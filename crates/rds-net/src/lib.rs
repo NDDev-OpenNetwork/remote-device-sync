@@ -75,8 +75,10 @@ pub struct EndpointConfig {
     pub backend: Backend,
     /// Persisted or generated Ed25519 secret key.
     pub secret_key: Option<SecretKey>,
-    /// UDP bind address. `None` binds `0.0.0.0:0`.
-    pub bind_addr: Option<SocketAddr>,
+    /// UDP bind addresses. Empty binds `0.0.0.0:0`. Multiple entries
+    /// bind multiple interfaces on backends that support socket muxing
+    /// (`noq`); single-socket backends use the first entry.
+    pub bind_addrs: Vec<SocketAddr>,
     /// Custom relay URL. `None` uses the backend's default relay set
     /// (n0 public relays for iroh; none for `noq` until `relay_link`).
     pub relay: Option<RelayUrl>,
@@ -89,7 +91,7 @@ impl Default for EndpointConfig {
         Self {
             backend: Backend::default(),
             secret_key: None,
-            bind_addr: None,
+            bind_addrs: Vec::new(),
             relay: None,
             alpns: vec![rds_core::ALPN.to_vec()],
         }

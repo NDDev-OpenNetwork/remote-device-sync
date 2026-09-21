@@ -20,6 +20,7 @@
 
 mod hmac;
 pub mod policy;
+pub mod socket;
 mod tls;
 
 use std::fmt;
@@ -32,6 +33,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
+use noq::Runtime;
 use tracing::debug;
 
 pub use tls::peer_endpoint_id;
@@ -83,29 +85,41 @@ pub async fn bind_endpoint(config: crate::EndpointConfig) -> anyhow::Result<Endp
     let mut client_config = noq::ClientConfig::new(Arc::new(client_crypto));
     client_config.transport_config(transport);
 
-    let bind = config
-        .bind_addr
-        .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
-    let socket = std::net::UdpSocket::bind(bind).context("bind udp socket")?;
+    let runtime = Arc::new(noq::TokioRuntime);
+    let binds = if config.bind_addrs.is_empty() {
+        vec![SocketAddr::from(([0, 0, 0, 0], 0))]
+    } else {
+        config.bind_addrs.clone()
+    };
+    let mut sockets: Vec<Box<dyn noq::AsyncUdpSocket>> = Vec::with_capacity(binds.len());
+    for bind in binds {
+        let socket =
+            std::net::UdpSocket::bind(bind).with_context(|| format!("bind udp socket {bind}"))?;
+        sockets.push(runtime.wrap_udp_socket(socket)?);
+    }
+    let mux = socket::Mux::new(sockets)?;
+    let local_addrs = mux.local_addrs();
 
-    let endpoint = noq::Endpoint::new(
+    let endpoint = noq::Endpoint::new_with_abstract_socket(
         endpoint_config,
         Some(server_config),
-        socket,
-        Arc::new(noq::TokioRuntime),
+        Box::new(mux),
+        runtime,
     )
     .context("create noq endpoint")?;
     endpoint.set_default_client_config(client_config);
 
-    let local_addr = endpoint
-        .local_addr()
+    let local_addr = local_addrs
+        .first()
+        .copied()
         .context("endpoint has no local address")?;
-    debug!(%local_addr, id = %secret_key.public(), "noq endpoint bound");
+    debug!(?local_addrs, id = %secret_key.public(), "noq endpoint bound");
 
     Ok(Endpoint {
         inner: endpoint,
         id: secret_key.public(),
         local_addr,
+        local_addrs,
         alpns: config.alpns,
         _relay: config.relay,
     })
@@ -157,6 +171,7 @@ pub struct Endpoint {
     inner: noq::Endpoint,
     id: EndpointId,
     local_addr: SocketAddr,
+    local_addrs: Vec<SocketAddr>,
     alpns: Vec<Vec<u8>>,
     _relay: Option<RelayUrl>,
 }
@@ -176,19 +191,25 @@ impl Endpoint {
         self.id
     }
 
-    /// The bound UDP address of this endpoint.
+    /// The primary bound UDP address of this endpoint.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// All bound UDP addresses — one per muxed transport.
+    pub fn local_addrs(&self) -> &[SocketAddr] {
+        &self.local_addrs
     }
 
     /// Advertised address: our identity plus the direct IP candidates we
     /// know about. Observed external and NAT-traversal addresses join this
     /// set once the candidate pipeline tracks them.
     pub fn addr(&self) -> EndpointAddr {
-        EndpointAddr {
-            id: self.id,
-            addrs: advertised_addrs(self.local_addr),
+        let mut addrs = std::collections::BTreeSet::new();
+        for local in &self.local_addrs {
+            addrs.extend(advertised_addrs(*local));
         }
+        EndpointAddr { id: self.id, addrs }
     }
 
     /// Connect to a peer by advertised address.

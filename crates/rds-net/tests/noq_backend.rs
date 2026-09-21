@@ -13,7 +13,7 @@ const PING: &[u8] = b"rds-ping";
 
 fn loopback_config() -> EndpointConfig {
     EndpointConfig {
-        bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        bind_addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         ..Default::default()
     }
 }
@@ -99,6 +99,47 @@ async fn noq_to_noq_ping() -> anyhow::Result<()> {
 
     a.close().await;
     b.close().await;
+    Ok(())
+}
+
+/// Socket mux: one endpoint bound to two loopback sockets advertises
+/// both, and a handshake dialed at the *non-primary* socket succeeds —
+/// the mux must deliver datagrams arriving on any child.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn noq_socket_mux_second_socket_accepts() -> anyhow::Result<()> {
+    let server_ep = noq::bind_endpoint(EndpointConfig {
+        bind_addrs: vec![
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        ],
+        ..Default::default()
+    })
+    .await?;
+    assert_eq!(server_ep.local_addrs().len(), 2);
+    let secondary = server_ep.local_addrs()[1];
+
+    let client_ep = noq::bind_endpoint(loopback_config()).await?;
+
+    let server = tokio::spawn({
+        let server_ep = server_ep.clone();
+        let client_id = client_ep.id();
+        async move {
+            let incoming = server_ep.accept().await.expect("accept");
+            let conn = incoming.await.expect("handshake");
+            assert_eq!(conn.remote_id(), client_id);
+            serve_noq(conn).await;
+        }
+    });
+
+    let conn = client_ep
+        .connect(addr_of(server_ep.id(), secondary), rds_core::ALPN)
+        .await?;
+    ping_noq(&conn).await?;
+    conn.close(0u32.into(), b"done");
+    server.await?;
+
+    client_ep.close().await;
+    server_ep.close().await;
     Ok(())
 }
 
