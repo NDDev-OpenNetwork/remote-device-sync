@@ -1,0 +1,23 @@
+[package]
+name = "rds-desktop"
+description = "Desktop session pipeline for rds: capture, encode, input, decode"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+x11 = ["dep:x11rb", "dep:openh264"]
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+iroh.workspace = true
+openh264 = { version = "0.9", optional = true }
+rds-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+x11rb = { version = "0.13", features = ["shm", "xtest", "xfixes"], optional = true }

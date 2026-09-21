@@ -1,0 +1,27 @@
+[package]
+name = "rds-agent"
+description = "Daemon on a controlled device: accepts rds connections and serves ssh/desktop"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+desktop = ["dep:rds-desktop", "rds-desktop/x11"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+iroh.workspace = true
+rds-core.workspace = true
+rds-desktop = { workspace = true, optional = true }
+rds-transport.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+iroh-relay = { workspace = true, features = ["server"] }
+rds-cli = { path = "../rds-cli" }

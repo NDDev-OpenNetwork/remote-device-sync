@@ -1,0 +1,27 @@
+[package]
+name = "rds-cli"
+description = "Operator CLI for remote device access over the rds transport"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+desktop = ["dep:rds-desktop", "rds-desktop/x11"]
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+iroh.workspace = true
+rds-core.workspace = true
+rds-desktop = { workspace = true, optional = true }
+rds-transport.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "rds"
+path = "src/main.rs"

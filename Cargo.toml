@@ -1,9 +1,38 @@
-[package]
-name = "remote-device-sync"
-version = "0.1.0"
+[workspace]
+resolver = "3"
+members = [
+    "crates/rds-agent",
+    "crates/rds-cli",
+    "crates/rds-core",
+    "crates/rds-desktop",
+    "crates/rds-relay",
+    "crates/rds-transport",
+]
+
+[workspace.package]
 edition = "2024"
-description = "Remote device access for the GDS estate: SSH connectivity and remote desktop sessions brokered through the GDS server"
+version = "0.1.0"
 license = "AGPL-3.0-only"
 repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
 
-[dependencies]
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+data-encoding = "2"
+iroh = "1"
+iroh-relay = "1"
+postcard = "1"
+rds-core = { path = "crates/rds-core" }
+rds-desktop = { path = "crates/rds-desktop" }
+rds-transport = { path = "crates/rds-transport" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
