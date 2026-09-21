@@ -28,8 +28,10 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     if let Some(key) = config.secret_key {
         builder = builder.secret_key(key);
     }
-    if let Some(addr) = config.bind_addr {
-        builder = builder.bind_addr(addr)?;
+    // iroh manages its own sockets; a single bind address is all it
+    // accepts. Multi-interface binding is a `noq`-backend capability.
+    if let Some(addr) = config.bind_addrs.first() {
+        builder = builder.bind_addr(*addr)?;
     }
     let endpoint = builder.alpns(config.alpns).bind().await?;
     Ok(endpoint)
