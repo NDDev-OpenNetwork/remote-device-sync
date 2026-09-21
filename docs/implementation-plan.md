@@ -20,23 +20,81 @@ below was verified against vendored sources or upstream documents on
   multipath-21` (IESG-approved, RFC Editor queue); QNT inside noq is
   the n0 variant (`draft-bruynooghe-n0-quic-nat-traversal-00`) — we
   orchestrate it, we don't reimplement it.
+- **Every wave ends at a checkpoint** (§Checkpoint protocol): a named, reproducible
+  verification bundle whose evidence is committed to
+  `docs/reports/`. A wave is not "mostly done" — its gate is either
+  passed with artifacts or the wave stays open.
+
+## Checkpoint protocol
+
+A **checkpoint** is the contract that closes a wave. It exists to make
+"it works on my machine" impossible: every gate emits artifacts, the
+artifacts are committed, and the automatable parts join the regression
+suite so later waves cannot silently break earlier guarantees.
+
+### The gate procedure
+
+```text
+entry:   prior checkpoints' regression suite green on main
+build:   the wave's tasks complete (code + docs + tests)
+run:     scripts/checkpoint.sh <gate>  → docs/reports/checkpoint-<id>.md
+review:  the report's checklist is filled honestly (an unrun check is
+         marked "not run", never "assumed")
+merge:   PR to main; the checkpoint report is part of the diff
+```
+
+`scripts/checkpoint.sh` runs the automatable parts and writes the
+report skeleton. Failing any check = fix forward or revert — main never
+carries a known-broken gate.
+
+### The check layers
+
+Every checkpoint draws from this fixed menu; the per-wave tables below
+say which apply.
+
+| Layer | What it proves | Tooling |
+| --- | --- | --- |
+| **green bars** | compile/lint/test on both OSes | CI matrix (`fmt`, `clippy -D warnings`, `test`) — always required |
+| **functional** | the wave's behavior | new unit/integration tests + all prior ones |
+| **simulation** | correctness under partition/loss, deterministically | `turmoil` hosts in-process (seeded RNG, hold/release/partition); committed seeds |
+| **impairment** | behavior on real bad networks | `tc netem` matrix on loopback: loss {0,1,5}%, jitter {0,30}ms, bw cap {10,100}M; `toxiproxy` for the TCP control plane; `quic-network-simulator` (ns3+docker) as the heavy option |
+| **interop** | old↔new compatibility | cross-backend matrix (iroh↔noq endpoints once WS1 lands), prior↔current ALPN handshake |
+| **fuzz** | parsers don't panic/misbehave on garbage | `proptest` round-trips + `bolero`/`cargo-fuzz` corpus runs on every wire decoder touched |
+| **soak** | no leaks/degradation over time | 30-min session: steady memory, stable latency percentiles, zero reconnects unless injected |
+| **security** | authz holds, DoS surface bounded | checklist: signature coverage, expiry paths, rate limits, bounded queues, `unsafe` audit |
+
+### The bench case taxonomy (adopted from quic-interop-runner)
+
+Our impairment/interop cases reuse the QUIC interop runner's proven
+set, mapped to rds semantics: `handshake`, `transfer` (flow control +
+multiplexing), `multiconnect` (handshake under high loss),
+`rebind-port`, `rebind-addr` (NAT rebinding → path validation),
+`migration` (active path switch mid-session), plus our own
+`relay-fallback`, `relay-drain`, `discovery-refresh`.
+
+### Regression lock
+
+Each checkpoint's automatable checks are added to `tests/` and the
+`rds-bench` scenario set, marked with the gate id. CI runs the fast
+subset per PR; the full matrix runs on a nightly/scheduled workflow.
+A gate id is a promise: wave N+1 must keep wave N's checks green.
 
 ## 1. Workstream map
 
-| WS | Delivers | Crates touched | Depends on |
-| --- | --- | --- | --- |
-| WS0 | bench harness + baseline report | `rds-bench` (new) | — |
-| WS1 | owned endpoint manager on noq | `rds-net` | WS0 (gating) |
-| WS2 | owned relay protocol + server | `rds-relay`, `rds-server` | WS1 (client link) |
-| WS3 | discovery service + publish/resolve | `rds-discovery`, `rds-server`, `rds-agent`, `rds-cli` | WS1 |
-| WS4 | capability-based authz | `rds-core`, `rds-discovery`, `rds-agent` | WS3 |
-| WS5 | session/media protocol v2 | `rds-core`, `rds-desktop` | WS1 |
-| WS6 | sync transfer protocol | `rds-sync`, `rds-cli` | WS1 |
-| WS7 | observability surface | `rds-net`, `rds-server`, `rds-agent` | WS1–WS3 |
-| WS8 | deploy on gds-services + real E2E | estate side | all |
+| WS | Delivers | Crates touched | Checkpoint | Depends on |
+| --- | --- | --- | --- | --- |
+| WS0 | bench harness + checkpoint tooling | `rds-bench` (new), `scripts/checkpoint.sh` | C0: baseline trustworthy | — |
+| WS1 | owned endpoint manager on noq | `rds-net` | C1: parity + survival | C0 |
+| WS2 | owned relay protocol + server | `rds-relay`, `rds-server` | C2: relay parity + drain | C1 |
+| WS3 | discovery service + publish/resolve | `rds-discovery`, `rds-server`, `rds-agent`, `rds-cli` | C3: resolve + hostile input | C1 |
+| WS4 | capability-based authz | `rds-core`, `rds-discovery`, `rds-agent` | C4: boundary airtight | C3 |
+| WS5 | session/media protocol v2 | `rds-core`, `rds-desktop` | C5: latency under loss | C1 |
+| WS6 | sync transfer protocol | `rds-sync`, `rds-cli` | C6: never corrupts | C1 |
+| WS7 | observability surface | `rds-net`, `rds-server`, `rds-agent` | C7: numbers are real | C1–C3 |
+| WS8 | deploy on gds-services + real E2E | estate side | C8: real metal | all |
 
 v0.3+ media/platform work (Vulkan Video, KMS, SCK, wgpu render) starts
-only after WS1–WS3 gates pass.
+only after C1–C3 pass.
 
 ## 2. WS0 — measurement harness
 
@@ -61,9 +119,22 @@ Tasks:
   is declared; cross-machine runs report RTT-decomposed estimates.
 - **B4 — report format**: `docs/reports/bench-YYYYMMDD.md` template;
   p50/p95/p99, direct-vs-relay split, path counts.
-- **Gate**: `rds-bench` produces a baseline report for the iroh
-  backend in-process and over an in-process relay; committed under
-  `docs/reports/baseline-iroh.md`.
+- **B5 — checkpoint tooling**: `scripts/checkpoint.sh <gate>` — runs
+  the gate's automatable layers, writes the report skeleton to
+  `docs/reports/checkpoint-<id>.md`, exits non-zero on any failed
+  check. This wave owns the machinery every later checkpoint uses.
+
+**Checkpoint C0** — the measurer is trustworthy:
+
+| Layer | Check |
+| --- | --- |
+| green bars | CI matrix pass on both OSes |
+| functional | all scenarios run on loopback; JSON report parses; p50/p95/p99 populated |
+| impairment | netem matrix script proven end-to-end: 9-cell run (loss {0,1,5}% × jitter {0,30}ms × bw {10,100}M) yields distinct, plausible numbers — sanity-checked (more loss ⇒ not less RTT) |
+| docs | `docs/reports/checkpoint-c0.md` + `baseline-iroh.md` committed; methodology section explains shared-clock limits |
+
+Exit = the baseline report exists and a second run reproduces it
+within measurement noise (declared threshold, e.g. p95 within 15%).
 
 ## 3. WS1 — `rds-net::backends::noq` (owned transport)
 
@@ -136,10 +207,22 @@ endpoint manager replicates:
   connect, streams, datagrams; then via in-process relay link.
 - parity: `rds-bench` suite on both backends side by side.
 
-**Exit criteria (gate G1)**: noq backend passes the e2e suite that the
-iroh backend passes (ping, tcp-forward, authz reject) AND bench parity:
-connect time within 2× of iroh, RTT equal on direct, relay throughput
-within 20% — or the delta is documented with a plan.
+**Checkpoint C1** — the owned transport earns its place:
+
+| Layer | Check |
+| --- | --- |
+| green bars | CI matrix pass; `--features transport-noq` builds on both OSes |
+| functional | noq backend passes the same e2e suite as iroh (ping, tcp-forward, authz reject) — the suite is backend-parameterized |
+| simulation | turmoil: seeded partition/heal between endpoints — connection survives partition, streams resume on heal; committed seeds in the test |
+| impairment | netem matrix on both backends: `handshake`, `multiconnect` (handshake under 5% loss), `rebind-addr`, `migration`, `relay-fallback` — noq no worse than iroh per case |
+| interop | iroh endpoint ↔ noq endpoint on `rds/0`: connect + ping both directions — proves wire-level standards compliance, not self-consistency |
+| fuzz | `proptest`/`bolero` on candidate-record parse + mux demux of malformed datagrams (garbage relay payloads can't panic the socket) |
+| soak | 30-min noq session over relay with a direct-path flap every 60 s: steady RSS, p99 RTT drift < 20%, zero deadlocks |
+| security | checklist: amplification guard (relay path usable only after handshake), candidate count cap, `open_path` rate limit, unsafe audit |
+
+**Gate G1**: C0+C1 checks green AND bench parity — connect ≤2× iroh,
+RTT equal on direct, relay throughput within 20% — or the delta is
+documented with a plan and the default stays iroh.
 
 ## 4. WS2 — owned relay protocol (`rds-relay::proto` → server)
 
@@ -174,9 +257,22 @@ Tasks:
 - Tests: register→forward roundtrip in-process; drop semantics;
   drain triggers client migration; forged dst_key dropped.
 
-**Gate G2**: relayed throughput ≥ iroh-relay measured on WS0 harness
-(target: ≥ its measured ~48 MiB/s class on loopback); drain removes the
-relay from path selection without dropping the session.
+**Checkpoint C2** — our relay replaces iroh-relay without regression:
+
+| Layer | Check |
+| --- | --- |
+| green bars | CI matrix pass |
+| functional | register→forward roundtrip, drop semantics, `PeerGone` on disconnect, forged `dst_key` dropped |
+| simulation | turmoil: relay host killed mid-session → clients get `PeerGone`/conn close, reconnect to second relay, streams resume |
+| impairment | relay leg under netem 5% loss — throughput collapse is bounded and logged (datagram leg has no retransmission; expected degradation documented) |
+| interop | rds-relay client ↔ iroh endpoint over relayed path; rds client ↔ iroh-relay (cross-compat where wire formats overlap — otherwise documented N/A) |
+| fuzz | relay control-stream decoder: truncated/oversized/forged frames never panic; datagram parser rejects >MTU and malformed headers |
+| soak | 30-min, 100 endpoint churn (register/deregister loop) — table sizes bounded, RSS steady |
+| security | rate limit on register + datagram flood per endpoint; drain actually stops new registrations; unauthenticated payload refused |
+
+**Gate G2**: relayed throughput ≥ iroh-relay on the WS0 harness
+(~48 MiB/s class on loopback); drain removes the relay from path
+selection without dropping live sessions.
 
 ## 5. WS3 — discovery service + registry bridge
 
@@ -199,8 +295,18 @@ relay from path selection without dropping the session.
   forged record rejected by store (already unit-tested); TTL refresh
   keeps record live.
 
+**Checkpoint C3** — discovery is correct and hostile-input safe:
+
+| Layer | Check |
+| --- | --- |
+| green bars | CI matrix pass |
+| functional | publish→get roundtrip; expired record refused by resolvers; TTL refresh keeps record live; `ObservedAddr` re-publish works |
+| impairment | toxiproxy on the discovery HTTP API: latency toxic → resolver timeout behaves; down toxic → clean cached-ticket fallback error |
+| fuzz | record parser + HTTP handlers: garbage bodies, oversized payloads, replayed old records — all rejected, none panic |
+| security | signature coverage 100% on stored records (store refuses unsigned/forged); PUT rate limit verified; replay protection (older `issued_at` rejected) |
+
 **Gate G3**: cold `rds ssh <name>` works end-to-end through discovery —
-resolve→connect→first byte ≤ 300 ms on LAN, documented.
+resolve→connect→first byte ≤ 300 ms on LAN, measured by the harness.
 
 ## 6. WS4 — capability authz
 
@@ -219,6 +325,19 @@ resolve→connect→first byte ≤ 300 ms on LAN, documented.
 - Tests: expired grant rejected; wrong-service grant rejected;
   revoked grant rejected after denylist push.
 
+**Checkpoint C4** — authz is airtight at the boundary:
+
+| Layer | Check |
+| --- | --- |
+| green bars | CI matrix pass |
+| functional | expired / wrong-service / revoked grants rejected; valid grant for service A cannot open service B's stream |
+| fuzz | grant decoder under malformed input (truncated signature, huge service list) — reject, never panic |
+| security | negative-test coverage: every authz path has a forge test; grant-replay across connections rejected; clock-skew tolerance documented |
+
+**Gate G4**: no service stream opens before grant verification —
+asserted by a test that opens streams concurrently with the control
+frame and counts rejections.
+
 ## 7. WS5 — session/media protocol v2 (protocol only; codecs stay v0.3)
 
 - Stream taxonomy (finalize in `rds-core`): `control` bidi (highest
@@ -234,6 +353,20 @@ resolve→connect→first byte ≤ 300 ms on LAN, documented.
 - Tests: synthetic 240 fps frame generator through netem loss — queue
   depth never grows unbounded; stale-frame drop provable in logs.
 
+**Checkpoint C5** — the media protocol carries real pressure:
+
+| Layer | Check |
+| --- | --- |
+| green bars | CI matrix pass |
+| functional | header roundtrip; stream-priority order observed (control beats video under congestion); keyframe-request roundtrip |
+| impairment | netem 5% loss + 30 ms jitter: frame queue bounded, newest-frame-wins presentation, latency percentiles in report |
+| fuzz | `FrameHeader` decoder + stream demux on malformed data |
+| soak | 30-min synthetic stream at 60 fps: steady RSS, frame-age p99 bounded, zero unbounded-queue events |
+
+**Gate G5**: under 5% loss the viewer-visible latency stays within the
+declared budget (initial: ≤150 ms p95 in-process) and control stream
+latency is unaffected by video backlog.
+
 ## 8. WS6 — sync protocol
 
 - `rds-sync` gains: `Session` (offer/request manifests),
@@ -246,6 +379,20 @@ resolve→connect→first byte ≤ 300 ms on LAN, documented.
   byte-identical; identical content → zero chunks transferred;
   corrupt chunk → re-fetch.
 
+**Checkpoint C6** — sync never corrupts, always resumes:
+
+| Layer | Check |
+| --- | --- |
+| green bars | CI matrix pass |
+| functional | 1 GiB transfer; kill at random points → resume → byte-identical; identical → zero chunks; corrupt chunk → re-fetch |
+| simulation | turmoil-fs or fault hooks: torn journal write, partial chunk file — resume still correct |
+| impairment | netem 5% loss + disconnect every 30 s — transfer completes, resume overhead < 5% re-fetched |
+| fuzz | manifest + chunk decoders on malformed input |
+| security | BLAKE3 verify coverage: every stored chunk verified before use; path-traversal in manifest entries rejected |
+
+**Gate G6**: transfer survives worst scripted failure (kill -9 at a
+random offset) with byte-identical result — run 20×, all pass.
+
 ## 9. WS7 — observability
 
 - `rds-net` metrics: per-path RTT/loss/congestion, path events, QNT
@@ -254,8 +401,17 @@ resolve→connect→first byte ≤ 300 ms on LAN, documented.
 - `rds-server`: `/v1/metrics` scrape endpoint, per-endpoint accounting.
 - Session event log: structured `tracing` spans per session with
   `session_id`, exported for bench reports.
-- Gate: every number in `docs/reports/` is produced by the harness
-  reading metrics — no hand-measured prose.
+
+**Checkpoint C7** — observability is load-bearing, not decorative:
+
+| Layer | Check |
+| --- | --- |
+| green bars | CI matrix pass |
+| functional | every metric the bench report cites exists in the export; counter accuracy proven by a known-traffic test |
+| security | `/v1/metrics` exposes no keys/secrets/peer content; endpoint list requires auth or is localhost-only — documented |
+
+**Gate G7**: every number in `docs/reports/` is produced by the harness
+reading metrics — no hand-measured prose.
 
 ## 10. WS8 — deployment
 
@@ -265,17 +421,38 @@ resolve→connect→first byte ≤ 300 ms on LAN, documented.
 - Real-E2E: `rds ssh` between `nddev-amsterdam` and `gds-services`;
   desktop smoke on attended session; report committed.
 
+**Checkpoint C8** — the system works on real metal, not just in sims:
+
+| Layer | Check |
+| --- | --- |
+| functional | `rds ssh` across real NAT (amsterdam ↔ gds-services): connect, run commands, survive a relay↔direct transition |
+| impairment | real-network report: measured RTT/loss/path used, compared against harness predictions — deltas explained |
+| soak | 1-hour real session: reconnects counted, RSS steady on both ends |
+| security | deploy review: systemd sandboxing (ProtectSystem, NoNewPrivileges), key permissions 0600, ports/firewall documented |
+| docs | runbook: restart/upgrade/drain procedures; failure modes table |
+
+**Gate G8**: real-device e2e report committed; every previous gate's
+automated checks still green on the deployed binaries.
+
 ## 11. Sequencing
 
 ```text
-WS0 ──▶ WS1 ──▶ WS2 ──┬─▶ WS3 ──▶ WS4 ──▶ WS8
-      (harness)  (endpoint) (relay) │        │
-                                    └─▶ WS5  └─▶ WS7 (throughout)
-                                        WS6 (parallel after WS1)
+C0 ──▶ WS1 ──▶ C1 ──▶ WS2 ──▶ C2 ──┬─▶ WS3 ──▶ C3 ──▶ WS4 ──▶ C4 ──▶ WS8 ──▶ C8
+(harness)       (endpoint)  (relay)│                                     │
+                                   └─▶ WS5 ──▶ C5    WS7 ◀── threads ────┘
+                                       WS6 ──▶ C6 (parallel after C1)
 ```
 
-Parallelizable: WS6 after WS1; WS5 protocol bits after WS1; WS7 threads
-through all.
+Rules:
+
+- A wave starts only after its dependency's checkpoint report is
+  merged — `docs/reports/checkpoint-*.md` on main is the unlock token.
+- Checkpoint automation lands with the wave that introduces the check;
+  `scripts/checkpoint.sh` refuses a gate id with no registered checks.
+- Parallelizable: WS6 after C1; WS5 after C1; WS7 threads through all.
+- If a checkpoint fails after merge (flaky found later), the fix
+  carries the failed artifact + the fix evidence — the report is
+  amended, not deleted.
 
 ## 12. Implementation-phase risks
 
