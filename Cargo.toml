@@ -1,0 +1,9 @@
+[package]
+name = "remote-device-sync"
+version = "0.1.0"
+edition = "2024"
+description = "Remote device access for the GDS estate: SSH connectivity and remote desktop sessions brokered through the GDS server"
+license = "AGPL-3.0-only"
+repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
+
+[dependencies]
