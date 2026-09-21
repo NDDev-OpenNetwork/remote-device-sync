@@ -6,7 +6,10 @@ Design goals, in order: **minimum interactive latency**, **maximum
 connection stability**, defense in depth, no inbound firewall changes.
 
 Status: v0.1 foundation. This document records the protocol and stack
-research and the decisions that fall out of it.
+research and the decisions that fall out of it. The deeper second-pass
+research — iroh 1.2/noq internals (multipath, path selectors, hooks),
+capture/codec/input crate matrix, GDS server composition, and the
+updated build order — lives in [research.md](research.md).
 
 ## Research summary
 
@@ -95,7 +98,9 @@ Encoding is the latency budget line item that matters: hardware encoders
 ```
 
 - **`rds-relay`** — embedded `iroh-relay` plus the RDS directory endpoint.
-  Runs on the GDS services host. Sees only encrypted traffic.
+  Runs on the GDS services host alongside `iroh-dns-server` (pkarr-based
+  signed endpoint discovery — the GDS discovery role). Sees only
+  encrypted traffic.
 - **`rds-agent`** — daemon on each controlled device. Binds an iroh
   `Endpoint` with a persisted Ed25519 secret key (the network identity),
   connects to its home relay, accepts `rds/0` connections, and serves
@@ -109,7 +114,10 @@ Encoding is the latency budget line item that matters: hardware encoders
   authentication is built on it — connections are mutually authenticated
   by key, not by password.
 - The agent serves only peers on its `allow` list of `EndpointId`s.
-  Everything else is rejected before any service stream opens.
+  The enforced boundary is `EndpointHooks::after_handshake`: the
+  connection is rejected at TLS completion, before any service stream
+  opens. (v0.1 currently checks at first stream; moving to the hook is
+  in the build order.)
 - GDS binding (next milestone): a signed device record ties
   `device_id` ↔ `EndpointId` and is distributed through the estate/device
   registry, so `rds ssh nddev-amsterdam` resolves keys from GDS state
@@ -146,12 +154,17 @@ custom UDP stack.
 1. **v0.1 (this)**: workspace, rendezvous/relay, auth allowlist, `ping`,
    `ssh`/TCP forward E2E, desktop pipeline traits + X11 capture/encode/
    input behind the `desktop` feature, architecture doc.
-2. **v0.2**: desktop session UI (winit), Wayland portal+PipeWire capture +
-   RemoteDesktop input, adaptive bitrate, clipboard.
-3. **v0.3**: GDS device registry integration (signed `device_id`↔
-   `EndpointId` records, `rds` resolves estate device names).
-4. **v0.4**: hardware encode (VA-API/NVENC/VideoToolbox/MF), AV1 option,
-   RDP-frontend via `ironrdp-server`, browser client via WebRTC gap-fill.
+2. **v0.2**: GDS discovery + authz — `iroh-dns-server` on gds-services,
+   `EndpointHooks` allowlist, signed `device_id`↔`EndpointId` registry,
+   `rds ssh <device-name>`; damage-driven (VFR) capture replacing the
+   fixed-fps loop; wgpu client render.
+3. **v0.3**: hardware encode (`cros-codecs` VA-API/V4L2, `gpu-video`
+   Vulkan path), `wdotool-core`/portal-EIS input, audio (opus),
+   clipboard; `rds send/recv` via iroh-blobs, registry replication via
+   iroh-docs.
+4. **v0.4**: multi-relay failover + custom `PathSelector`, adaptive
+   bitrate from path congestion state, AV1 tier, RDP frontend via
+   `ironrdp-server`, browser client via WebRTC if needed.
 
 ## Non-goals for v0.1
 
