@@ -299,11 +299,151 @@ iroh ecosystem gives the whole story on the same endpoint:
 8. **Resilience**: multi-relay map, custom `PathSelector`, reconnect
    tests, loss/jitter harness (`netem`), p50/p99 glass-to-glass bench.
 
+## 9. Full-ownership architecture — what "ours" means layer by layer
+
+Owner's directive: build our own implementation on standards, drivers
+and best practices — not assemble third-party high-level frameworks.
+The correct boundary is therefore *not* "no dependencies" but "we own
+every protocol decision and every data path; dependencies are either
+thin generated bindings to OS/driver APIs or the QUIC engine itself".
+
+### 9.1 The noq seam — verified in source
+
+iroh's connectivity magic (~28k LOC total crate; `socket/` +
+`remote_map/` + `relay actor` ≈ 10k LOC of the hard part) is mostly
+orchestration, because **noq moved the mechanics into the QUIC engine**:
+
+- `noq::Endpoint::new_with_abstract_socket` / `rebind_abstract` —
+  the application supplies `Box<dyn AsyncUdpSocket>`. Our socket can
+  mux direct UDP, a relay tunnel and multiple interfaces.
+- `Connection::open_path` / `open_path_ensure` — we feed candidate
+  paths from *our* discovery; the engine opens them.
+- `PathEvents` / `NatTraversalUpdates` streams — QNT progress and
+  path lifecycle delivered to us.
+- `observed_external_addr()` / `AddressDiscovery` — QAD: the peer
+  reports our public address; **STUN functionality inside QUIC, no
+  STUN server needed**.
+- Per-path `rtt`, `congestion_state`, `path_stats`; pluggable
+  `congestion_controller_factory` (bbr3 in-tree) and the `PathSelector`
+  seam stay ours.
+- TLS: `rustls` inside noq; our identity stays raw Ed25519 keys
+  (own certificate scheme like iroh's, or self-signed+keypin — ours).
+
+So "our own transport" = **noq as the QUIC engine + our endpoint
+manager** (socket mux, discovery exchange, path-open policy, relay
+transport). Estimated new code ≈ 4–8k LOC, versus inheriting iroh's
+generic machinery (Router, address-lookup framework, protocol
+negotiation) that we don't need. iroh stays the reference oracle for
+interoperability testing.
+
+Engine alternatives and why noq wins for us: `quinn` 0.11 (upstream —
+no multipath/QNT), `s2n-quic` 1.88 (AWS — mature, no multipath/QNT),
+`quiche` 0.30 (Cloudflare — FFI-oriented API, no multipath in stable).
+Multipath+QNT is what makes "relay now, direct when punched" cheap
+and migration seamless; only noq ships it.
+
+### 9.2 Relay — our own
+
+The relay only forwards opaque datagrams endpoint↔endpoint (QUIC is
+end-to-end encrypted; the relay never sees plaintext). Ours:
+QUIC listener; endpoints register by pubkey; forward UDP payloads
+keyed by destination `EndpointId` over a datagram/stream channel;
+health + drain + metrics. ~1–2k LOC, simpler than iroh-relay's
+WebSocket/HTTP2 compat surface because we control both ends.
+
+### 9.3 Discovery — our own
+
+GDS already owns the estate device registry. Extend it: signed
+`EndpointRecord { endpoint_id, addrs[], relay_urls[], services[],
+expiry, signature }` stored/queried over HTTPS (or QUIC) against the
+GDS server. Same semantics as pkarr records (key-verified, self-
+published) without DNS infrastructure. `iroh-dns-server` remains an
+interop option, not a dependency.
+
+### 9.4 Capture — our own on driver APIs
+
+| Path | Our stack | What we write |
+| --- | --- | --- |
+| Wayland privileged | `wayland-client` + `wayland-protocols::ext::image_copy_capture` (bindings confirmed in 0.32.13) | Session mgmt, per-frame damage, dmabuf/shm buffer pools, modifier negotiation → feed encoder |
+| Wayland unattended/kernel | `drm` 0.15 + `gbm` 0.18 + `drm-fourcc` + `rustix` ioctls | Our own DRM/KMS scanout tap (libdrmtap equivalent ≈ 2–4k LOC): GBM buffers, `FB_DAMAGE_CLIPS`, cursor plane, multi-GPU |
+| Wayland consented | `pipewire` 0.10 + `libspa` 0.10 (thin bindings to the C lib that *is* the protocol impl) + `ashpd` for the portal handshake | SPA param/pod negotiation, dmabuf-first buffer exchange, damage rects, cursor stream |
+| X11 | `x11rb` (MIT-SHM GetImage + XDamage + XFixes) | Already ours |
+| Windows | `windows` 0.62 — DXGI Desktop Duplication / WGC | D3D11 texture → vendor encoder, dirty rects |
+| macOS | `screencapturekit` 10.0.3 + `core-graphics`/`core-video` | IOSurface → VideoToolbox |
+
+### 9.5 Encode/decode — our own on driver APIs
+
+| Backend | Stack | Notes |
+| --- | --- | --- |
+| **Vulkan Video (primary GPU path)** | `ash` 0.38 raw `vk::Video*` types (211 defs verified; video-queue loaders loadable via `vkGetDeviceProcAddr` — ash 0.38 predates the loader wrappers) + `wgpu`/`gpu-allocator` for dmabuf import/export | One implementation → NV/AMD/Intel/Adreno. H264 enc+dec today, HEVC enc, AV1 as drivers land. Session mgmt, DPB, rate control = our code (~2–4k LOC per codec). |
+| VA-API (Linux fallback) | `libva-sys` bindings (thin; regenerate if stale) or own `libva` FFI | Covers Intel/AMD where Vulkan Video driver gaps exist |
+| V4L2 mem2mem | `v4l` 0.14 / `v4l2r` | Embedded/ARM boards, RPi, some Chromebooks |
+| VideoToolbox | `video-toolbox` 0.3.1 | macOS only sane route |
+| MediaFoundation/D3D11 | `windows` crate | NVENC/AMF/QSV all reachable via MF transform or Vulkan Video; no NVENC FFI needed |
+| Software floor | `openh264` / `rav1e`(enc) + `openh264`/`dav1d`(dec) | `dav1d` = C-asm but the reference decoder; `h264-reader` for bitstream introspection |
+
+### 9.6 Input — our own
+
+- `reis` 0.7.1 — **pure-Rust libei/libeis** (portal remote-desktop wire
+  protocol); pair with `ashpd` `RemoteDesktop` → `ConnectToEIS`.
+- wlr `virtual-keyboard`/`virtual-pointer` via `wayland-client`
+  generated bindings; KWin/GNOME specific paths optional.
+- `evdev`/`input-linux` + raw `uinput` ioctls — privileged virtual
+  device (kiosks, headless, login screen).
+- X11 XTEST; Windows `SendInput`; macOS `CGEvent` — thin FFI, ours.
+
+### 9.7 Render/audio/sync — our own
+
+- Render: `wgpu` surface, own YUV→RGB fragment/compute path, present
+  newest-frame-only. Fullscreen-console client option: DRM atomic
+  direct present.
+- Audio: `cpal` 0.18 capture (WASAPI/CoreAudio/ALSA) + `opus` 0.4
+  (libopus — the C library *is* the Opus standard) + `rubato`
+  resample; dedicated low-jitter stream, independent clock.
+- Sync: `fastcdc` 5.0 content-defined chunking + `blake3` tree
+  hashing + our own set-reconciliation over our streams — manifest
+  exchange, chunk fetch, resume. `iroh-blobs/docs` not needed once
+  the transport is ours.
+- FEC: `reed-solomon-erasure` 6.0 on the video path, gated by
+  measured loss.
+- Serialization: `postcard` control (kept) + `zerocopy`/`bytemuck`
+  in hot paths; `rkyv` only if profiling demands.
+
+### 9.8 The honest boundary — what we do NOT build
+
+- **QUIC/TLS state machine** (noq + rustls). RFC 9000 + extensions is
+  a multi-year, security-critical undertaking with no product upside;
+  the engine already carries multipath/QNT/QAD. Everything above it —
+  discovery, relay, path policy, session, media, auth — is ours.
+- **OS/driver C libraries that define their protocols** (libpipewire,
+  libva, libopus, DXGI/MF/VideoToolbox/ScreenCaptureKit frameworks).
+  Owning means thin safe bindings + our logic; reimplementing the
+  libraries themselves would mean reimplementing the driver ABI.
+- **Crypto primitives** beyond our token/record formats.
+
+### 9.9 Migration path
+
+1. Keep iroh as the working substrate while `rds-net` (our noq endpoint
+   manager + socket mux + discovery + path policy) is built beside it.
+2. Feature-flag transports; benchmark ours vs iroh on the same harness
+   (setup time, time-to-direct, RTT, migration survival).
+3. Switch default once ours matches; keep the iroh transport for
+   interop tests and as fallback during bring-up.
+4. `rds-relay` becomes our own relay protocol; GDS gains the signed
+   `EndpointRecord` store (registry API).
+
+This keeps shipping value continuous while every layer transitions to
+owned code on standards — no big-bang rewrite.
+
 ## Sources (selected)
 
 - iroh: noq announcement & multipath write-ups (iroh.computer/blog),
   `iroh` 1.2.0 vendored source (`endpoint.rs`, `address_lookup.rs`,
   `socket/remote_map.rs`, `socket/biased_rtt_path_selector.rs`),
+  `noq` 1.3.0 vendored source (`endpoint.rs` —
+  `new_with_abstract_socket`/`rebind_abstract`, `connection.rs` —
+  `open_path`, `path.rs` — `AddressDiscovery`, `event_stream.rs` —
+  `NatTraversalUpdates`),
   `noq-proto` 1.3.0 `congestion/bbr3`, iroh issue #3876 (hole-punch
   relay traffic), iroh PR nagle fix (#3995, 28→48 MiB/s relayed).
 - Media: moq-dev/moq (moq-lite 0.17, hang 0.20), scrcpy develop.md +
