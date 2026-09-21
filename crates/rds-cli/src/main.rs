@@ -4,9 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use rds_net::{
-    EndpointConfig, Ticket, bind_endpoint, default_key_path, load_or_create_key, parse_target,
-};
+use rds_net::{EndpointConfig, Ticket, bind_endpoint, default_key_path, load_or_create_key};
 
 #[derive(Parser)]
 #[command(version, about = "Remote device access for the GDS estate")]
@@ -21,6 +19,10 @@ struct Cli {
     /// `transport-noq` feature).
     #[arg(long, global = true, default_value = "iroh")]
     backend: String,
+    /// Discovery directory address. Enables bare-key lookups and GDS
+    /// device-name resolution; tickets still work without it.
+    #[arg(long, global = true)]
+    server: Option<SocketAddr>,
     #[command(subcommand)]
     command: Command,
 }
@@ -100,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         config = config.with_relay(url)?;
     }
     let endpoint = bind_endpoint(config).await?;
+    let directory = cli.server.map(rds_discovery::client::Client::new);
 
     match cli.command {
         Command::Id => println!("{}", endpoint.id()),
@@ -108,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", Ticket::of(&endpoint));
         }
         Command::Ping { target, count } => {
-            let conn = rds_cli::connect(&endpoint, parse_target(&target)?).await?;
+            let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
             println!("connected to {}", conn.remote_id());
             for i in 0..count {
                 let rtt = rds_cli::ping(&conn, i as u64).await?;
@@ -116,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Info { target } => {
-            let conn = rds_cli::connect(&endpoint, parse_target(&target)?).await?;
+            let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
             let info = rds_cli::info(&conn).await?;
             println!("{info:#?}");
         }
@@ -125,7 +128,8 @@ async fn main() -> anyhow::Result<()> {
             bind,
             remote,
         } => {
-            let conn = Arc::new(rds_cli::connect(&endpoint, parse_target(&target)?).await?);
+            let conn =
+                Arc::new(rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?);
             let (host, port) = parse_host_port(&remote)?;
             eprintln!(
                 "endpoint {} — run: ssh -p {} <user>@{}",
@@ -140,7 +144,8 @@ async fn main() -> anyhow::Result<()> {
             bind,
             remote,
         } => {
-            let conn = Arc::new(rds_cli::connect(&endpoint, parse_target(&target)?).await?);
+            let conn =
+                Arc::new(rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?);
             let (host, port) = parse_host_port(&remote)?;
             rds_cli::forward_listener(conn, bind, host, port).await?;
         }
@@ -151,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             #[cfg(feature = "desktop")]
             {
-                let conn = rds_cli::connect(&endpoint, parse_target(&target)?).await?;
+                let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
                 rds_desktop::client::run_desktop_client(conn, display, max_fps).await?;
             }
             #[cfg(not(feature = "desktop"))]
@@ -169,4 +174,11 @@ fn parse_host_port(s: &str) -> anyhow::Result<(String, u16)> {
         .rsplit_once(':')
         .ok_or_else(|| anyhow::anyhow!("expected host:port, got {s}"))?;
     Ok((host.to_string(), port.parse()?))
+}
+
+async fn resolve(
+    directory: &Option<rds_discovery::client::Client>,
+    target: &str,
+) -> anyhow::Result<rds_net::EndpointAddr> {
+    rds_net::resolve_target(directory.clone(), target).await
 }

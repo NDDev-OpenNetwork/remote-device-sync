@@ -18,6 +18,7 @@ clap.workspace = true
 rds-core.workspace = true
 rds-desktop = { workspace = true, optional = true }
 rds-net.workspace = true
+rds-discovery.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true

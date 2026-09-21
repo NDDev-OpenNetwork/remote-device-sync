@@ -32,6 +32,7 @@ use std::task::{Context, Poll};
 
 use anyhow::Context as _;
 
+pub mod announce;
 pub mod backends {
     /// Current transport substrate (iroh 1.x on noq underneath).
     pub mod iroh;
@@ -39,6 +40,7 @@ pub mod backends {
     #[cfg(feature = "transport-noq")]
     pub mod noq;
 }
+pub mod resolve;
 
 // Shared identity and address types — the same key material works on
 // both backends.
@@ -51,9 +53,11 @@ pub use iroh::endpoint::{
     SendDatagramError, SendStream, VarInt,
 };
 
+pub use announce::{Announce, AnnounceConfig, announce};
 pub use backends::iroh::{
     Ticket, default_key_path, load_or_create_key, parse_target, relay_url_of,
 };
+pub use resolve::resolve_target;
 
 /// Which transport substrate an endpoint binds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
