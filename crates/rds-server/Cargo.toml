@@ -1,6 +1,6 @@
 [package]
-name = "rds-relay"
-description = "RDS relay server: packet forwarding for endpoints behind hard NAT"
+name = "rds-server"
+description = "GDS-facing services host: relay + discovery directory + registry bridge"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -10,7 +10,8 @@ repository.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 iroh.workspace = true
-iroh-relay = { workspace = true, features = ["server"] }
+rds-discovery.workspace = true
+rds-relay.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

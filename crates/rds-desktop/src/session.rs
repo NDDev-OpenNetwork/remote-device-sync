@@ -72,7 +72,7 @@ pub async fn serve_desktop(
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
                     #[cfg(feature = "x11")]
-                    if let Err(e) = crate::x11::inject(&ev) {
+                    if let Err(e) = crate::input::x11::inject(&ev) {
                         tracing::warn!("input injection failed: {e}");
                     }
                     #[cfg(not(feature = "x11"))]
@@ -123,8 +123,8 @@ fn produce_loop_x11(
 ) {
     use std::time::Instant;
 
-    use crate::codec::H264Encoder;
-    use crate::x11::X11Capturer;
+    use crate::capture::x11::X11Capturer;
+    use crate::codec::openh264::H264Encoder;
     use crate::{Capturer, Encoder};
 
     let mut capturer = match X11Capturer::new(display) {

@@ -5,7 +5,7 @@ use std::str::FromStr;
 use clap::Parser;
 use iroh::EndpointId;
 use rds_agent::{Agent, AgentPolicy};
-use rds_transport::{EndpointConfig, Ticket, bind_endpoint, default_key_path, load_or_create_key};
+use rds_net::{EndpointConfig, Ticket, bind_endpoint, default_key_path, load_or_create_key};
 
 #[derive(Parser)]
 #[command(

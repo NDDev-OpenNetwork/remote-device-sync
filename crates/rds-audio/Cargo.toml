@@ -1,0 +1,13 @@
+[package]
+name = "rds-audio"
+description = "Audio capture/encode/playback pipeline for rds (Opus)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bytes.workspace = true
+
+[lints]
+workspace = true

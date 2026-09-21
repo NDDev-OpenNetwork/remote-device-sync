@@ -16,7 +16,7 @@ clap.workspace = true
 iroh.workspace = true
 rds-core.workspace = true
 rds-desktop = { workspace = true, optional = true }
-rds-transport.workspace = true
+rds-net.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -25,3 +25,6 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 iroh-relay = { workspace = true, features = ["server"] }
 rds-cli = { path = "../rds-cli" }
+
+[lints]
+workspace = true

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use rds_transport::{
+use rds_net::{
     EndpointConfig, Ticket, bind_endpoint, default_key_path, load_or_create_key, parse_target,
 };
 
