@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- WS1b backend-neutral `rds-net` facade: unified `EndpointConfig`
+  (backend, secret key, bind addr, relay, ALPNs) and `Backend` selector;
+  `Endpoint`/`Connection`/`Incoming` wrappers dispatch to either
+  substrate while sharing the same `noq` stream/error types.
+  `rds-agent`, `rds-cli` and `rds-bench` no longer depend on `iroh`
+  directly — `--backend iroh|noq` selects at bind time. Owned-backend
+  `addr()` now advertises dialable candidates (loopback + kernel egress
+  hint) instead of the unspecified bind address. New evidence: agent
+  e2e runs on `Backend::Noq`, and `rds-bench --backend noq` produces
+  same-harness parity numbers on the direct path (handshake p50 20.5ms
+  vs iroh 22.6ms; ping p50 1.31ms vs 1.49ms; suite compare within
+  tolerance). Relay paths correctly refuse on `noq` until WS2.
 - WS1 owned transport backend (`rds-net::backends::noq`, behind the
   `transport-noq` feature): noq endpoint with our own RFC 7250
   raw-public-key TLS layer (`tls.rs` — Ed25519 SPKI certs, server-name

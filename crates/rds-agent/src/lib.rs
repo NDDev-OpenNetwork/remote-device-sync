@@ -8,11 +8,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointId};
 use rds_core::{
     AgentInfo, HelloAck, PROTOCOL_VERSION, ServiceKind, StreamHello, read_frame, write_frame,
 };
+use rds_net::{Connection, Endpoint, EndpointId};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
@@ -124,8 +123,8 @@ async fn serve_connection(
 
 async fn serve_stream(
     conn: Connection,
-    mut send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
+    mut send: rds_net::SendStream,
+    mut recv: rds_net::RecvStream,
     policy: Arc<AgentPolicy>,
     desktop: bool,
 ) -> anyhow::Result<()> {

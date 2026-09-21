@@ -5,10 +5,14 @@ version.workspace = true
 license.workspace = true
 description = "Benchmark and checkpoint harness for rds: scenario runner, UDP impairment proxy, machine-readable reports. Dev tooling, never shipped."
 
+[features]
+default = []
+## Owned transport backend for `--backend noq` runs (WS1).
+transport-noq = ["rds-net/transport-noq"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-iroh.workspace = true
 iroh-relay = { workspace = true, features = ["server"] }
 rds-agent.workspace = true
 rds-cli.workspace = true

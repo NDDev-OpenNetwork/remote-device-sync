@@ -5,9 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
-use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointAddr};
 use rds_core::{AgentInfo, HelloAck, StreamHello, read_frame, write_frame};
+use rds_net::{Connection, Endpoint, EndpointAddr};
 use tokio::net::TcpListener;
 
 /// Open a connection to `target` and return it.
@@ -53,7 +52,7 @@ pub async fn open_tcp(
     conn: &Connection,
     host: &str,
     port: u16,
-) -> anyhow::Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+) -> anyhow::Result<(rds_net::SendStream, rds_net::RecvStream)> {
     let (mut send, mut recv) = conn.open_bi().await?;
     write_frame(
         &mut send,

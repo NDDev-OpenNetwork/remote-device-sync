@@ -24,7 +24,7 @@ mod tls;
 
 use std::fmt;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
@@ -47,30 +47,6 @@ const MAX_QNT_ADDRESSES: u8 = 32;
 /// QUIC datagram buffer caps: 1 MiB each direction, oldest dropped first.
 const DATAGRAM_BUFFER_SIZE: usize = 1 << 20;
 
-/// How a noq endpoint reaches the network.
-#[derive(Debug, Clone)]
-pub struct EndpointConfig {
-    /// Persisted or generated Ed25519 secret key. `None` generates one.
-    pub secret_key: Option<SecretKey>,
-    /// UDP bind address. `None` binds `0.0.0.0:0`.
-    pub bind_addr: Option<SocketAddr>,
-    /// QUIC ALPN protocol ids. Defaults to `rds/0`.
-    pub alpns: Vec<Vec<u8>>,
-    /// Custom relay URL. Reserved: relay transport lands with `relay_link`.
-    pub relay: Option<RelayUrl>,
-}
-
-impl Default for EndpointConfig {
-    fn default() -> Self {
-        Self {
-            secret_key: None,
-            bind_addr: None,
-            alpns: vec![rds_core::ALPN.to_vec()],
-            relay: None,
-        }
-    }
-}
-
 /// QUIC transport parameters, mirroring the iroh backend's choices so
 /// behavior — and benchmark numbers — are comparable across backends.
 fn transport_config() -> Arc<noq::TransportConfig> {
@@ -91,7 +67,7 @@ fn transport_config() -> Arc<noq::TransportConfig> {
 /// One UDP socket carries all QUIC traffic; multipath and QNT are
 /// negotiated so additional paths and NAT traversal can be layered on
 /// after connect.
-pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
+pub async fn bind_endpoint(config: crate::EndpointConfig) -> anyhow::Result<Endpoint> {
     let secret_key = config.secret_key.unwrap_or_else(SecretKey::generate);
     let tls = tls::TlsConfig::new(secret_key.clone());
 
@@ -135,6 +111,46 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     })
 }
 
+/// Translate the bound socket address into dialable direct candidates.
+///
+/// An unspecified bind (`0.0.0.0`) is not dialable — advertise the
+/// loopback address plus the kernel's egress source address for a public
+/// destination instead. The egress hint uses UDP `connect()` route
+/// lookup, which sends no packets; TEST-NET-1 is documentation space and
+/// only selects the source interface. Full interface enumeration lands
+/// with the candidate pipeline (WS1b).
+fn advertised_addrs(local: SocketAddr) -> std::collections::BTreeSet<TransportAddr> {
+    let mut out = std::collections::BTreeSet::new();
+    let port = local.port();
+    match local.ip() {
+        ip if !ip.is_unspecified() => {
+            out.insert(TransportAddr::Ip(local));
+        }
+        IpAddr::V4(_) => {
+            out.insert(TransportAddr::Ip(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port,
+            )));
+            if let Ok(sock) = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+                // Route lookup only — UDP connect emits no traffic.
+                if sock.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).is_ok()
+                    && let Ok(src) = sock.local_addr()
+                    && !src.ip().is_unspecified()
+                {
+                    out.insert(TransportAddr::Ip(SocketAddr::new(src.ip(), port)));
+                }
+            }
+        }
+        IpAddr::V6(_) => {
+            out.insert(TransportAddr::Ip(SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                port,
+            )));
+        }
+    }
+    out
+}
+
 /// An owned-transport endpoint: our socket, our TLS, our path policy.
 #[derive(Clone)]
 pub struct Endpoint {
@@ -169,9 +185,10 @@ impl Endpoint {
     /// know about. Observed external and NAT-traversal addresses join this
     /// set once the candidate pipeline tracks them.
     pub fn addr(&self) -> EndpointAddr {
-        let mut addrs = std::collections::BTreeSet::new();
-        addrs.insert(TransportAddr::Ip(self.local_addr));
-        EndpointAddr { id: self.id, addrs }
+        EndpointAddr {
+            id: self.id,
+            addrs: advertised_addrs(self.local_addr),
+        }
     }
 
     /// Connect to a peer by advertised address.

@@ -17,6 +17,10 @@ struct Cli {
     /// Custom relay URL; default is the n0 public relays.
     #[arg(long, global = true)]
     relay: Option<String>,
+    /// Transport backend: `iroh` (default) or `noq` (with the
+    /// `transport-noq` feature).
+    #[arg(long, global = true, default_value = "iroh")]
+    backend: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -81,8 +85,15 @@ async fn main() -> anyhow::Result<()> {
             .map(|p| load_or_create_key(&p))
             .transpose()?,
     };
+    let backend = match cli.backend.as_str() {
+        "iroh" => rds_net::Backend::Iroh,
+        #[cfg(feature = "transport-noq")]
+        "noq" => rds_net::Backend::Noq,
+        other => anyhow::bail!("unknown or unavailable backend {other:?}"),
+    };
     let mut config = EndpointConfig {
         secret_key: key,
+        backend,
         ..Default::default()
     };
     if let Some(url) = &cli.relay {

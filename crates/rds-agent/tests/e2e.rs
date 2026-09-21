@@ -105,7 +105,7 @@ async fn unauthorized_peer_is_rejected() {
     stranger.online().await;
 
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 22));
-    policy.allow.insert(iroh::SecretKey::generate().public()); // never binds
+    policy.allow.insert(rds_net::SecretKey::generate().public()); // never binds
     let agent = Agent::new(agent_ep, policy);
     let ticket = Ticket::of(&agent.endpoint);
     let _task = tokio::spawn({
@@ -140,6 +140,37 @@ async fn direct_connection_without_relay() {
     // offline check disable relays by constructing the ticket from addr().
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
     let client_ep = bind_endpoint(EndpointConfig::default()).await.unwrap();
+    policy.allow.insert(client_ep.id());
+    let agent = Agent::new(agent_ep, policy);
+    let ticket = Ticket::of(&agent.endpoint);
+    let _task = tokio::spawn({
+        let agent = Arc::new(agent);
+        async move { agent.run().await }
+    });
+
+    let conn = rds_cli::connect(
+        &client_ep,
+        rds_net::parse_target(&ticket.to_string()).unwrap(),
+    )
+    .await
+    .unwrap();
+    rds_cli::ping(&conn, 7).await.unwrap();
+}
+
+/// Same direct-path flow on the owned `noq` backend: agent and client
+/// both bind `Backend::Noq` — exercises the facade end to end, not just
+/// the backend in isolation.
+#[cfg(feature = "transport-noq")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_connection_noq_backend() {
+    let config = || EndpointConfig {
+        backend: rds_net::Backend::Noq,
+        relay: None,
+        ..Default::default()
+    };
+    let agent_ep = bind_endpoint(config()).await.unwrap();
+    let client_ep = bind_endpoint(config()).await.unwrap();
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
     policy.allow.insert(client_ep.id());
     let agent = Agent::new(agent_ep, policy);
     let ticket = Ticket::of(&agent.endpoint);

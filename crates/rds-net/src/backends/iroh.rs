@@ -12,26 +12,9 @@ use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr,
 };
 
-/// How an endpoint reaches the network.
-#[derive(Debug, Clone, Default)]
-pub struct EndpointConfig {
-    /// Persisted or generated Ed25519 secret key.
-    pub secret_key: Option<SecretKey>,
-    /// Custom relay URL. `None` uses the n0 public relays.
-    pub relay: Option<RelayUrl>,
-    /// Bind port for the QUIC socket. `None` picks a free port.
-    pub bind_port: Option<u16>,
-}
+use crate::EndpointConfig;
 
-impl EndpointConfig {
-    /// Relay URL string, e.g. `https://relay.example.com` or `http://127.0.0.1:3340`.
-    pub fn with_relay(mut self, url: &str) -> anyhow::Result<Self> {
-        self.relay = Some(RelayUrl::from_str(url)?);
-        Ok(self)
-    }
-}
-
-/// Bind an rds endpoint: ALPN `rds/0`, configured identity and relay mode.
+/// Bind an rds endpoint: configured ALPNs, identity and relay mode.
 ///
 /// With a custom relay the endpoint uses `presets::Minimal` — no n0 address
 /// lookup — so a private deployment does not publish to third-party DNS.
@@ -45,13 +28,10 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     if let Some(key) = config.secret_key {
         builder = builder.secret_key(key);
     }
-    if let Some(port) = config.bind_port {
-        builder = builder.bind_addr(std::net::SocketAddrV4::new(
-            std::net::Ipv4Addr::UNSPECIFIED,
-            port,
-        ))?;
+    if let Some(addr) = config.bind_addr {
+        builder = builder.bind_addr(addr)?;
     }
-    let endpoint = builder.alpns(vec![rds_core::ALPN.to_vec()]).bind().await?;
+    let endpoint = builder.alpns(config.alpns).bind().await?;
     Ok(endpoint)
 }
 
@@ -110,7 +90,7 @@ pub struct Ticket(pub EndpointAddr);
 
 impl Ticket {
     /// Current address of `endpoint`, including its home relay once online.
-    pub fn of(endpoint: &Endpoint) -> Self {
+    pub fn of(endpoint: &crate::Endpoint) -> Self {
         Self(endpoint.addr())
     }
 

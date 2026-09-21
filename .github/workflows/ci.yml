@@ -34,7 +34,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: clippy with owned transport backend (noq)
-        run: cargo clippy -p rds-net --all-targets --features transport-noq -- -D warnings
+        run: >-
+          cargo clippy --workspace --all-targets
+          --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq
+          -- -D warnings
       - name: clippy with x11/desktop feature (linux)
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --features rds-desktop/x11 -- -D warnings
@@ -50,7 +53,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --workspace
       - name: test owned transport backend (noq)
-        run: cargo test -p rds-net --features transport-noq
+        run: >-
+          cargo test -p rds-net -p rds-agent
+          --features rds-net/transport-noq,rds-agent/transport-noq
       - name: test with x11/desktop feature (linux)
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --features rds-desktop/x11

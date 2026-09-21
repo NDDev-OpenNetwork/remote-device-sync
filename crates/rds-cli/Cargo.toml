@@ -9,12 +9,13 @@ repository.workspace = true
 [features]
 default = []
 desktop = ["dep:rds-desktop", "rds-desktop/x11"]
+## Owned transport backend for `--backend noq` selection (WS1).
+transport-noq = ["rds-net/transport-noq"]
 
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
-iroh.workspace = true
 rds-core.workspace = true
 rds-desktop = { workspace = true, optional = true }
 rds-net.workspace = true

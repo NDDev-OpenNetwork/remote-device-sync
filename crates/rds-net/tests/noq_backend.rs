@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use iroh::{EndpointAddr, EndpointId, TransportAddr};
-use rds_net::backends::noq::{self, EndpointConfig};
+use rds_net::EndpointConfig;
+use rds_net::backends::noq;
 
 const PING: &[u8] = b"rds-ping";
 
