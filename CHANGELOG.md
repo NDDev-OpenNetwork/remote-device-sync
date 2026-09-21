@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- WS1 owned transport backend (`rds-net::backends::noq`, behind the
+  `transport-noq` feature): noq endpoint with our own RFC 7250
+  raw-public-key TLS layer (`tls.rs` — Ed25519 SPKI certs, server-name
+  `EndpointId` verification, mutual client certs) that is
+  wire-compatible with the shipping iroh backend on `rds/0`; BLAKE3
+  stateless-reset key; endpoint facade (`bind/connect/accept/addr/close`)
+  mirroring the iroh surface; candidate pipeline (`policy.rs` — dedup,
+  cap at multipath limit, `open_path_ensure` for extra candidates, QNT
+  round trigger); transport config matching iroh defaults (multipath ×8,
+  QNT addrs ×32, QUIC datagrams, path keepalive/idle). Integration tests
+  prove noq↔noq loopback, QUIC datagrams, and cross-backend interop
+  (iroh client ↔ noq server, both directions). `iroh` remains the
+  default backend until C1 parity.
 - WS0 measurement harness: new dev-only `rds-bench` crate — scenario
   runner (handshake/ping/transfer/multiconnect/relay-fallback/impaired)
   on real QUIC paths, deterministic seeded UDP impairment proxy
