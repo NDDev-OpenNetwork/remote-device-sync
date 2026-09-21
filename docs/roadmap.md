@@ -2,7 +2,9 @@
 
 Each milestone ends with gates — benchmarks and checks that must pass
 before the next starts. Order is chosen so the riskiest owned layers
-(transport, relay) are proven early.
+(transport, relay) are proven early. The task-level plan with file
+scope, API sketches and per-task tests lives in
+[implementation-plan.md](implementation-plan.md).
 
 ## v0.1 — foundation (done)
 
