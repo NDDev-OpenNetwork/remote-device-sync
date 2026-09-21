@@ -1,10 +1,12 @@
 # Roadmap
 
-Each milestone ends with gates — benchmarks and checks that must pass
-before the next starts. Order is chosen so the riskiest owned layers
-(transport, relay) are proven early. The task-level plan with file
-scope, API sketches and per-task tests lives in
-[implementation-plan.md](implementation-plan.md).
+Each workstream ends at a named **checkpoint** — a reproducible
+verification bundle (functional, simulation, impairment, interop,
+fuzz, soak, security layers as applicable) whose report is committed
+to `docs/reports/` before the next wave starts. Order is chosen so
+the riskiest owned layers (transport, relay) are proven early. The
+task-level plan, checkpoint protocol and per-gate check tables live
+in [implementation-plan.md](implementation-plan.md).
 
 ## v0.1 — foundation (done)
 
