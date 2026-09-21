@@ -11,13 +11,14 @@ anyhow.workspace = true
 blake3 = { workspace = true, optional = true }
 bytes.workspace = true
 data-encoding.workspace = true
-ed25519-dalek = { workspace = true, optional = true, features = ["pkcs8"] }
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 iroh.workspace = true
 noq = { workspace = true, optional = true }
 noq-proto = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
+rds-discovery.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -25,6 +26,7 @@ tokio-stream = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
+iroh-relay = { workspace = true, features = ["server"] }
 tracing-subscriber.workspace = true
 turmoil = "0.7.2"
 
@@ -36,7 +38,6 @@ transport-noq = [
     "dep:noq-proto",
     "dep:tokio-stream",
     "dep:blake3",
-    "dep:ed25519-dalek",
     "dep:rand",
 ]
 

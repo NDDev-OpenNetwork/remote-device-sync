@@ -134,10 +134,45 @@ c2)
 - decoder fuzz (proptest): PASS
 - relay-kill → second-relay migration: NOT RUN (single-relay config; needs multi-relay attach)"
     ;;
+c3)
+    note "gate c3 — discovery service + publish/resolve"
+    green_bars
+
+    note "directory suite (roundtrip, staleness, rate-limit, delete, registry, hostile, outage)"
+    cargo test -p rds-discovery || fail "rds-discovery tests"
+
+    note "announce + resolve e2e (publish, republish, resolve→connect, fallbacks)"
+    cargo test -p rds-net --test announce_e2e || fail "announce e2e"
+
+    note "agent e2e (relay + authz regression)"
+    cargo test -p rds-agent --test e2e || fail "agent e2e"
+
+    note "G3 cold resolve→connect→first-byte"
+    cargo run -q -p rds-bench -- run --scenario resolve-connect \
+        --json "$REPORTS/bench-${TS}-resolve.json" --md "$REPORTS/bench-${TS}-resolve.md" \
+        || fail "resolve-connect bench"
+    python3 - "$REPORTS/bench-${TS}-resolve.json" <<'PY' || fail "G3 budget exceeded"
+import json, sys
+r = json.load(open(sys.argv[1]))["reports"][0]
+ok, total = r["attempts"]
+p50 = r["rtt"]["p50_ns"] / 1e6
+p95 = r["rtt"]["p95_ns"] / 1e6
+print(f"resolve-connect: {ok}/{total} ok, p50={p50:.1f}ms p95={p95:.1f}ms")
+sys.exit(0 if (ok == total and p50 <= 300.0) else 1)
+PY
+
+    write_checkpoint "c3" "pending review" \
+        "- fmt/clippy/test: PASS
+- directory suite (roundtrip, expiry, staleness/replay, forgery, rate limit, signed delete, registry authz, hostile input, outage): PASS
+- announce e2e (publish, TTL refresh, addr-change republish): PASS
+- resolve e2e (ticket/bare-key/name fallbacks, resolve→connect): PASS
+- record + http parser fuzz (proptest): PASS
+- G3 cold resolve→connect→first-byte ≤300ms: see bench-${TS}-resolve.{json,md}"
+    ;;
 *)
     cat <<EOF
 unknown or unregistered gate: '${GATE}'
-registered gates: c0 c1 c2
+registered gates: c0 c1 c2 c3
 a checkpoint with no registered checks is refused by design.
 EOF
     exit 2

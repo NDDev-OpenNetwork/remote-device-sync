@@ -71,6 +71,9 @@ pub enum Scenario {
     RelayFallback,
     /// Ping over the impaired direct path (loss/jitter/rate as given).
     Impaired,
+    /// Cold `rds ssh <name>`: registry name → record → connect →
+    /// first byte, fresh client endpoint per iteration (G3).
+    ResolveConnect,
     /// All of the above.
     All,
 }
@@ -84,6 +87,7 @@ impl Scenario {
             Scenario::Multiconnect => "multiconnect",
             Scenario::RelayFallback => "relay-fallback",
             Scenario::Impaired => "impaired",
+            Scenario::ResolveConnect => "resolve-connect",
             Scenario::All => "all",
         }
     }
@@ -100,6 +104,7 @@ pub async fn run(s: Scenario, p: &Params) -> anyhow::Result<Vec<BenchReport>> {
             Scenario::Multiconnect,
             Scenario::RelayFallback,
             Scenario::Impaired,
+            Scenario::ResolveConnect,
         ] {
             match run_one(s, p).await {
                 Ok(reports) => out.extend(reports),
@@ -136,6 +141,7 @@ async fn run_one(s: Scenario, p: &Params) -> anyhow::Result<Vec<BenchReport>> {
                 r.meta.scenario = "impaired".into();
                 vec![r]
             }),
+        Scenario::ResolveConnect => resolve_connect(p).await.map(|r| vec![r]),
         Scenario::All => unreachable!("handled in run"),
     }
 }
@@ -283,6 +289,141 @@ async fn transfer(p: &Params) -> anyhow::Result<BenchReport> {
         throughput_mib_s: Some(mib_s),
         attempts: None,
         notes: proxy_note(&world),
+    })
+}
+
+/// Cold `rds ssh <name>`: the estate-signed registry maps a device
+/// name to the agent's key, the directory serves the agent's announced
+/// record, and each iteration resolves → connects → reads the first
+/// byte with a *fresh* client endpoint — no warm session resumption.
+/// This is the G3 measurement (≤300 ms on LAN).
+async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use rds_agent::{Agent, AgentPolicy};
+    use rds_discovery::registry::SignedRegistry;
+    use rds_discovery::{EndpointKey, MemoryStore, client, service};
+    use rds_net::{AnnounceConfig, EndpointConfig, bind_endpoint};
+
+    let backend = p.transport_backend()?;
+
+    let mut relay_config = iroh_relay::server::ServerConfig::default();
+    relay_config.relay = Some(iroh_relay::server::RelayConfig::new(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let relay = iroh_relay::server::Server::spawn(relay_config).await?;
+    let relay_url = format!("http://{}", relay.http_addr().unwrap());
+
+    let agent_key = rds_net::SecretKey::from_bytes(&[42u8; 32]);
+    let client_key = rds_net::SecretKey::from_bytes(&[77u8; 32]);
+
+    // Estate-signed registry: "bench-agent" → agent endpoint key.
+    let reg_key = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+    let snap = SignedRegistry::publish(
+        &reg_key,
+        BTreeMap::from([(
+            "bench-agent".to_string(),
+            EndpointKey(*agent_key.public().as_bytes()),
+        )]),
+        Duration::from_secs(3600),
+    )?;
+    let dir = service::serve(
+        "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+        Arc::new(MemoryStore::default()),
+        service::ServiceConfig {
+            registry_key: Some(reg_key.verifying_key()),
+            registry: Some(snap),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let directory = client::Client::new(dir.addr());
+
+    // Agent endpoint: announce into the directory, then serve.
+    let agent_ep = bind_endpoint(
+        EndpointConfig {
+            secret_key: Some(agent_key.clone()),
+            backend,
+            ..Default::default()
+        }
+        .with_relay(&relay_url)?,
+    )
+    .await?;
+    agent_ep.online().await;
+    let _announce = rds_net::announce(
+        agent_ep.clone(),
+        AnnounceConfig {
+            key: agent_key,
+            directory: directory.clone(),
+            services: vec![rds_discovery::Service::Ping],
+            ttl: Duration::from_secs(120),
+        },
+    );
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.allow.insert(client_key.public());
+    let agent = Arc::new(Agent::new(agent_ep, policy));
+    let agent_task = tokio::spawn({
+        let agent = agent.clone();
+        async move {
+            let _ = agent.run().await;
+        }
+    });
+
+    // The first publish is asynchronous; wait for it before timing.
+    let ek = EndpointKey(*agent.id().as_bytes());
+    let mut published = false;
+    for _ in 0..100 {
+        if directory.fetch(&ek).await.is_ok() {
+            published = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::ensure!(published, "agent record never reached the directory");
+
+    let mut samples = Vec::with_capacity(p.iterations);
+    let mut ok = 0u64;
+    for _ in 0..p.iterations {
+        // A fresh client endpoint keeps both resolve and handshake
+        // cold, matching a new `rds ssh` invocation.
+        let client_ep = bind_endpoint(
+            EndpointConfig {
+                secret_key: Some(client_key.clone()),
+                backend,
+                ..Default::default()
+            }
+            .with_relay(&relay_url)?,
+        )
+        .await?;
+        let timed = tokio::time::timeout(p.timeout, async {
+            let t0 = Instant::now();
+            let addr = rds_net::resolve_target(Some(directory.clone()), "bench-agent").await?;
+            let conn = rds_cli::connect(&client_ep, addr).await?;
+            rds_cli::ping(&conn, 1).await?;
+            Ok::<_, anyhow::Error>(t0.elapsed())
+        })
+        .await;
+        if let Ok(Ok(d)) = timed {
+            samples.push(d.as_nanos() as u64);
+            ok += 1;
+        }
+        client_ep.close().await;
+    }
+    agent_task.abort();
+    let mut notes = Vec::new();
+    if ok < p.iterations as u64 {
+        notes.push(format!(
+            "{} cold resolve→connect→first-byte attempts failed",
+            p.iterations as u64 - ok
+        ));
+    }
+    Ok(BenchReport {
+        meta: meta("resolve-connect", p, "discovered", None),
+        rtt: Percentiles::of(&samples),
+        throughput_mib_s: None,
+        attempts: Some((ok, p.iterations as u64)),
+        notes,
     })
 }
 

@@ -32,6 +32,13 @@ struct Cli {
     /// Permit TcpConnect to any host:port (development only).
     #[arg(long)]
     allow_any_tcp: bool,
+    /// Discovery directory address; when set the agent publishes its
+    /// signed record and keeps it fresh.
+    #[arg(long)]
+    directory: Option<std::net::SocketAddr>,
+    /// Record TTL when `--directory` is set.
+    #[arg(long, default_value = "300")]
+    record_ttl: u64,
 }
 
 #[tokio::main]
@@ -70,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut config = EndpointConfig {
-        secret_key: Some(secret_key),
+        secret_key: Some(secret_key.clone()),
         backend,
         ..Default::default()
     };
@@ -80,6 +87,21 @@ async fn main() -> anyhow::Result<()> {
 
     let endpoint = bind_endpoint(config).await?;
     endpoint.online().await;
+
+    let _announce = cli.directory.map(|addr| {
+        rds_net::announce(
+            endpoint.clone(),
+            rds_net::AnnounceConfig {
+                key: secret_key,
+                directory: rds_discovery::client::Client::new(addr),
+                services: vec![
+                    rds_discovery::Service::Ping,
+                    rds_discovery::Service::TcpForward,
+                ],
+                ttl: std::time::Duration::from_secs(cli.record_ttl),
+            },
+        )
+    });
 
     let agent = Agent::new(endpoint, policy);
     println!("endpoint id: {}", agent.id());

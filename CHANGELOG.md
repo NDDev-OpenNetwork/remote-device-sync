@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- WS3 discovery service + publish/resolve (`rds-discovery`):
+  `EndpointRecord` payloads carry `issued_at`; stores reject
+  forged, expired and same-age-or-older replayed records, and honor
+  signed `DeleteRequest` tombstones with replay protection. Minimal
+  owned HTTP/1.1 codec (`http.rs` — hard head/body caps, one request
+  per connection) serving `PUT/GET/DELETE /v1/records`,
+  `GET /v1/names/{name}`, `PUT /v1/registry`, `/v1/health`,
+  `/v1/metrics` with per-key + global PUT rate limiting
+  (`service.rs`), plus a matching timeout-bounded `client.rs`.
+  Estate name→key resolution rides a signed `SignedRegistry`
+  snapshot (`registry.rs`) verified against a configured registry
+  key — the directory can withhold but never invent names.
+  `rds-net`: `announce` task publishes on start, refreshes at
+  `ttl/3`, and republishes promptly when the advertised address set
+  changes; `resolve_target` resolves ticket → bare key → device
+  name. `rds` CLI gains `--server`; `rds-agent` gains `--directory` /
+  `--record-ttl`; `rds-server` composes relay + directory + registry
+  flags. `rds-bench` gains the G3 `resolve-connect` scenario: cold
+  name→resolve→connect→first-byte per fresh endpoint. Gate `c3`:
+  G3 p50 well under the 300 ms budget (see
+  `docs/reports/checkpoint-c3.md`).
 - WS2 owned relay transport (`rds-relay` + `rds-net::backends::noq::relay`):
   shared wire protocol in `rds_core::relay` (`rds-relay/0` ALPN, control
   stream, `[32B key][payload]` datagram frames); owned server with

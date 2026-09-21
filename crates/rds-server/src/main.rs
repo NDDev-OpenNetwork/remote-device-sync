@@ -5,16 +5,22 @@
 //!
 //! - packet **relay** for endpoints behind hard NAT (`rds-relay`),
 //! - the **discovery directory**: signed `EndpointRecord`s stored on
-//!   disk (`rds-discovery`), published by devices and queried by peers.
+//!   disk (`rds-discovery`), served over the directory HTTP API
+//!   (`PUT/GET/DELETE /v1/records`, `GET /v1/names/{name}`,
+//!   `PUT /v1/registry`, health, metrics),
+//! - the **registry bridge**: a estate-signed name→key snapshot the
+//!   directory verifies against `--registry-key` before serving.
 //!
-//! Planned next: the HTTP/QUIC discovery API (PUT/GET records), the
-//! device-registry bridge into GDS estate state, presence, and audit
-//! emission. Today it binds the relay and loads the record directory.
+//! The estate publishes the signed snapshot; this host never sees the
+//! private signing key.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
+use rds_discovery::registry::SignedRegistry;
+use rds_discovery::service::{self, ServiceConfig};
 use rds_discovery::{FileStore, RecordStore};
 use tracing::info;
 
@@ -24,12 +30,22 @@ struct Cli {
     /// Address the relay endpoint binds to.
     #[arg(long, default_value = "0.0.0.0:3340")]
     relay_addr: SocketAddr,
+    /// Address the discovery HTTP API binds to.
+    #[arg(long, default_value = "0.0.0.0:3341")]
+    http_addr: SocketAddr,
     /// Directory holding signed endpoint records.
     #[arg(long, default_value = "/var/lib/rds/directory")]
     directory: PathBuf,
     /// Restrict relay use to these endpoint ids. Empty = open relay.
     #[arg(long = "allow")]
     allow: Vec<String>,
+    /// Base32 verifying key that signs estate registry snapshots.
+    /// Required for name resolution and `PUT /v1/registry`.
+    #[arg(long)]
+    registry_key: Option<String>,
+    /// JSON file with the initial estate-signed registry snapshot.
+    #[arg(long)]
+    registry: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -41,9 +57,46 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let cli = Cli::parse();
 
-    let store = FileStore::new(&cli.directory)?;
+    let store: Arc<dyn RecordStore> = Arc::new(FileStore::new(&cli.directory)?);
     info!(dir = %cli.directory.display(), "endpoint record directory ready");
-    let _ = &store as &dyn RecordStore; // keep trait usage honest
+
+    let registry_key = cli
+        .registry_key
+        .as_deref()
+        .map(|s| {
+            let bytes = data_encoding::BASE32_NOPAD
+                .decode(s.to_uppercase().as_bytes())
+                .map_err(|e| anyhow::anyhow!("--registry-key not base32: {e}"))?;
+            let raw: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("--registry-key is not 32 bytes"))?;
+            ed25519_dalek::VerifyingKey::from_bytes(&raw)
+                .map_err(|e| anyhow::anyhow!("--registry-key invalid: {e}"))
+        })
+        .transpose()?;
+    let registry = cli
+        .registry
+        .as_deref()
+        .map(|p| -> anyhow::Result<SignedRegistry> {
+            Ok(serde_json::from_slice(&std::fs::read(p)?)?)
+        })
+        .transpose()?;
+    if registry.is_some() && registry_key.is_none() {
+        anyhow::bail!("--registry given without --registry-key");
+    }
+
+    let dir = service::serve(
+        cli.http_addr,
+        store,
+        ServiceConfig {
+            registry_key,
+            registry,
+            ..Default::default()
+        },
+    )
+    .await?;
+    info!(addr = %dir.addr(), "discovery directory listening");
+    let _dir = dir; // serves until process exit
 
     let allow: Vec<iroh::EndpointId> = cli
         .allow
