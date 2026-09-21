@@ -12,10 +12,13 @@ desktop = []
 
 [dependencies]
 bytes.workspace = true
-postcard = { workspace = true, features = ["alloc"] }
+postcard = { workspace = true, features = ["alloc", "use-std"] }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true

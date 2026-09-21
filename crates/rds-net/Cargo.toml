@@ -16,7 +16,7 @@ iroh.workspace = true
 noq = { workspace = true, optional = true }
 noq-proto = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
-postcard = { workspace = true, features = ["alloc"] }
+postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true

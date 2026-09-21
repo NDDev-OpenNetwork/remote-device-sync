@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- WS2 owned relay transport (`rds-relay` + `rds-net::backends::noq::relay`):
+  shared wire protocol in `rds_core::relay` (`rds-relay/0` ALPN, control
+  stream, `[32B key][payload]` datagram frames); owned server with
+  per-endpoint slots keyed by TLS-verified identity, token-bucket rate
+  limiting, `PeerGone` fan-out, drain broadcast, identity-checked
+  replacement. Client side: `RelaySocket` joins the socket mux as a
+  tunnel child — a same-key helper endpoint registers on the control
+  bidi, peers map to synthetic `198.19.0.0/16` addresses, and
+  `EndpointConfig::relay_endpoint` attaches it. e2e proves handshake +
+  datagrams + streams entirely through the tunnel, stale-slot
+  replacement, and drain eviction. Gate `c2` passed; multi-relay
+  failover deferred to WS3.
 - WS1c connection driver + path migration: per-connection
   `connection_driver` task (`policy.rs`) consumes QNT address
   advertisements (`ADD_ADDRESS`/`REMOVE_ADDRESS`) and path events, and

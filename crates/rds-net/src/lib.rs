@@ -80,8 +80,15 @@ pub struct EndpointConfig {
     /// (`noq`); single-socket backends use the first entry.
     pub bind_addrs: Vec<SocketAddr>,
     /// Custom relay URL. `None` uses the backend's default relay set
-    /// (n0 public relays for iroh; none for `noq` until `relay_link`).
+    /// (n0 public relays for iroh).
     pub relay: Option<RelayUrl>,
+    /// Owned-relay attachment (`noq` backend only): the relay server's
+    /// endpoint address. When set, a relay tunnel socket joins the
+    /// socket mux and the endpoint advertises it as
+    /// `TransportAddr::Relay` — peers sharing the relay can open
+    /// relayed paths that migrate like any other QUIC path.
+    #[cfg(feature = "transport-noq")]
+    pub relay_endpoint: Option<EndpointAddr>,
     /// QUIC ALPN protocol ids. Defaults to `rds/0`.
     pub alpns: Vec<Vec<u8>>,
 }
@@ -93,6 +100,8 @@ impl Default for EndpointConfig {
             secret_key: None,
             bind_addrs: Vec::new(),
             relay: None,
+            #[cfg(feature = "transport-noq")]
+            relay_endpoint: None,
             alpns: vec![rds_core::ALPN.to_vec()],
         }
     }
@@ -136,7 +145,7 @@ pub struct Endpoint(EndpointInner);
 enum EndpointInner {
     Iroh(iroh::Endpoint),
     #[cfg(feature = "transport-noq")]
-    Noq(backends::noq::Endpoint),
+    Noq(Box<backends::noq::Endpoint>),
 }
 
 impl Endpoint {
@@ -146,7 +155,7 @@ impl Endpoint {
 
     #[cfg(feature = "transport-noq")]
     fn new_noq(inner: backends::noq::Endpoint) -> Self {
-        Self(EndpointInner::Noq(inner))
+        Self(EndpointInner::Noq(Box::new(inner)))
     }
 
     /// This endpoint's public identity.
