@@ -197,41 +197,35 @@ async fn resolve_refuses_aged_out_record() {
     .unwrap();
     let client = Client::new(dir.addr());
 
-    let key = rds_net::SecretKey::from_bytes(&[10u8; 32]);
-    let endpoint = bind_endpoint(EndpointConfig {
-        secret_key: Some(key.clone()),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
-    // TTL of 1s: fresh at publish, expired moments later.
-    let _announce = announce(
-        endpoint.clone(),
-        AnnounceConfig {
-            key,
-            directory: client.clone(),
+    // One hand-signed record with a 1s TTL — deterministic, no
+    // background task that could republish past the boundary.
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]);
+    let ek = EndpointKey(signing.verifying_key().to_bytes());
+    let now = rds_discovery::now_unix().unwrap();
+    let rec = rds_discovery::EndpointRecord::sign(
+        &rds_discovery::Payload {
+            key: ek,
+            addrs: vec!["10.0.0.9:4200".parse().unwrap()],
+            relay_urls: vec![],
             services: vec![Service::Ping],
-            ttl: Duration::from_secs(1),
+            issued_at: now,
+            expires_at: now + 1,
         },
-    );
-    let bare = format!("{}", endpoint.id());
-    let mut resolved = false;
-    for _ in 0..50 {
-        if rds_net::resolve_target(Some(client.clone()), &bare)
-            .await
-            .is_ok()
-        {
-            resolved = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(resolved, "fresh record resolves");
+        &signing,
+    )
+    .unwrap();
+    client.publish(&rec).await.unwrap();
 
-    // Once it ages out the resolver must refuse it — the announce
-    // refresh at ttl/3 races expiry, so stop it and wait past TTL.
-    drop(_announce);
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let id = rds_net::EndpointId::from_bytes(&ek.0).unwrap();
+    let bare = format!("{id}");
+    rds_net::resolve_target(Some(client.clone()), &bare)
+        .await
+        .expect("fresh record resolves");
+
+    // Past expiry the same stored record must be refused. issued_at
+    // and now are whole seconds, so a 1s TTL is fresh for up to ~2s
+    // real time — sleep past the worst-case boundary.
+    tokio::time::sleep(Duration::from_millis(2200)).await;
     let err = rds_net::resolve_target(Some(client.clone()), &bare)
         .await
         .unwrap_err();
