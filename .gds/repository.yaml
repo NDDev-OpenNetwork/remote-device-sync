@@ -1,0 +1,68 @@
+schema_version: 1
+
+repository:
+  id: "repo_01M3295WYVXFN3V6H0WFYN0BC7"
+  display_name: "remote-device-sync"
+  roles: ["project", "module"]
+  lifecycle: "active"
+
+provider:
+  type: "github"
+  installation: "installation:github-opennetwork"
+  repository_id: 1380014631
+  owner: "NDDev-OpenNetwork"
+  name: "remote-device-sync"
+
+classification:
+  portfolios: ["portfolio:opennetwork-projects"]
+  visibility_contract: "public"
+  data_classification: "public"
+
+product:
+  purpose: >-
+    Remote device access for the GDS estate: SSH-based connectivity and remote
+    desktop sessions between enrolled devices, brokered through the GDS server.
+  capabilities:
+    - "Rust library crate and remote-device-sync CLI (skeleton)"
+    - "SSH device-to-device session transport (design stage)"
+    - "Remote desktop (RDP) sessions brokered through the GDS server (design stage)"
+  entrypoints:
+    - change: "Library crate"
+      path: "src/lib.rs"
+    - change: "CLI binary"
+      path: "src/main.rs"
+    - change: "Package manifest"
+      path: "Cargo.toml"
+
+policy:
+  profiles: ["repository-default", "public-module", "continuous-development"]
+  rollout_ring: "standard"
+
+git:
+  default_branch: "main"
+  integration: "pull-request"
+  branch_model: "task-branches"
+  handoff_pr: "preferred"
+  cleanup: "merged-only"
+
+verification:
+  commands:
+    lint: ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings"]
+    test: ["cargo test"]
+  required: ["lint", "test"]
+  required_contexts: []
+
+agent:
+  context_profile: "project-default"
+  generated_agents: false
+  serena: {enabled: false, provenance_required: false}
+
+module:
+  contract: "public"
+  consumption: ["git-submodule"]
+  compatibility: "commit-contract"
+  pin_policy: "default-branch-commit"
+  publication: {registry: "none", github_release: "optional"}
+
+release:
+  mode: "bundle"
