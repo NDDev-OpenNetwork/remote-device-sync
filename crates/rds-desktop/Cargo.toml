@@ -21,3 +21,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 x11rb = { version = "0.13", features = ["shm", "xtest", "xfixes"], optional = true }
+
+[lints]
+workspace = true

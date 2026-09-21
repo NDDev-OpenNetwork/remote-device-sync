@@ -1,101 +1,21 @@
-//! X11 capture and input via `x11rb`: `GetImage` polling for frames and
-//! XTEST for input injection.
+//! X11 input injection via XTEST (`x11rb`).
 //!
-//! This is the portable baseline backend. The MIT-SHM zero-copy path and
-//! the Wayland portal+PipeWire backend are scheduled behind the same
-//! traits; GetImage polling is what every X server already supports.
+//! Injects into the default X11 session. Portable baseline; Wayland paths
+//! live in `input/portal` and `input/wlr`.
 
-use bytes::Bytes;
-use rds_core::{DesktopCaps, DisplayInfo, InputEvent};
+use rds_core::InputEvent;
 use x11rb::connection::Connection as _;
-use x11rb::protocol::xproto::{ConnectionExt, GetImageReply, ImageFormat};
+use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
-use crate::{Capturer, DesktopError, InputSink, RawFrame};
+use crate::{DesktopError, InputSink};
 
 const KEY_PRESS: u8 = 2;
 const KEY_RELEASE: u8 = 3;
 const BUTTON_PRESS: u8 = 4;
 const BUTTON_RELEASE: u8 = 5;
 const MOTION_NOTIFY: u8 = 6;
-
-/// Polls one X11 screen (root window) into `RawFrame`s.
-pub struct X11Capturer {
-    conn: RustConnection,
-    root: x11rb::protocol::xproto::Window,
-    width: u16,
-    height: u16,
-    screen: usize,
-}
-
-impl X11Capturer {
-    /// Connect to `$DISPLAY` and select `screen`.
-    pub fn new(screen: u32) -> Result<Self, DesktopError> {
-        let (conn, default_screen) =
-            RustConnection::connect(None).map_err(|e| DesktopError::Capture(e.to_string()))?;
-        let setup = conn.setup();
-        let idx = (screen as usize).min(setup.roots.len().saturating_sub(1));
-        let root = setup.roots[idx].root;
-        let (width, height) = (
-            setup.roots[idx].width_in_pixels,
-            setup.roots[idx].height_in_pixels,
-        );
-        let _ = default_screen;
-        Ok(Self {
-            conn,
-            root,
-            width,
-            height,
-            screen: idx,
-        })
-    }
-}
-
-impl Capturer for X11Capturer {
-    fn capture(&mut self) -> Result<RawFrame, DesktopError> {
-        let reply: GetImageReply = self
-            .conn
-            .get_image(
-                ImageFormat::Z_PIXMAP,
-                self.root,
-                0,
-                0,
-                self.width,
-                self.height,
-                !0,
-            )
-            .map_err(|e| DesktopError::Capture(e.to_string()))?
-            .reply()
-            .map_err(|e| DesktopError::Capture(e.to_string()))?;
-        Ok(RawFrame {
-            width: u32::from(self.width),
-            height: u32::from(self.height),
-            stride: u32::from(self.width) * 4,
-            data: Bytes::from(reply.data),
-        })
-    }
-
-    fn displays(&self) -> Vec<DisplayInfo> {
-        vec![DisplayInfo {
-            index: self.screen as u32,
-            width: u32::from(self.width),
-            height: u32::from(self.height),
-            primary: true,
-        }]
-    }
-}
-
-/// Displays visible over X11.
-pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
-    match X11Capturer::new(0) {
-        Ok(c) => Ok(DesktopCaps {
-            displays: c.displays(),
-            codecs: vec![rds_core::Codec::H264],
-        }),
-        Err(e) => Err(e),
-    }
-}
 
 /// XTEST input sink: injects events into the default X11 session.
 pub struct XtestInput {

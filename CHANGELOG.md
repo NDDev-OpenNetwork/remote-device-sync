@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Workspace restructure for the full-ownership architecture
+  (`docs/research.md` §9): `rds-transport` renamed `rds-net` with
+  `backends::{iroh,noq}`; new crates `rds-discovery` (signed endpoint
+  records, memory/file stores), `rds-sync` (FastCDC+BLAKE3 manifests,
+  delta computation), `rds-audio` (Opus pipeline scaffold),
+  `rds-server` (GDS services host: relay + discovery directory);
+  `rds-relay` gains a lib + `proto` owned-protocol scaffold;
+  `rds-desktop` reorganized into `capture`/`codec`/`input`/`render`
+  backend dirs with per-platform probe order.
+- `docs/platforms.md`, `docs/conventions.md`, `docs/roadmap.md`:
+  platform matrix (Linux x86_64, macOS arm64), engineering rules,
+  milestone gates. CI matrix on both OSes; `rust-toolchain.toml`,
+  `deny.toml`, workspace lint floor.
 - Core transport foundation: six-crate workspace (`rds-core`,
   `rds-transport`, `rds-relay`, `rds-agent`, `rds-cli`, `rds-desktop`) on
   iroh 1.2 / QUIC with Ed25519 endpoint identity, hole-punched direct

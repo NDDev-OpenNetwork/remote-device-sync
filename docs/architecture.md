@@ -87,26 +87,54 @@ Encoding is the latency budget line item that matters: hardware encoders
 ```text
 ┌──────────┐   direct QUIC (hole-punched)   ┌──────────┐
 │  rds cli │◄──────────────────────────────►│ rds-agent│
-│ (viewer, │   or relayed via rds-relay     │ (daemon, │
+│ (viewer, │   or relayed via the relay     │ (daemon, │
 │  ssh -L) │◄────────────►┌──────────┐◄────►│  host)   │
-└──────────┘              │ rds-relay│      └────┬─────┘
-                          │ (iroh    │           │
-                          │  relay + │      ┌────┴─────┐
-                          │  dir)    │      │ sshd :22 │
+└──────────┘              │rds-server│      └────┬─────┘
+                          │ relay +  │           │
+                          │ directory│      ┌────┴─────┐
+                          │ (GDS)    │      │ sshd :22 │
                           └──────────┘      │ desktop  │
                                             └──────────┘
 ```
 
-- **`rds-relay`** — embedded `iroh-relay` plus the RDS directory endpoint.
-  Runs on the GDS services host alongside `iroh-dns-server` (pkarr-based
-  signed endpoint discovery — the GDS discovery role). Sees only
-  encrypted traffic.
-- **`rds-agent`** — daemon on each controlled device. Binds an iroh
-  `Endpoint` with a persisted Ed25519 secret key (the network identity),
-  connects to its home relay, accepts `rds/0` connections, and serves
-  streams to an allowlist of peer `EndpointId`s.
+## Crate map and dependency direction
+
+Dependencies point strictly downward; no cycles, no sideways deps at the
+same layer. `docs/conventions.md` holds the enforceable rules.
+
+```text
+                     rds-core           types, framing, tokens — leaf
+                       │  │
+        ┌──────────────┘  └───────────────┐
+        ▼                               ▼
+  rds-discovery                     rds-net
+  signed EndpointRecord,            transports: backends::iroh (now)
+  stores (mem/file), GDS bridge         backends::noq (ours, §9)
+        │                               │
+        └──────────────┬────────────────┘
+                       ▼
+   ┌──────────┬──────────────┬───────────┐
+   rds-relay  rds-desktop    rds-audio    rds-sync
+   proto+     capture/codec/ Opus paths   FastCDC+BLAKE3
+   iroh shim  input/render   (scaffold)   manifests/delta
+   └──────────┴──────────────┴───────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        ▼                              ▼
+   rds-agent (daemon)            rds-cli (operator)
+                       ▼
+   rds-server — GDS services host: relay + discovery + registry
+```
+
+- **`rds-server`** — runs on the GDS services host: the packet relay and
+  the signed-record discovery directory; later the registry bridge into
+  estate state, presence and audit. Sees only encrypted traffic.
+- **`rds-agent`** — daemon on each controlled device. Binds the endpoint
+  (Ed25519 identity persisted), connects to its home relay, accepts
+  `rds/0` connections, serves streams to an allowlist of peers.
 - **`rds`** — operator CLI. `rds id`, `rds ticket`, `rds ping`, `rds ssh`,
-  `rds forward`, `rds desktop` (feature-gated).
+  `rds forward`, `rds desktop` (feature-gated); `rds send/recv` planned
+  on the sync engine.
 
 ### Identity and authorization
 

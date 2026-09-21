@@ -2,11 +2,15 @@
 resolver = "3"
 members = [
     "crates/rds-agent",
+    "crates/rds-audio",
     "crates/rds-cli",
     "crates/rds-core",
     "crates/rds-desktop",
+    "crates/rds-discovery",
+    "crates/rds-net",
     "crates/rds-relay",
-    "crates/rds-transport",
+    "crates/rds-server",
+    "crates/rds-sync",
 ]
 
 [workspace.package]
@@ -15,23 +19,52 @@ version = "0.1.0"
 license = "AGPL-3.0-only"
 repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
 
+# Dependency direction (enforced by convention, not by cargo):
+#   rds-core      leaf: types, framing, tokens — no io, no async runtime
+#   rds-discovery → core types (own identity layer)
+#   rds-net       → rds-core
+#   rds-relay     → rds-core, rds-net
+#   rds-audio     → rds-core
+#   rds-sync      → rds-core, rds-net
+#   rds-desktop   → rds-core (+rds-net when streams abstract)
+#   rds-agent     → everything client-facing
+#   rds-cli       → everything user-facing
+#   rds-server    → rds-relay, rds-discovery
+
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+blake3 = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 data-encoding = "2"
+ed25519-dalek = "3"
+fastcdc = "5"
 iroh = "1"
 iroh-relay = "1"
+noq = "1"
 postcard = "1"
+rds-audio = { path = "crates/rds-audio" }
 rds-core = { path = "crates/rds-core" }
 rds-desktop = { path = "crates/rds-desktop" }
-rds-transport = { path = "crates/rds-transport" }
+rds-discovery = { path = "crates/rds-discovery" }
+rds-net = { path = "crates/rds-net" }
+rds-relay = { path = "crates/rds-relay" }
+rds-sync = { path = "crates/rds-sync" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Shared lint floor — every crate inherits via `[lints] workspace = true`.
+# `unsafe_code` stays a warning: FFI backends in rds-desktop must `allow`
+# it locally per module; everywhere else unsafe is a review flag.
+[workspace.lints.rust]
+unsafe_code = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = "warn"
 
 [profile.release]
 lto = "thin"

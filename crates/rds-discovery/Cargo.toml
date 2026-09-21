@@ -1,18 +1,18 @@
 [package]
-name = "rds-transport"
-description = "Endpoint lifecycle for rds: iroh binding, identity, tickets"
+name = "rds-discovery"
+description = "Signed endpoint records and stores for rds discovery via the GDS server"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 data-encoding.workspace = true
-iroh.workspace = true
+ed25519-dalek.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
-rds-core.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+
+[lints]
+workspace = true

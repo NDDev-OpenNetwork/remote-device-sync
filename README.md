@@ -12,12 +12,21 @@ and protocol decisions.
 ```text
 crates/
 ├── rds-core       wire protocol: ALPN rds/0, postcard frames, service types
-├── rds-transport  iroh endpoint lifecycle, key persistence, tickets
-├── rds-relay      self-hostable relay binary (embedded iroh-relay + allowlist)
-├── rds-agent      daemon on a controlled device (ssh forward, desktop serve)
+├── rds-net        endpoint lifecycle, keys, tickets — backends::iroh
+│                  (shipping) + backends::noq (owned transport, §9)
+├── rds-discovery  signed endpoint records + stores for GDS discovery
+├── rds-relay      relay server lib+bin; proto = owned relay protocol
+├── rds-server     GDS services host: relay + discovery + registry
+├── rds-agent      daemon on a controlled device (ssh forward, desktop)
 ├── rds-cli        `rds` operator CLI
-└── rds-desktop    capture/encode/input/decode traits + X11/OpenH264 impls
+├── rds-desktop    capture/codec/input/render traits + platform backends
+├── rds-audio      Opus audio pipeline (scaffold)
+└── rds-sync       FastCDC+BLAKE3 content-addressed sync
 ```
+
+Docs: [architecture](docs/architecture.md) · [deep research](docs/research.md)
+· [platforms](docs/platforms.md) · [conventions](docs/conventions.md) ·
+[roadmap](docs/roadmap.md).
 
 ## Usage
 

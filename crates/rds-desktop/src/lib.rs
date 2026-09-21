@@ -1,27 +1,40 @@
 //! Desktop session pipeline for rds.
 //!
 //! Server side: `serve_desktop` captures a display, encodes frames and
-//! streams each frame on its own uni-directional QUIC stream — stale frames
-//! are reset rather than retransmitted, following the MoQ pattern.
-//! Client side: `client` decodes the newest frames and sends input events
-//! back on the control stream.
+//! streams each frame on its own uni-directional QUIC stream — stale
+//! frames are reset rather than retransmitted, following the MoQ
+//! pattern. Client side: `client` decodes the newest frames and sends
+//! input events back on the control stream.
+//!
+//! # Module map
+//!
+//! - [`capture`] — frame sources per platform (probe order in the
+//!   module docs; see `docs/platforms.md`).
+//! - [`codec`] — encoder/decoder backends (Vulkan Video, VA-API,
+//!   VideoToolbox, software floor).
+//! - [`input`] — injection backends (portal/EIS, uinput, XTEST, CGEvent).
+//! - [`render`] — presentation (wgpu surface, newest-frame-only).
+//! - [`session`] / [`client`] — serving and viewing sides of a session.
 
 use bytes::Bytes;
 use rds_core::{Codec, DesktopCaps, InputEvent};
 use thiserror::Error;
 
+pub mod capture;
 pub mod client;
-#[cfg(feature = "x11")]
-mod codec;
+pub mod codec;
+pub mod input;
+pub mod render;
 mod session;
-#[cfg(feature = "x11")]
-pub mod x11;
 
 #[cfg(feature = "x11")]
-pub use codec::{H264Decoder, H264Encoder};
+pub use codec::openh264::{H264Decoder, H264Encoder};
 pub use session::serve_desktop;
 
 /// One captured video frame, BGRA8 unless noted otherwise.
+///
+/// Hardware paths will carry GPU buffers instead of `Bytes`; the trait
+/// surface is stable while `RawFrame` grows a surface variant.
 #[derive(Debug)]
 pub struct RawFrame {
     pub width: u32,
@@ -91,10 +104,10 @@ pub trait InputSink: Send + 'static {
 
 /// What this build can serve.
 pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
-    #[cfg(feature = "x11")]
+    #[cfg(all(target_os = "linux", feature = "x11"))]
     {
-        crate::x11::capabilities()
+        capture::x11::capabilities()
     }
-    #[cfg(not(feature = "x11"))]
+    #[cfg(not(all(target_os = "linux", feature = "x11")))]
     Err(DesktopError::Capture("no capture backend built".into()))
 }

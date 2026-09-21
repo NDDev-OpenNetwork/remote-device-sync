@@ -821,6 +821,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastcdc"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0431c3132902a1bed6fe77dcfa5d03844e083f263b81288246a2d43dd7d4b2ad"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2689,11 +2695,18 @@ dependencies = [
  "rds-cli",
  "rds-core",
  "rds-desktop",
- "rds-transport",
+ "rds-net",
  "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rds-audio"
+version = "0.1.0"
+dependencies = [
+ "bytes",
 ]
 
 [[package]]
@@ -2706,7 +2719,7 @@ dependencies = [
  "iroh",
  "rds-core",
  "rds-desktop",
- "rds-transport",
+ "rds-net",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2740,6 +2753,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rds-discovery"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "ed25519-dalek",
+ "postcard",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rds-net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "data-encoding",
+ "iroh",
+ "postcard",
+ "rds-core",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rds-relay"
 version = "0.1.0"
 dependencies = [
@@ -2753,18 +2793,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "rds-transport"
+name = "rds-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "data-encoding",
+ "clap",
  "iroh",
- "postcard",
- "rds-core",
- "serde",
- "thiserror 2.0.20",
+ "rds-discovery",
+ "rds-relay",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rds-sync"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "fastcdc",
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

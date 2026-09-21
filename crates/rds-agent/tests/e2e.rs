@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use iroh_relay::server::{RelayConfig, Server, ServerConfig};
 use rds_agent::{Agent, AgentPolicy};
-use rds_transport::{EndpointConfig, Ticket, bind_endpoint};
+use rds_net::{EndpointConfig, Ticket, bind_endpoint};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -67,7 +67,7 @@ async fn ping_and_tcp_forward_over_relay() {
     });
 
     // Resolve through the ticket the agent published.
-    let target = rds_transport::parse_target(&agent_ticket.to_string()).unwrap();
+    let target = rds_net::parse_target(&agent_ticket.to_string()).unwrap();
     let conn = rds_cli::connect(&client_ep, target).await.unwrap();
     assert_eq!(conn.remote_id(), agent_ticket.endpoint_id());
 
@@ -115,7 +115,7 @@ async fn unauthorized_peer_is_rejected() {
 
     let conn = rds_cli::connect(
         &stranger,
-        rds_transport::parse_target(&ticket.to_string()).unwrap(),
+        rds_net::parse_target(&ticket.to_string()).unwrap(),
     )
     .await
     .unwrap();
@@ -150,7 +150,7 @@ async fn direct_connection_without_relay() {
 
     let conn = rds_cli::connect(
         &client_ep,
-        rds_transport::parse_target(&ticket.to_string()).unwrap(),
+        rds_net::parse_target(&ticket.to_string()).unwrap(),
     )
     .await
     .unwrap();

@@ -1,21 +1,21 @@
 [package]
-name = "rds-core"
-description = "Protocol types and framing shared by rds peers"
+name = "rds-net"
+description = "Network layer for rds: endpoint lifecycle, identity, tickets, transport backends"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-default = []
-desktop = []
-
 [dependencies]
-bytes.workspace = true
+anyhow.workspace = true
+data-encoding.workspace = true
+iroh.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
+rds-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
