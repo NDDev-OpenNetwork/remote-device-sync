@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- WS1c connection driver + path migration: per-connection
+  `connection_driver` task (`policy.rs`) consumes QNT address
+  advertisements (`ADD_ADDRESS`/`REMOVE_ADDRESS`) and path events, and
+  applies a biased-RTT path selection — the lowest-RTT path becomes
+  `Available`, all others `Backup`, with a 5ms stickiness margin to
+  prevent flapping. Holds only `WeakConnectionHandle`/`WeakPathHandle`
+  so the task never keeps a connection alive (last-handle-drop stays the
+  close trigger). Both endpoints advertise their real socket addrs and
+  the client initiates traversal rounds, so peers can upgrade paths
+  learned in-band. Result: under the `impaired` scenario (5% loss,
+  50+30ms delay via proxy) noq now migrates traffic to a direct path —
+  p50 1.80ms vs 136.5ms before the driver, at parity with iroh's 1.68ms.
+  Deterministic `turmoil` partition/repair simulation stays green; the
+  socket-mux accepts handshakes on non-primary sockets.
 - WS1b backend-neutral `rds-net` facade: unified `EndpointConfig`
   (backend, secret key, bind addr, relay, ALPNs) and `Backend` selector;
   `Endpoint`/`Connection`/`Incoming` wrappers dispatch to either
