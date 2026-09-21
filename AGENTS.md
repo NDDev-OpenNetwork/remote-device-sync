@@ -19,6 +19,7 @@ private data.
   backend probe orders, cfg conventions
 - `docs/conventions.md` — layering, safety, errors, wire, testing rules
 - `docs/roadmap.md` — milestone gates; a change belongs to a milestone
+- `docs/implementation-plan.md` — workstreams, tasks, tests, exit criteria
 
 ## Checks
 
