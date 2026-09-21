@@ -398,8 +398,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         .await?;
         let timed = tokio::time::timeout(p.timeout, async {
             let t0 = Instant::now();
-            let addr =
-                rds_net::resolve_target(Some(directory.clone()), "bench-agent").await?;
+            let addr = rds_net::resolve_target(Some(directory.clone()), "bench-agent").await?;
             let conn = rds_cli::connect(&client_ep, addr).await?;
             rds_cli::ping(&conn, 1).await?;
             Ok::<_, anyhow::Error>(t0.elapsed())
