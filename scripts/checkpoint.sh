@@ -81,10 +81,63 @@ c0)
 - reproducibility p95 ±15%: PASS
 - baseline: baseline-iroh.md"
     ;;
+c1)
+    note "gate c1 — owned noq transport parity"
+    green_bars
+
+    note "clippy + tests with transport-noq"
+    cargo clippy --workspace --all-targets \
+        --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq \
+        -- -D warnings || fail "clippy noq"
+    cargo test -p rds-net -p rds-agent \
+        --features rds-net/transport-noq,rds-agent/transport-noq \
+        || fail "noq tests"
+
+    note "turmoil deterministic simulation"
+    cargo test -p rds-net --features transport-noq --test turmoil_sim \
+        || fail "turmoil sim"
+
+    note "noq bench suite"
+    cargo run -q -p rds-bench -- run --scenario all --backend noq \
+        --json "$REPORTS/bench-${TS}-noq.json" --md "$REPORTS/bench-${TS}-noq.md" \
+        || fail "noq bench suite"
+
+    write_checkpoint "c1" "pending review" \
+        "- fmt/clippy/test: PASS
+- clippy/tests with transport-noq: PASS
+- turmoil partition/repair sim: PASS
+- noq suite: bench-${TS}-noq.{json,md}
+- impaired-path migration: see checkpoint-c1.md measurement table"
+    ;;
+c2)
+    note "gate c2 — owned relay transport"
+    green_bars
+
+    note "clippy + tests with transport-noq and owned-relay"
+    cargo clippy --workspace --all-targets \
+        --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay \
+        -- -D warnings || fail "clippy relay"
+    cargo test -p rds-net -p rds-agent -p rds-relay \
+        --features rds-net/transport-noq,rds-agent/transport-noq,rds-relay/owned-relay \
+        || fail "relay tests"
+
+    note "relay wire decoder fuzz (proptest)"
+    cargo test -p rds-core relay::tests::decode_never_panics_and_roundtrips \
+        || fail "decoder fuzz"
+
+    write_checkpoint "c2" "pending review" \
+        "- fmt/clippy/test: PASS
+- clippy/tests with transport-noq + owned-relay: PASS
+- relay proto unit tests (rds-core): PASS
+- owned relay e2e (attach→handshake→datagrams→streams, replacement, drain): PASS
+- rate-limiter unit tests: PASS
+- decoder fuzz (proptest): PASS
+- relay-kill → second-relay migration: NOT RUN (single-relay config; needs multi-relay attach)"
+    ;;
 *)
     cat <<EOF
 unknown or unregistered gate: '${GATE}'
-registered gates: c0
+registered gates: c0 c1 c2
 a checkpoint with no registered checks is refused by design.
 EOF
     exit 2

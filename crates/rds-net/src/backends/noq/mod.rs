@@ -20,6 +20,7 @@
 
 mod hmac;
 pub mod policy;
+pub mod relay;
 pub mod socket;
 mod tls;
 
@@ -32,7 +33,7 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
-use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
+use iroh::{EndpointAddr, EndpointId, SecretKey, TransportAddr};
 use noq::Runtime;
 use tracing::debug;
 
@@ -69,34 +70,56 @@ fn transport_config() -> Arc<noq::TransportConfig> {
 /// One socket mux carries all QUIC traffic; multipath and QNT are
 /// negotiated so additional paths and NAT traversal can be layered on
 /// after connect.
-pub async fn bind_endpoint(config: crate::EndpointConfig) -> anyhow::Result<Endpoint> {
+pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<Endpoint> {
     let runtime = Arc::new(noq::TokioRuntime);
     let binds = if config.bind_addrs.is_empty() {
         vec![SocketAddr::from(([0, 0, 0, 0], 0))]
     } else {
         config.bind_addrs.clone()
     };
-    let mut sockets: Vec<Box<dyn noq::AsyncUdpSocket>> = Vec::with_capacity(binds.len());
-    for bind in binds {
+    let mut sockets: Vec<Box<dyn noq::AsyncUdpSocket>> = Vec::with_capacity(binds.len() + 1);
+    for bind in &binds {
         let socket =
             std::net::UdpSocket::bind(bind).with_context(|| format!("bind udp socket {bind}"))?;
         sockets.push(runtime.wrap_udp_socket(socket)?);
     }
+
+    // Relay attachment: a tunnel socket joins the mux so relayed paths
+    // behave like any other QUIC path — opened via candidates/QNT,
+    // scheduled by the connection driver's RTT selection.
+    let key = config
+        .secret_key
+        .clone()
+        .unwrap_or_else(SecretKey::generate);
+    config.secret_key = Some(key.clone());
+    let relay_handle = match &config.relay_endpoint {
+        Some(relay_addr) => {
+            let (socket, handle) =
+                relay::RelaySocket::connect(relay_addr.clone(), key, binds[0]).await?;
+            sockets.push(Box::new(socket));
+            Some(handle)
+        }
+        None => None,
+    };
+
     let mux = socket::Mux::new(sockets)?;
     let local_addrs = mux.local_addrs();
-    bind_with_socket(config, Box::new(mux), local_addrs, runtime).await
+    bind_with_socket(config, Box::new(mux), local_addrs, runtime, relay_handle).await
 }
 
 /// Bind an endpoint on a caller-provided transport.
 ///
 /// The seam for custom transports: the socket mux (default), a
-/// simulation harness socket, or the relay tunnel once `relay_link`
-/// lands. `local_addrs` advertises the transports' bound addresses.
+/// simulation harness socket, or any other `AsyncUdpSocket`
+/// implementation. `local_addrs` advertises the transports' bound
+/// addresses; `relay` carries the tunnel handle when a relay socket is
+/// muxed in (None for injected transports like the sim).
 pub async fn bind_with_socket(
     config: crate::EndpointConfig,
     socket: Box<dyn noq::AsyncUdpSocket>,
     local_addrs: Vec<SocketAddr>,
     runtime: Arc<dyn Runtime>,
+    relay: Option<relay::RelayHandle>,
 ) -> anyhow::Result<Endpoint> {
     let secret_key = config.secret_key.unwrap_or_else(SecretKey::generate);
     let tls = tls::TlsConfig::new(secret_key.clone());
@@ -134,7 +157,7 @@ pub async fn bind_with_socket(
         local_addr,
         local_addrs,
         alpns: config.alpns,
-        _relay: config.relay,
+        relay,
     })
 }
 
@@ -186,7 +209,9 @@ pub struct Endpoint {
     local_addr: SocketAddr,
     local_addrs: Vec<SocketAddr>,
     alpns: Vec<Vec<u8>>,
-    _relay: Option<RelayUrl>,
+    /// Relay tunnel handle when `relay_endpoint` was configured —
+    /// steers synthetic-address sends and advertises the relay url.
+    relay: Option<relay::RelayHandle>,
 }
 
 impl fmt::Debug for Endpoint {
@@ -215,12 +240,16 @@ impl Endpoint {
     }
 
     /// Advertised address: our identity plus the direct IP candidates we
-    /// know about. Observed external and NAT-traversal addresses join this
-    /// set once the candidate pipeline tracks them.
+    /// know about, plus the home relay when one is attached. Observed
+    /// external addresses join this set once the candidate pipeline
+    /// tracks them.
     pub fn addr(&self) -> EndpointAddr {
         let mut addrs = std::collections::BTreeSet::new();
         for local in &self.local_addrs {
             addrs.extend(advertised_addrs(*local));
+        }
+        if let Some(handle) = &self.relay {
+            addrs.insert(TransportAddr::Relay(handle.url.clone()));
         }
         EndpointAddr { id: self.id, addrs }
     }
@@ -236,10 +265,19 @@ impl Endpoint {
         }
         let remote_id = target.id;
         let candidates = policy::ip_candidates(&target);
+        // A relayed path is usable when the peer's advertised relay is
+        // the one we are attached to; it becomes the synthetic remote.
+        let relay_remote = self.relay_remote(&target);
         let primary = candidates
             .first()
             .copied()
-            .ok_or_else(|| anyhow::anyhow!("no direct addresses for {remote_id}"))?;
+            .or(relay_remote)
+            .ok_or_else(|| anyhow::anyhow!("no reachable addresses for {remote_id}"))?;
+        if relay_remote.is_some()
+            && let Some(handle) = &self.relay
+        {
+            handle.register_peer(remote_id);
+        }
 
         let server_name = tls::name::encode(remote_id);
         let connecting = self
@@ -248,7 +286,13 @@ impl Endpoint {
             .context("initiate connect")?;
         let conn = connecting.await.context("handshake")?;
 
-        let seeds = policy::open_extra_paths(&conn, &candidates);
+        let mut seeds = policy::open_extra_paths(&conn, &candidates);
+        if let Some(syn) = relay_remote {
+            // When the synthetic address was the primary path this is a
+            // no-op dedupe that returns the existing PathId.
+            let open = conn.open_path_ensure(syn, noq::PathStatus::Available);
+            seeds.extend(open.path_id());
+        }
         self.wire_connection(&conn, seeds);
 
         Ok(Connection {
@@ -260,14 +304,32 @@ impl Endpoint {
     /// Accept the next incoming connection attempt.
     pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
         let accept = self.inner.accept();
-        let our_addrs = self.advertised_socket_addrs();
-        async move { accept.await.map(|i| Incoming::new(i, our_addrs)) }
+        let mut our_addrs = self.advertised_socket_addrs();
+        if self.relay.is_some() {
+            our_addrs.push(relay::synthetic_for(&self.id));
+        }
+        let relay = self.relay.clone();
+        async move { accept.await.map(|i| Incoming::new(i, our_addrs, relay)) }
+    }
+
+    /// The peer's synthetic relay remote when it advertises the relay
+    /// we are attached to.
+    fn relay_remote(&self, target: &EndpointAddr) -> Option<SocketAddr> {
+        let handle = self.relay.as_ref()?;
+        target.addrs.iter().find_map(|a| match a {
+            TransportAddr::Relay(url) => relay::parse_relay_url(url)
+                .filter(|(rid, _)| *rid == handle.relay_id)
+                .map(|_| relay::synthetic_for(&target.id)),
+            _ => None,
+        })
     }
 
     /// Direct addresses we can dial from, resolved per bound socket.
+    /// Synthetic relay-mapped locals are never real candidates.
     fn advertised_socket_addrs(&self) -> Vec<SocketAddr> {
         self.local_addrs
             .iter()
+            .filter(|l| !relay::is_synthetic(**l))
             .flat_map(|l| advertised_addrs(*l))
             .filter_map(|a| match a {
                 TransportAddr::Ip(sock) => Some(sock),
@@ -277,12 +339,18 @@ impl Endpoint {
     }
 
     /// Common per-connection wiring: advertise our direct addresses to
-    /// the peer, kick a traversal round so it probes ours, and spawn the
-    /// driver that opens paths to its in-band advertised candidates and
-    /// keeps the best path selected. `seed_paths` are the PathIds open
-    /// at wiring time (their Established events predate subscription).
+    /// the peer (plus our synthetic relay address when attached — the
+    /// peer can then upgrade to a relayed path in-band), kick a
+    /// traversal round so it probes ours, and spawn the driver that
+    /// opens paths to its in-band advertised candidates and keeps the
+    /// best path selected. `seed_paths` are the PathIds open at wiring
+    /// time (their Established events predate subscription).
     fn wire_connection(&self, conn: &noq::Connection, seed_paths: Vec<noq::PathId>) {
-        policy::advertise_addrs(conn, &self.advertised_socket_addrs());
+        let mut ours = self.advertised_socket_addrs();
+        if self.relay.is_some() {
+            ours.push(relay::synthetic_for(&self.id));
+        }
+        policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn);
         tokio::spawn(policy::connection_driver(
             conn.weak_handle(),
@@ -305,15 +373,22 @@ pub struct Incoming {
     connecting: Option<noq::Connecting>,
     /// Direct addresses to advertise to this peer once connected.
     our_addrs: Vec<SocketAddr>,
+    /// Relay tunnel handle for synthetic-address peer registration.
+    relay: Option<relay::RelayHandle>,
 }
 
 impl Incoming {
     /// Wrap a raw incoming attempt.
-    pub fn new(incoming: noq::Incoming, our_addrs: Vec<SocketAddr>) -> Self {
+    pub fn new(
+        incoming: noq::Incoming,
+        our_addrs: Vec<SocketAddr>,
+        relay: Option<relay::RelayHandle>,
+    ) -> Self {
         Self {
             incoming: Some(incoming),
             connecting: None,
             our_addrs,
+            relay,
         }
     }
 
@@ -338,6 +413,9 @@ impl Future for Incoming {
                     Err(e) => Err(e.into()),
                     Ok(inner) => match peer_endpoint_id(&inner) {
                         Some(remote_id) => {
+                            if let Some(handle) = &self.relay {
+                                handle.register_peer(remote_id);
+                            }
                             policy::advertise_addrs(&inner, &self.our_addrs);
                             policy::initiate_traversal_round(&inner);
                             // The handshake path is always PathId::ZERO;

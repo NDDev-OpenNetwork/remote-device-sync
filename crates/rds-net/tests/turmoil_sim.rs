@@ -174,6 +174,7 @@ async fn sim_endpoint(
         Box::new(socket),
         vec![SocketAddr::new(sim_ip, local.port())],
         Arc::new(noq::TokioRuntime),
+        None,
     )
     .await
 }

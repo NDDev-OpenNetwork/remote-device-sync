@@ -10,6 +10,8 @@
 //!   `rds-server` composition on the GDS host.
 
 pub mod proto;
+#[cfg(feature = "owned-relay")]
+pub mod server;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;

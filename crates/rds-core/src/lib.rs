@@ -9,6 +9,9 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Owned relay protocol wire types (ALPN `rds-relay/0`).
+pub mod relay;
+
 /// ALPN negotiated for all rds traffic.
 pub const ALPN: &[u8] = b"rds/0";
 

@@ -17,6 +17,8 @@ use noq::AsyncUdpSocket;
 use noq::UdpSender;
 use noq::udp::{RecvMeta, Transmit};
 
+use super::relay;
+
 /// One logical endpoint socket over N child transports.
 pub struct Mux {
     children: Vec<Box<dyn AsyncUdpSocket>>,
@@ -117,9 +119,18 @@ struct MuxSender {
 }
 
 impl MuxSender {
-    /// Child index able to carry `transmit`: an explicit `src_ip` wins,
-    /// else the child whose family matches the destination.
+    /// Child index able to carry `transmit`: synthetic destinations go
+    /// to the relay child, an explicit `src_ip` wins, else the child
+    /// whose family matches the destination.
     fn pick(&self, transmit: &Transmit<'_>) -> Option<usize> {
+        // Synthetic relay-mapped destinations only resolve through the
+        // tunnel socket — the one whose own local address is synthetic.
+        if relay::is_synthetic(transmit.destination) {
+            return self
+                .senders
+                .iter()
+                .position(|(addr, _)| addr.is_some_and(relay::is_synthetic));
+        }
         if let Some(src) = transmit.src_ip
             && let Some(i) = self
                 .senders
@@ -131,7 +142,12 @@ impl MuxSender {
         self.senders
             .iter()
             .position(|(addr, _)| {
-                addr.is_some_and(|a| a.is_ipv4() == transmit.destination.is_ipv4())
+                // The relay child's synthetic local is IPv4 — exclude it
+                // from the family fallback or every v4 transmit could
+                // land in the tunnel.
+                addr.is_some_and(|a| {
+                    !relay::is_synthetic(a) && a.is_ipv4() == transmit.destination.is_ipv4()
+                })
             })
             .or(if self.senders.is_empty() {
                 None
@@ -148,11 +164,13 @@ impl UdpSender for MuxSender {
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
         let Some(idx) = self.pick(transmit) else {
+            tracing::warn!(dst = %transmit.destination, "no mux transport can carry transmit");
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::AddrNotAvailable,
                 "no mux transport can carry this transmit",
             )));
         };
+        tracing::trace!(dst = %transmit.destination, child = idx, "mux send");
         self.senders[idx].1.as_mut().poll_send(transmit, cx)
     }
 
