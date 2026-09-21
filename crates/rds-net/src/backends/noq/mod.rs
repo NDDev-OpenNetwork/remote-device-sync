@@ -66,10 +66,38 @@ fn transport_config() -> Arc<noq::TransportConfig> {
 
 /// Bind an owned-transport endpoint.
 ///
-/// One UDP socket carries all QUIC traffic; multipath and QNT are
+/// One socket mux carries all QUIC traffic; multipath and QNT are
 /// negotiated so additional paths and NAT traversal can be layered on
 /// after connect.
 pub async fn bind_endpoint(config: crate::EndpointConfig) -> anyhow::Result<Endpoint> {
+    let runtime = Arc::new(noq::TokioRuntime);
+    let binds = if config.bind_addrs.is_empty() {
+        vec![SocketAddr::from(([0, 0, 0, 0], 0))]
+    } else {
+        config.bind_addrs.clone()
+    };
+    let mut sockets: Vec<Box<dyn noq::AsyncUdpSocket>> = Vec::with_capacity(binds.len());
+    for bind in binds {
+        let socket =
+            std::net::UdpSocket::bind(bind).with_context(|| format!("bind udp socket {bind}"))?;
+        sockets.push(runtime.wrap_udp_socket(socket)?);
+    }
+    let mux = socket::Mux::new(sockets)?;
+    let local_addrs = mux.local_addrs();
+    bind_with_socket(config, Box::new(mux), local_addrs, runtime).await
+}
+
+/// Bind an endpoint on a caller-provided transport.
+///
+/// The seam for custom transports: the socket mux (default), a
+/// simulation harness socket, or the relay tunnel once `relay_link`
+/// lands. `local_addrs` advertises the transports' bound addresses.
+pub async fn bind_with_socket(
+    config: crate::EndpointConfig,
+    socket: Box<dyn noq::AsyncUdpSocket>,
+    local_addrs: Vec<SocketAddr>,
+    runtime: Arc<dyn Runtime>,
+) -> anyhow::Result<Endpoint> {
     let secret_key = config.secret_key.unwrap_or_else(SecretKey::generate);
     let tls = tls::TlsConfig::new(secret_key.clone());
 
@@ -85,25 +113,10 @@ pub async fn bind_endpoint(config: crate::EndpointConfig) -> anyhow::Result<Endp
     let mut client_config = noq::ClientConfig::new(Arc::new(client_crypto));
     client_config.transport_config(transport);
 
-    let runtime = Arc::new(noq::TokioRuntime);
-    let binds = if config.bind_addrs.is_empty() {
-        vec![SocketAddr::from(([0, 0, 0, 0], 0))]
-    } else {
-        config.bind_addrs.clone()
-    };
-    let mut sockets: Vec<Box<dyn noq::AsyncUdpSocket>> = Vec::with_capacity(binds.len());
-    for bind in binds {
-        let socket =
-            std::net::UdpSocket::bind(bind).with_context(|| format!("bind udp socket {bind}"))?;
-        sockets.push(runtime.wrap_udp_socket(socket)?);
-    }
-    let mux = socket::Mux::new(sockets)?;
-    let local_addrs = mux.local_addrs();
-
     let endpoint = noq::Endpoint::new_with_abstract_socket(
         endpoint_config,
         Some(server_config),
-        Box::new(mux),
+        socket,
         runtime,
     )
     .context("create noq endpoint")?;
@@ -235,17 +248,8 @@ impl Endpoint {
             .context("initiate connect")?;
         let conn = connecting.await.context("handshake")?;
 
-        policy::open_extra_paths(&conn, &candidates);
-
-        // Kick a NAT traversal round: the peer learns our candidates, we
-        // learn theirs; direct paths open in-band when both sides probe.
-        match conn.initiate_nat_traversal_round() {
-            Ok(addrs) if !addrs.is_empty() => {
-                debug!(n = addrs.len(), "nat traversal round started")
-            }
-            Ok(_) => {}
-            Err(e) => debug!("nat traversal round not started: {e}"),
-        }
+        let seeds = policy::open_extra_paths(&conn, &candidates);
+        self.wire_connection(&conn, seeds);
 
         Ok(Connection {
             inner: conn,
@@ -256,7 +260,36 @@ impl Endpoint {
     /// Accept the next incoming connection attempt.
     pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
         let accept = self.inner.accept();
-        async move { accept.await.map(Incoming::new) }
+        let our_addrs = self.advertised_socket_addrs();
+        async move { accept.await.map(|i| Incoming::new(i, our_addrs)) }
+    }
+
+    /// Direct addresses we can dial from, resolved per bound socket.
+    fn advertised_socket_addrs(&self) -> Vec<SocketAddr> {
+        self.local_addrs
+            .iter()
+            .flat_map(|l| advertised_addrs(*l))
+            .filter_map(|a| match a {
+                TransportAddr::Ip(sock) => Some(sock),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Common per-connection wiring: advertise our direct addresses to
+    /// the peer, kick a traversal round so it probes ours, and spawn the
+    /// driver that opens paths to its in-band advertised candidates and
+    /// keeps the best path selected. `seed_paths` are the PathIds open
+    /// at wiring time (their Established events predate subscription).
+    fn wire_connection(&self, conn: &noq::Connection, seed_paths: Vec<noq::PathId>) {
+        policy::advertise_addrs(conn, &self.advertised_socket_addrs());
+        policy::initiate_traversal_round(conn);
+        tokio::spawn(policy::connection_driver(
+            conn.weak_handle(),
+            conn.nat_traversal_updates(),
+            conn.path_events(),
+            seed_paths,
+        ));
     }
 
     /// Close all connections and the endpoint.
@@ -270,14 +303,17 @@ impl Endpoint {
 pub struct Incoming {
     incoming: Option<noq::Incoming>,
     connecting: Option<noq::Connecting>,
+    /// Direct addresses to advertise to this peer once connected.
+    our_addrs: Vec<SocketAddr>,
 }
 
 impl Incoming {
     /// Wrap a raw incoming attempt.
-    pub fn new(incoming: noq::Incoming) -> Self {
+    pub fn new(incoming: noq::Incoming, our_addrs: Vec<SocketAddr>) -> Self {
         Self {
             incoming: Some(incoming),
             connecting: None,
+            our_addrs,
         }
     }
 
@@ -301,7 +337,21 @@ impl Future for Incoming {
                 return Poll::Ready(match res {
                     Err(e) => Err(e.into()),
                     Ok(inner) => match peer_endpoint_id(&inner) {
-                        Some(remote_id) => Ok(Connection { inner, remote_id }),
+                        Some(remote_id) => {
+                            policy::advertise_addrs(&inner, &self.our_addrs);
+                            policy::initiate_traversal_round(&inner);
+                            // The handshake path is always PathId::ZERO;
+                            // its Established event predates our
+                            // subscription, so seed it explicitly.
+                            let seeds = vec![noq::PathId::ZERO];
+                            tokio::spawn(policy::connection_driver(
+                                inner.weak_handle(),
+                                inner.nat_traversal_updates(),
+                                inner.path_events(),
+                                seeds,
+                            ));
+                            Ok(Connection { inner, remote_id })
+                        }
                         None => Err(anyhow::anyhow!("peer presented no identity")),
                     },
                 });

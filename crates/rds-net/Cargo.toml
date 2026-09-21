@@ -14,22 +14,27 @@ data-encoding.workspace = true
 ed25519-dalek = { workspace = true, optional = true, features = ["pkcs8"] }
 iroh.workspace = true
 noq = { workspace = true, optional = true }
+noq-proto = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 postcard = { workspace = true, features = ["alloc"] }
 rds-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-stream = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+turmoil = "0.7.2"
 
 [features]
 default = []
 ## Owned transport backend on noq (WS1). Off by default until C1 parity.
 transport-noq = [
     "dep:noq",
+    "dep:noq-proto",
+    "dep:tokio-stream",
     "dep:blake3",
     "dep:ed25519-dalek",
     "dep:rand",
