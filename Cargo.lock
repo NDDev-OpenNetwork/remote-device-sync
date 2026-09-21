@@ -2765,7 +2765,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "iroh",
  "iroh-relay",
  "rds-cli",
  "rds-core",
@@ -2790,7 +2789,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "iroh",
  "iroh-relay",
  "rds-agent",
  "rds-cli",
@@ -2810,7 +2808,6 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
- "iroh",
  "rds-core",
  "rds-desktop",
  "rds-net",

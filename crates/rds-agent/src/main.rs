@@ -3,8 +3,8 @@
 use std::str::FromStr;
 
 use clap::Parser;
-use iroh::EndpointId;
 use rds_agent::{Agent, AgentPolicy};
+use rds_net::EndpointId;
 use rds_net::{EndpointConfig, Ticket, bind_endpoint, default_key_path, load_or_create_key};
 
 #[derive(Parser)]
@@ -19,6 +19,10 @@ struct Cli {
     /// Custom relay URL; default is the n0 public relays.
     #[arg(long)]
     relay: Option<String>,
+    /// Transport backend: `iroh` (default) or `noq` (with the
+    /// `transport-noq` feature).
+    #[arg(long, default_value = "iroh")]
+    backend: String,
     /// Allowed peer EndpointId. Repeatable.
     #[arg(long = "allow")]
     allow: Vec<String>,
@@ -58,8 +62,16 @@ async fn main() -> anyhow::Result<()> {
     }
     policy.allow_any_tcp = cli.allow_any_tcp;
 
+    let backend = match cli.backend.as_str() {
+        "iroh" => rds_net::Backend::Iroh,
+        #[cfg(feature = "transport-noq")]
+        "noq" => rds_net::Backend::Noq,
+        other => anyhow::bail!("unknown or unavailable backend {other:?}"),
+    };
+
     let mut config = EndpointConfig {
         secret_key: Some(secret_key),
+        backend,
         ..Default::default()
     };
     if let Some(url) = &cli.relay {

@@ -25,8 +25,23 @@ pub struct Params {
     pub timeout: Duration,
     /// Impairment applied to `*-impaired` scenarios.
     pub impairment: Impairment,
-    /// Backend under test (only `iroh` until WS1 lands).
+    /// Backend under test: `iroh` (default) or `noq` (with the
+    /// `transport-noq` feature).
     pub backend: String,
+}
+
+impl Params {
+    /// Parse the backend label into the facade selector.
+    pub fn transport_backend(&self) -> anyhow::Result<rds_net::Backend> {
+        match self.backend.as_str() {
+            "iroh" => Ok(rds_net::Backend::Iroh),
+            #[cfg(feature = "transport-noq")]
+            "noq" => Ok(rds_net::Backend::Noq),
+            other => anyhow::bail!(
+                "unknown or unavailable backend {other:?} (build with --features transport-noq for `noq`)"
+            ),
+        }
+    }
 }
 
 impl Default for Params {
@@ -97,6 +112,8 @@ pub async fn run(s: Scenario, p: &Params) -> anyhow::Result<Vec<BenchReport>> {
 }
 
 async fn run_one(s: Scenario, p: &Params) -> anyhow::Result<Vec<BenchReport>> {
+    // Fail fast on an unselectable backend instead of per-scenario noise.
+    p.transport_backend()?;
     match s {
         Scenario::Handshake => handshake(p, Path::Direct).await.map(|r| vec![r]),
         Scenario::Ping => ping(p, Path::Direct, None).await.map(|r| vec![r]),
@@ -160,7 +177,9 @@ fn failed(scenario: &str, p: &Params, e: anyhow::Error) -> BenchReport {
 
 /// Cold connect → immediate close, repeated `iterations` times.
 async fn handshake(p: &Params, path: Path) -> anyhow::Result<BenchReport> {
-    let world = World::spawn(path).await.context("spawn world")?;
+    let world = World::spawn(path, p.transport_backend()?)
+        .await
+        .context("spawn world")?;
     let mut samples = Vec::with_capacity(p.iterations);
     let mut ok = 0u64;
     for _ in 0..p.iterations {
@@ -199,7 +218,9 @@ async fn ping(
     path: Path,
     impairment: Option<Impairment>,
 ) -> anyhow::Result<BenchReport> {
-    let world = World::spawn(path).await.context("spawn world")?;
+    let world = World::spawn(path, p.transport_backend()?)
+        .await
+        .context("spawn world")?;
     let conn = tokio::time::timeout(
         p.timeout,
         rds_cli::connect(&world.client, world.target.clone()),
@@ -229,7 +250,9 @@ async fn ping(
 
 /// `transfer_mib` MiB over one forwarded stream to a discard sink.
 async fn transfer(p: &Params) -> anyhow::Result<BenchReport> {
-    let world = World::spawn(Path::Direct).await.context("spawn world")?;
+    let world = World::spawn(Path::Direct, p.transport_backend()?)
+        .await
+        .context("spawn world")?;
     let conn = tokio::time::timeout(
         p.timeout,
         rds_cli::connect(&world.client, world.target.clone()),
@@ -275,19 +298,19 @@ impl PathLabel for World {
             .target
             .addrs
             .iter()
-            .any(|a| matches!(a, iroh::TransportAddr::Relay(_)))
+            .any(|a| matches!(a, rds_net::TransportAddr::Relay(_)))
             && self
                 .target
                 .addrs
                 .iter()
-                .any(|a| matches!(a, iroh::TransportAddr::Ip(_)))
+                .any(|a| matches!(a, rds_net::TransportAddr::Ip(_)))
         {
             "mixed"
         } else if self
             .target
             .addrs
             .iter()
-            .any(|a| matches!(a, iroh::TransportAddr::Relay(_)))
+            .any(|a| matches!(a, rds_net::TransportAddr::Relay(_)))
         {
             "relay"
         } else {

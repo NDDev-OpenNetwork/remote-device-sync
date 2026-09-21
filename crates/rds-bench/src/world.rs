@@ -6,9 +6,8 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use rds_agent::{Agent, AgentPolicy};
-use rds_net::{EndpointConfig, bind_endpoint};
+use rds_net::{Endpoint, EndpointAddr, EndpointConfig, TransportAddr, bind_endpoint};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -75,24 +74,50 @@ impl Drop for World {
 }
 
 impl World {
-    /// Spin up relay + agent + client and return the world plus the
-    /// target address the client should dial for `path`.
-    pub async fn spawn(path: Path) -> anyhow::Result<World> {
+    /// Spin up relay + agent + client on `backend` and return the world
+    /// plus the target address the client should dial for `path`.
+    ///
+    /// The owned `noq` backend has no relay transport yet (WS2): relay
+    /// paths on it fail here with a clear error, and no relay process
+    /// is spawned.
+    pub async fn spawn(path: Path, backend: rds_net::Backend) -> anyhow::Result<World> {
         let mut tasks = Vec::new();
 
-        // Relay is always running (Minimal preset, no third-party lookups);
-        // whether traffic uses it is decided by the advertised ticket.
-        let relay = {
-            let mut config = iroh_relay::server::ServerConfig::default();
-            config.relay = Some(iroh_relay::server::RelayConfig::new(
-                "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
-            ));
-            iroh_relay::server::Server::spawn(config).await?
-        };
-        let relay_url = format!("http://{}", relay.http_addr().unwrap());
+        let wants_relay = matches!(path, Path::RelayOnly | Path::Mixed);
+        if wants_relay && backend != rds_net::Backend::Iroh {
+            anyhow::bail!(
+                "path {:?} needs a relay; backend {backend:?} has no relay transport yet (WS2)",
+                path.label()
+            );
+        }
 
-        let agent_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url)?).await?;
-        let client_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url)?).await?;
+        // Relay is spawned for the iroh backend (Minimal preset, no
+        // third-party lookups); whether traffic uses it is decided by
+        // the advertised ticket.
+        let relay = match backend {
+            rds_net::Backend::Iroh => {
+                let mut config = iroh_relay::server::ServerConfig::default();
+                config.relay = Some(iroh_relay::server::RelayConfig::new(
+                    "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+                ));
+                Some(iroh_relay::server::Server::spawn(config).await?)
+            }
+            #[allow(unreachable_patterns)]
+            _ => None,
+        };
+        let relay_url = relay
+            .as_ref()
+            .map(|r| format!("http://{}", r.http_addr().unwrap()));
+
+        let endpoint_config = |relay_url: &Option<String>| -> anyhow::Result<EndpointConfig> {
+            let mut config = EndpointConfig::default().with_backend(backend);
+            if let Some(url) = relay_url {
+                config = config.with_relay(url)?;
+            }
+            Ok(config)
+        };
+        let agent_ep = bind_endpoint(endpoint_config(&relay_url)?).await?;
+        let client_ep = bind_endpoint(endpoint_config(&relay_url)?).await?;
         agent_ep.online().await;
         client_ep.online().await;
 
@@ -125,14 +150,10 @@ impl World {
                 })
             })
             .ok_or_else(|| anyhow::anyhow!("agent endpoint advertises no udp addr"))?;
-        let agent_relay = advertised
-            .addrs
-            .iter()
-            .find_map(|a| match a {
-                TransportAddr::Relay(u) => Some(u.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow::anyhow!("agent endpoint has no relay addr"))?;
+        let agent_relay = advertised.addrs.iter().find_map(|a| match a {
+            TransportAddr::Relay(u) => Some(u.clone()),
+            _ => None,
+        });
 
         let mut proxy_stats = None;
         let mut addrs = BTreeSet::new();
@@ -146,11 +167,15 @@ impl World {
                 proxy_stats = Some(Arc::new(proxy));
             }
             Path::RelayOnly => {
-                addrs.insert(TransportAddr::Relay(agent_relay));
+                let relay_addr = agent_relay
+                    .ok_or_else(|| anyhow::anyhow!("agent endpoint has no relay addr"))?;
+                addrs.insert(TransportAddr::Relay(relay_addr));
             }
             Path::Mixed => {
+                let relay_addr = agent_relay
+                    .ok_or_else(|| anyhow::anyhow!("agent endpoint has no relay addr"))?;
                 addrs.insert(TransportAddr::Ip(agent_udp));
-                addrs.insert(TransportAddr::Relay(agent_relay));
+                addrs.insert(TransportAddr::Relay(relay_addr));
             }
         }
 
@@ -164,7 +189,7 @@ impl World {
             discard_port,
             proxy_stats,
             tasks,
-            _relay: Some(relay),
+            _relay: relay,
         })
     }
 }
