@@ -71,11 +71,11 @@ pub async fn serve_desktop(
         loop {
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
-                    #[cfg(feature = "x11")]
+                    #[cfg(all(target_os = "linux", feature = "x11"))]
                     if let Err(e) = crate::input::x11::inject(&ev) {
                         tracing::warn!("input injection failed: {e}");
                     }
-                    #[cfg(not(feature = "x11"))]
+                    #[cfg(not(all(target_os = "linux", feature = "x11")))]
                     let _ = ev;
                 }
                 Ok(DesktopControl::RequestIdr) => idr.store(true, Ordering::Relaxed),
@@ -105,15 +105,15 @@ fn produce_loop(
     idr: Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<Produced>,
 ) {
-    #[cfg(not(feature = "x11"))]
+    #[cfg(not(all(target_os = "linux", feature = "x11")))]
     {
         let _ = (display, interval, bitrate, idr, tx);
     }
-    #[cfg(feature = "x11")]
+    #[cfg(all(target_os = "linux", feature = "x11"))]
     produce_loop_x11(display, interval, bitrate, idr, tx)
 }
 
-#[cfg(feature = "x11")]
+#[cfg(all(target_os = "linux", feature = "x11"))]
 fn produce_loop_x11(
     display: u32,
     interval: Duration,

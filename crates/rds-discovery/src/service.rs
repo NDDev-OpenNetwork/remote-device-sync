@@ -39,8 +39,9 @@ pub struct Limits {
     /// obstructs legitimate announce republishes. Deployments that
     /// want it anyway can set a non-zero interval.
     pub put_min_interval: Duration,
-    /// Maximum PUTs accepted globally per minute — this is the real
-    /// abuse bound (signature verification costs CPU per request).
+    /// Maximum PUT requests globally per minute — this is the real
+    /// abuse bound: it caps JSON parse + signature-verification CPU
+    /// an unauthenticated peer can burn.
     pub put_per_minute: u32,
     /// Client-side and per-connection idle timeout.
     pub conn_timeout: Duration,
@@ -86,8 +87,9 @@ struct RateLimiter {
 }
 
 impl RateLimiter {
-    fn check(&self, key: &EndpointKey, limits: &Limits) -> bool {
-        // Global window.
+    /// Global window over all PUT requests. Runs before parsing so it
+    /// bounds the verification CPU an unauthenticated peer can burn.
+    fn check_global(&self, limits: &Limits) -> bool {
         {
             let mut start = self.window_start.lock().unwrap();
             if start.elapsed() >= Duration::from_secs(60) {
@@ -95,10 +97,11 @@ impl RateLimiter {
                 self.window_count.store(0, Ordering::Relaxed);
             }
         }
-        if self.window_count.fetch_add(1, Ordering::Relaxed) >= u64::from(limits.put_per_minute) {
-            return false;
-        }
-        // Per-key interval.
+        self.window_count.fetch_add(1, Ordering::Relaxed) < u64::from(limits.put_per_minute)
+    }
+
+    /// Per-key interval between accepted PUTs.
+    fn check_key(&self, key: &EndpointKey, limits: &Limits) -> bool {
         let mut last = self.last_put.lock().unwrap();
         if let Some(t) = last.get(key)
             && t.elapsed() < limits.put_min_interval
@@ -224,6 +227,12 @@ fn route(state: &State, req: &Request) -> Response {
 }
 
 fn put_record(state: &State, req: &Request) -> Response {
+    // Global window first — bounds parse and signature-verification
+    // CPU for unauthenticated peers, before any per-request work.
+    if !state.limiter.check_global(&state.limits) {
+        state.metrics.puts_rejected.fetch_add(1, Ordering::Relaxed);
+        return Response::error(429, &DiscoveryError::RateLimited);
+    }
     let record: EndpointRecord = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
@@ -238,7 +247,7 @@ fn put_record(state: &State, req: &Request) -> Response {
             return Response::error(status_for(&e), &e);
         }
     };
-    if !state.limiter.check(&payload.key, &state.limits) {
+    if !state.limiter.check_key(&payload.key, &state.limits) {
         state.metrics.puts_rejected.fetch_add(1, Ordering::Relaxed);
         return Response::error(429, &DiscoveryError::RateLimited);
     }
