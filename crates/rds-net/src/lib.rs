@@ -22,6 +22,7 @@ pub mod backends {
     /// Current transport substrate (iroh 1.x on noq underneath).
     pub mod iroh;
     /// Owned transport: noq endpoint + our socket/path/discovery layer.
+    #[cfg(feature = "transport-noq")]
     pub mod noq;
 }
 
