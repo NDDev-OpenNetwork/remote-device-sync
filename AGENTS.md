@@ -29,9 +29,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features rds-desktop/x11 -- -D warnings   # linux lane
 cargo test --workspace
 cargo deny check   # if cargo-deny installed
+scripts/checkpoint.sh <gate>   # wave-close gate; registered ids only
 ```
 
 CI runs fmt + clippy + test on `ubuntu-latest` and `macos-latest`.
+`rds-bench` is the measurement harness; reports land in
+`docs/reports/` and are part of every wave's checkpoint evidence.
 
 ## Git
 

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- WS0 measurement harness: new dev-only `rds-bench` crate — scenario
+  runner (handshake/ping/transfer/multiconnect/relay-fallback/impaired)
+  on real QUIC paths, deterministic seeded UDP impairment proxy
+  (loss/delay/jitter/rate), JSON+markdown reports and suite-vs-suite
+  drift comparison (`max(rel, floor)` rule, separate tail band).
+  `scripts/checkpoint.sh` implements the gate machinery from
+  `docs/implementation-plan.md`; gate `c0` passed with committed
+  evidence under `docs/reports/` (baseline-iroh.md).
 - Workspace restructure for the full-ownership architecture
   (`docs/research.md` §9): `rds-transport` renamed `rds-net` with
   `backends::{iroh,noq}`; new crates `rds-discovery` (signed endpoint

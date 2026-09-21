@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/rds-agent",
+    "crates/rds-bench",
     "crates/rds-audio",
     "crates/rds-cli",
     "crates/rds-core",
@@ -44,7 +45,10 @@ iroh = "1"
 iroh-relay = "1"
 noq = "1"
 postcard = "1"
+rds-agent = { path = "crates/rds-agent" }
 rds-audio = { path = "crates/rds-audio" }
+rds-bench = { path = "crates/rds-bench" }
+rds-cli = { path = "crates/rds-cli" }
 rds-core = { path = "crates/rds-core" }
 rds-desktop = { path = "crates/rds-desktop" }
 rds-discovery = { path = "crates/rds-discovery" }
