@@ -2710,6 +2710,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rds-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "iroh",
+ "iroh-relay",
+ "rds-agent",
+ "rds-cli",
+ "rds-core",
+ "rds-net",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rds-cli"
 version = "0.1.0"
 dependencies = [
