@@ -1,0 +1,18 @@
+[package]
+name = "rds-core"
+description = "Protocol types and framing shared by rds peers"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+desktop = []
+
+[dependencies]
+bytes.workspace = true
+postcard = { workspace = true, features = ["alloc"] }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

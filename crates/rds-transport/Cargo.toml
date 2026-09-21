@@ -1,0 +1,18 @@
+[package]
+name = "rds-transport"
+description = "Endpoint lifecycle for rds: iroh binding, identity, tickets"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+data-encoding.workspace = true
+iroh.workspace = true
+postcard = { workspace = true, features = ["alloc"] }
+rds-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
