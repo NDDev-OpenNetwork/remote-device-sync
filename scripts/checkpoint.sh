@@ -292,10 +292,52 @@ c7)
 - QNT attempt/success counters driven by the noq policy driver;
   iroh reports paths_seen{via=direct} as the equivalent signal"
     ;;
+c8)
+    note "gate c8 — deployment artifacts"
+    green_bars
+
+    note "systemd units carry the required sandboxing directives"
+    for unit in deploy/systemd/rds-server.service deploy/systemd/rds-agent.service; do
+        for directive in NoNewPrivileges=yes ProtectSystem=strict \
+                ProtectHome=yes PrivateTmp=yes "CapabilityBoundingSet=" \
+                "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" \
+                "SystemCallFilter=@system-service" "UMask=0077"; do
+            grep -q "^$directive" "$unit" \
+                || fail "$unit missing $directive"
+        done
+    done
+
+    note "runbook documents ports, firewall, restart/upgrade/drain, failure modes"
+    for section in "Ports and firewall" "Restart" "Upgrade" "Drain" \
+            "Failure modes" "0600" "loopback"; do
+        grep -qi "$section" docs/deployment.md \
+            || fail "deployment.md missing section: $section"
+    done
+
+    note "deployed-unit smoke: binaries build release + --version runs"
+    cargo build --release -p rds-server -p rds-agent || fail "release build"
+    ./target/release/rds-server --version >/dev/null || fail "rds-server --version"
+    ./target/release/rds-agent --version >/dev/null || fail "rds-agent --version"
+
+    write_checkpoint "c8" "pending review" \
+        "- fmt/clippy/test: PASS (default + transport-noq lanes)
+- systemd units: ProtectSystem=strict, NoNewPrivileges, PrivateTmp,
+  empty CapabilityBoundingSet, AF_INET/6/UNIX only, @system-service
+  filter, UMask=0077, StateDirectory-scoped writes: verified in both
+  units
+- key permissions: endpoint.key written 0600 by load_or_create_key;
+  enforced at create; review checks stat %a on deployed hosts
+- ports/firewall/runbook/failure-modes: docs/deployment.md
+- release build + --version smoke: PASS
+- REAL-METAL EVIDENCE: attested in the private estate repository's
+  docs/reports/rds-e2e-<date>.md (host facts are estate-private) —
+  this gate covers the artifact layer; ssh-across-NAT, soak and
+  desktop-smoke rows are attested there"
+    ;;
 *)
     cat <<EOF
 unknown or unregistered gate: '${GATE}'
-registered gates: c0 c1 c2 c3 c4 c5 c6 c7
+registered gates: c0 c1 c2 c3 c4 c5 c6 c7 c8
 a checkpoint with no registered checks is refused by design.
 EOF
     exit 2

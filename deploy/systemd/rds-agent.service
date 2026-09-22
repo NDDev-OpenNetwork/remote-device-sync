@@ -1,0 +1,62 @@
+[Unit]
+Description=rds-agent: remote-device-sync service host (ssh/tcp forward, desktop, sync)
+Documentation=https://github.com/rldyourmnd/remote-device-sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated unprivileged user; create with:
+#   useradd --system --home /var/lib/rds-agent --shell /usr/sbin/nologin rds-agent
+User=rds-agent
+Group=rds-agent
+StateDirectory=rds-agent
+StateDirectoryMode=0700
+UMask=0077
+
+# The endpoint key is created on first start with mode 0600 under
+# StateDirectory (/var/lib/rds-agent/endpoint.key). Fill --allow with
+# estate EndpointIds; --directory/--revocations-key wire the signed
+# discovery record + denylist feed.
+ExecStart=/usr/local/bin/rds-agent \
+    --key-file /var/lib/rds-agent/endpoint.key \
+    --ssh 127.0.0.1:22
+# Estate deployments add:
+#   --relay http://<relay-host>:3340
+#   --directory <dir-host>:3341 --revocations-key <base32 verify key>
+#   --issuer <base32 grant-issuer verify key>   (grant enforcement)
+#   --allow <endpoint-id>…                     (allowlist)
+#   --sync-dir /srv/rds-sync                   (optional Sync service)
+
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+# --- sandboxing -------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# AF_NETLINK: interface/netmon watches (path migration on link change).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+# StateDirectory + the sync dir are the only writable paths. ssh is
+# reached over 127.0.0.1:22 — loopback stays permitted.
+ReadWritePaths=/var/lib/rds-agent
+
+[Install]
+WantedBy=multi-user.target

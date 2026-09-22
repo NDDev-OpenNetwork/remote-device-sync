@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- WS8 deployment: `deploy/systemd/rds-server.service` and
+  `rds-agent.service` — hardened units (ProtectSystem=strict,
+  NoNewPrivileges, PrivateTmp/Devices, ProtectKernel*/ControlGroups,
+  empty CapabilityBoundingSet, @system-service filter,
+  AF_INET/6/UNIX/NETLINK only, UMask=0077, StateDirectory-scoped
+  writes). `docs/deployment.md` documents install, ports/firewall
+  (3340/tcp relay, 3341/tcp directory, metrics loopback-only),
+  restart/upgrade/drain procedures and a failure-modes table.
+  `rds ping` now prints per-path stats (via/selected/RTT/sent/lost/
+  cwnd) for ops evidence; `rds-net/examples/ticket` mints
+  restricted-address tickets (e.g. relay-only) for path verification.
+  Deployment findings encoded: AF_NETLINK is required for interface
+  monitoring; a client transiting the relay must itself be on the
+  relay's `--allow`; an agent and a CLI on one host need distinct key
+  files or the relay disconnects the duplicate EndpointId.
 - WS7 observability: `rds-net::metrics` — a per-endpoint `Registry`
   of atomic counters plus a per-connection `ConnSampler` that folds
   cumulative `path_stats()` deltas into them. The
