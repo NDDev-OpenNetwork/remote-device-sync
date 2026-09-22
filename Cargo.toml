@@ -23,11 +23,11 @@ repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
 # Dependency direction (enforced by convention, not by cargo):
 #   rds-core      leaf: types, framing, tokens — no io, no async runtime
 #   rds-discovery → core types (own identity layer)
-#   rds-net       → rds-core
+#   rds-net       → rds-core, rds-discovery
 #   rds-relay     → rds-core, rds-net
 #   rds-audio     → rds-core
 #   rds-sync      → rds-core, rds-net
-#   rds-desktop   → rds-core (+rds-net when streams abstract)
+#   rds-desktop   → rds-core, rds-net
 #   rds-agent     → everything client-facing
 #   rds-cli       → everything user-facing
 #   rds-server    → rds-relay, rds-discovery

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- Post-WS3 consistency + hardening: `rds-desktop` now programs
+  against the `rds_net` facade (`Connection` plus the stream/error
+  re-exports — the documented "+rds-net when streams abstract"
+  direction), so the `desktop` feature on `rds-agent`/`rds-cli`
+  compiles and serves on both transport backends instead of failing
+  on a raw-`iroh` type mismatch; a new CI lane
+  `--features rds-agent/desktop,rds-cli/desktop` (both OSes) keeps it
+  compiling. Session teardown fixed: `serve_desktop` aborts the
+  frame-writer task and the capture producer exits when its channel
+  closes — `JoinHandle::abort` cannot interrupt `spawn_blocking`
+  work, so ending a session previously leaked a permanently-spinning
+  capture/encode thread; `DesktopSession` drop aborts the
+  frame-receiver task so the connection closes with the session
+  instead of outliving it. The directory's global per-minute window
+  now covers every signature-verifying write — `PUT /v1/records`,
+  `PUT /v1/registry`, `DELETE /v1/records/{key}` — checked before
+  parsing, exported as `rds_directory_writes_rate_limited`.
+  `x11rb` 0.13 → 0.14.
 - WS3 discovery service + publish/resolve (`rds-discovery`):
   `EndpointRecord` payloads carry `issued_at`; stores reject
   forged, expired and same-age-or-older replayed records, and honor

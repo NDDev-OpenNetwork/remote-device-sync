@@ -13,7 +13,9 @@
 //! ```
 //!
 //! Security posture: every write is signature-verified before it
-//! touches the store; `PUT` is rate-limited per key and globally;
+//! touches the store; every signature-verifying write (`PUT` records,
+//! `PUT` registry, `DELETE` records) is globally rate-limited before
+//! verification, and `PUT` records are additionally paced per key;
 //! records are self-certifying so a compromised directory can at worst
 //! withhold updates, never forge reachability.
 
@@ -39,9 +41,11 @@ pub struct Limits {
     /// obstructs legitimate announce republishes. Deployments that
     /// want it anyway can set a non-zero interval.
     pub put_min_interval: Duration,
-    /// Maximum PUT requests globally per minute — this is the real
-    /// abuse bound: it caps JSON parse + signature-verification CPU
-    /// an unauthenticated peer can burn.
+    /// Maximum signature-verifying write requests globally per minute
+    /// — this is the real abuse bound: it caps JSON parse +
+    /// signature-verification CPU an unauthenticated peer can burn.
+    /// Applies to `PUT /v1/records`, `PUT /v1/registry` and
+    /// `DELETE /v1/records/{key}`, checked before any parsing.
     pub put_per_minute: u32,
     /// Client-side and per-connection idle timeout.
     pub conn_timeout: Duration,
@@ -77,9 +81,10 @@ struct Metrics {
     name_lookups: AtomicU64,
     registry_puts: AtomicU64,
     requests_bad: AtomicU64,
+    writes_rate_limited: AtomicU64,
 }
 
-/// Per-source PUT pacing + a global per-minute window.
+/// Per-key PUT pacing + a global per-minute window over verifying writes.
 struct RateLimiter {
     last_put: Mutex<HashMap<EndpointKey, Instant>>,
     window_start: Mutex<Instant>,
@@ -226,12 +231,20 @@ fn route(state: &State, req: &Request) -> Response {
     }
 }
 
+/// Global-window rejection shared by every verifying write route.
+fn rate_limited(state: &State) -> Response {
+    state
+        .metrics
+        .writes_rate_limited
+        .fetch_add(1, Ordering::Relaxed);
+    Response::error(429, &DiscoveryError::RateLimited)
+}
+
 fn put_record(state: &State, req: &Request) -> Response {
     // Global window first — bounds parse and signature-verification
     // CPU for unauthenticated peers, before any per-request work.
     if !state.limiter.check_global(&state.limits) {
-        state.metrics.puts_rejected.fetch_add(1, Ordering::Relaxed);
-        return Response::error(429, &DiscoveryError::RateLimited);
+        return rate_limited(state);
     }
     let record: EndpointRecord = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
@@ -276,6 +289,11 @@ fn get_record(state: &State, key: &str) -> Response {
 }
 
 fn delete_record(state: &State, key: &str, req: &Request) -> Response {
+    // Same global bound as PUTs: the tombstone verify below is ed25519
+    // work an unauthenticated peer could otherwise burn unbounded.
+    if !state.limiter.check_global(&state.limits) {
+        return rate_limited(state);
+    }
     let key = match key.parse::<EndpointKey>() {
         Ok(k) => k,
         Err(e) => return Response::error(400, &e),
@@ -316,6 +334,10 @@ fn get_name(state: &State, name: &str) -> Response {
 }
 
 fn put_registry(state: &State, req: &Request) -> Response {
+    // Same global bound as PUTs: snapshot verify below is ed25519 work.
+    if !state.limiter.check_global(&state.limits) {
+        return rate_limited(state);
+    }
     let Some(key) = &state.registry_key else {
         return Response::error(401, &DiscoveryError::BadSignature);
     };
@@ -347,7 +369,8 @@ fn metrics(state: &State) -> Response {
          rds_directory_deletes {}\n\
          rds_directory_name_lookups {}\n\
          rds_directory_registry_puts {}\n\
-         rds_directory_requests_bad {}\n",
+         rds_directory_requests_bad {}\n\
+         rds_directory_writes_rate_limited {}\n",
         state.store.len(),
         m.puts_ok.load(Ordering::Relaxed),
         m.puts_rejected.load(Ordering::Relaxed),
@@ -356,6 +379,7 @@ fn metrics(state: &State) -> Response {
         m.name_lookups.load(Ordering::Relaxed),
         m.registry_puts.load(Ordering::Relaxed),
         m.requests_bad.load(Ordering::Relaxed),
+        m.writes_rate_limited.load(Ordering::Relaxed),
     );
     Response::text(200, body)
 }

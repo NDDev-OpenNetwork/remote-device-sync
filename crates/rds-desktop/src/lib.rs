@@ -63,15 +63,15 @@ pub enum DesktopError {
     #[error("input injection failed: {0}")]
     Input(String),
     #[error("connection failed: {0}")]
-    Connection(#[from] iroh::endpoint::ConnectionError),
+    Connection(#[from] rds_net::ConnectionError),
     #[error("stream closed by peer")]
-    Closed(#[from] iroh::endpoint::ClosedStream),
+    Closed(#[from] rds_net::ClosedStream),
     #[error("stream write failed: {0}")]
-    Write(#[from] iroh::endpoint::WriteError),
+    Write(#[from] rds_net::WriteError),
     #[error("stream read failed: {0}")]
-    Read(#[from] iroh::endpoint::ReadError),
+    Read(#[from] rds_net::ReadError),
     #[error("stream read failed: {0}")]
-    ReadExact(#[from] iroh::endpoint::ReadExactError),
+    ReadExact(#[from] rds_net::ReadExactError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

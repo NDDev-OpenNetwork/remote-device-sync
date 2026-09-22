@@ -113,6 +113,36 @@ async fn put_rate_limit_enforced() {
 }
 
 #[tokio::test]
+async fn global_write_limit_covers_delete_and_registry() {
+    // put_per_minute = 1: the first verifying write consumes the
+    // window; a write on a different route hits the same bound before
+    // any parse or signature work.
+    let store = Arc::new(MemoryStore::default());
+    let dir = service::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        store,
+        ServiceConfig {
+            limits: Limits {
+                put_per_minute: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = Client::new(dir.addr());
+    let k = key(16);
+    let ek = EndpointKey(k.verifying_key().to_bytes());
+    client
+        .publish(&record(&k, now_unix().unwrap(), 300))
+        .await
+        .unwrap();
+    let err = client.remove(&ek, &k).await.unwrap_err();
+    assert!(matches!(err, DiscoveryError::RateLimited));
+}
+
+#[tokio::test]
 async fn signed_delete_removes_record() {
     let (_dir, client) = serve().await;
     let k = key(15);

@@ -8,11 +8,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use iroh::endpoint::Connection;
 use rds_core::{
     Codec, DesktopCaps, DesktopControl, DesktopHello, FrameHeader, HelloAck, InputEvent,
     StreamHello, read_frame, write_frame,
 };
+use rds_net::Connection;
 use tokio::sync::mpsc;
 
 use crate::{DesktopError, RawFrame};
@@ -26,6 +26,16 @@ pub struct DesktopSession {
     /// Highest frame sequence fully received so far.
     last_seq: Arc<AtomicU64>,
     caps: DesktopCaps,
+    /// Frame-receiver task; it holds a `Connection` clone, so without
+    /// aborting it on drop the connection — and the remote session —
+    /// would outlive the session forever.
+    frame_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for DesktopSession {
+    fn drop(&mut self) {
+        self.frame_task.abort();
+    }
 }
 
 impl DesktopSession {
@@ -72,7 +82,7 @@ impl DesktopSession {
         // Frame receiver task: accept uni streams, drop stale, decode newest.
         let conn = conn.clone();
         let seq_marker = last_seq.clone();
-        tokio::spawn(async move {
+        let frame_task = tokio::spawn(async move {
             while let Ok(mut stream) = conn.accept_uni().await {
                 let frame_tx = frame_tx.clone();
                 let seq_marker = seq_marker.clone();
@@ -101,6 +111,7 @@ impl DesktopSession {
             ctrl_tx,
             last_seq,
             caps,
+            frame_task,
         })
     }
 

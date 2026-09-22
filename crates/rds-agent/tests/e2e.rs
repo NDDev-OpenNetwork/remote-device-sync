@@ -157,6 +157,54 @@ async fn direct_connection_without_relay() {
     rds_cli::ping(&conn, 7).await.unwrap();
 }
 
+/// The `desktop` feature's service plumbing end-to-end: the client
+/// sends `StreamHello::Desktop` on the control stream and the agent
+/// answers — capabilities when a capture backend is live, an honest
+/// `desktop unavailable` error headless or on macOS. Either way the
+/// handshake must complete, never hang or desynchronize.
+#[cfg(feature = "desktop")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desktop_handshake_completes() {
+    let (_relay, relay_url) = test_relay().await;
+    let agent_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())
+        .await
+        .unwrap();
+    agent_ep.online().await;
+    let client_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())
+        .await
+        .unwrap();
+    client_ep.online().await;
+
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.allow.insert(client_ep.id());
+    let agent = Agent::new(agent_ep, policy);
+    let ticket = Ticket::of(&agent.endpoint);
+    let _task = tokio::spawn({
+        let agent = Arc::new(agent);
+        async move { agent.run().await }
+    });
+
+    let conn = rds_cli::connect(
+        &client_ep,
+        rds_net::parse_target(&ticket.to_string()).unwrap(),
+    )
+    .await
+    .unwrap();
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        rds_desktop::client::DesktopSession::connect(&conn, 0, 30, rds_core::Codec::H264),
+    )
+    .await
+    {
+        Err(_) => panic!("desktop handshake hung"),
+        Ok(Ok(session)) => assert!(!session.caps().codecs.is_empty()),
+        Ok(Err(e)) => assert!(
+            matches!(e, rds_desktop::DesktopError::Capture(_)),
+            "unexpected desktop error: {e:?}"
+        ),
+    }
+}
+
 /// Same direct-path flow on the owned `noq` backend: agent and client
 /// both bind `Backend::Noq` — exercises the facade end to end, not just
 /// the backend in isolation.

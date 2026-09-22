@@ -49,8 +49,8 @@ pub use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
 // Shared stream/error types (re-exported through `iroh::endpoint`,
 // which aliases the `noq` types the owned backend also returns).
 pub use iroh::endpoint::{
-    AcceptBi, AcceptUni, ClosedStream, ConnectionError, OpenBi, OpenUni, ReadDatagram, RecvStream,
-    SendDatagramError, SendStream, VarInt,
+    AcceptBi, AcceptUni, ClosedStream, ConnectionError, OpenBi, OpenUni, ReadDatagram, ReadError,
+    ReadExactError, RecvStream, SendDatagramError, SendStream, VarInt, WriteError,
 };
 
 pub use announce::{Announce, AnnounceConfig, announce};

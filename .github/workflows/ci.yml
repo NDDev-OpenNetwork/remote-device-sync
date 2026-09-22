@@ -41,6 +41,10 @@ jobs:
       - name: clippy with x11/desktop feature (linux)
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --features rds-desktop/x11 -- -D warnings
+      - name: clippy with desktop feature on agent/cli
+        run: >-
+          cargo clippy --workspace --all-targets
+          --features rds-agent/desktop,rds-cli/desktop -- -D warnings
 
   test:
     strategy:

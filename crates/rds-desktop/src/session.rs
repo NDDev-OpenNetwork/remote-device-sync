@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use iroh::endpoint::{Connection, RecvStream, SendStream};
 use rds_core::{DesktopControl, DesktopHello, FrameHeader, read_frame, write_frame};
+use rds_net::{Connection, RecvStream, SendStream};
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -94,6 +94,11 @@ pub async fn serve_desktop(
             Err(e) => Err(DesktopError::Io(std::io::Error::other(e.to_string()))),
         },
     };
+    // Teardown has to unwind both tasks: `writer` must be aborted —
+    // dropping its JoinHandle only detaches it. Once it stops, `rx`
+    // closes and the blocking producer exits on `tx.is_closed()`
+    // (abort() cannot interrupt spawn_blocking work mid-closure).
+    writer.abort();
     capture_task.abort();
     result
 }
@@ -145,6 +150,12 @@ fn produce_loop_x11(
     let start = Instant::now();
     let mut seq = 0u64;
     loop {
+        // The channel is the session's lifecycle: when the session
+        // ends the writer drops `rx`, and this blocking loop exits —
+        // `JoinHandle::abort` cannot interrupt spawn_blocking work.
+        if tx.is_closed() {
+            return;
+        }
         let due = start + interval.mul_f64(seq as f64);
         if let Some(sleep) = due.checked_duration_since(Instant::now()) {
             std::thread::sleep(sleep);
