@@ -17,6 +17,12 @@ const BUTTON_PRESS: u8 = 4;
 const BUTTON_RELEASE: u8 = 5;
 const MOTION_NOTIFY: u8 = 6;
 
+/// Max wheel clicks injected per scroll event. Remote-supplied deltas
+/// are unbounded f64s — without a cap a single event can loop billions
+/// of paired XTEST calls and wedge the injector permanently. 32 lines
+/// is already a page-scale scroll.
+const MAX_SCROLL_CLICKS: f64 = 32.0;
+
 /// XTEST input sink: injects events into the default X11 session.
 pub struct XtestInput {
     conn: RustConnection,
@@ -74,7 +80,9 @@ impl InputSink for XtestInput {
             ),
             InputKind::Scroll { dx, dy } => {
                 // Emulate wheel clicks: 4 up, 5 down, 6 left, 7 right.
-                for _ in 0..dy.abs().round() as u32 {
+                // `.min` bounds the loop; even a NaN delta caps at the
+                // limit — `f64::min` ignores NaN rather than propagating.
+                for _ in 0..dy.abs().min(MAX_SCROLL_CLICKS).round() as u32 {
                     let b = if dy > 0.0 { 4 } else { 5 };
                     self.conn
                         .xtest_fake_input(BUTTON_PRESS, b, 0, self.root, 0, 0, 0)
@@ -83,7 +91,7 @@ impl InputSink for XtestInput {
                         .xtest_fake_input(BUTTON_RELEASE, b, 0, self.root, 0, 0, 0)
                         .map_err(|e| DesktopError::Input(e.to_string()))?;
                 }
-                for _ in 0..dx.abs().round() as u32 {
+                for _ in 0..dx.abs().min(MAX_SCROLL_CLICKS).round() as u32 {
                     let b = if dx > 0.0 { 6 } else { 7 };
                     self.conn
                         .xtest_fake_input(BUTTON_PRESS, b, 0, self.root, 0, 0, 0)

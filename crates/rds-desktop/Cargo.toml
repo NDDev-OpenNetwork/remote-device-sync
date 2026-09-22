@@ -11,12 +11,10 @@ default = []
 x11 = ["dep:x11rb", "dep:openh264"]
 
 [dependencies]
-async-trait.workspace = true
 bytes.workspace = true
 openh264 = { version = "0.9", optional = true }
 rds-core.workspace = true
 rds-net.workspace = true
-serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -25,6 +23,7 @@ x11rb = { version = "0.14", features = ["shm", "xtest", "xfixes"], optional = tr
 [dev-dependencies]
 noq.workspace = true
 rds-bench = { workspace = true, features = ["transport-noq"] }
+rds-sync.workspace = true
 
 [lints]
 workspace = true

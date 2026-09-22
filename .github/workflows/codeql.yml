@@ -1,0 +1,34 @@
+name: codeql
+
+# Code scanning via the pinned public reusable. Default setup stays
+# `not-configured` on purpose: a pinned workflow is reviewable in a diff,
+# and enabling default setup later means removing this file first.
+#
+# Rust needs no build step (CodeQL build-mode `none`, GA): extraction runs
+# rust-analyzer over the workspace directly, so no build_command is passed.
+# The weekly schedule keeps scanning a repository that stops changing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 5 * * 4"
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  codeql:
+    name: codeql
+    permissions:
+      actions: read           # the callee reads this run for SARIF upload bookkeeping
+      contents: read          # check out the tree being analysed
+      security-events: write  # publish CodeQL results to code scanning
+    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/public-codeql.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
+    with:
+      languages: '["rust", "actions"]'
+      runner: ubuntu-latest

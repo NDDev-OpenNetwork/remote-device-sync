@@ -16,7 +16,7 @@
 //!   receiver → holder  Done { root }
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -80,7 +80,9 @@ pub enum SyncMsg {
 /// Validate a peer-supplied relative path. Returns the safe
 /// normalized form. Rejects absolute paths, `..` escapes, empty
 /// components, NULs and overlong input — anything that could land a
-/// write outside the sync root.
+/// write outside the sync root. This is the *lexical* half of
+/// confinement: [`resolve_under`] is the other half, proving the
+/// result can't escape through a symlinked component either.
 pub fn check_rel_path(rel: &str) -> Result<PathBuf, SyncError> {
     if rel.is_empty() || rel.len() > MAX_REL_PATH {
         return Err(SyncError::Manifest(format!("bad rel_path {rel:?}")));
@@ -95,6 +97,7 @@ pub fn check_rel_path(rel: &str) -> Result<PathBuf, SyncError> {
         return Err(SyncError::Manifest(format!("absolute rel_path {rel:?}")));
     }
     let mut out = PathBuf::new();
+    let mut first = true;
     for part in rel.split(['/', '\\']) {
         match part {
             "" | "." => {}
@@ -103,13 +106,73 @@ pub fn check_rel_path(rel: &str) -> Result<PathBuf, SyncError> {
                     "traversal in rel_path {rel:?}"
                 )));
             }
-            p => out.push(p),
+            // `.rds-sync` at the root is the journal namespace — a peer
+            // may not read or plant state files in it.
+            p if first && p == crate::journal::STATE_DIR => {
+                return Err(SyncError::Manifest(format!(
+                    "rel_path {rel:?} enters the sync journal"
+                )));
+            }
+            p => {
+                first = false;
+                out.push(p);
+            }
         }
     }
     if out.as_os_str().is_empty() {
         return Err(SyncError::Manifest(format!("empty rel_path {rel:?}")));
     }
     Ok(out)
+}
+
+/// Resolve `rel` beneath `root`, refusing any path that would escape
+/// the root through a symlinked component. `root` must already exist;
+/// the returned path is the canonical deepest-existing ancestor plus
+/// the not-yet-created tail of `rel`, so every filesystem operation on
+/// it lands inside `root`.
+///
+/// `check_rel_path` proves `rel` is lexical; a sync root that itself
+/// contains symlinks (managed dotfiles, nix-style dirs, …) could still
+/// redirect a read or a `create_dir_all`/`rename` outside — this
+/// resolves the existing prefix and requires it to stay under the
+/// canonicalized root. Racy relinking between resolve and write is
+/// only possible for someone who already has write access to the root.
+pub fn resolve_under(root: &Path, rel: &Path) -> Result<PathBuf, SyncError> {
+    let canon_root = root
+        .canonicalize()
+        .map_err(|e| SyncError::Manifest(format!("sync root {}: {e}", root.display())))?;
+    let mut anc = canon_root.join(rel);
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        // symlink_metadata (lstat): a dangling symlink counts as
+        // existing — canonicalize then fails on it, which is the right
+        // refusal.
+        if anc.symlink_metadata().is_ok() {
+            let canon = anc
+                .canonicalize()
+                .map_err(|e| SyncError::Manifest(format!("resolve {}: {e}", anc.display())))?;
+            if !canon.starts_with(&canon_root) {
+                return Err(SyncError::Manifest(format!(
+                    "{} escapes the sync root",
+                    rel.display()
+                )));
+            }
+            let mut out = canon;
+            for c in tail.iter().rev() {
+                out.push(c);
+            }
+            return Ok(out);
+        }
+        let name = anc
+            .file_name()
+            .ok_or_else(|| SyncError::Manifest(format!("bad path {}", anc.display())))?;
+        tail.push(name.to_os_string());
+        // canon_root exists, so the walk terminates there at the latest.
+        anc = anc
+            .parent()
+            .ok_or_else(|| SyncError::Manifest("no existing ancestor".into()))?
+            .to_path_buf();
+    }
 }
 
 /// Structural validation of a reassembled manifest: chunks sorted,

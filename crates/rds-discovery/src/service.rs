@@ -104,6 +104,22 @@ fn hex16(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Lock acquisition that survives a poisoned lock: every lock here
+/// guards plain data (instants, counters, `Option` snapshots) whose
+/// invariants a panic cannot tear, so one panicked holder must not
+/// fail every request the directory serves from then on.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn read<T>(l: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write<T>(l: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    l.write().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Cap on distinct writer labels before accounting folds into `other`
 /// — the scrape stays bounded under a writer flood.
 const MAX_WRITER_LABELS: usize = 4096;
@@ -120,7 +136,7 @@ impl RateLimiter {
     /// bounds the verification CPU an unauthenticated peer can burn.
     fn check_global(&self, limits: &Limits) -> bool {
         {
-            let mut start = self.window_start.lock().unwrap();
+            let mut start = lock(&self.window_start);
             if start.elapsed() >= Duration::from_secs(60) {
                 *start = Instant::now();
                 self.window_count.store(0, Ordering::Relaxed);
@@ -131,7 +147,7 @@ impl RateLimiter {
 
     /// Per-key interval between accepted PUTs.
     fn check_key(&self, key: &EndpointKey, limits: &Limits) -> bool {
-        let mut last = self.last_put.lock().unwrap();
+        let mut last = lock(&self.last_put);
         if let Some(t) = last.get(key)
             && t.elapsed() < limits.put_min_interval
         {
@@ -301,7 +317,7 @@ fn put_record(state: &State, req: &Request) -> Response {
     match state.store.put(&record) {
         Ok(()) => {
             state.metrics.puts_ok.fetch_add(1, Ordering::Relaxed);
-            let mut per = state.metrics.endpoint_puts.lock().unwrap();
+            let mut per = lock(&state.metrics.endpoint_puts);
             let label = if per.len() >= MAX_WRITER_LABELS {
                 "other".to_string()
             } else {
@@ -367,7 +383,7 @@ fn get_name(state: &State, name: &str) -> Response {
             &DiscoveryError::InvalidRecord("invalid device name".into()),
         );
     }
-    let registry = state.registry.read().unwrap();
+    let registry = read(&state.registry);
     match registry.as_ref().and_then(|r| r.entries.get(name)) {
         Some(key) => Response::json(200, serde_json::json!({ "key": key.to_string() })),
         None => Response::error(404, &DiscoveryError::NotFound),
@@ -388,11 +404,14 @@ fn put_registry(state: &State, req: &Request) -> Response {
             return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
         }
     };
-    let current = state.registry.read().unwrap();
+    // Hold the write lock across verify+store — same reason as
+    // `put_revocations`: the monotonic check runs against `current`,
+    // and a dropped read lock would let two valid PUTs race so the
+    // older snapshot wins.
+    let mut current = write(&state.registry);
     match snap.verify_fresh(key, current.as_ref()) {
         Ok(payload) => {
-            drop(current);
-            *state.registry.write().unwrap() = Some(payload);
+            *current = Some(payload);
             state.metrics.registry_puts.fetch_add(1, Ordering::Relaxed);
             Response::json(200, serde_json::json!({ "stored": true }))
         }
@@ -404,7 +423,7 @@ fn put_registry(state: &State, req: &Request) -> Response {
 /// signature themselves, so the stored signed bytes are what travel.
 /// 404 until the estate publishes the first snapshot.
 fn get_revocations(state: &State) -> Response {
-    match &*state.revocations.read().unwrap() {
+    match &*read(&state.revocations) {
         Some((snap, _)) => Response::json(200, snap),
         None => Response::error(404, &DiscoveryError::NotFound),
     }
@@ -424,11 +443,13 @@ fn put_revocations(state: &State, req: &Request) -> Response {
             return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
         }
     };
-    let current = state.revocations.read().unwrap();
+    // Hold the write lock across verify+store: the monotonic check runs
+    // against `current`, so it must be the same snapshot we replace —
+    // a dropped read lock would let two valid PUTs race and regress.
+    let mut current = write(&state.revocations);
     match snap.verify_fresh(key, current.as_ref().map(|(_, p)| p)) {
         Ok(payload) => {
-            drop(current);
-            *state.revocations.write().unwrap() = Some((snap, payload));
+            *current = Some((snap, payload));
             state
                 .metrics
                 .revocations_puts
@@ -465,7 +486,7 @@ fn metrics(state: &State) -> Response {
     );
     // Per-endpoint accounting: PUT counts by anonymized writer label
     // (blake3(key)[..8] — never the key itself; C7 security).
-    let per = m.endpoint_puts.lock().unwrap();
+    let per = lock(&m.endpoint_puts);
     body.push_str(&format!("rds_directory_writers_distinct {}\n", per.len()));
     for (writer, count) in per.iter() {
         body.push_str(&format!(

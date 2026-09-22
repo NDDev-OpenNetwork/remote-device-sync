@@ -81,6 +81,9 @@ Caveats:
   session display and `/dev/uinput` — run the agent as a user service
   in the graphical session for desktop, or relax `PrivateDevices` and
   add `DeviceAllow=/dev/uinput rw` plus `SupplementaryGroups=input`.
+  `PrivateTmp` also hides `/tmp/.X11-unix` from the unit — the session
+  X socket won't be reachable unless the display listens on the
+  abstract socket (default on Linux) or `PrivateTmp` is dropped.
 - **Agent `--sync-dir`**: add its path to `ReadWritePaths` or keep it
   under `/var/lib/rds-agent`.
 - **Key material**: `endpoint.key` must stay `0600` and owned by the

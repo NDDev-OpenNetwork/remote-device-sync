@@ -8,20 +8,15 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 clap.workspace = true
 iroh.workspace = true
 iroh-relay = { workspace = true, features = ["server"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
 rds-net = { workspace = true, optional = true }
-serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[dev-dependencies]
-rand.workspace = true
 
 [features]
 default = []

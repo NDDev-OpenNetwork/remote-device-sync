@@ -2,6 +2,91 @@
 
 ## [Unreleased]
 
+- Stability/latency hardening across the workspace:
+  - `rds-net`: the uni demux hands each accepted stream its own
+    tag-read task under a 10s bound — a peer that opens a stream and
+    never writes its `UniHello` can no longer stall routing of every
+    stream behind it, and a failed send into a reclaimed inbox no
+    longer removes the *new* route (channel-identity checked).
+  - `rds-desktop`: the decoder is session-local (a shared static one
+    cross-contaminated reference chains between sessions); decode
+    failure auto-requests an IDR, rate-limited at 500ms so corrupt
+    stretches can't storm; session ack and frame stream header/body
+    reads are bounded at 30s, frame bodies at 32 MiB. On the serving
+    side a frame that goes stale *while sending* is reset mid-write
+    (MoQ-style) — a stale delta's tail no longer consumes path
+    capacity; the reset re-arms the producer's IDR flag and drains the
+    undecodable deltas. Frame streams carry an explicit constant
+    priority below control (escalating per-frame priorities that
+    starved in-flight sends are not reintroduced). Empty encode-failure
+    placeholders are skipped instead of sent.
+  - `openh264` codec: the `keyframe` flag is read off the emitted NAL
+    units instead of assumed from `seq % 240` (which was wrong —
+    `intra_frame_period` defaulted to `auto`, so periodic IDRs never
+    fired on schedule); the period is now pinned at 240 (~8s at 30fps)
+    as a bound on undecodable time. `set_bitrate` actually rebuilds the
+    encoder past a 15% deadband instead of being a silent no-op, and
+    the rebuild's first frame is a real IDR.
+  - `rds-sync`: manifests stream through `StreamCDC` (memory bounded at
+    one max-size chunk, proven identical to slice chunking); manifest
+    scans, journal open/verify, and assembly run on `spawn_blocking`;
+    verified chunks are written by a dedicated blocking-pool sink
+    behind a bounded queue; every protocol read and chunk body is
+    bounded by a 300s stall; completion counts chunks on the wire —
+    not the sink's lagging `present` counter, which used to park the
+    receive loop in a 300s stall after the last chunk.
+  - `rds-agent`: stream hello bounded at 15s; state/grant/watcher
+    mutexes recover from poisoning instead of denying service forever;
+    request paths refuse with `HelloAck::Error` instead of
+    `unreachable!`.
+  - `rds-discovery`: `/v1/registry` PUT verifies freshness and stores
+    under one write lock — two racing valid PUTs can no longer leave
+    the older snapshot stored (regression test
+    `concurrent_registry_puts_cannot_regress`).
+  - `rds-relay`: register/control-stream wait bounded at 15s — a
+    connection that never registers no longer parks a task.
+  - `rds-cli`: connect bounded at 30s; every `HelloAck` wait and the
+    ping echo bounded at 15s.
+- Protocol v3 + review hardening: every uni-directional stream now
+  opens with a `UniHello` tag (`Desktop`/`Sync`/`Audio`), and the
+  accepting side routes it through a single per-connection demux
+  (`Connection::uni_streams`) — desktop and sync can share a
+  connection without racing `accept_uni`. Inboxes end cleanly:
+  `UniStreams::recv` returns `None` once the connection dies — the
+  demux's exit drops every registered sender instead of leaving
+  consumers parked. `PROTOCOL_VERSION` is 3; v2 peers won't interop
+  on uni streams.
+- Security fixes: sync confinement is now resolved, not just lexical —
+  `resolve_under` canonicalizes the deepest existing ancestor of every
+  destination and requires it to stay under the canonical sync root,
+  so symlinked components can't redirect pulls, the `.rds-sync`
+  journal, or assembly outside the root; assembly's temp file is a
+  suffixed `*.rds-part` created exclusively after unlinking any stale
+  one, and `.rds-sync` as a first path component is refused outright.
+  `ChunkHdr.len` is checked against the manifest before it sizes the
+  receive buffer (a forged u32 no longer forces a huge allocation).
+  X11 scroll injection clamps deltas to 32 clicks per event. Input
+  events naming a display other than the session's are dropped
+  un-acked. The directory's `/v1/revocations` PUT now verifies and
+  stores under one write lock (no check-then-store regression window).
+- Correctness fix: `mailbox::Sender` decrements an explicit sender
+  count and then notifies on drop — a consumer parked in `recv` now
+  observes the last sender leaving instead of sleeping forever, and a
+  cross-thread wake can't observe a stale count and re-park
+  (regression tests `parked_recv_wakes_when_last_sender_drops`,
+  `parked_recv_survives_drop_wake_race`).
+- CI/CD: the hand-rolled `ci.yml` is replaced by pinned
+  `ci-workflows` reusables (0.1.26): `rust-ci` (locked build, fmt,
+  five clippy lanes, ubuntu+macos test matrix), `rust-supply-chain`
+  (cargo-deny per `deny.toml`, cargo-audit, cargo-machete — weekly
+  advisory sweep), `public-codeql` (rust + actions, build-mode none)
+  and `release-supply-chain` (tag `X.Y.Z` → immutable release: source
+  archive + SPDX SBOM + SHA256SUMS + SLSA/SBOM attestations, behind a
+  `release` environment). `deny.toml` now allows `Unlicense` and
+  `CDLA-Permissive-2.0` (iroh transitive deps) and ignores the two
+  unfixable unmaintained advisories; 13 unused crate dependencies
+  removed; `VERSION` file added for the release contract; dependabot
+  tracks cargo + github-actions weekly.
 - WS8 deployment: `deploy/systemd/rds-server.service` and
   `rds-agent.service` — hardened units (ProtectSystem=strict,
   NoNewPrivileges, PrivateTmp/Devices, ProtectKernel*/ControlGroups,
@@ -50,8 +135,8 @@
   atomic rename after root verification. `rel_path` rejects
   traversal, absolute paths, NUL and oversize. `rds send`/`rds recv`
   push/pull through `rds_cli::open_sync`; the agent serves `Sync`
-  under `--sync-dir` with a one-session-per-connection guard (chunk
-  streams share the `accept_uni` queue) and advertises `Sync` in
+  under `--sync-dir` with a one-session-per-connection guard and
+  advertises `Sync` in
   `Info` only when configured. E2E: byte-identical push/pull,
   zero-chunk resend, corrupt-part refetch, torn-journal and
   mid-transfer kill resume, repeated kill/resume convergence,

@@ -171,24 +171,51 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 | `Desktop` | bi + uni | hello/capabilities; input events client→server; one uni stream per video frame server→client |
 | `Sync` | bi + uni | offer/request → manifest parts → `Need` bitmap → chunk pull on 4 dedicated uni streams → `Done` |
 
+Every uni stream leads with a `UniHello` tag frame (protocol v3). The
+accepting side runs one per-connection demux (`Connection::uni_streams`)
+that routes each stream to the consumer registered for its tag — a
+desktop session and a sync pull can share a connection without either
+stealing the other's streams off `accept_uni`. The demux accepts, then
+hands each stream its own tag-read task under a 10s bound: a peer that
+opens a stream and never writes its tag cannot stall the routing of the
+streams queued behind it, and a claimed inbox whose consumer dropped is
+reclaimable by the next `uni_streams` call.
+
 Desktop media: capture → BGRA→I420 → H.264 (OpenH264 baseline, no B-frames;
 hw encoders behind a trait) → per-frame uni stream with a `FrameHeader`
-`{seq, keyframe, capture_ts_ms, send_ts_ms}`. Freshness is enforced
-twice rather than by stream reset: the producer→writer channel is a
-bounded collapse (a queued keyframe always survives; otherwise newest
-wins), sends are serialized and token-bucket-paced to the controller's
-bitrate so QUIC's own buffer never fills with stale-on-arrival frames,
-and the receiver drops anything below a "next expected seq" watermark —
-a delivered-seq gap auto-requests an IDR, and a backpressured keyframe
-re-arms the producer's IDR flag. The control stream (`DesktopControl`:
-input events, `RequestIdr`, `SetBitrate`, heartbeats; `DesktopEvent`:
-input acks, heartbeat echoes) runs at max stream priority; per-frame
-priorities were tried and removed — under load they starve in-flight
-streams. This yields decode-what-survives behavior without a custom
-UDP stack.
+`{seq, keyframe, capture_ts_ms, send_ts_ms}`. Freshness is enforced at
+every stage: the producer→writer channel collapses to the newest queued
+frame (a queued keyframe always survives — deltas behind it cannot decode
+without it), sends are serialized and token-bucket-paced to the
+controller's bitrate so QUIC's own buffer never fills with
+stale-on-arrival frames, and a frame that goes stale *while its stream
+is still sending* is reset mid-write (MoQ-style) — a stale delta's tail
+only consumes path capacity the fresher frame needs. The reset breaks
+the client's delta chain, so the producer's IDR flag is re-armed and
+queued deltas are drained. The encoder's `keyframe` flag is read off the
+emitted NAL units (forced IDRs, periodic IDRs at the configured
+~8s `intra_frame_period`, and encoder rebuilds on a >15% bitrate change
+all mark real IDRs) — never assumed from a schedule. The receiver drops
+anything below a "next expected seq" watermark, decodes with a
+session-local decoder (a shared one would cross-contaminate reference
+chains), and auto-requests an IDR on a delivered-seq gap or a decode
+failure, rate-limited so a corrupt stretch cannot storm. Frame stream
+headers and bodies are bounded (32 MiB cap, 30s stall); every stream
+leads with its `UniHello` tag under a 10s bound. The control stream
+(`DesktopControl`: input events, `RequestIdr`, `SetBitrate`, heartbeats;
+`DesktopEvent`: input acks, heartbeat echoes) runs at max stream
+priority; frame streams sit at a constant midpoint — above QUIC's
+default, strictly below control. Per-frame *escalating* priorities were
+tried and removed — under load they starve in-flight sends — but a
+constant rank keeps frames ahead of background traffic without frames
+fighting each other. This yields decode-what-survives behavior without
+a custom UDP stack.
 
 File sync (`rds send`/`rds recv`, agent `--sync-dir`): the file is cut
-by FastCDC into BLAKE3-addressed chunks. The control stream carries
+by FastCDC into BLAKE3-addressed chunks — streamed (`StreamCDC`), so
+manifest memory stays at one max-size chunk regardless of file size and
+disk-bound work (manifest scan, journal open/verify, assembly) runs on
+the blocking pool, never an async worker. The control stream carries
 `Offer`/`Request` then the manifest in ≤512-entry `ManifestPart`
 batches (a 1 GiB manifest exceeds the 64 KiB frame cap). The receiver
 opens a journal under `<dest>/.rds-sync/<root>/`, re-verifies every
@@ -199,9 +226,17 @@ indices (≤4096/batch) then chunk payloads across 4 dedicated uni
 streams; `SetDone`/`Done` close the session. Assembly concatenates
 verified parts, checks the BLAKE3 root, and renames atomically — a
 torn or corrupt part is refetched, a killed transfer resumes from the
-journal, and `rel_path` is validated against traversal, absolute and
-NUL paths. One sync session per connection (chunk streams share the
-connection's `accept_uni` queue).
+journal, and `rel_path` is validated twice: lexically (traversal,
+absolute, NUL, the `.rds-sync` journal namespace) and by resolution —
+the canonicalized destination must stay inside the canonicalized sync
+root, so a symlinked component can't redirect reads, journal state or
+assembly outside it. Verified chunks are written by a dedicated
+blocking-pool sink behind a bounded queue, so disk latency never parks
+the wire pipeline; completion is counted on the wire (the peer sends
+exactly the `Need` set), not on the sink's lagging counter. Every
+protocol read and chunk body is bounded by a 300s stall — a peer alive
+but silent aborts rather than parking the session. One sync session per
+connection.
 
 ### Stability measures
 
@@ -209,9 +244,17 @@ connection's `accept_uni` queue).
   hole-punch upgrade — both handled by iroh.
 - QUIC connection migration survives NAT rebinding/Wi-Fi↔LTE moves.
 - Agent reconnects to relay with backoff; CLI can pin `--relay`.
-- Serialized frame sends + collapse bound worst-case latency under
-  loss: queues stay near-empty and the residual tail is retransmit
-  physics, not queueing.
+- Serialized frame sends + collapse + mid-send stale reset bound
+  worst-case latency under loss: queues stay near-empty and the
+  residual tail is retransmit physics, not queueing.
+- Every handshake and stream stage is stall-bounded: agent stream hello
+  15s, desktop session ack / frame stream header+body 30s, relay
+  register 15s, uni-stream tag 10s, CLI acks 15s and connect 30s,
+  sync protocol reads 300s. A peer that opens a stream and goes silent
+  costs seconds, not a parked task for the connection's lifetime.
+- Agent state mutexes recover from poisoning (`into_inner`) — one
+  panicked holder cannot deny service forever, and request paths refuse
+  explicitly instead of `unreachable!`.
 
 ### Observability
 

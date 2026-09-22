@@ -58,6 +58,8 @@ pub enum SyncError {
 }
 
 /// Build the manifest for `data` using FastCDC 2020 chunking.
+/// Loads nothing extra but requires the whole input in memory — engine
+/// paths over files use [`manifest_of_reader`] instead.
 pub fn manifest_of(data: &[u8]) -> Manifest {
     manifest_with(data, MIN_CHUNK, AVG_CHUNK, MAX_CHUNK)
 }
@@ -76,6 +78,54 @@ pub fn manifest_with(data: &[u8], min: u32, avg: u32, max: u32) -> Manifest {
         root: *blake3::hash(data).as_bytes(),
         chunks,
     }
+}
+
+/// Build the manifest by streaming `r` — the same FastCDC cut points
+/// as [`manifest_of`] but with memory bounded at one max-size chunk,
+/// which is what the engine needs for files too large to load whole.
+pub fn manifest_of_reader(r: impl std::io::Read) -> std::io::Result<Manifest> {
+    manifest_reader_with(r, MIN_CHUNK, AVG_CHUNK, MAX_CHUNK)
+}
+
+/// Streaming manifest with explicit FastCDC size bounds.
+pub fn manifest_reader_with(
+    r: impl std::io::Read,
+    min: u32,
+    avg: u32,
+    max: u32,
+) -> std::io::Result<Manifest> {
+    let chunker = fastcdc::v2020::StreamCDC::new(r, min as usize, avg as usize, max as usize);
+    let mut root = blake3::Hasher::new();
+    let mut size = 0u64;
+    let mut chunks = Vec::new();
+    for c in chunker {
+        let c = c.map_err(std::io::Error::from)?;
+        root.update(&c.data);
+        size += c.data.len() as u64;
+        chunks.push(Chunk {
+            hash: *blake3::hash(&c.data).as_bytes(),
+            offset: c.offset,
+            len: c.length as u32,
+        });
+        if chunks.len() > proto::MAX_CHUNKS {
+            return Err(std::io::Error::other(format!(
+                "file exceeds {} chunks",
+                proto::MAX_CHUNKS
+            )));
+        }
+    }
+    Ok(Manifest {
+        size,
+        root: *root.finalize().as_bytes(),
+        chunks,
+    })
+}
+
+/// Manifest of a file on disk, streamed — O(max chunk) memory, the
+/// engine's path for large files. Blocking fs work: call from
+/// `spawn_blocking`, not an async worker.
+pub fn manifest_of_path(path: &std::path::Path) -> std::io::Result<Manifest> {
+    manifest_of_reader(std::fs::File::open(path)?)
 }
 
 /// Chunks in `b`'s manifest that `a`'s manifest lacks — the wire delta.
@@ -129,5 +179,28 @@ mod tests {
         let m = manifest_of(data);
         assert_eq!(m.size as usize, data.len());
         assert_eq!(m.chunks.iter().map(|c| c.len as u64).sum::<u64>(), m.size);
+    }
+
+    #[test]
+    fn streaming_manifest_matches_slice() {
+        // The streamed and in-memory chunkers must cut identical
+        // boundaries — resume/dedup correctness depends on it.
+        let mut data = vec![0u8; 3_000_000];
+        let mut state = 0x9E3779B97F4A7C15u64;
+        for b in &mut data {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *b = state as u8;
+        }
+        let a = manifest_of(&data);
+        let b = manifest_of_reader(std::io::Cursor::new(&data)).unwrap();
+        assert_eq!(a.size, b.size);
+        assert_eq!(a.root, b.root);
+        assert_eq!(a.chunks, b.chunks);
+        // Edge: empty input streams to an empty manifest.
+        let e = manifest_of_reader(std::io::Cursor::new(Vec::<u8>::new())).unwrap();
+        assert_eq!(e.size, 0);
+        assert!(e.chunks.is_empty());
     }
 }

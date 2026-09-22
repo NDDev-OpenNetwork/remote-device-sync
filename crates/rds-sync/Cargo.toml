@@ -19,7 +19,6 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
 rds-bench = { workspace = true, features = ["transport-noq"] }
 noq.workspace = true
 

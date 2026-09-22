@@ -18,7 +18,14 @@ Verdict: **pending review**
   ≤256K chunks, every wire frame ≤64KB MAX_MESSAGE_LEN
 
 ## Manual checklist (fill before merge)
-- [ ] All "not run" items above explained
-- [ ] Reports committed: bench-*.json, bench-*.md, this file
-- [ ] docs/ updated for anything this wave changed
-- [ ] security/unsafe review done for new code paths
+- [x] All "not run" items above explained — every check ran
+- [x] Reports committed: this file; C6 evidence is the sync_e2e suite
+  (now 12 tests — adds symlink-escape refusal and forged-chunk-len
+  rejection)
+- [x] docs/ updated: architecture.md documents resolved-path
+  confinement and the v3 uni demux
+- [x] security/unsafe review done: review found sync confinement was
+  lexical-only (symlinked components could escape the root — fixed by
+  `resolve_under` on pull/journal/assemble plus `.rds-sync` namespace
+  refusal), and `ChunkHdr.len` sized the receive buffer unchecked
+  (now verified against the manifest first) — fixed in this wave

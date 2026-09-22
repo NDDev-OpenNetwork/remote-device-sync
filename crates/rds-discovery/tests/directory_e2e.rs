@@ -380,6 +380,62 @@ async fn revocations_roundtrip_and_authz() {
     assert!(matches!(err, DiscoveryError::Http { status: 409, .. }));
 }
 
+/// Two racing valid PUTs must never leave the older snapshot stored:
+/// `verify_fresh`'s monotonic check has to run against the same
+/// snapshot the write lock replaces.
+#[tokio::test]
+async fn concurrent_registry_puts_cannot_regress() {
+    use rds_discovery::registry::RegistryPayload;
+
+    let reg_key = key(50);
+    let store = Arc::new(MemoryStore::default());
+    let dir = service::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        store,
+        ServiceConfig {
+            registry_key: Some(reg_key.verifying_key()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = Arc::new(Client::new(dir.addr()));
+
+    let now = now_unix().unwrap();
+    let n = 8u64;
+    let mut tasks = Vec::new();
+    for i in 0..n {
+        // Snapshot i maps "device" to key byte i, issued_at strictly
+        // increasing — the identifiable winner is n-1.
+        let snap = SignedRegistry::sign(
+            &RegistryPayload {
+                entries: BTreeMap::from([("device".into(), EndpointKey([i as u8; 32]))]),
+                issued_at: now + 1000 + i,
+                expires_at: now + 3600,
+            },
+            &reg_key,
+        )
+        .unwrap();
+        let client = client.clone();
+        tasks.push(tokio::spawn(
+            async move { client.update_registry(&snap).await },
+        ));
+    }
+    let mut accepted = 0;
+    for t in tasks {
+        if t.await.unwrap().is_ok() {
+            accepted += 1;
+        }
+    }
+    assert!(accepted >= 1, "every registry PUT failed");
+    // However the PUTs interleaved, the stored snapshot is the newest.
+    assert_eq!(
+        client.resolve_name("device").await.unwrap(),
+        EndpointKey([(n - 1) as u8; 32]),
+        "registry regressed under concurrent PUTs"
+    );
+}
+
 #[tokio::test]
 async fn registry_put_refused_without_configured_key() {
     // No estate key configured: the name API is off and PUTs are 401.

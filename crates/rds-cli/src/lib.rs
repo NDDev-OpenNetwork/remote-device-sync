@@ -2,18 +2,35 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rds_core::{AgentInfo, HelloAck, StreamHello, read_frame, write_frame};
 use rds_net::{Connection, Endpoint, EndpointAddr};
 use tokio::net::TcpListener;
 
+/// Every acknowledgement wait is bounded — a peer that opens the
+/// stream but never answers must not hang the CLI forever. Generous:
+/// grant verification and the far side's TCP connect gate on it.
+const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// One `HelloAck` read, bounded by [`ACK_TIMEOUT`].
+async fn read_ack(recv: &mut rds_net::RecvStream) -> anyhow::Result<HelloAck> {
+    match tokio::time::timeout(ACK_TIMEOUT, read_frame::<_, HelloAck>(recv)).await {
+        Ok(r) => r.map_err(Into::into),
+        Err(_) => anyhow::bail!("peer did not answer within {ACK_TIMEOUT:?}"),
+    }
+}
+
+/// Bound on the whole dial — hole punching and relay fallback retry
+/// internally, so the CLI gives them room but not forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Open a connection to `target` and return it.
 pub async fn connect(endpoint: &Endpoint, target: EndpointAddr) -> anyhow::Result<Connection> {
-    endpoint
-        .connect(target, rds_core::ALPN)
+    tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(target, rds_core::ALPN))
         .await
+        .context("connect timed out")?
         .context("connect to peer")
 }
 
@@ -29,7 +46,7 @@ pub async fn connect_authorized(
     let conn = connect(endpoint, target).await?;
     let (mut send, mut recv) = conn.open_bi().await?;
     write_frame(&mut send, &StreamHello::Authz(grant.clone())).await?;
-    match read_frame::<_, HelloAck>(&mut recv).await? {
+    match read_ack(&mut recv).await? {
         HelloAck::Ok => Ok(conn),
         HelloAck::Error { message } => anyhow::bail!("grant rejected: {message}"),
         other => anyhow::bail!("unexpected ack {other:?}"),
@@ -37,17 +54,20 @@ pub async fn connect_authorized(
 }
 
 /// Send a `Ping` and measure the full round trip.
-pub async fn ping(conn: &Connection, nonce: u64) -> anyhow::Result<std::time::Duration> {
+pub async fn ping(conn: &Connection, nonce: u64) -> anyhow::Result<Duration> {
     let start = Instant::now();
     let (mut send, mut recv) = conn.open_bi().await?;
     write_frame(&mut send, &StreamHello::Ping { nonce }).await?;
-    match read_frame::<_, HelloAck>(&mut recv).await? {
+    match read_ack(&mut recv).await? {
         HelloAck::Ok => {}
         HelloAck::Error { message } => anyhow::bail!("ping rejected: {message}"),
         other => anyhow::bail!("unexpected ack {other:?}"),
     }
     let mut buf = [0u8; 8];
-    recv.read_exact(&mut buf).await?;
+    match tokio::time::timeout(ACK_TIMEOUT, recv.read_exact(&mut buf)).await {
+        Ok(r) => r?,
+        Err(_) => anyhow::bail!("ping echo timed out"),
+    }
     let echoed = u64::from_be_bytes(buf);
     if echoed != nonce {
         anyhow::bail!("ping echo mismatch: {echoed} != {nonce}");
@@ -59,7 +79,7 @@ pub async fn ping(conn: &Connection, nonce: u64) -> anyhow::Result<std::time::Du
 pub async fn info(conn: &Connection) -> anyhow::Result<AgentInfo> {
     let (mut send, mut recv) = conn.open_bi().await?;
     write_frame(&mut send, &StreamHello::Info).await?;
-    match read_frame::<_, HelloAck>(&mut recv).await? {
+    match read_ack(&mut recv).await? {
         HelloAck::Info(info) => Ok(info),
         HelloAck::Error { message } => anyhow::bail!("info rejected: {message}"),
         other => anyhow::bail!("unexpected ack {other:?}"),
@@ -81,7 +101,7 @@ pub async fn open_tcp(
         },
     )
     .await?;
-    match read_frame::<_, HelloAck>(&mut recv).await? {
+    match read_ack(&mut recv).await? {
         HelloAck::Ok => Ok((send, recv)),
         HelloAck::Error { message } => anyhow::bail!("forward rejected: {message}"),
         other => anyhow::bail!("unexpected ack {other:?}"),
@@ -95,7 +115,7 @@ pub async fn open_sync(
 ) -> anyhow::Result<(rds_net::SendStream, rds_net::RecvStream)> {
     let (mut send, mut recv) = conn.open_bi().await?;
     write_frame(&mut send, &StreamHello::Sync).await?;
-    match read_frame::<_, HelloAck>(&mut recv).await? {
+    match read_ack(&mut recv).await? {
         HelloAck::Ok => Ok((send, recv)),
         HelloAck::Error { message } => anyhow::bail!("sync rejected: {message}"),
         other => anyhow::bail!("unexpected ack {other:?}"),

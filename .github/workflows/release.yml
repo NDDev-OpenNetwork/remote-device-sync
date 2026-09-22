@@ -1,0 +1,97 @@
+name: release
+
+# Tag-driven immutable release: push a signed tag `X.Y.Z` where VERSION and
+# the CHANGELOG `## [X.Y.Z]` heading match, and the pinned supply-chain
+# reusable publishes one GitHub Release carrying a deterministic source
+# archive, an SPDX SBOM of it, release notes, a manifest and SHA256SUMS —
+# plus SLSA build-provenance and SBOM attestations (public repo: artifact
+# attestations are included on every plan).
+#
+# Graph: resolve (read-only) → authorize (the `release` environment is the
+# authority seam — add a required reviewer in Settings → Environments to
+# make it a human gate) → publish (the only job holding write scopes).
+#
+# workflow_dispatch must run from the tag ref: the reusable fails closed
+# when the checked-out HEAD is not the tagged commit.
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release. Run from the tag ref; must equal VERSION and the tag."
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Resolve and shape-check the version
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$REF_NAME"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          fi
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release: version must be numeric SemVer X.Y.Z" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  authorize:
+    name: Authorize release
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release
+    permissions: {}
+    steps:
+      - name: Record the authorized candidate
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Release authorized"
+            echo
+            echo "- version: \`${RELEASE_VERSION}\`"
+            echo "- approver: recorded by the \`release\` environment"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Build and publish release
+    needs: [resolve, authorize]
+    permissions:
+      contents: write         # create the GitHub Release and upload assets
+      id-token: write         # OIDC identity for SLSA build provenance
+      attestations: write     # attest the SBOM and the release archive
+      artifact-metadata: write # actions/attest artifact storage record
+    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/release-supply-chain.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
+    with:
+      runner: ubuntu-latest
+      version: ${{ needs.resolve.outputs.version }}
+      package_name: remote-device-sync
+      archive_paths: >-
+        README.md LICENSE VERSION CHANGELOG.md AGENTS.md deny.toml
+        rust-toolchain.toml Cargo.toml Cargo.lock crates deploy docs
+        scripts .github
