@@ -45,6 +45,19 @@ fn next_session_id() -> u64 {
     SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// A peer that opens a stream but never writes its `StreamHello` would
+/// otherwise park a task per stream for the connection's lifetime —
+/// bounded here so silent streams cost seconds, not the session.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Mutex acquisition that survives a poisoned lock: every mutex here
+/// guards plain data (a state word, an `Option`, a `HashSet`) whose
+/// invariants a panic cannot corrupt, so refusing service forever
+/// after one panicked holder would be the worse failure.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Runtime policy for the agent.
 #[derive(Clone)]
 pub struct AgentPolicy {
@@ -293,7 +306,7 @@ impl ConnAuthz {
 
     /// Scope the connection currently has for service streams.
     fn scope(&self) -> Result<Option<Arc<VerifiedGrant>>, &'static str> {
-        match &*self.state.lock().unwrap() {
+        match &*lock(&self.state) {
             AuthzState::Open => Ok(None),
             AuthzState::Pending => Err("grant required: send Authz first"),
             AuthzState::Granted(g) => Ok(Some(g.clone())),
@@ -345,11 +358,11 @@ async fn serve_connection(
 /// Connection teardown: stop the expiry/revocation watcher and release
 /// the grant slot so the same grant may authorize a future session.
 fn teardown(_conn: &Connection, policy: &AgentPolicy, authz: &ConnAuthz) {
-    if let Some(w) = authz.watcher.lock().unwrap().take() {
+    if let Some(w) = lock(&authz.watcher).take() {
         w.abort();
     }
-    if let Some(id) = authz.grant_id.lock().unwrap().take() {
-        policy.active_grants.lock().unwrap().remove(&id);
+    if let Some(id) = lock(&authz.grant_id).take() {
+        lock(&policy.active_grants).remove(&id);
     }
 }
 
@@ -366,7 +379,11 @@ async fn serve_stream(
     authz: Arc<ConnAuthz>,
     desktop: bool,
 ) -> anyhow::Result<()> {
-    let hello: StreamHello = read_frame(&mut recv).await?;
+    let hello: StreamHello = match tokio::time::timeout(HELLO_TIMEOUT, read_frame(&mut recv)).await
+    {
+        Ok(h) => h?,
+        Err(_) => anyhow::bail!("stream hello timed out"),
+    };
     if let StreamHello::Authz(grant) = hello {
         return authorize(&conn, send, recv, grant, &policy, &authz).await;
     }
@@ -474,7 +491,19 @@ async fn serve_stream(
                         }
                     }
                     #[cfg(not(feature = "desktop"))]
-                    unreachable!()
+                    {
+                        // `desktop` is `cfg!(feature = "desktop")` so this
+                        // is unreachable today — but a request path must
+                        // refuse, never panic, if that coupling breaks.
+                        write_frame(
+                            &mut send,
+                            &HelloAck::Error {
+                                message: "desktop service not compiled in".into(),
+                            },
+                        )
+                        .await?;
+                        anyhow::bail!("desktop requested but not compiled in");
+                    }
                 } else {
                     let _ = hello;
                     write_frame(
@@ -524,7 +553,19 @@ async fn serve_stream(
                 .await?;
                 anyhow::bail!("audio service not implemented");
             }
-            StreamHello::Authz(_) => unreachable!("Authz handled above"),
+            StreamHello::Authz(_) => {
+                // `authorize` early-returns on Authz, so this is
+                // unreachable — a request path still refuses rather
+                // than panic if that ever stops holding.
+                write_frame(
+                    &mut send,
+                    &HelloAck::Error {
+                        message: "authz is not a service".into(),
+                    },
+                )
+                .await?;
+                anyhow::bail!("authz stream on the service path");
+            }
         }
         Ok(())
     }
@@ -558,7 +599,7 @@ async fn authorize(
     {
         // A second Authz stream is never valid — either still pending
         // (fine, this is the first) or already granted (refuse).
-        if matches!(*authz.state.lock().unwrap(), AuthzState::Granted(_)) {
+        if matches!(*lock(&authz.state), AuthzState::Granted(_)) {
             write_frame(
                 &mut send,
                 &HelloAck::Error {
@@ -603,11 +644,7 @@ async fn authorize(
         deny(conn, "grant revoked");
         anyhow::bail!("grant revoked");
     }
-    let admitted = policy
-        .active_grants
-        .lock()
-        .map(|mut a| a.insert(verified.id))
-        .unwrap_or(false);
+    let admitted = lock(&policy.active_grants).insert(verified.id);
     if !admitted {
         write_frame(
             &mut send,
@@ -620,12 +657,12 @@ async fn authorize(
         anyhow::bail!("grant replay on concurrent connection");
     }
     let grant = Arc::new(verified);
-    *authz.state.lock().unwrap() = AuthzState::Granted(grant.clone());
-    *authz.grant_id.lock().unwrap() = Some(grant.id);
+    *lock(&authz.state) = AuthzState::Granted(grant.clone());
+    *lock(&authz.grant_id) = Some(grant.id);
     write_frame(&mut send, &HelloAck::Ok).await?;
     send.finish()?;
     info!(%peer, grant = %blake3::Hash::from(grant.id), "grant authorized");
-    *authz.watcher.lock().unwrap() = Some(tokio::spawn(watch_grant(
+    *lock(&authz.watcher) = Some(tokio::spawn(watch_grant(
         conn.clone(),
         grant,
         policy.denylist.subscribe(),
