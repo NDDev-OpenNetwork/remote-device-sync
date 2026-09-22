@@ -424,11 +424,13 @@ fn put_revocations(state: &State, req: &Request) -> Response {
             return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
         }
     };
-    let current = state.revocations.read().unwrap();
+    // Hold the write lock across verify+store: the monotonic check runs
+    // against `current`, so it must be the same snapshot we replace —
+    // a dropped read lock would let two valid PUTs race and regress.
+    let mut current = state.revocations.write().unwrap();
     match snap.verify_fresh(key, current.as_ref().map(|(_, p)| p)) {
         Ok(payload) => {
-            drop(current);
-            *state.revocations.write().unwrap() = Some((snap, payload));
+            *current = Some((snap, payload));
             state
                 .metrics
                 .revocations_puts
