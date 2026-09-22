@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+- Stability/latency hardening across the workspace:
+  - `rds-net`: the uni demux hands each accepted stream its own
+    tag-read task under a 10s bound — a peer that opens a stream and
+    never writes its `UniHello` can no longer stall routing of every
+    stream behind it, and a failed send into a reclaimed inbox no
+    longer removes the *new* route (channel-identity checked).
+  - `rds-desktop`: the decoder is session-local (a shared static one
+    cross-contaminated reference chains between sessions); decode
+    failure auto-requests an IDR, rate-limited at 500ms so corrupt
+    stretches can't storm; session ack and frame stream header/body
+    reads are bounded at 30s, frame bodies at 32 MiB. On the serving
+    side a frame that goes stale *while sending* is reset mid-write
+    (MoQ-style) — a stale delta's tail no longer consumes path
+    capacity; the reset re-arms the producer's IDR flag and drains the
+    undecodable deltas. Frame streams carry an explicit constant
+    priority below control (escalating per-frame priorities that
+    starved in-flight sends are not reintroduced). Empty encode-failure
+    placeholders are skipped instead of sent.
+  - `openh264` codec: the `keyframe` flag is read off the emitted NAL
+    units instead of assumed from `seq % 240` (which was wrong —
+    `intra_frame_period` defaulted to `auto`, so periodic IDRs never
+    fired on schedule); the period is now pinned at 240 (~8s at 30fps)
+    as a bound on undecodable time. `set_bitrate` actually rebuilds the
+    encoder past a 15% deadband instead of being a silent no-op, and
+    the rebuild's first frame is a real IDR.
+  - `rds-sync`: manifests stream through `StreamCDC` (memory bounded at
+    one max-size chunk, proven identical to slice chunking); manifest
+    scans, journal open/verify, and assembly run on `spawn_blocking`;
+    verified chunks are written by a dedicated blocking-pool sink
+    behind a bounded queue; every protocol read and chunk body is
+    bounded by a 300s stall; completion counts chunks on the wire —
+    not the sink's lagging `present` counter, which used to park the
+    receive loop in a 300s stall after the last chunk.
+  - `rds-agent`: stream hello bounded at 15s; state/grant/watcher
+    mutexes recover from poisoning instead of denying service forever;
+    request paths refuse with `HelloAck::Error` instead of
+    `unreachable!`.
+  - `rds-discovery`: `/v1/registry` PUT verifies freshness and stores
+    under one write lock — two racing valid PUTs can no longer leave
+    the older snapshot stored (regression test
+    `concurrent_registry_puts_cannot_regress`).
+  - `rds-relay`: register/control-stream wait bounded at 15s — a
+    connection that never registers no longer parks a task.
+  - `rds-cli`: connect bounded at 30s; every `HelloAck` wait and the
+    ping echo bounded at 15s.
 - Protocol v3 + review hardening: every uni-directional stream now
   opens with a `UniHello` tag (`Desktop`/`Sync`/`Audio`), and the
   accepting side routes it through a single per-connection demux
