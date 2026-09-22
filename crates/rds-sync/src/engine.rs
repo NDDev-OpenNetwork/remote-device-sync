@@ -66,6 +66,13 @@ pub async fn serve(
                     return Err(e);
                 }
             };
+            tracing::info!(
+                peer = %conn.remote_id(),
+                rel = %rel.display(),
+                size,
+                chunks = manifest.chunks.len(),
+                "sync push accepted"
+            );
             let stats = receive(&conn, &mut send, &dir, &rel.to_string_lossy(), &manifest).await?;
             tracing::info!(?stats, "push receive complete");
             Ok(())
@@ -84,6 +91,13 @@ pub async fn serve(
                 bail!("requested file absent: {}", rel.display());
             }
             let manifest = manifest_of(&std::fs::read(&path)?);
+            tracing::info!(
+                peer = %conn.remote_id(),
+                rel = %rel.display(),
+                size = manifest.size,
+                chunks = manifest.chunks.len(),
+                "sync pull serving"
+            );
             send_manifest(&mut send, &rel.to_string_lossy(), &manifest).await?;
             let SyncMsg::Need { bits } = read_frame::<_, SyncMsg>(&mut recv).await? else {
                 bail!("expected Need");
@@ -91,7 +105,10 @@ pub async fn serve(
             let indices = bits_to_indices(&bits, manifest.chunks.len());
             push_chunks(&conn, &path, &manifest, &indices).await?;
             match read_frame::<_, SyncMsg>(&mut recv).await? {
-                SyncMsg::Done { .. } => Ok(()),
+                SyncMsg::Done { .. } => {
+                    tracing::info!(sent = indices.len(), "sync pull complete");
+                    Ok(())
+                }
                 other => bail!("expected Done, got {other:?}"),
             }
         }
@@ -112,6 +129,13 @@ pub async fn send_file(
         .map(|n| n.to_string_lossy().to_string())
         .ok_or_else(|| anyhow::anyhow!("{path:?} has no file name"))?;
     let manifest = manifest_of(&std::fs::read(path)?);
+    tracing::info!(
+        peer = %conn.remote_id(),
+        rel = %rel,
+        size = manifest.size,
+        chunks = manifest.chunks.len(),
+        "sync push start"
+    );
     send_manifest(&mut send, &rel, &manifest).await?;
     let indices = match read_frame::<_, SyncMsg>(&mut recv).await? {
         SyncMsg::Need { bits } => bits_to_indices(&bits, manifest.chunks.len()),
@@ -125,11 +149,13 @@ pub async fn send_file(
         other => bail!("expected Done, got {other:?}"),
     }
     send.finish()?;
-    Ok(Stats {
+    let stats = Stats {
         fetched: indices.len() as u64,
         total: manifest.chunks.len() as u64,
         bytes: manifest.size,
-    })
+    };
+    tracing::info!(?stats, "sync push complete");
+    Ok(stats)
 }
 
 /// CLI pull: request `rel_path` from the peer into `dest_dir`,
@@ -166,6 +192,7 @@ pub async fn recv_file(
     };
     let manifest = read_manifest(&mut recv, size, root, chunk_count).await?;
     let stats = receive(conn, &mut send, dest_dir, &rel.to_string_lossy(), &manifest).await?;
+    tracing::info!(rel = %rel.display(), ?stats, "sync pull complete");
     Ok((dest_dir.join(&rel), stats))
 }
 

@@ -158,6 +158,7 @@ pub async fn bind_with_socket(
         local_addrs,
         alpns: config.alpns,
         relay,
+        metrics: crate::metrics::Registry::default(),
     })
 }
 
@@ -212,6 +213,9 @@ pub struct Endpoint {
     /// Relay tunnel handle when `relay_endpoint` was configured —
     /// steers synthetic-address sends and advertises the relay url.
     relay: Option<relay::RelayHandle>,
+    /// Endpoint metrics — the connection driver records QNT progress
+    /// here; the facade surfaces it via `Endpoint::metrics`.
+    metrics: crate::metrics::Registry,
 }
 
 impl fmt::Debug for Endpoint {
@@ -224,6 +228,12 @@ impl fmt::Debug for Endpoint {
 }
 
 impl Endpoint {
+    /// This endpoint's metrics registry (QNT counters are fed by the
+    /// per-connection drivers).
+    pub fn metrics(&self) -> crate::metrics::Registry {
+        self.metrics.clone()
+    }
+
     /// This endpoint's public identity.
     pub fn id(&self) -> EndpointId {
         self.id
@@ -309,7 +319,12 @@ impl Endpoint {
             our_addrs.push(relay::synthetic_for(&self.id));
         }
         let relay = self.relay.clone();
-        async move { accept.await.map(|i| Incoming::new(i, our_addrs, relay)) }
+        let metrics = self.metrics.clone();
+        async move {
+            accept
+                .await
+                .map(|i| Incoming::new(i, our_addrs, relay, metrics))
+        }
     }
 
     /// The peer's synthetic relay remote when it advertises the relay
@@ -351,12 +366,13 @@ impl Endpoint {
             ours.push(relay::synthetic_for(&self.id));
         }
         policy::advertise_addrs(conn, &ours);
-        policy::initiate_traversal_round(conn);
+        policy::initiate_traversal_round(conn, &self.metrics);
         tokio::spawn(policy::connection_driver(
             conn.weak_handle(),
             conn.nat_traversal_updates(),
             conn.path_events(),
             seed_paths,
+            self.metrics.clone(),
         ));
     }
 
@@ -375,6 +391,8 @@ pub struct Incoming {
     our_addrs: Vec<SocketAddr>,
     /// Relay tunnel handle for synthetic-address peer registration.
     relay: Option<relay::RelayHandle>,
+    /// Endpoint metrics — the driver records QNT progress here.
+    metrics: crate::metrics::Registry,
 }
 
 impl Incoming {
@@ -383,12 +401,14 @@ impl Incoming {
         incoming: noq::Incoming,
         our_addrs: Vec<SocketAddr>,
         relay: Option<relay::RelayHandle>,
+        metrics: crate::metrics::Registry,
     ) -> Self {
         Self {
             incoming: Some(incoming),
             connecting: None,
             our_addrs,
             relay,
+            metrics,
         }
     }
 
@@ -417,7 +437,7 @@ impl Future for Incoming {
                                 handle.register_peer(remote_id);
                             }
                             policy::advertise_addrs(&inner, &self.our_addrs);
-                            policy::initiate_traversal_round(&inner);
+                            policy::initiate_traversal_round(&inner, &self.metrics);
                             // The handshake path is always PathId::ZERO;
                             // its Established event predates our
                             // subscription, so seed it explicitly.
@@ -427,6 +447,7 @@ impl Future for Incoming {
                                 inner.nat_traversal_updates(),
                                 inner.path_events(),
                                 seeds,
+                                self.metrics.clone(),
                             ));
                             Ok(Connection { inner, remote_id })
                         }

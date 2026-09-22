@@ -177,6 +177,7 @@ fn failed(scenario: &str, p: &Params, e: anyhow::Error) -> BenchReport {
         rtt: None,
         throughput_mib_s: None,
         attempts: None,
+        metrics: Default::default(),
         notes: vec![format!("SCENARIO FAILED: {e:#}")],
     }
 }
@@ -198,6 +199,9 @@ async fn handshake(p: &Params, path: Path) -> anyhow::Result<BenchReport> {
         {
             samples.push(t0.elapsed().as_nanos() as u64);
             ok += 1;
+            // Fold this connection's handshake counters before closing —
+            // after close the path set is gone.
+            world.client.metrics().sampler(conn.clone()).sample();
             conn.close(0u32.into(), b"bench done");
         }
     }
@@ -208,12 +212,14 @@ async fn handshake(p: &Params, path: Path) -> anyhow::Result<BenchReport> {
             p.iterations as u64 - ok
         ));
     }
+    let metrics = world.metrics_snapshot(None);
     world.close().await;
     Ok(BenchReport {
         meta: meta("handshake", p, world.path_label(), impairment_of(&path)),
         rtt: Percentiles::of(&samples),
         throughput_mib_s: None,
         attempts: Some((ok, p.iterations as u64)),
+        metrics,
         notes,
     })
 }
@@ -244,12 +250,14 @@ async fn ping(
         let rtt = rds_cli::ping(&conn, 1000 + i as u64).await?;
         samples.push(rtt.as_nanos() as u64);
     }
+    let metrics = world.metrics_snapshot(Some(&conn));
     world.close().await;
     Ok(BenchReport {
         meta: meta("ping", p, world.path_label(), impairment),
         rtt: Percentiles::of(&samples),
         throughput_mib_s: None,
         attempts: None,
+        metrics,
         notes: proxy_note(&world),
     })
 }
@@ -282,12 +290,14 @@ async fn transfer(p: &Params) -> anyhow::Result<BenchReport> {
     // side is done sending; add a grace read timeout on recv to bound it.
     let elapsed = t0.elapsed();
     let mib_s = written as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64();
+    let metrics = world.metrics_snapshot(Some(&conn));
     world.close().await;
     Ok(BenchReport {
         meta: meta("transfer", p, world.path_label(), None),
         rtt: None,
         throughput_mib_s: Some(mib_s),
         attempts: None,
+        metrics,
         notes: proxy_note(&world),
     })
 }
@@ -384,6 +394,9 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
 
     let mut samples = Vec::with_capacity(p.iterations);
     let mut ok = 0u64;
+    // Client endpoints are per-iteration; accumulate their registries
+    // so the report keeps total connection/path counters (G7).
+    let mut client_metrics: BTreeMap<String, u64> = BTreeMap::new();
     for _ in 0..p.iterations {
         // A fresh client endpoint keeps both resolve and handshake
         // cold, matching a new `rds ssh` invocation.
@@ -401,12 +414,16 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
             let addr = rds_net::resolve_target(Some(directory.clone()), "bench-agent").await?;
             let conn = rds_cli::connect(&client_ep, addr).await?;
             rds_cli::ping(&conn, 1).await?;
+            client_ep.metrics().sampler(conn.clone()).sample();
             Ok::<_, anyhow::Error>(t0.elapsed())
         })
         .await;
         if let Ok(Ok(d)) = timed {
             samples.push(d.as_nanos() as u64);
             ok += 1;
+        }
+        for (k, v) in client_ep.metrics().snapshot() {
+            *client_metrics.entry(format!("client_{k}")).or_insert(0) += v;
         }
         client_ep.close().await;
     }
@@ -418,11 +435,16 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
             p.iterations as u64 - ok
         ));
     }
+    let mut metrics = client_metrics;
+    for (k, v) in agent.endpoint.metrics().snapshot() {
+        metrics.insert(format!("agent_{k}"), v);
+    }
     Ok(BenchReport {
         meta: meta("resolve-connect", p, "discovered", None),
         rtt: Percentiles::of(&samples),
         throughput_mib_s: None,
         attempts: Some((ok, p.iterations as u64)),
+        metrics,
         notes,
     })
 }

@@ -63,6 +63,11 @@ pub struct BenchReport {
     /// Attempted vs succeeded for scenarios where failure is data
     /// (e.g. multiconnect under loss).
     pub attempts: Option<(u64, u64)>,
+    /// Transport-registry snapshot read by the harness itself (G7):
+    /// `client_*`/`agent_*` prefixed `rds_net_*` counter names — the
+    /// same names `render_prometheus` exports.
+    #[serde(default)]
+    pub metrics: std::collections::BTreeMap<String, u64>,
     /// Free-form facts: proxy stats, errors seen, environment notes.
     pub notes: Vec<String>,
 }
@@ -103,6 +108,14 @@ impl BenchReport {
         }
         if let Some((ok, total)) = self.attempts {
             let _ = writeln!(out, "attempts: {ok}/{total} succeeded\n");
+        }
+        let nonzero: Vec<_> = self.metrics.iter().filter(|(_, v)| **v > 0).collect();
+        if !nonzero.is_empty() {
+            let _ = writeln!(out, "metrics:");
+            for (k, v) in nonzero {
+                let _ = writeln!(out, "- `{k}` = {v}");
+            }
+            let _ = writeln!(out);
         }
         for n in &self.notes {
             let _ = writeln!(out, "- {n}");
@@ -301,6 +314,7 @@ mod tests {
             }),
             throughput_mib_s: None,
             attempts: None,
+            metrics: Default::default(),
             notes: vec![],
         };
         let a = BenchSuite {
@@ -351,6 +365,7 @@ mod tests {
             }),
             throughput_mib_s: None,
             attempts: None,
+            metrics: Default::default(),
             notes: vec![],
         };
         let a = BenchSuite {

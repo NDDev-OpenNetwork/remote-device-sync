@@ -2923,6 +2923,7 @@ dependencies = [
 name = "rds-discovery"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "data-encoding",
  "ed25519-dalek",
  "postcard",

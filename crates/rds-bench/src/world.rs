@@ -63,6 +63,28 @@ impl World {
         self.client.close().await;
         self.agent.endpoint.close().await;
     }
+
+    /// Metrics snapshot for the report (G7): if `conn` is given, its
+    /// cumulative path stats are folded into the client registry first,
+    /// then both registries are read — `client_*`/`agent_*` prefixes.
+    /// The agent samples its own connections once a second, so a short
+    /// scenario still sees its side via this one-shot fold.
+    pub fn metrics_snapshot(
+        &self,
+        conn: Option<&rds_net::Connection>,
+    ) -> std::collections::BTreeMap<String, u64> {
+        let mut out = std::collections::BTreeMap::new();
+        if let Some(conn) = conn {
+            self.client.metrics().sampler(conn.clone()).sample();
+        }
+        for (k, v) in self.client.metrics().snapshot() {
+            out.insert(format!("client_{k}"), v);
+        }
+        for (k, v) in self.agent.endpoint.metrics().snapshot() {
+            out.insert(format!("agent_{k}"), v);
+        }
+        out
+    }
 }
 
 impl Drop for World {

@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- WS7 observability: `rds-net::metrics` — a per-endpoint `Registry`
+  of atomic counters plus a per-connection `ConnSampler` that folds
+  cumulative `path_stats()` deltas into them. The
+  `via="direct"`/`via="relay"` split is exact across path migration:
+  datagrams and bytes sent/lost, congestion events, paths seen,
+  connection totals, and RTT/cwnd/live-paths/active-connections
+  gauges. QNT attempt/success counters are driven by the noq policy
+  driver (iroh does not expose hole-punch attempts; a `direct` path
+  appearing after a relay-only start is the equivalent signal).
+  `Registry::render_prometheus` emits text exposition behind the new
+  `metrics` feature. `PathStats` gains `sent_bytes`/`recv_bytes`.
+  `rds-server`'s `GET /v1/metrics` now reports per-endpoint PUT
+  counters under anonymized 16-hex BLAKE3-prefix labels and answers
+  loopback peers only — raw keys, peer addresses and content are
+  never exposed; remote scraping goes over SSH or a local exporter.
+  The agent wraps every connection in an `rds.conn{peer, session_id}`
+  span with nested `rds.stream{service}` spans and runs a 1s
+  `ConnSampler` per connection; `rds-sync` logs session-boundary
+  events with byte/chunk counts. `rds-bench` reports embed the
+  `client_`/`agent_` registry snapshot collected at run time, so
+  every reported number is backed by the harness's own counters.
 - WS6 content-addressed sync: `rds-sync` gains a real protocol —
   FastCDC chunking, BLAKE3 per-chunk + per-file roots, a bounded
   wire format (`Offer`/`Request`/`Refuse`, `ManifestPart` ≤512

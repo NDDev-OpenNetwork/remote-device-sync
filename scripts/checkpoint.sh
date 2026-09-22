@@ -256,10 +256,46 @@ c6)
 - bounds: manifest ≤512/batch, chunksets ≤4096/batch, Need bitmap
   ≤256K chunks, every wire frame ≤64KB MAX_MESSAGE_LEN"
     ;;
+c7)
+    note "gate c7 — observability"
+    green_bars
+
+    note "metrics: known-traffic counter accuracy (direct + relay split)"
+    cargo test -p rds-net --features metrics --test metrics || fail "rds-net metrics"
+
+    note "directory metrics scrape: anonymized per-endpoint counts"
+    cargo test -p rds-discovery --test directory_e2e metrics || fail "directory metrics e2e"
+
+    note "bench report embeds the metrics snapshot it cites (G7)"
+    cargo run -q -p rds-bench -- run --scenario ping --iterations 10 \
+        --md /tmp/rds-c7-bench.md --json /tmp/rds-c7-bench.json || fail "bench run"
+    grep -q "rds_net_datagrams_sent_total" /tmp/rds-c7-bench.md \
+        || fail "bench report carries no metrics snapshot"
+    grep -q "rds_net_bytes_sent_total" /tmp/rds-c7-bench.md \
+        || fail "bench report missing relay/direct byte split"
+
+    write_checkpoint "c7" "pending review" \
+        "- fmt/clippy/test: PASS (default + transport-noq lanes)
+- metrics known-traffic (3 tests): PASS
+  - direct echo → via=direct counters only; bytes_sent/recv cover payload
+  - relay-only ticket + path pinning → via=relay counters only
+  - prometheus render emits every name the bench reports cite
+- bench report G7: metrics block embedded from endpoint registries
+  (client_/agent_ prefixed snapshot at run time): PASS
+- directory /v1/metrics: per-endpoint PUT counters under anonymized
+  blake3-16 labels; raw key + peer addr absent from body: PASS
+- exposure: /v1/metrics is loopback-only at the router (non-loopback
+  peers get 404) — remote scrape via SSH/local exporter, documented in
+  architecture.md
+- session spans: rds.conn{peer, session_id} ⊃ rds.stream{service}
+  on every agent connection; sync engine logs session events
+- QNT attempt/success counters driven by the noq policy driver;
+  iroh reports paths_seen{via=direct} as the equivalent signal"
+    ;;
 *)
     cat <<EOF
 unknown or unregistered gate: '${GATE}'
-registered gates: c0 c1 c2 c3 c4 c5 c6
+registered gates: c0 c1 c2 c3 c4 c5 c6 c7
 a checkpoint with no registered checks is refused by design.
 EOF
     exit 2

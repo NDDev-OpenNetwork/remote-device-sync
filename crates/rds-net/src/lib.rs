@@ -41,6 +41,7 @@ pub mod backends {
     #[cfg(feature = "transport-noq")]
     pub mod noq;
 }
+pub mod metrics;
 pub mod resolve;
 
 // Shared identity and address types — the same key material works on
@@ -189,7 +190,10 @@ pub async fn bind_noq_with_socket(
 ///
 /// Cloneable handle; dropping the last clone closes the endpoint.
 #[derive(Clone)]
-pub struct Endpoint(EndpointInner);
+pub struct Endpoint {
+    inner: EndpointInner,
+    metrics: metrics::Registry,
+}
 
 #[derive(Clone)]
 enum EndpointInner {
@@ -200,17 +204,32 @@ enum EndpointInner {
 
 impl Endpoint {
     fn new_iroh(inner: iroh::Endpoint) -> Self {
-        Self(EndpointInner::Iroh(inner))
+        Self {
+            inner: EndpointInner::Iroh(inner),
+            metrics: metrics::Registry::default(),
+        }
     }
 
     #[cfg(feature = "transport-noq")]
     fn new_noq(inner: backends::noq::Endpoint) -> Self {
-        Self(EndpointInner::Noq(Box::new(inner)))
+        let metrics = inner.metrics();
+        Self {
+            inner: EndpointInner::Noq(Box::new(inner)),
+            metrics,
+        }
+    }
+
+    /// This endpoint's metrics registry: connection counters, sampled
+    /// per-path datagram/loss/congestion totals split relay-vs-direct,
+    /// QNT attempts (noq backend), and live gauges. Share it with a
+    /// scraper; `render_prometheus` needs the `metrics` feature.
+    pub fn metrics(&self) -> metrics::Registry {
+        self.metrics.clone()
     }
 
     /// This endpoint's public identity.
     pub fn id(&self) -> EndpointId {
-        match &self.0 {
+        match &self.inner {
             EndpointInner::Iroh(ep) => ep.id(),
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.id(),
@@ -220,7 +239,7 @@ impl Endpoint {
     /// The advertised address of this endpoint: identity plus the
     /// transport addresses it knows about (direct IPs, home relay).
     pub fn addr(&self) -> EndpointAddr {
-        match &self.0 {
+        match &self.inner {
             EndpointInner::Iroh(ep) => ep.addr(),
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.addr(),
@@ -232,7 +251,7 @@ impl Endpoint {
     /// The `noq` backend returns immediately — relay transport lands
     /// with `relay_link` (WS2).
     pub async fn online(&self) {
-        match &self.0 {
+        match &self.inner {
             EndpointInner::Iroh(ep) => ep.online().await,
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(_) => {}
@@ -241,7 +260,7 @@ impl Endpoint {
 
     /// Connect to a peer by advertised address on `alpn`.
     pub async fn connect(&self, target: EndpointAddr, alpn: &[u8]) -> anyhow::Result<Connection> {
-        match &self.0 {
+        let conn = match &self.inner {
             EndpointInner::Iroh(ep) => ep
                 .connect(target, alpn)
                 .await
@@ -249,32 +268,40 @@ impl Endpoint {
                 .context("connect to peer"),
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.connect(target, alpn).await.map(Connection::new_noq),
-        }
+        }?;
+        self.metrics.connection_opened();
+        Ok(conn)
     }
 
     /// Accept the next incoming connection attempt.
     pub async fn accept(&self) -> Option<Incoming> {
-        match &self.0 {
+        let metrics = self.metrics.clone();
+        let counted = move |fut: Connection| {
+            metrics.connection_accepted();
+            fut
+        };
+        match &self.inner {
             EndpointInner::Iroh(ep) => ep.accept().await.map(|incoming| {
                 Incoming(Box::pin(async move {
                     incoming
                         .await
                         .map(Connection::new_iroh)
+                        .map(counted)
                         .map_err(anyhow::Error::from)
                 }))
             }),
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.accept().await.map(|incoming| {
-                Incoming(Box::pin(
-                    async move { incoming.await.map(Connection::new_noq) },
-                ))
+                Incoming(Box::pin(async move {
+                    incoming.await.map(Connection::new_noq).map(counted)
+                }))
             }),
         }
     }
 
     /// Close all connections and the endpoint.
     pub async fn close(&self) {
-        match &self.0 {
+        match &self.inner {
             EndpointInner::Iroh(ep) => ep.close().await,
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.close().await,
@@ -395,6 +422,16 @@ impl Connection {
         }
     }
 
+    /// Whether the connection has closed (either side). Samplers use
+    /// this as their stop condition.
+    pub fn is_closed(&self) -> bool {
+        match &self.0 {
+            ConnectionInner::Iroh(c) => c.close_reason().is_some(),
+            #[cfg(feature = "transport-noq")]
+            ConnectionInner::Noq(c) => c.inner().close_reason().is_some(),
+        }
+    }
+
     /// Snapshot of every live path's transport counters, normalized
     /// across backends. Used by media pacing (WS5) and metrics (WS7).
     pub fn path_stats(&self) -> Vec<PathStats> {
@@ -410,6 +447,8 @@ impl Connection {
                         cwnd: s.cwnd,
                         sent: s.udp_tx.datagrams,
                         lost: s.lost_packets,
+                        sent_bytes: s.udp_tx.bytes,
+                        recv_bytes: s.udp_rx.bytes,
                         congestion_events: s.congestion_events,
                         selected: p.is_selected(),
                         via_relay: p.is_relay(),
@@ -432,6 +471,8 @@ impl Connection {
                                 cwnd: s.cwnd,
                                 sent: s.udp_tx.datagrams,
                                 lost: s.lost_packets,
+                                sent_bytes: s.udp_tx.bytes,
+                                recv_bytes: s.udp_rx.bytes,
                                 congestion_events: s.congestion_events,
                                 selected: raw == 0,
                                 via_relay: false,
@@ -476,6 +517,10 @@ pub struct PathStats {
     pub sent: u64,
     /// Datagrams declared lost on this path.
     pub lost: u64,
+    /// UDP payload bytes transmitted on this path.
+    pub sent_bytes: u64,
+    /// UDP payload bytes received on this path.
+    pub recv_bytes: u64,
     /// Congestion events signalled on this path.
     pub congestion_events: u64,
     /// Whether the connection currently transmits on this path.

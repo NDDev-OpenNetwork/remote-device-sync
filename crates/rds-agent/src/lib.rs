@@ -34,7 +34,16 @@ use rds_net::{Connection, Endpoint, EndpointId};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
+
+/// Monotonic session ids for structured tracing — every connection's
+/// `rds.conn` span carries one, so `session_id` filters a whole
+/// session's events (streams, grants, sync, desktop) in the log.
+static SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_session_id() -> u64 {
+    SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Runtime policy for the agent.
 #[derive(Clone)]
@@ -187,10 +196,19 @@ impl Agent {
         while let Some(incoming) = self.endpoint.accept().await {
             let policy = self.policy.clone();
             let desktop = self.desktop;
+            let metrics = self.endpoint.metrics();
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
-                        if let Err(e) = serve_connection(conn, policy, desktop).await {
+                        let span = info_span!(
+                            "rds.conn",
+                            peer = %conn.remote_id(),
+                            session_id = next_session_id(),
+                        );
+                        let res = serve_connection(conn, policy, desktop, metrics)
+                            .instrument(span)
+                            .await;
+                        if let Err(e) = res {
                             debug!("connection ended: {e}");
                         }
                     }
@@ -203,7 +221,19 @@ impl Agent {
 
     /// Serve a single already-established connection.
     pub async fn serve(&self, conn: Connection) -> anyhow::Result<()> {
-        serve_connection(conn, self.policy.clone(), self.desktop).await
+        let span = info_span!(
+            "rds.conn",
+            peer = %conn.remote_id(),
+            session_id = next_session_id(),
+        );
+        serve_connection(
+            conn,
+            self.policy.clone(),
+            self.desktop,
+            self.endpoint.metrics(),
+        )
+        .instrument(span)
+        .await
     }
 }
 
@@ -274,6 +304,7 @@ async fn serve_connection(
     conn: Connection,
     policy: Arc<AgentPolicy>,
     desktop: bool,
+    metrics: rds_net::metrics::Registry,
 ) -> anyhow::Result<()> {
     let peer = conn.remote_id();
     if !policy.allow.contains(&peer) {
@@ -282,6 +313,9 @@ async fn serve_connection(
         anyhow::bail!("peer {peer} not in allowlist");
     }
     info!(%peer, "peer connected");
+    // Fold this connection's per-path transport counters into the
+    // endpoint registry for the connection's lifetime.
+    tokio::spawn(metrics.sampler(conn.clone()).run(Duration::from_secs(1)));
     let authz = Arc::new(ConnAuthz::new(policy.grants_required()));
     loop {
         let (send, recv) = match conn.accept_bi().await {
@@ -295,11 +329,15 @@ async fn serve_connection(
         let policy = policy.clone();
         let conn = conn.clone();
         let authz = authz.clone();
-        tokio::spawn(async move {
-            if let Err(e) = serve_stream(conn, send, recv, policy, authz, desktop).await {
-                debug!("stream ended: {e}");
+        let span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                if let Err(e) = serve_stream(conn, send, recv, policy, authz, desktop).await {
+                    debug!("stream ended: {e}");
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 }
 
@@ -349,143 +387,148 @@ async fn serve_stream(
         write_frame(&mut send, &HelloAck::Error { message: why }).await?;
         anyhow::bail!("stream outside grant scope");
     }
-    match hello {
-        StreamHello::Ping { nonce } => {
-            write_frame(&mut send, &HelloAck::Ok).await?;
-            send.write_all(&nonce.to_be_bytes()).await?;
-            send.finish()?;
-        }
-        StreamHello::Info => {
-            let info = AgentInfo {
-                protocol: PROTOCOL_VERSION,
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                hostname: hostname(),
-                services: {
-                    let mut s = vec![ServiceKind::Ping, ServiceKind::Info, ServiceKind::Tcp];
-                    if desktop {
-                        s.push(ServiceKind::Desktop);
-                    }
-                    if policy.sync_dir.is_some() {
-                        s.push(ServiceKind::Sync);
-                    }
-                    s
-                },
-                desktop: desktop_caps(desktop),
-            };
-            write_frame(&mut send, &HelloAck::Info(info)).await?;
-            send.finish()?;
-        }
-        StreamHello::TcpConnect { host, port } => {
-            if !policy.permits_tcp(&host, port) {
-                write_frame(
-                    &mut send,
-                    &HelloAck::Error {
-                        message: format!("tcp target {host}:{port} not permitted"),
-                    },
-                )
-                .await?;
-                anyhow::bail!("tcp target {host}:{port} rejected");
+    let span = info_span!("rds.stream", service = ?service_kind(&hello));
+    async move {
+        match hello {
+            StreamHello::Ping { nonce } => {
+                write_frame(&mut send, &HelloAck::Ok).await?;
+                send.write_all(&nonce.to_be_bytes()).await?;
+                send.finish()?;
             }
-            match TcpStream::connect((host.as_str(), port)).await {
-                Ok(mut tcp) => {
-                    write_frame(&mut send, &HelloAck::Ok).await?;
-                    let mut quic = tokio::io::join(recv, send);
-                    tokio::io::copy_bidirectional(&mut tcp, &mut quic).await?;
-                }
-                Err(e) => {
+            StreamHello::Info => {
+                let info = AgentInfo {
+                    protocol: PROTOCOL_VERSION,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    hostname: hostname(),
+                    services: {
+                        let mut s = vec![ServiceKind::Ping, ServiceKind::Info, ServiceKind::Tcp];
+                        if desktop {
+                            s.push(ServiceKind::Desktop);
+                        }
+                        if policy.sync_dir.is_some() {
+                            s.push(ServiceKind::Sync);
+                        }
+                        s
+                    },
+                    desktop: desktop_caps(desktop),
+                };
+                write_frame(&mut send, &HelloAck::Info(info)).await?;
+                send.finish()?;
+            }
+            StreamHello::TcpConnect { host, port } => {
+                if !policy.permits_tcp(&host, port) {
                     write_frame(
                         &mut send,
                         &HelloAck::Error {
-                            message: format!("connect {host}:{port} failed: {e}"),
+                            message: format!("tcp target {host}:{port} not permitted"),
                         },
                     )
                     .await?;
+                    anyhow::bail!("tcp target {host}:{port} rejected");
                 }
-            }
-        }
-        StreamHello::Desktop(hello) => {
-            if desktop {
-                #[cfg(feature = "desktop")]
-                match rds_desktop::capabilities() {
-                    Ok(caps) => {
-                        write_frame(&mut send, &HelloAck::Desktop(caps)).await?;
-                        let max_bps = grant.as_ref().and_then(|g| g.max_bps());
-                        rds_desktop::serve_desktop_with(
-                            conn,
-                            send,
-                            recv,
-                            hello,
-                            rds_desktop::SessionConfig {
-                                bitrate_ceiling: max_bps,
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
+                match TcpStream::connect((host.as_str(), port)).await {
+                    Ok(mut tcp) => {
+                        write_frame(&mut send, &HelloAck::Ok).await?;
+                        let mut quic = tokio::io::join(recv, send);
+                        tokio::io::copy_bidirectional(&mut tcp, &mut quic).await?;
                     }
                     Err(e) => {
                         write_frame(
                             &mut send,
                             &HelloAck::Error {
-                                message: format!("desktop unavailable: {e}"),
+                                message: format!("connect {host}:{port} failed: {e}"),
                             },
                         )
                         .await?;
                     }
                 }
-                #[cfg(not(feature = "desktop"))]
-                unreachable!()
-            } else {
-                let _ = hello;
-                write_frame(
-                    &mut send,
-                    &HelloAck::Error {
-                        message: "agent built without desktop support".into(),
-                    },
-                )
-                .await?;
             }
-        }
-        StreamHello::Sync => {
-            let Some(dir) = policy.sync_dir.clone() else {
-                write_frame(
-                    &mut send,
-                    &HelloAck::Error {
-                        message: "sync service not configured".into(),
-                    },
-                )
-                .await?;
-                anyhow::bail!("sync service not configured");
-            };
-            if !authz.try_sync_slot() {
-                write_frame(
-                    &mut send,
-                    &HelloAck::Error {
-                        message: "sync session already active on this connection".into(),
-                    },
-                )
-                .await?;
-                anyhow::bail!("concurrent sync session refused");
+            StreamHello::Desktop(hello) => {
+                if desktop {
+                    #[cfg(feature = "desktop")]
+                    match rds_desktop::capabilities() {
+                        Ok(caps) => {
+                            write_frame(&mut send, &HelloAck::Desktop(caps)).await?;
+                            let max_bps = grant.as_ref().and_then(|g| g.max_bps());
+                            rds_desktop::serve_desktop_with(
+                                conn,
+                                send,
+                                recv,
+                                hello,
+                                rds_desktop::SessionConfig {
+                                    bitrate_ceiling: max_bps,
+                                    ..Default::default()
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            write_frame(
+                                &mut send,
+                                &HelloAck::Error {
+                                    message: format!("desktop unavailable: {e}"),
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                    #[cfg(not(feature = "desktop"))]
+                    unreachable!()
+                } else {
+                    let _ = hello;
+                    write_frame(
+                        &mut send,
+                        &HelloAck::Error {
+                            message: "agent built without desktop support".into(),
+                        },
+                    )
+                    .await?;
+                }
             }
-            write_frame(&mut send, &HelloAck::Ok).await?;
-            let res = rds_sync::engine::serve(conn, send, recv, dir).await;
-            authz.release_sync_slot();
-            res?;
+            StreamHello::Sync => {
+                let Some(dir) = policy.sync_dir.clone() else {
+                    write_frame(
+                        &mut send,
+                        &HelloAck::Error {
+                            message: "sync service not configured".into(),
+                        },
+                    )
+                    .await?;
+                    anyhow::bail!("sync service not configured");
+                };
+                if !authz.try_sync_slot() {
+                    write_frame(
+                        &mut send,
+                        &HelloAck::Error {
+                            message: "sync session already active on this connection".into(),
+                        },
+                    )
+                    .await?;
+                    anyhow::bail!("concurrent sync session refused");
+                }
+                write_frame(&mut send, &HelloAck::Ok).await?;
+                let res = rds_sync::engine::serve(conn, send, recv, dir).await;
+                authz.release_sync_slot();
+                res?;
+            }
+            StreamHello::Audio(_) => {
+                // Wire shape landed in protocol v2; capture/codec support
+                // is v0.3 scope. Refuse politely rather than hang.
+                write_frame(
+                    &mut send,
+                    &HelloAck::Error {
+                        message: "audio service not implemented".into(),
+                    },
+                )
+                .await?;
+                anyhow::bail!("audio service not implemented");
+            }
+            StreamHello::Authz(_) => unreachable!("Authz handled above"),
         }
-        StreamHello::Audio(_) => {
-            // Wire shape landed in protocol v2; capture/codec support
-            // is v0.3 scope. Refuse politely rather than hang.
-            write_frame(
-                &mut send,
-                &HelloAck::Error {
-                    message: "audio service not implemented".into(),
-                },
-            )
-            .await?;
-            anyhow::bail!("audio service not implemented");
-        }
-        StreamHello::Authz(_) => unreachable!("Authz handled above"),
+        Ok(())
     }
-    Ok(())
+    .instrument(span)
+    .await
 }
 
 /// Verify an `Authz` stream's grant and bind it to this connection.
@@ -619,27 +662,34 @@ async fn watch_grant(
     }
 }
 
+/// The service a `StreamHello` selects; `None` for `Authz`, which is
+/// not a service stream.
+fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
+    Some(match hello {
+        StreamHello::Ping { .. } => ServiceKind::Ping,
+        StreamHello::Info => ServiceKind::Info,
+        StreamHello::TcpConnect { .. } => ServiceKind::Tcp,
+        StreamHello::Desktop(_) => ServiceKind::Desktop,
+        StreamHello::Sync => ServiceKind::Sync,
+        StreamHello::Audio(_) => ServiceKind::Audio,
+        StreamHello::Authz(_) => return None,
+    })
+}
+
 /// Whether `hello`'s service is inside `grant`'s scope — service kind
 /// plus the constraint that applies to that service.
 fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String> {
-    let kind = match hello {
-        StreamHello::Ping { .. } => ServiceKind::Ping,
-        StreamHello::Info => ServiceKind::Info,
-        StreamHello::TcpConnect { port, .. } => {
-            if !grant.permits_port(*port) {
-                return Err(format!("port {port} outside grant constraints"));
-            }
-            ServiceKind::Tcp
+    match hello {
+        StreamHello::TcpConnect { port, .. } if !grant.permits_port(*port) => {
+            return Err(format!("port {port} outside grant constraints"));
         }
-        StreamHello::Desktop(h) => {
-            if !grant.permits_display(h.display) {
-                return Err(format!("display {} outside grant constraints", h.display));
-            }
-            ServiceKind::Desktop
+        StreamHello::Desktop(h) if !grant.permits_display(h.display) => {
+            return Err(format!("display {} outside grant constraints", h.display));
         }
-        StreamHello::Sync => ServiceKind::Sync,
-        StreamHello::Audio(_) => ServiceKind::Audio,
-        StreamHello::Authz(_) => return Err("authz is not a service".into()),
+        _ => {}
+    }
+    let Some(kind) = service_kind(hello) else {
+        return Err("authz is not a service".into());
     };
     if !grant.permits(kind) {
         return Err(format!("service {kind:?} not granted"));

@@ -11,7 +11,7 @@
 //! GET    /v1/revocations        estate-signed grant denylist snapshot
 //! PUT    /v1/revocations        replace the denylist snapshot
 //! GET    /v1/health             liveness
-//! GET    /v1/metrics            prometheus text counters
+//! GET    /v1/metrics            prometheus text counters (loopback only)
 //! ```
 //!
 //! Security posture: every write is signature-verified before it
@@ -87,7 +87,26 @@ struct Metrics {
     revocations_puts: AtomicU64,
     requests_bad: AtomicU64,
     writes_rate_limited: AtomicU64,
+    /// Per-writer PUT counts keyed by an anonymized id —
+    /// `blake3(endpoint_key)[..8]` hex — so the scrape shows
+    /// per-endpoint accounting without disclosing public keys.
+    /// Bounded; writers past the cap fold into `other`.
+    endpoint_puts: Mutex<HashMap<String, u64>>,
 }
+
+/// Anonymized per-endpoint label: a truncated BLAKE3 of the public
+/// key. Stable per endpoint, useless for recovering the key.
+fn writer_label(key: &EndpointKey) -> String {
+    hex16(&blake3::hash(&key.0).as_bytes()[..8])
+}
+
+fn hex16(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Cap on distinct writer labels before accounting folds into `other`
+/// — the scrape stays bounded under a writer flood.
+const MAX_WRITER_LABELS: usize = 4096;
 
 /// Per-key PUT pacing + a global per-minute window over verifying writes.
 struct RateLimiter {
@@ -189,7 +208,7 @@ pub async fn serve(
         let state = state.clone();
         async move {
             loop {
-                let Ok((mut sock, _peer)) = listener.accept().await else {
+                let Ok((mut sock, peer)) = listener.accept().await else {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
@@ -198,7 +217,7 @@ pub async fn serve(
                     let _ = tokio::time::timeout(state.limits.conn_timeout, async {
                         match http::read_request(&mut sock).await {
                             Ok(Some(req)) => {
-                                let resp = route(&state, &req);
+                                let resp = route(&state, peer, &req);
                                 let _ = http::write_response(&mut sock, &resp).await;
                             }
                             Ok(None) => {}
@@ -226,7 +245,7 @@ pub async fn serve(
     Ok(Directory { addr: local, task })
 }
 
-fn route(state: &State, req: &Request) -> Response {
+fn route(state: &State, peer: SocketAddr, req: &Request) -> Response {
     let segments: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
     match (req.method.as_str(), segments.as_slice()) {
         ("PUT", ["v1", "records"]) => put_record(state, req),
@@ -237,7 +256,10 @@ fn route(state: &State, req: &Request) -> Response {
         ("GET", ["v1", "revocations"]) => get_revocations(state),
         ("PUT", ["v1", "revocations"]) => put_revocations(state, req),
         ("GET", ["v1", "health"]) => Response::json(200, serde_json::json!({ "ok": true })),
-        ("GET", ["v1", "metrics"]) => metrics(state),
+        // Per-endpoint counters reveal writer activity, so scrapes are
+        // loopback-only; remote monitoring goes over SSH or a local
+        // exporter rather than a public port.
+        ("GET", ["v1", "metrics"]) if peer.ip().is_loopback() => metrics(state),
         (_, ["v1", ..]) => Response::text(404, "unknown route"),
         _ => Response::text(404, "unknown route"),
     }
@@ -279,6 +301,13 @@ fn put_record(state: &State, req: &Request) -> Response {
     match state.store.put(&record) {
         Ok(()) => {
             state.metrics.puts_ok.fetch_add(1, Ordering::Relaxed);
+            let mut per = state.metrics.endpoint_puts.lock().unwrap();
+            let label = if per.len() >= MAX_WRITER_LABELS {
+                "other".to_string()
+            } else {
+                writer_label(&payload.key)
+            };
+            *per.entry(label).or_insert(0) += 1;
             Response::json(200, serde_json::json!({ "stored": true }))
         }
         Err(e) => {
@@ -412,7 +441,7 @@ fn put_revocations(state: &State, req: &Request) -> Response {
 
 fn metrics(state: &State) -> Response {
     let m = &state.metrics;
-    let body = format!(
+    let mut body = format!(
         "rds_directory_records {}\n\
          rds_directory_puts_ok {}\n\
          rds_directory_puts_rejected {}\n\
@@ -434,6 +463,15 @@ fn metrics(state: &State) -> Response {
         m.requests_bad.load(Ordering::Relaxed),
         m.writes_rate_limited.load(Ordering::Relaxed),
     );
+    // Per-endpoint accounting: PUT counts by anonymized writer label
+    // (blake3(key)[..8] — never the key itself; C7 security).
+    let per = m.endpoint_puts.lock().unwrap();
+    body.push_str(&format!("rds_directory_writers_distinct {}\n", per.len()));
+    for (writer, count) in per.iter() {
+        body.push_str(&format!(
+            "rds_directory_endpoint_puts_total{{writer=\"{writer}\"}} {count}\n"
+        ));
+    }
     Response::text(200, body)
 }
 

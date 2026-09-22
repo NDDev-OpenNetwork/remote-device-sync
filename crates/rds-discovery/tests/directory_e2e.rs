@@ -59,6 +59,43 @@ async fn publish_fetch_roundtrip() {
     client.health().await.unwrap();
 }
 
+/// C7: `/v1/metrics` carries per-endpoint accounting under anonymized
+/// writer labels — never the public key itself.
+#[tokio::test]
+async fn metrics_scrape_has_anonymized_per_endpoint_counts() {
+    let (dir, client) = serve().await;
+    let k = key(11);
+    let rec = record(&k, now_unix().unwrap(), 300);
+    client.publish(&rec).await.unwrap();
+
+    // Raw HTTP GET — Client has no metrics helper.
+    let mut sock = TcpStream::connect(dir.addr()).await.unwrap();
+    sock.write_all(b"GET /v1/metrics HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    let mut body = String::new();
+    sock.read_to_string(&mut body).await.unwrap();
+
+    assert!(body.contains("rds_directory_puts_ok 1"), "{body}");
+    assert!(body.contains("rds_directory_writers_distinct 1"), "{body}");
+    let line = body
+        .lines()
+        .find(|l| l.starts_with("rds_directory_endpoint_puts_total"))
+        .expect("per-endpoint counter missing");
+    // Label is the 16-hex-char blake3 prefix — and the raw verifying
+    // key (base32 or hex) must appear nowhere in the scrape.
+    let label = line.split('"').nth(1).unwrap();
+    assert_eq!(label.len(), 16, "writer label: {label}");
+    let raw_hex: String = k
+        .verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(!body.contains(&raw_hex), "raw endpoint key in scrape");
+    assert!(!body.contains("10.0.0.1"), "peer address in scrape");
+}
+
 #[tokio::test]
 async fn stale_replay_and_forgery_rejected() {
     let (_dir, client) = serve().await;

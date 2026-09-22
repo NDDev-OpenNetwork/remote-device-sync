@@ -601,6 +601,8 @@ mod tests {
             cwnd: 64 * 1024,
             sent,
             lost,
+            sent_bytes: sent * 1200,
+            recv_bytes: 0,
             congestion_events: congestion,
             selected: true,
             via_relay: false,

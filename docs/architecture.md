@@ -213,6 +213,35 @@ connection's `accept_uni` queue).
   loss: queues stay near-empty and the residual tail is retransmit
   physics, not queueing.
 
+### Observability
+
+`rds-net::metrics` gives every endpoint a [`Registry`] of atomic
+counters; a per-connection `ConnSampler` diffs cumulative
+`path_stats()` into it, so the `via="direct"`/`via="relay"` split stays
+exact across path migration. Counters: connections opened/accepted,
+datagrams and bytes sent/lost per path kind, congestion events, paths
+seen, QNT attempts/success (driven by the noq policy driver — iroh
+does not expose its hole-punch attempts, where
+`paths_seen{via="direct"}` appearing after a relay-only start is the
+equivalent signal). Gauges: active connections, selected-path RTT,
+cwnd, live paths. `Registry::render_prometheus` emits text exposition
+behind the `metrics` feature — no prometheus dependency.
+
+`rds-server` serves `GET /v1/metrics` on the directory listener with
+per-endpoint PUT counters labelled by a 16-hex BLAKE3 prefix of the
+writer key — raw keys, peer addresses and content never appear. The
+route answers loopback peers only (everyone else gets 404): remote
+scraping goes over SSH or a local exporter.
+
+Session logging is structured `tracing`: every agent connection runs
+inside an `rds.conn` span carrying `peer` and a monotonic
+`session_id`; each service stream nests an `rds.stream{service}` span
+under it, and the sync engine logs accept/complete events with byte
+and chunk counts, so `session_id` filters a whole session across
+services. Bench reports embed the endpoint registry snapshot they ran
+against (`metrics:` block, `client_`/`agent_` prefixed) — every number
+in `docs/reports/` comes from the harness reading these counters.
+
 ## Milestones
 
 1. **v0.1 (this)**: workspace, rendezvous/relay, auth allowlist, `ping`,
