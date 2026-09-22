@@ -18,6 +18,29 @@ struct Cli {
     /// Restrict relay use to these endpoint ids. Empty = open relay.
     #[arg(long = "allow")]
     allow: Vec<String>,
+    /// PEM certificate chain enabling HTTPS relaying. Requires --tls-key.
+    /// Unprivileged services cannot bind :443 — use --tls-https-addr ≥1024.
+    #[arg(long, requires = "tls_key")]
+    tls_cert: Option<std::path::PathBuf>,
+    /// PEM private key for --tls-cert.
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<std::path::PathBuf>,
+    /// HTTPS bind address when TLS is enabled. ACME validation needs :443.
+    #[arg(long, default_value = "0.0.0.0:3443")]
+    tls_https_addr: SocketAddr,
+    /// Let's Encrypt domain via in-process ACME (TLS-ALPN-01, needs :443
+    /// reachable). Repeatable. Mutually exclusive with --tls-cert.
+    #[arg(long, conflicts_with = "tls_cert")]
+    tls_acme_domain: Vec<String>,
+    /// ACME contact (repeatable); emails need a `mailto:` prefix.
+    #[arg(long, requires = "tls_acme_domain")]
+    tls_acme_contact: Vec<String>,
+    /// Directory caching issued ACME certificates across restarts.
+    #[arg(long, requires = "tls_acme_domain")]
+    tls_acme_cache: Option<std::path::PathBuf>,
+    /// Use the Let's Encrypt staging directory (untrusted certs; testing).
+    #[arg(long)]
+    tls_acme_staging: bool,
 }
 
 #[tokio::main]
@@ -34,11 +57,23 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.parse())
         .collect::<Result<_, _>>()?;
 
-    let server = rds_relay::serve(cli.addr, allow).await?;
+    let tls = rds_relay::tls_from_flags(
+        cli.tls_https_addr,
+        cli.tls_cert,
+        cli.tls_key,
+        cli.tls_acme_domain,
+        cli.tls_acme_contact,
+        cli.tls_acme_cache,
+        cli.tls_acme_staging,
+    )?;
+    let server = rds_relay::serve(cli.addr, allow, tls).await?;
     println!(
         "relay listening on http://{}",
         server.http_addr().expect("relay config enabled")
     );
+    if let Some(addr) = server.https_addr() {
+        println!("relay tls url: https://{addr}");
+    }
     shutdown_signal().await;
     // Graceful stop: close listener + client websockets instead of
     // letting attached endpoints hit a silent RST.

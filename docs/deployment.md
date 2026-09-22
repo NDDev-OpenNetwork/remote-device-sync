@@ -68,12 +68,30 @@ endpoint's discovered addresses).
 (WebSocket over HTTP) on 3340 in plaintext: relayed payloads are
 end-to-end-encrypted QUIC the relay cannot read, and relay admission is
 keyed by `EndpointId` signature challenge, so a network MITM can only
-disrupt, not decrypt. For defence-in-depth on a public IP, terminate TLS
-in front of 3340 with any TCP-level TLS terminator (nginx `stream`,
-haproxy) and give endpoints `--relay https://<host>:<tls-port>`; the
-relay protocol rides WebSocket inside TLS unchanged. The embedded
-iroh-relay also supports ACME natively — wiring `TlsConfig` through
-`rds_relay::serve` is future work, not required for launch.
+disrupt, not decrypt. For defence-in-depth on a public IP the relay
+supports native TLS in two modes:
+
+```bash
+# manual PEM (certbot, internal CA, any provider)
+rds-server --tls-cert /etc/rds/cert.pem --tls-key /etc/rds/key.pem
+
+# or in-process Let's Encrypt (TLS-ALPN-01 — requires port 443
+# reachable from the internet, so a privileged bind or a redirect)
+rds-server --tls-acme-domain relay.example.com \
+           --tls-acme-contact mailto:ops@example.com \
+           --tls-acme-cache /var/lib/rds/acme
+```
+
+HTTPS binds `--tls-https-addr` (default `0.0.0.0:3443`; the
+unprivileged unit cannot bind 443 — for 443 add
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` to the unit). The plaintext
+HTTP port keeps serving only the captive-portal probe. Endpoints then
+dial `--relay https://<host>:<port>`; the relay protocol rides WebSocket
+inside TLS unchanged. A TCP-level TLS terminator (nginx `stream`,
+haproxy) in front of 3340 remains a valid alternative.
+
+The relay serves `GET /healthz` → `200` on its HTTP(S) listener for
+load-balancer and monitoring probes.
 
 **No tunnel/VPN dependency.** The design assumes only *outbound*
 connectivity from endpoints: tcp/3340 (relay) + tcp/3341 (directory) +

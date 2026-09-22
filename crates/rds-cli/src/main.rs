@@ -106,6 +106,16 @@ async fn main() -> anyhow::Result<()> {
             .map(|p| load_or_create_key(&p))
             .transpose()?,
     };
+    // `id` is a pure function of the key: no socket, no relay contact.
+    // (An unresolvable key previously fell back to an ephemeral identity,
+    // printing a different id on every run.)
+    if let Command::Id = cli.command {
+        let key = key.ok_or_else(|| {
+            anyhow::anyhow!("no endpoint key: pass --key-file or set HOME/XDG_CONFIG_HOME")
+        })?;
+        println!("{}", key.public());
+        return Ok(());
+    }
     let backend = match cli.backend.as_str() {
         "iroh" => rds_net::Backend::Iroh,
         #[cfg(feature = "transport-noq")]
@@ -130,9 +140,16 @@ async fn main() -> anyhow::Result<()> {
         })
         .transpose()?;
     match cli.command {
-        Command::Id => println!("{}", endpoint.id()),
+        Command::Id => unreachable!("handled before endpoint bind"),
         Command::Ticket => {
-            endpoint.online().await;
+            // Bound the wait: an unreachable relay must not hang the
+            // command; the ticket still carries any resolved addresses.
+            if tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online())
+                .await
+                .is_err()
+            {
+                eprintln!("warning: relay unreachable after 15s; ticket may lack a relay address");
+            }
             println!("{}", Ticket::of(&endpoint));
         }
         Command::Ping { target, count } => {

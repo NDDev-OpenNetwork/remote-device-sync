@@ -46,6 +46,29 @@ struct Cli {
     /// JSON file with the initial estate-signed registry snapshot.
     #[arg(long)]
     registry: Option<PathBuf>,
+    /// PEM certificate chain enabling HTTPS relaying. Requires --tls-key.
+    /// Unprivileged services cannot bind :443 — use --tls-https-addr ≥1024.
+    #[arg(long, requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+    /// PEM private key for --tls-cert.
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+    /// HTTPS bind address when relay TLS is enabled. ACME needs :443.
+    #[arg(long, default_value = "0.0.0.0:3443")]
+    tls_https_addr: SocketAddr,
+    /// Let's Encrypt domain via in-process ACME (TLS-ALPN-01, needs :443
+    /// reachable). Repeatable. Mutually exclusive with --tls-cert.
+    #[arg(long, conflicts_with = "tls_cert")]
+    tls_acme_domain: Vec<String>,
+    /// ACME contact (repeatable); emails need a `mailto:` prefix.
+    #[arg(long, requires = "tls_acme_domain")]
+    tls_acme_contact: Vec<String>,
+    /// Directory caching issued ACME certificates across restarts.
+    #[arg(long, requires = "tls_acme_domain")]
+    tls_acme_cache: Option<PathBuf>,
+    /// Use the Let's Encrypt staging directory (untrusted certs; testing).
+    #[arg(long)]
+    tls_acme_staging: bool,
 }
 
 #[tokio::main]
@@ -103,8 +126,20 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .map(|s| s.parse())
         .collect::<Result<_, _>>()?;
-    let relay = rds_relay::serve(cli.relay_addr, allow).await?;
+    let tls = rds_relay::tls_from_flags(
+        cli.tls_https_addr,
+        cli.tls_cert,
+        cli.tls_key,
+        cli.tls_acme_domain,
+        cli.tls_acme_contact,
+        cli.tls_acme_cache,
+        cli.tls_acme_staging,
+    )?;
+    let relay = rds_relay::serve(cli.relay_addr, allow, tls).await?;
     info!(addr = %relay.http_addr().expect("relay config enabled"), "relay listening");
+    if let Some(addr) = relay.https_addr() {
+        info!(%addr, "relay tls listening");
+    }
 
     shutdown_signal().await;
     // Graceful stop: close listener + client websockets instead of

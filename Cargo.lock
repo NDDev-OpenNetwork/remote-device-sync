@@ -2964,6 +2964,8 @@ dependencies = [
  "postcard",
  "rds-core",
  "rds-net",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
  "tracing",
  "tracing-subscriber",
