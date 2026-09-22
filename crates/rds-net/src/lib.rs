@@ -386,41 +386,74 @@ impl UniStreams {
     }
 }
 
-/// The demux body: accept, read the tag, route. Runs until the
-/// connection dies; a route whose consumer dropped is removed so a
+/// How long an inbound uni stream may sit before writing its `UniHello`
+/// tag. A peer that opens streams and never tags them would otherwise
+/// park a demux task per stream until the connection dies.
+const UNI_TAG_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The demux body: accept, then hand each stream its own tag-read task
+/// so a peer that stalls before writing the `UniHello` cannot block
+/// routing of the streams queued behind it (head-of-line). Runs until
+/// the connection dies; a route whose consumer dropped is removed so a
 /// later `uni_streams` can reclaim the kind. On exit every registered
 /// sender is dropped so parked [`UniStreams::recv`] callers observe
 /// `None` — a dead connection ends its inboxes, it does not leave them
 /// waiting forever.
 async fn uni_demux(conn: Connection, demux: std::sync::Arc<UniDemux>) {
     loop {
-        let mut stream = match conn.accept_uni().await {
+        let stream = match conn.accept_uni().await {
             Ok(s) => s,
             Err(_) => break,
         };
-        let kind = match rds_core::read_frame::<_, rds_core::UniHello>(&mut stream).await {
-            Ok(k) => k,
-            Err(e) => {
-                tracing::debug!("uni stream dropped, unreadable tag: {e}");
-                continue;
-            }
-        };
-        let tx = demux.state.lock().unwrap().routes.get(&kind).cloned();
-        match tx {
-            Some(tx) => {
-                // Backpressure, not loss: a full queue parks the demux
-                // until the consumer drains it (sync transfers must
-                // never silently lose a chunk stream).
-                if tx.send(stream).await.is_err() {
-                    demux.state.lock().unwrap().routes.remove(&kind);
-                }
-            }
-            None => tracing::debug!("uni {kind:?} stream dropped: no consumer"),
-        }
+        let demux = std::sync::Arc::clone(&demux);
+        tokio::spawn(async move {
+            route_uni(stream, &demux).await;
+        });
     }
     let mut st = demux.state.lock().unwrap();
     st.task = None;
     st.routes.clear();
+}
+
+/// Read one stream's tag and hand it to the claimed inbox. Stream order
+/// within a kind is not the accept order under parallel tag reads;
+/// consumers order by their own wire sequencing (frame `seq`, chunk
+/// index).
+async fn route_uni(mut stream: RecvStream, demux: &UniDemux) {
+    let kind = match tokio::time::timeout(
+        UNI_TAG_TIMEOUT,
+        rds_core::read_frame::<_, rds_core::UniHello>(&mut stream),
+    )
+    .await
+    {
+        Ok(Ok(k)) => k,
+        Ok(Err(e)) => {
+            tracing::debug!("uni stream dropped, unreadable tag: {e}");
+            return;
+        }
+        Err(_) => {
+            tracing::debug!("uni stream dropped: tag timeout");
+            return;
+        }
+    };
+    let tx = demux.state.lock().unwrap().routes.get(&kind).cloned();
+    match tx {
+        Some(tx) => {
+            // Backpressure, not loss: a full queue parks the router task
+            // until the consumer drains it (sync transfers must never
+            // silently lose a chunk stream). Other streams keep routing.
+            if tx.send(stream).await.is_err() {
+                // Only remove the route if the map still holds *this*
+                // channel — a re-claimed kind must not be clobbered by
+                // a stale sender's failure.
+                let mut st = demux.state.lock().unwrap();
+                if st.routes.get(&kind).is_some_and(|t| t.same_channel(&tx)) {
+                    st.routes.remove(&kind);
+                }
+            }
+        }
+        None => tracing::debug!("uni {kind:?} stream dropped: no consumer"),
+    }
 }
 
 impl Connection {

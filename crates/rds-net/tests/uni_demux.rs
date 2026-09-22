@@ -70,3 +70,52 @@ async fn uni_streams_on_dead_connection_end() {
         Err(_) => panic!("uni.recv() hung on dead connection"),
     }
 }
+
+/// A peer that opens a uni stream and never writes the `UniHello` tag
+/// must not stall routing of the streams behind it — each accepted
+/// stream gets its own tag-read task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_tag_does_not_block_routing() {
+    let cfg = || EndpointConfig::default().without_discovery();
+    let server = bind_endpoint(cfg()).await.unwrap();
+    let client = bind_endpoint(cfg()).await.unwrap();
+
+    let server_ep = server.clone();
+    let accept = tokio::spawn(async move { server_ep.accept().await.unwrap().await.unwrap() });
+
+    let mut addrs = BTreeSet::new();
+    for a in server.addr().addrs {
+        if let TransportAddr::Ip(sa) = a {
+            addrs.insert(TransportAddr::Ip(sa));
+        }
+    }
+    let conn = client
+        .connect(
+            EndpointAddr {
+                id: server.id(),
+                addrs,
+            },
+            rds_core::ALPN,
+        )
+        .await
+        .unwrap();
+    let server_conn = accept.await.unwrap();
+
+    let mut uni = conn.uni_streams(rds_core::UniHello::Desktop).unwrap();
+
+    // Stream one: opened, held open, tag never written.
+    let _stalled = server_conn.open_uni().await.unwrap();
+
+    // Stream two: tagged properly — must route despite the stalled
+    // predecessor sitting at the head of the accept queue.
+    let mut tagged = server_conn.open_uni().await.unwrap();
+    rds_core::write_frame(&mut tagged, &rds_core::UniHello::Desktop)
+        .await
+        .unwrap();
+
+    match tokio::time::timeout(Duration::from_secs(5), uni.recv()).await {
+        Ok(Some(_)) => {}
+        Ok(None) => panic!("inbox ended while connection is alive"),
+        Err(_) => panic!("tagged stream stuck behind a stalled tag"),
+    }
+}
