@@ -37,6 +37,11 @@ LimitNOFILE=65536
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
+# NOTE on desktop capture: PrivateTmp gives the unit its own /tmp, which
+# hides /tmp/.X11-unix — X11 capture/input then can't reach the display.
+# For desktop serving run the agent as the session user (see
+# docs/deployment.md), or drop PrivateTmp on dedicated X11 rigs. Abstract
+# X11 sockets are unaffected; tcp/6000 is not used by XTEST paths.
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

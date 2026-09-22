@@ -171,6 +171,12 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 | `Desktop` | bi + uni | hello/capabilities; input events client→server; one uni stream per video frame server→client |
 | `Sync` | bi + uni | offer/request → manifest parts → `Need` bitmap → chunk pull on 4 dedicated uni streams → `Done` |
 
+Every uni stream leads with a `UniHello` tag frame (protocol v3). The
+accepting side runs one per-connection demux (`Connection::uni_streams`)
+that routes each stream to the consumer registered for its tag — a
+desktop session and a sync pull can share a connection without either
+stealing the other's streams off `accept_uni`.
+
 Desktop media: capture → BGRA→I420 → H.264 (OpenH264 baseline, no B-frames;
 hw encoders behind a trait) → per-frame uni stream with a `FrameHeader`
 `{seq, keyframe, capture_ts_ms, send_ts_ms}`. Freshness is enforced
@@ -199,9 +205,11 @@ indices (≤4096/batch) then chunk payloads across 4 dedicated uni
 streams; `SetDone`/`Done` close the session. Assembly concatenates
 verified parts, checks the BLAKE3 root, and renames atomically — a
 torn or corrupt part is refetched, a killed transfer resumes from the
-journal, and `rel_path` is validated against traversal, absolute and
-NUL paths. One sync session per connection (chunk streams share the
-connection's `accept_uni` queue).
+journal, and `rel_path` is validated twice: lexically (traversal,
+absolute, NUL, the `.rds-sync` journal namespace) and by resolution —
+the canonicalized destination must stay inside the canonicalized sync
+root, so a symlinked component can't redirect reads, journal state or
+assembly outside it. One sync session per connection.
 
 ### Stability measures
 

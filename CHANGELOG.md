@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- Protocol v3 + review hardening: every uni-directional stream now
+  opens with a `UniHello` tag (`Desktop`/`Sync`/`Audio`), and the
+  accepting side routes it through a single per-connection demux
+  (`Connection::uni_streams`) — desktop and sync can share a
+  connection without racing `accept_uni`. `PROTOCOL_VERSION` is 3;
+  v2 peers won't interop on uni streams.
+- Security fixes: sync confinement is now resolved, not just lexical —
+  `resolve_under` canonicalizes the deepest existing ancestor of every
+  destination and requires it to stay under the canonical sync root,
+  so symlinked components can't redirect pulls, the `.rds-sync`
+  journal, or assembly outside the root; assembly's temp file is a
+  suffixed `*.rds-part` created exclusively after unlinking any stale
+  one, and `.rds-sync` as a first path component is refused outright.
+  `ChunkHdr.len` is checked against the manifest before it sizes the
+  receive buffer (a forged u32 no longer forces a huge allocation).
+  X11 scroll injection clamps deltas to 32 clicks per event. Input
+  events naming a display other than the session's are dropped
+  un-acked. The directory's `/v1/revocations` PUT now verifies and
+  stores under one write lock (no check-then-store regression window).
+- Correctness fix: `mailbox::Sender` notifies on drop — a consumer
+  parked in `recv` now observes the last sender leaving instead of
+  sleeping forever (regression test
+  `parked_recv_wakes_when_last_sender_drops`).
 - WS8 deployment: `deploy/systemd/rds-server.service` and
   `rds-agent.service` — hardened units (ProtectSystem=strict,
   NoNewPrivileges, PrivateTmp/Devices, ProtectKernel*/ControlGroups,
@@ -50,8 +73,8 @@
   atomic rename after root verification. `rel_path` rejects
   traversal, absolute paths, NUL and oversize. `rds send`/`rds recv`
   push/pull through `rds_cli::open_sync`; the agent serves `Sync`
-  under `--sync-dir` with a one-session-per-connection guard (chunk
-  streams share the `accept_uni` queue) and advertises `Sync` in
+  under `--sync-dir` with a one-session-per-connection guard and
+  advertises `Sync` in
   `Info` only when configured. E2E: byte-identical push/pull,
   zero-chunk resend, corrupt-part refetch, torn-journal and
   mid-transfer kill resume, repeated kill/resume convergence,
