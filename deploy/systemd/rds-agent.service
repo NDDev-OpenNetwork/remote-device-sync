@@ -1,6 +1,6 @@
 [Unit]
 Description=rds-agent: remote-device-sync service host (ssh/tcp forward, desktop, sync)
-Documentation=https://github.com/rldyourmnd/remote-device-sync
+Documentation=https://github.com/NDDev-OpenNetwork/remote-device-sync
 After=network-online.target
 Wants=network-online.target
 
