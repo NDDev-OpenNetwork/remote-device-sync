@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Desktop capture/encode throughput:
+  - X11 capture uses MIT-SHM (`CreateSegment` fd-passing, server ≥1.2)
+    when available — the pixmap lands in a shared segment instead of an
+    ~8 MiB serialized `GetImage` reply per 1080p frame; plain `GetImage`
+    remains the fallback for remote/older servers.
+  - The encoder recycles its I420 input buffer across frames (~3 MiB
+    per frame at 1080p — ~190 MB/s of alloc churn at 60 fps removed).
+  - Decode output goes I420→RGBA in one SIMD pass (`write_rgba8`,
+    AVX2 on x86-64) plus an in-place R↔B swap — replacing an RGB8
+    scratch buffer plus a scalar expand.
 - Desktop encode path:
   - OpenH264 now runs `ScreenContentRealTime` — the correct usage type
     for desktop content (text/sharp edges, not camera footage); adaptive
