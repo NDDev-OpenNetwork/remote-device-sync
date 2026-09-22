@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ChunkHash, Manifest, SyncError, proto::check_manifest};
+use crate::{
+    ChunkHash, Manifest, SyncError,
+    proto::{check_manifest, resolve_under},
+};
 
 /// Directory name (under the sync root) holding in-flight state.
 pub const STATE_DIR: &str = ".rds-sync";
@@ -43,7 +46,10 @@ impl Journal {
     /// rebuilt from the offer.
     pub fn open(dest_dir: &Path, rel_path: &str, manifest: &Manifest) -> Result<Self, SyncError> {
         check_manifest(manifest)?;
-        let dir = dest_dir.join(STATE_DIR).join(hex(&manifest.root));
+        std::fs::create_dir_all(dest_dir)?;
+        // The state dir is resolved under the canonical root: a
+        // symlinked `.rds-sync` cannot redirect journal writes outside.
+        let dir = resolve_under(dest_dir, &Path::new(STATE_DIR).join(hex(&manifest.root)))?;
         std::fs::create_dir_all(dir.join("parts"))?;
         // Meta is advisory: pin the destination but never trust it for
         // chunk truth. A torn/absent meta just gets rewritten.
@@ -71,7 +77,10 @@ impl Journal {
     /// Chunk boundaries are content-defined, so the same bytes cut
     /// identically.
     fn seed_from_destination(&mut self, dest_dir: &Path) {
-        let dest = dest_dir.join(&self.meta.rel_path);
+        // No seeding through a symlink that escapes the root.
+        let Ok(dest) = resolve_under(dest_dir, Path::new(&self.meta.rel_path)) else {
+            return;
+        };
         let Ok(existing) = std::fs::read(&dest) else {
             return;
         };
@@ -167,7 +176,9 @@ impl Journal {
         if !self.complete() {
             return Err(SyncError::Manifest("assemble before complete".into()));
         }
-        let dest = dest_dir.join(&self.meta.rel_path);
+        // Resolved under the canonical root — a symlinked intermediate
+        // component is refused rather than followed outside.
+        let dest = resolve_under(dest_dir, Path::new(&self.meta.rel_path))?;
         // Dedup fast path: the destination may already hold the exact
         // content (identical resend) — verify its root and finish.
         if let Ok(existing) = std::fs::read(&dest)
@@ -179,11 +190,21 @@ impl Journal {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = dest.with_extension("rds-part");
+        // Suffix is appended, not substituted, so a peer's literal
+        // `x.rds-part` name cannot alias the temp file to dest.
+        let tmp = dest.with_added_extension("rds-part");
+        // A pre-existing tmp may be a stale artifact — or a planted
+        // symlink. Remove it (remove_file unlinks the link itself, not
+        // its target) and create exclusively so the assembly write can
+        // never follow a link.
+        let _ = std::fs::remove_file(&tmp);
         let mut root = blake3::Hasher::new();
         {
             use std::io::Write;
-            let mut f = std::fs::File::create(&tmp)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
             for c in &self.manifest.chunks {
                 let data = std::fs::read(self.part_path(&c.hash))?;
                 root.update(&data);

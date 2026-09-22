@@ -21,7 +21,7 @@ use rds_net::{Connection, RecvStream, SendStream};
 use crate::journal::Journal;
 use crate::proto::{
     CHUNKSET_BATCH, FETCH_STREAMS, MANIFEST_BATCH, MAX_CHUNKS, SyncMsg, bits_to_indices,
-    check_manifest, check_rel_path, need_bits,
+    check_manifest, check_rel_path, need_bits, resolve_under,
 };
 use crate::{Manifest, manifest_of};
 
@@ -59,6 +59,19 @@ pub async fn serve(
                     bail!("offer refused: {e}");
                 }
             };
+            // The journal creates the root on demand; the resolve below
+            // needs it to exist.
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                refuse(&mut send, &e.to_string()).await?;
+                bail!("sync root not writable: {e}");
+            }
+            // Fail fast when the resolved destination would escape the
+            // root through a symlinked component — assemble re-checks at
+            // write time, but refusing here saves moving the chunks.
+            if let Err(e) = resolve_under(&dir, &rel) {
+                refuse(&mut send, &e.to_string()).await?;
+                bail!("offer refused: {e}");
+            }
             let manifest = match read_manifest(&mut recv, size, root, chunk_count).await {
                 Ok(m) => m,
                 Err(e) => {
@@ -73,7 +86,8 @@ pub async fn serve(
                 chunks = manifest.chunks.len(),
                 "sync push accepted"
             );
-            let stats = receive(&conn, &mut send, &dir, &rel.to_string_lossy(), &manifest).await?;
+            let (_dest, stats) =
+                receive(&conn, &mut send, &dir, &rel.to_string_lossy(), &manifest).await?;
             tracing::info!(?stats, "push receive complete");
             Ok(())
         }
@@ -85,11 +99,16 @@ pub async fn serve(
                     bail!("request refused: {e}");
                 }
             };
-            let path = dir.join(&rel);
-            if !path.is_file() {
-                refuse(&mut send, "no such file").await?;
-                bail!("requested file absent: {}", rel.display());
-            }
+            // Lexical check passed — now prove the resolved path stays
+            // inside the sync root (a symlinked component can't be used
+            // to read outside it).
+            let path = match resolve_under(&dir, &rel) {
+                Ok(p) if p.is_file() => p,
+                _ => {
+                    refuse(&mut send, "no such file").await?;
+                    bail!("requested file absent or outside root: {}", rel.display());
+                }
+            };
             let manifest = manifest_of(&std::fs::read(&path)?);
             tracing::info!(
                 peer = %conn.remote_id(),
@@ -191,27 +210,35 @@ pub async fn recv_file(
         other => bail!("expected Offer, got {other:?}"),
     };
     let manifest = read_manifest(&mut recv, size, root, chunk_count).await?;
-    let stats = receive(conn, &mut send, dest_dir, &rel.to_string_lossy(), &manifest).await?;
+    let (dest, stats) =
+        receive(conn, &mut send, dest_dir, &rel.to_string_lossy(), &manifest).await?;
     tracing::info!(rel = %rel.display(), ?stats, "sync pull complete");
-    Ok((dest_dir.join(&rel), stats))
+    Ok((dest, stats))
 }
 
 /// Receiver half, shared by push and pull: journal the offer, answer
 /// `Need`, collect chunk streams until complete, assemble, `Done`.
+/// Returns the assembled destination path (resolved under the root).
 async fn receive(
     conn: &Connection,
     send: &mut SendStream,
     dir: &Path,
     rel: &str,
     manifest: &Manifest,
-) -> anyhow::Result<Stats> {
+) -> anyhow::Result<(PathBuf, Stats)> {
     let mut journal = Journal::open(dir, rel, manifest)?;
     let bits = need_bits(journal.total(), journal.have_set());
     write_frame(send, &SyncMsg::Need { bits }).await?;
 
+    // Chunk streams arrive tagged `UniHello::Sync` — routed by the
+    // connection's demux so a concurrent desktop session on the same
+    // connection can't consume them.
+    let mut uni = conn
+        .uni_streams(rds_core::UniHello::Sync)
+        .context("claim sync uni streams")?;
     let mut fetched_bytes = 0u64;
     while !journal.complete() {
-        let mut stream = conn.accept_uni().await.context("accept chunk stream")?;
+        let mut stream = uni.recv().await.context("chunk streams ended")?;
         loop {
             match read_frame::<_, SyncMsg>(&mut stream).await? {
                 SyncMsg::ChunkSet { indices } => {
@@ -223,6 +250,14 @@ async fn receive(
                         };
                         if i != index {
                             bail!("chunk stream out of order: {i} != {index}");
+                        }
+                        // The wire len is untrusted: validate it against
+                        // the manifest before it sizes the receive
+                        // buffer (a forged u32 len would otherwise force
+                        // a multi-GiB allocation).
+                        match manifest.chunks.get(i as usize) {
+                            Some(c) if c.len == len => {}
+                            _ => bail!("chunk {i} header len {len} != manifest"),
                         }
                         let mut buf = vec![0u8; len as usize];
                         stream.read_exact(&mut buf).await?;
@@ -244,11 +279,14 @@ async fn receive(
     )
     .await?;
     tracing::debug!(?dest, "sync file assembled");
-    Ok(Stats {
-        fetched: journal.fetched(),
-        total: journal.total() as u64,
-        bytes: fetched_bytes,
-    })
+    Ok((
+        dest,
+        Stats {
+            fetched: journal.fetched(),
+            total: journal.total() as u64,
+            bytes: fetched_bytes,
+        },
+    ))
 }
 
 /// Holder half: open [`FETCH_STREAMS`] uni streams, each walking an
@@ -275,6 +313,9 @@ async fn push_chunks(
                 return Ok::<(), anyhow::Error>(());
             }
             let mut stream = conn.open_uni().await?;
+            // First frame on every uni stream is its UniHello tag —
+            // the receiver's demux routes on it.
+            write_frame(&mut stream, &rds_core::UniHello::Sync).await?;
             let mut file = std::fs::File::open(&path)?;
             for batch in mine.chunks(CHUNKSET_BATCH) {
                 write_frame(

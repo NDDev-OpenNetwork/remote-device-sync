@@ -258,8 +258,9 @@ struct ConnAuthz {
     /// The active grant id, released back into `active_grants` on
     /// connection teardown so the slot frees for a future session.
     grant_id: Mutex<Option<GrantId>>,
-    /// One sync session per connection: chunk streams arrive on
-    /// `accept_uni`, which concurrent sessions would race on.
+    /// One sync session per connection: the journal is per-destination
+    /// and the uni demux serves a single `Sync` claim at a time, so a
+    /// concurrent session gets a clean refusal instead of a race.
     sync_busy: std::sync::atomic::AtomicBool,
 }
 

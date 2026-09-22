@@ -311,7 +311,13 @@ async fn path_traversal_rejected() {
     for bad in ["../x", "a/../../b", "/abs/path", "..\\win", "a\0b", ""] {
         assert!(check_rel_path(bad).is_err(), "accepted {bad:?}");
     }
+    // The journal namespace is reserved: no reading or planting state.
+    for bad in [".rds-sync/meta", ".rds-sync/x/parts/aa", "./.rds-sync/meta"] {
+        assert!(check_rel_path(bad).is_err(), "accepted {bad:?}");
+    }
     assert!(check_rel_path("dir/sub/file.bin").is_ok());
+    // `.rds-sync` deeper in the tree is just a filename — allowed.
+    assert!(check_rel_path("a/.rds-sync/notes").is_ok());
 
     // And over the wire: a hostile Offer gets Refuse.
     let (_s, c_ep, target, _task, _server_dir) = pair().await;
@@ -334,6 +340,193 @@ async fn path_traversal_rejected() {
     {
         rds_sync::proto::SyncMsg::Refuse { .. } => {}
         other => panic!("traversal offer not refused: {other:?}"),
+    }
+}
+
+/// Symlink confinement: a sync root containing links to outside must
+/// not serve or write through them — `check_rel_path` is lexical, so
+/// `resolve_under` proves the resolved path stays inside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn symlink_escape_refused() {
+    let (_s, c_ep, target, _task, server_dir) = pair().await;
+    let outside = scratch("outside");
+    std::fs::write(outside.join("secret.txt"), b"not for sync").unwrap();
+
+    // `link` inside the sync root points outside it.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, server_dir.join("link")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&outside, server_dir.join("link")).unwrap();
+
+    // Pull through the link: refused, nothing served.
+    let conn = client_conn(&c_ep, target.clone()).await;
+    let (send, recv) = conn.open_bi().await.unwrap();
+    let err = recv_file(&conn, "link/secret.txt", &scratch("dest"), send, recv).await;
+    assert!(err.is_err(), "pull through symlinked dir was served");
+
+    // Pull of a file that IS a link pointing outside: also refused.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.join("secret.txt"), server_dir.join("alias.txt")).unwrap();
+    let conn = client_conn(&c_ep, target.clone()).await;
+    let (send, recv) = conn.open_bi().await.unwrap();
+    let err = recv_file(&conn, "alias.txt", &scratch("dest2"), send, recv).await;
+    assert!(err.is_err(), "pull of symlink-to-outside was served");
+
+    // Push into the linked dir: the offer passes the lexical check but
+    // resolve_under refuses it — the transfer aborts before a chunk
+    // moves and nothing lands outside.
+    let data = b"payload-bytes".to_vec();
+    let manifest = manifest_of(&data);
+    let conn = client_conn(&c_ep, target.clone()).await;
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    rds_core::write_frame(
+        &mut send,
+        &rds_sync::proto::SyncMsg::Offer {
+            rel_path: "link/victim.bin".into(),
+            size: manifest.size,
+            root: manifest.root,
+            chunk_count: manifest.chunks.len() as u32,
+        },
+    )
+    .await
+    .unwrap();
+    let verdict = tokio::time::timeout(
+        Duration::from_secs(10),
+        rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
+    )
+    .await;
+    match verdict {
+        Err(_) | Ok(Err(_)) => panic!("escape attempt killed the stream, expected Refuse"),
+        Ok(Ok(rds_sync::proto::SyncMsg::Refuse { .. })) => {}
+        Ok(Ok(other)) => panic!("escape attempt got {other:?}"),
+    }
+    assert!(
+        !outside.join("victim.bin").exists(),
+        "push wrote through the symlink outside the root"
+    );
+
+    // And a symlinked `.rds-sync` can't redirect the journal either:
+    // plant one, then run a normal push — it must be refused rather
+    // than journal state landing outside.
+    let jail = scratch("jailed-server");
+    let journal_out = scratch("journal-out");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&journal_out, jail.join(".rds-sync")).unwrap();
+    let jail_ep = bind_endpoint(EndpointConfig::default()).await.unwrap();
+    let jail_task = spawn_server(jail_ep.clone(), jail.clone());
+    let jail_target = jail_ep.addr();
+    let conn = client_conn(&c_ep, jail_target).await;
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    rds_core::write_frame(
+        &mut send,
+        &rds_sync::proto::SyncMsg::Offer {
+            rel_path: "ok.bin".into(),
+            size: manifest.size,
+            root: manifest.root,
+            chunk_count: manifest.chunks.len() as u32,
+        },
+    )
+    .await
+    .unwrap();
+    rds_core::write_frame(
+        &mut send,
+        &rds_sync::proto::SyncMsg::ManifestPart {
+            chunks: manifest.chunks.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let verdict = tokio::time::timeout(
+        Duration::from_secs(10),
+        rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
+    )
+    .await;
+    match verdict {
+        // Journal::open fails → the stream dies without Need.
+        Err(_) | Ok(Err(_)) => {}
+        Ok(Ok(other)) => panic!("journal-through-symlink got {other:?}"),
+    }
+    assert!(
+        std::fs::read_dir(&journal_out).unwrap().next().is_none(),
+        "journal state escaped through .rds-sync symlink"
+    );
+    jail_task.abort();
+}
+
+/// A forged `ChunkHdr` length must not size the receive buffer: the
+/// header is checked against the manifest before allocation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forged_chunk_len_rejected() {
+    let (_s, c_ep, target, _task, _server_dir) = pair().await;
+    let conn = client_conn(&c_ep, target).await;
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+
+    // Offer a real one-chunk file so the manifest validates.
+    let data = random_bytes(64 * 1024, 0xBAD);
+    let manifest = manifest_of(&data);
+    rds_core::write_frame(
+        &mut send,
+        &rds_sync::proto::SyncMsg::Offer {
+            rel_path: "victim.bin".into(),
+            size: manifest.size,
+            root: manifest.root,
+            chunk_count: manifest.chunks.len() as u32,
+        },
+    )
+    .await
+    .unwrap();
+    rds_core::write_frame(
+        &mut send,
+        &rds_sync::proto::SyncMsg::ManifestPart {
+            chunks: manifest.chunks.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    // Server answers Need.
+    match rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv)
+        .await
+        .unwrap()
+    {
+        rds_sync::proto::SyncMsg::Need { .. } => {}
+        other => panic!("expected Need, got {other:?}"),
+    }
+
+    // Chunk stream: tag, set, then a ChunkHdr claiming 4 GiB.
+    let mut stream = conn.open_uni().await.unwrap();
+    rds_core::write_frame(&mut stream, &rds_core::UniHello::Sync)
+        .await
+        .unwrap();
+    rds_core::write_frame(
+        &mut stream,
+        &rds_sync::proto::SyncMsg::ChunkSet { indices: vec![0] },
+    )
+    .await
+    .unwrap();
+    rds_core::write_frame(
+        &mut stream,
+        &rds_sync::proto::SyncMsg::ChunkHdr {
+            index: 0,
+            hash: manifest.chunks[0].hash,
+            len: u32::MAX,
+        },
+    )
+    .await
+    .unwrap();
+    stream.write_all(b"short").await.unwrap();
+    stream.finish().unwrap();
+
+    // The receiver must abort the transfer on the len mismatch — the
+    // control stream ends without Done.
+    let verdict = tokio::time::timeout(
+        Duration::from_secs(10),
+        rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
+    )
+    .await;
+    match verdict {
+        Err(_) | Ok(Err(_)) => {}
+        Ok(Ok(rds_sync::proto::SyncMsg::Refuse { .. })) => {}
+        Ok(Ok(other)) => panic!("forged chunk len accepted: {other:?}"),
     }
 }
 
