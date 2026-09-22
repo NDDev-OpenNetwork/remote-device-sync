@@ -6,8 +6,11 @@
   opens with a `UniHello` tag (`Desktop`/`Sync`/`Audio`), and the
   accepting side routes it through a single per-connection demux
   (`Connection::uni_streams`) — desktop and sync can share a
-  connection without racing `accept_uni`. `PROTOCOL_VERSION` is 3;
-  v2 peers won't interop on uni streams.
+  connection without racing `accept_uni`. Inboxes end cleanly:
+  `UniStreams::recv` returns `None` once the connection dies — the
+  demux's exit drops every registered sender instead of leaving
+  consumers parked. `PROTOCOL_VERSION` is 3; v2 peers won't interop
+  on uni streams.
 - Security fixes: sync confinement is now resolved, not just lexical —
   `resolve_under` canonicalizes the deepest existing ancestor of every
   destination and requires it to stay under the canonical sync root,
@@ -21,10 +24,12 @@
   events naming a display other than the session's are dropped
   un-acked. The directory's `/v1/revocations` PUT now verifies and
   stores under one write lock (no check-then-store regression window).
-- Correctness fix: `mailbox::Sender` notifies on drop — a consumer
-  parked in `recv` now observes the last sender leaving instead of
-  sleeping forever (regression test
-  `parked_recv_wakes_when_last_sender_drops`).
+- Correctness fix: `mailbox::Sender` decrements an explicit sender
+  count and then notifies on drop — a consumer parked in `recv` now
+  observes the last sender leaving instead of sleeping forever, and a
+  cross-thread wake can't observe a stale count and re-park
+  (regression tests `parked_recv_wakes_when_last_sender_drops`,
+  `parked_recv_survives_drop_wake_race`).
 - WS8 deployment: `deploy/systemd/rds-server.service` and
   `rds-agent.service` — hardened units (ProtectSystem=strict,
   NoNewPrivileges, PrivateTmp/Devices, ProtectKernel*/ControlGroups,

@@ -388,7 +388,10 @@ impl UniStreams {
 
 /// The demux body: accept, read the tag, route. Runs until the
 /// connection dies; a route whose consumer dropped is removed so a
-/// later `uni_streams` can reclaim the kind.
+/// later `uni_streams` can reclaim the kind. On exit every registered
+/// sender is dropped so parked [`UniStreams::recv`] callers observe
+/// `None` — a dead connection ends its inboxes, it does not leave them
+/// waiting forever.
 async fn uni_demux(conn: Connection, demux: std::sync::Arc<UniDemux>) {
     loop {
         let mut stream = match conn.accept_uni().await {
@@ -415,7 +418,9 @@ async fn uni_demux(conn: Connection, demux: std::sync::Arc<UniDemux>) {
             None => tracing::debug!("uni {kind:?} stream dropped: no consumer"),
         }
     }
-    demux.state.lock().unwrap().task = None;
+    let mut st = demux.state.lock().unwrap();
+    st.task = None;
+    st.routes.clear();
 }
 
 impl Connection {

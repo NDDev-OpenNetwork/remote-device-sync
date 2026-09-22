@@ -80,7 +80,8 @@ impl InputSink for XtestInput {
             ),
             InputKind::Scroll { dx, dy } => {
                 // Emulate wheel clicks: 4 up, 5 down, 6 left, 7 right.
-                // `.min` bounds the loop; NaN mins to NaN → 0 clicks.
+                // `.min` bounds the loop; even a NaN delta caps at the
+                // limit — `f64::min` ignores NaN rather than propagating.
                 for _ in 0..dy.abs().min(MAX_SCROLL_CLICKS).round() as u32 {
                     let b = if dy > 0.0 { 4 } else { 5 };
                     self.conn
