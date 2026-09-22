@@ -75,23 +75,28 @@ impl Journal {
     /// `dest_dir/rel_path` exists, chunk it and count every matching
     /// hash as present — identical content needs zero wire chunks.
     /// Chunk boundaries are content-defined, so the same bytes cut
-    /// identically.
+    /// identically. Streamed: memory stays at one max-size chunk
+    /// regardless of file size.
     fn seed_from_destination(&mut self, dest_dir: &Path) {
         // No seeding through a symlink that escapes the root.
         let Ok(dest) = resolve_under(dest_dir, Path::new(&self.meta.rel_path)) else {
             return;
         };
-        let Ok(existing) = std::fs::read(&dest) else {
+        // Cheap gate first: only a regular file of identical size can
+        // contribute chunks — a manifest scan of anything else is waste.
+        let Ok(meta) = std::fs::metadata(&dest) else {
             return;
         };
-        if existing.len() as u64 != self.manifest.size {
+        if !meta.is_file() || meta.len() != self.manifest.size {
             return;
         }
-        let present: HashSet<ChunkHash> = crate::manifest_of(&existing)
-            .chunks
-            .iter()
-            .map(|c| c.hash)
-            .collect();
+        let Ok(file) = std::fs::File::open(&dest) else {
+            return;
+        };
+        let Ok(existing) = crate::manifest_of_reader(file) else {
+            return;
+        };
+        let present: HashSet<ChunkHash> = existing.chunks.iter().map(|c| c.hash).collect();
         for (i, c) in self.manifest.chunks.iter().enumerate() {
             if present.contains(&c.hash) {
                 self.have.insert(i as u32);
@@ -125,8 +130,10 @@ impl Journal {
 
     /// Store one received chunk. The payload is verified against the
     /// manifest hash BEFORE it touches the state directory — a corrupt
-    /// or forged chunk is an error, never a part.
-    pub fn store(&mut self, index: u32, data: &[u8]) -> Result<(), SyncError> {
+    /// or forged chunk is an error, never a part. Returns `true` when
+    /// the chunk was newly present (a resent chunk verifies but is not
+    /// rewritten).
+    pub fn store(&mut self, index: u32, data: &[u8]) -> Result<bool, SyncError> {
         let c = self
             .manifest
             .chunks
@@ -137,16 +144,18 @@ impl Journal {
                 "chunk {index} failed BLAKE3 verification"
             )));
         }
+        if self.have.contains(&index) {
+            return Ok(false);
+        }
         let part = self.part_path(&c.hash);
         // Write tmp + rename: a crash mid-write leaves a *.tmp, which
         // rescan ignores — parts are only ever complete files.
         let tmp = part.with_extension("tmp");
         std::fs::write(&tmp, data)?;
         std::fs::rename(&tmp, &part)?;
-        if self.have.insert(index) {
-            self.fetched += 1;
-        }
-        Ok(())
+        self.have.insert(index);
+        self.fetched += 1;
+        Ok(true)
     }
 
     /// True once every manifest chunk is present and verified.
@@ -181,8 +190,9 @@ impl Journal {
         let dest = resolve_under(dest_dir, Path::new(&self.meta.rel_path))?;
         // Dedup fast path: the destination may already hold the exact
         // content (identical resend) — verify its root and finish.
-        if let Ok(existing) = std::fs::read(&dest)
-            && blake3::hash(&existing).as_bytes() == &self.manifest.root
+        // Streamed hash: no whole-file read.
+        if let Ok(root) = hash_file(&dest)
+            && root == self.manifest.root
         {
             let _ = std::fs::remove_dir_all(&self.dir);
             return Ok(dest);
@@ -248,6 +258,28 @@ fn read_meta(dir: &Path) -> Option<Meta> {
         return None; // torn write
     }
     postcard::from_bytes(body).ok()
+}
+
+/// Stream-hash a file — bounded memory regardless of size.
+fn hash_file(path: &Path) -> std::io::Result<ChunkHash> {
+    let mut f = std::fs::File::open(path)?;
+    let mut h = blake3::Hasher::new();
+    std::io::copy(&mut f, &mut HasherWriter(&mut h))?;
+    Ok(*h.finalize().as_bytes())
+}
+
+/// `std::io::Write` adapter that feeds a BLAKE3 hasher — lets
+/// `io::copy` stream the file through the digest without buffering.
+struct HasherWriter<'a>(&'a mut blake3::Hasher);
+
+impl std::io::Write for HasherWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn hex(hash: &ChunkHash) -> String {
