@@ -12,6 +12,10 @@
     AVX2 at runtime on x86-64 — ~3.5× faster than the previous scalar
     loop at 1080p (≈1.7 ms vs ≈5.9 ms per frame measured), with
     box-averaged chroma and no extra dependency.
+- Discovery abuse resistance: `Limits::max_conns` (default 1024) caps
+  concurrently held connections — a connection flood can no longer
+  spend an unbounded number of tasks/FDs; excess sockets close on
+  accept.
 - Transport tuning and relay redundancy:
   - BBRv3 congestion control on both backends (paced, bufferbloat-
     resistant) instead of the loss-based Cubic default — better
