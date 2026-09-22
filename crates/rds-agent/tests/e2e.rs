@@ -131,7 +131,7 @@ async fn unauthorized_peer_is_rejected() {
 async fn direct_connection_without_relay() {
     // LAN-style path: no relay, direct UDP addresses in the ticket.
     let agent_ep = bind_endpoint(EndpointConfig {
-        relay: None,
+        relays: Vec::new(),
         ..Default::default()
     })
     .await
@@ -554,7 +554,7 @@ async fn sync_unconfigured_is_refused() {
 async fn direct_connection_noq_backend() {
     let config = || EndpointConfig {
         backend: rds_net::Backend::Noq,
-        relay: None,
+        relays: Vec::new(),
         ..Default::default()
     };
     let agent_ep = bind_endpoint(config()).await.unwrap();

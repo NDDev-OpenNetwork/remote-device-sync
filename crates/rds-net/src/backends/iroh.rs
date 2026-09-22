@@ -20,23 +20,35 @@ use crate::EndpointConfig;
 /// lookup — so a private deployment does not publish to third-party DNS.
 /// Without one, `presets::N0` gives the public relays plus DNS/Pkarr lookup.
 pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
-    let mut builder = match (&config.relay, config.discovery) {
-        (Some(url), _) => Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .relay_mode(RelayMode::Custom(RelayMap::from_iter([url.clone()]))),
-        (None, true) => Endpoint::builder(iroh::endpoint::presets::N0),
+    let mut builder = match (config.relays.is_empty(), config.discovery) {
+        (false, _) => Endpoint::builder(iroh::endpoint::presets::Minimal).relay_mode(
+            RelayMode::Custom(RelayMap::from_iter(config.relays.clone())),
+        ),
+        (true, true) => Endpoint::builder(iroh::endpoint::presets::N0),
         // No relay, no lookup: Minimal binds a plain QUIC socket.
-        (None, false) => Endpoint::builder(iroh::endpoint::presets::Minimal),
+        (true, false) => Endpoint::builder(iroh::endpoint::presets::Minimal),
     };
     if let Some(key) = config.secret_key {
         builder = builder.secret_key(key);
     }
+    // Tuning on top of iroh's multipath-aware defaults:
+    // - BBRv3: paced, bufferbloat-resistant — the low-latency choice for
+    //   interactive desktop + bulk sync over real WAN paths (upstream
+    //   default is loss-based Cubic).
+    // - 4 MiB stream receive window: upstream tunes for ~100 Mbps x
+    //   100 ms; a larger per-stream window keeps a big keyframe or sync
+    //   chunk stream from stalling on high-BDP links.
+    // - 32 MiB connection send window keeps several bulk streams busy.
+    let mut transport = iroh::endpoint::QuicTransportConfig::builder()
+        .congestion_controller_factory(std::sync::Arc::new(
+            noq_proto::congestion::Bbr3Config::default(),
+        ))
+        .stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024))
+        .send_window(32 * 1024 * 1024);
     if let Some(max_paths) = config.max_multipath_paths {
-        builder = builder.transport_config(
-            iroh::endpoint::QuicTransportConfig::builder()
-                .max_concurrent_multipath_paths(max_paths)
-                .build(),
-        );
+        transport = transport.max_concurrent_multipath_paths(max_paths);
     }
+    builder = builder.transport_config(transport.build());
     // iroh manages its own sockets; a single bind address is all it
     // accepts. Multi-interface binding is a `noq`-backend capability.
     if let Some(addr) = config.bind_addrs.first() {

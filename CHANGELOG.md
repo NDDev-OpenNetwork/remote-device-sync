@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Transport tuning and relay redundancy:
+  - BBRv3 congestion control on both backends (paced, bufferbloat-
+    resistant) instead of the loss-based Cubic default — better
+    latency under load for interactive desktop and bulk sync.
+  - 4 MiB stream receive window / 32 MiB connection send window
+    (upstream defaults target ~100 Mbps × 100 ms): large keyframes and
+    sync chunk streams no longer stall on high-BDP links.
+  - `--relay` is repeatable on `rds` and `rds-agent`; endpoints probe
+    all configured relays, home on the fastest and fail over
+    automatically — the iroh-recommended ≥2-relay production topology.
 - Relay TLS and lifecycle polish:
   - `rds-server`/`rds-relay` gain native TLS on the relay listener:
     `--tls-cert/--tls-key` for PEM files (rustls `ring` provider), or
