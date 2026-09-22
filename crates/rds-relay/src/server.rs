@@ -39,6 +39,9 @@ const RATE_BURST: f64 = 4.0 * 1024.0 * 1024.0;
 const MAX_RECENT_PEERS: usize = 64;
 /// Grace between `Drain` broadcast and closing the listener.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
+/// A connection that never opens its control stream and registers
+/// parks a task otherwise — bounded, like the agent's stream hello.
+const REGISTER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A running owned relay. Dropping it leaves tasks detached; call
 /// [`Relay::close`] for a clean stop or [`Relay::drain`] for a graceful
@@ -224,9 +227,14 @@ async fn serve_conn(conn: rds_noq::Connection, state: std::sync::Arc<State>) -> 
         bail!("refused {id}: not on allowlist");
     }
 
-    // Control stream: first bidi the client opens.
-    let (mut ctrl_send, mut ctrl_recv) = conn.accept_bi().await?;
-    let hello = read_control(&mut ctrl_recv).await?;
+    // Control stream: first bidi the client opens — bounded so a
+    // connection that never registers costs seconds, not a parked task.
+    let (mut ctrl_send, mut ctrl_recv) = tokio::time::timeout(REGISTER_TIMEOUT, conn.accept_bi())
+        .await
+        .context("control stream never opened")??;
+    let hello = tokio::time::timeout(REGISTER_TIMEOUT, read_control(&mut ctrl_recv))
+        .await
+        .context("register read timed out")??;
     if !matches!(hello, RelayControl::Register) {
         conn.close(0u32.into(), b"expected register");
         bail!("{id} did not register");
