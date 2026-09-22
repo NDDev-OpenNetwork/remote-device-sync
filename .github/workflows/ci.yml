@@ -34,8 +34,7 @@ jobs:
       test_matrix_os: '["ubuntu-latest", "macos-latest"]'
       test_command: >-
         cargo test --locked --workspace
-        && cargo test --locked -p rds-net -p rds-agent -p rds-relay
-           --features rds-net/transport-noq,rds-agent/transport-noq,rds-relay/owned-relay
+        && cargo test --locked -p rds-net -p rds-agent -p rds-relay --features rds-net/transport-noq,rds-agent/transport-noq,rds-relay/owned-relay
         && cargo test --locked -p rds-net --features metrics --test metrics
         && { [ "$(uname -s)" != "Linux" ] || cargo test --locked --workspace --features rds-desktop/x11; }
       fmt_command: "cargo fmt --all -- --check"
@@ -43,9 +42,7 @@ jobs:
       # feature-gated lane (owned transport, metrics export, x11/desktop).
       clippy_command: >-
         cargo clippy --locked --workspace --all-targets -- -D warnings
-        && cargo clippy --locked --workspace --all-targets
-           --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay
-           -- -D warnings
+        && cargo clippy --locked --workspace --all-targets --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay -- -D warnings
         && cargo clippy --locked -p rds-net --all-targets --features metrics -- -D warnings
         && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings
         && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
