@@ -19,13 +19,11 @@ iroh-relay = { workspace = true, features = ["server"] }
 noq = { workspace = true, optional = true }
 rds-agent.workspace = true
 rds-cli.workspace = true
-rds-core.workspace = true
 rds-discovery.workspace = true
 rds-net.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [lints]

@@ -2835,7 +2835,6 @@ dependencies = [
  "rds-discovery",
  "rds-net",
  "rds-sync",
- "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2859,13 +2858,11 @@ dependencies = [
  "noq",
  "rds-agent",
  "rds-cli",
- "rds-core",
  "rds-discovery",
  "rds-net",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -2874,7 +2871,6 @@ name = "rds-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "clap",
  "rds-core",
  "rds-desktop",
@@ -2905,14 +2901,12 @@ dependencies = [
 name = "rds-desktop"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
  "noq",
  "openh264",
  "rds-bench",
  "rds-core",
  "rds-net",
- "serde",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -2932,7 +2926,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2953,11 +2946,9 @@ dependencies = [
  "rds-core",
  "rds-discovery",
  "serde",
- "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "tracing",
- "tracing-subscriber",
  "turmoil",
 ]
 
@@ -2966,15 +2957,12 @@ name = "rds-relay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "clap",
  "iroh",
  "iroh-relay",
  "postcard",
- "rand 0.9.5",
  "rds-core",
  "rds-net",
- "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3006,7 +2994,6 @@ dependencies = [
  "fastcdc",
  "noq",
  "postcard",
- "proptest",
  "rds-bench",
  "rds-core",
  "rds-net",

@@ -14,7 +14,6 @@ transport-noq = ["rds-net/transport-noq"]
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 clap.workspace = true
 rds-core.workspace = true
 rds-desktop = { workspace = true, optional = true }

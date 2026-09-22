@@ -1,5 +1,6 @@
 # cargo-deny policy for remote-device-sync.
-# Run: `cargo deny check`. CI runs `cargo deny check licenses bans`.
+# Run: `cargo deny check`. CI runs
+# `cargo deny check bans licenses advisories sources` (rust-supply-chain).
 
 [licenses]
 allow = [
@@ -10,10 +11,15 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
+    # CDLA-Permissive-2.0: webpki-roots/webpki-root-certs (Mozilla root
+    # store data) via rustls-platform-verifier/iroh-relay.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "MPL-2.0",
     "OpenSSL",
+    # Unlicense: ws_stream_wasm/async_io_stream/pharos via iroh-relay.
+    "Unlicense",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
@@ -27,3 +33,11 @@ wildcards = "warn"
 [advisories]
 # Cargo.lock is committed; advisories gate on it.
 db-path = "~/.cargo/advisory-db"
+ignore = [
+    # atomic-polyfill (unmaintained) via heapless <- postcard: no safe
+    # upgrade exists; severity is informational, not a vulnerability.
+    "RUSTSEC-2023-0089",
+    # paste (unmaintained) via netlink-packet-core <- netwatch <- iroh:
+    # no safe upgrade exists; informational only.
+    "RUSTSEC-2024-0436",
+]
