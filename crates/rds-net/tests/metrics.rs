@@ -97,8 +97,9 @@ async fn direct_traffic_counts_direct_not_relay() {
     assert!(counter(&s, "rds_net_datagrams_sent_total{via=\"direct\"}") > 0);
 }
 
-/// Relay-only advertised address: every datagram must land on
-/// `via=relay` — the split is real, not guessed.
+/// Relay-only advertised address: the payload must land on
+/// `via=relay` — the split is real, not guessed. Direct-path probes
+/// may still appear in the counters (see the assertion comment).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_only_traffic_counts_relay_not_direct() {
     let mut relay_config = iroh_relay::server::ServerConfig::default();
@@ -164,13 +165,16 @@ async fn relay_only_traffic_counts_relay_not_direct() {
 
     let c = client.metrics();
     assert!(counter(&c, "rds_net_datagrams_sent_total{via=\"relay\"}") > 0);
-    assert_eq!(
-        counter(&c, "rds_net_datagrams_sent_total{via=\"direct\"}"),
-        0
-    );
     assert!(counter(&c, "rds_net_bytes_sent_total{via=\"relay\"}") >= 9);
-    assert_eq!(counter(&c, "rds_net_bytes_sent_total{via=\"direct\"}"), 0);
+    assert!(counter(&c, "rds_net_bytes_received_total{via=\"relay\"}") >= 9);
     assert!(counter(&c, "rds_net_paths_seen_total{via=\"relay\"}") >= 1);
+    // No `via=direct == 0` assertions: path pinning caps concurrent
+    // paths at one, but iroh still fires direct-path probes at
+    // candidates it learns via in-band address exchange — whether they
+    // land inside the test window is platform timing (4 datagrams on
+    // macOS runners, none observed on Linux). They are real datagrams
+    // and the counter is right to record them; the relay side above is
+    // what proves the split accounts payload traffic correctly.
 }
 
 /// Prometheus export exists under `metrics` and carries the names the
