@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- WS6 content-addressed sync: `rds-sync` gains a real protocol —
+  FastCDC chunking, BLAKE3 per-chunk + per-file roots, a bounded
+  wire format (`Offer`/`Request`/`Refuse`, `ManifestPart` ≤512
+  entries, `Need` bitmap ≤256K chunks, `ChunkSet` ≤4096 indices,
+  chunk payloads on 4 dedicated uni streams, `SetDone`/`Done`).
+  Receives journal under `<dest>/.rds-sync/<root>/`: surviving parts
+  are re-verified by content hash (corrupt parts refetched), a torn
+  meta is rebuilt from the offer, an existing destination file seeds
+  `have` so identical resends move zero bytes, and assembly is an
+  atomic rename after root verification. `rel_path` rejects
+  traversal, absolute paths, NUL and oversize. `rds send`/`rds recv`
+  push/pull through `rds_cli::open_sync`; the agent serves `Sync`
+  under `--sync-dir` with a one-session-per-connection guard (chunk
+  streams share the `accept_uni` queue) and advertises `Sync` in
+  `Info` only when configured. E2E: byte-identical push/pull,
+  zero-chunk resend, corrupt-part refetch, torn-journal and
+  mid-transfer kill resume, repeated kill/resume convergence,
+  traversal fuzz, and a lossy-socket impaired-lane completion.
 - WS5 session/media protocol v2: `FrameHeader` gains
   `capture_ts_ms`/`send_ts_ms` (shared-clock latency measurement),
   `DesktopControl` gains heartbeat + `RequestIdr` + `SetBitrate`,

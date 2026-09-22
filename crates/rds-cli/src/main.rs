@@ -74,6 +74,21 @@ enum Command {
         #[arg(long, default_value = "30")]
         max_fps: u32,
     },
+    /// Push a file into the peer's sync directory (resumable).
+    Send {
+        target: String,
+        /// Local file to send.
+        path: std::path::PathBuf,
+    },
+    /// Pull a file from the peer's sync directory into `dir`.
+    Recv {
+        target: String,
+        /// Relative path inside the peer's sync directory.
+        rel_path: String,
+        /// Local directory to receive into.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -201,6 +216,43 @@ async fn main() -> anyhow::Result<()> {
                 let _ = (target, display, max_fps);
                 anyhow::bail!("rds built without desktop support; enable the `desktop` feature");
             }
+        }
+        Command::Send { target, path } => {
+            let conn = dial(
+                &endpoint,
+                resolve(&directory, &target).await?,
+                grant.clone(),
+            )
+            .await?;
+            let (send, recv) = rds_cli::open_sync(&conn).await?;
+            let stats = rds_sync::engine::send_file(&conn, &path, send, recv).await?;
+            println!(
+                "sent {} ({} chunks, {} bytes)",
+                path.display(),
+                stats.total,
+                stats.bytes
+            );
+        }
+        Command::Recv {
+            target,
+            rel_path,
+            dir,
+        } => {
+            let conn = dial(
+                &endpoint,
+                resolve(&directory, &target).await?,
+                grant.clone(),
+            )
+            .await?;
+            let (send, recv) = rds_cli::open_sync(&conn).await?;
+            let (dest, stats) =
+                rds_sync::engine::recv_file(&conn, &rel_path, &dir, send, recv).await?;
+            println!(
+                "received {} ({} chunks fetched, {} bytes)",
+                dest.display(),
+                stats.fetched,
+                stats.bytes
+            );
         }
     }
     Ok(())

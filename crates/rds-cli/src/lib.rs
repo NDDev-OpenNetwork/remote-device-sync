@@ -88,6 +88,20 @@ pub async fn open_tcp(
     }
 }
 
+/// Open a `Sync` control stream — the first frame of a sync session.
+/// Push: `rds_sync::engine::send_file`; pull: `recv_file`.
+pub async fn open_sync(
+    conn: &Connection,
+) -> anyhow::Result<(rds_net::SendStream, rds_net::RecvStream)> {
+    let (mut send, mut recv) = conn.open_bi().await?;
+    write_frame(&mut send, &StreamHello::Sync).await?;
+    match read_frame::<_, HelloAck>(&mut recv).await? {
+        HelloAck::Ok => Ok((send, recv)),
+        HelloAck::Error { message } => anyhow::bail!("sync rejected: {message}"),
+        other => anyhow::bail!("unexpected ack {other:?}"),
+    }
+}
+
 /// Listen on `bind` and splice every accepted TCP connection into a new
 /// `TcpConnect` stream on `conn` to `remote_host:remote_port`.
 pub async fn forward_listener(

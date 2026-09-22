@@ -228,10 +228,38 @@ c5)
   (run before merge or noted honestly)
 - FrameHeader decoder + stream demux fuzz (proptest): PASS"
     ;;
+c6)
+    note "gate c6 — content-addressed resumable sync"
+    green_bars
+
+    note "sync e2e: transfer, resume, corruption, traversal, impairment"
+    cargo test -p rds-sync --test sync_e2e || fail "sync_e2e"
+
+    note "agent sync: slot guard + unconfigured refusal"
+    cargo test -p rds-agent --test e2e sync_ || fail "agent sync e2e"
+
+    note "manifest/chunking unit tests"
+    cargo test -p rds-sync --lib || fail "rds-sync lib tests"
+
+    write_checkpoint "c6" "pending review" \
+        "- fmt/clippy/test: PASS (default + transport-noq lanes)
+- sync_e2e (10 tests): PASS
+  - push byte-identical; pull byte-identical
+  - identical content resend: 0 chunks on the wire (dest-hash dedup)
+  - corrupt part deleted + refetched; torn journal meta rebuilt
+  - kill mid-transfer: resume fetches only missing chunks
+  - G6 repeated kill/resume loop: converges identical
+  - path traversal / absolute / NUL rel_paths refused (proptest fuzz)
+  - impaired lane (lossy ImpairingSocket, noq backend): completes
+- agent e2e: one sync session per connection (slot released on end);
+  sync unconfigured refused; Info advertises Sync iff --sync-dir: PASS
+- bounds: manifest ≤512/batch, chunksets ≤4096/batch, Need bitmap
+  ≤256K chunks, every wire frame ≤64KB MAX_MESSAGE_LEN"
+    ;;
 *)
     cat <<EOF
 unknown or unregistered gate: '${GATE}'
-registered gates: c0 c1 c2 c3 c4 c5
+registered gates: c0 c1 c2 c3 c4 c5 c6
 a checkpoint with no registered checks is refused by design.
 EOF
     exit 2

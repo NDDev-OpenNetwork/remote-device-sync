@@ -228,6 +228,9 @@ struct ConnAuthz {
     /// The active grant id, released back into `active_grants` on
     /// connection teardown so the slot frees for a future session.
     grant_id: Mutex<Option<GrantId>>,
+    /// One sync session per connection: chunk streams arrive on
+    /// `accept_uni`, which concurrent sessions would race on.
+    sync_busy: std::sync::atomic::AtomicBool,
 }
 
 impl ConnAuthz {
@@ -240,7 +243,21 @@ impl ConnAuthz {
             }),
             watcher: Mutex::new(None),
             grant_id: Mutex::new(None),
+            sync_busy: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Take the per-connection sync slot, or `false` if a session is
+    /// already running.
+    fn try_sync_slot(&self) -> bool {
+        !self
+            .sync_busy
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    fn release_sync_slot(&self) {
+        self.sync_busy
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// Scope the connection currently has for service streams.
@@ -429,16 +446,30 @@ async fn serve_stream(
             }
         }
         StreamHello::Sync => {
-            // Wired to rds-sync in WS6; the scope check above already
-            // enforced ServiceKind::Sync when a grant is required.
-            write_frame(
-                &mut send,
-                &HelloAck::Error {
-                    message: "sync service not implemented".into(),
-                },
-            )
-            .await?;
-            anyhow::bail!("sync service not implemented");
+            let Some(dir) = policy.sync_dir.clone() else {
+                write_frame(
+                    &mut send,
+                    &HelloAck::Error {
+                        message: "sync service not configured".into(),
+                    },
+                )
+                .await?;
+                anyhow::bail!("sync service not configured");
+            };
+            if !authz.try_sync_slot() {
+                write_frame(
+                    &mut send,
+                    &HelloAck::Error {
+                        message: "sync session already active on this connection".into(),
+                    },
+                )
+                .await?;
+                anyhow::bail!("concurrent sync session refused");
+            }
+            write_frame(&mut send, &HelloAck::Ok).await?;
+            let res = rds_sync::engine::serve(conn, send, recv, dir).await;
+            authz.release_sync_slot();
+            res?;
         }
         StreamHello::Audio(_) => {
             // Wire shape landed in protocol v2; capture/codec support

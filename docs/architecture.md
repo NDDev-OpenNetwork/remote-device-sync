@@ -169,7 +169,7 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 | `Info` | bi | agent version, services, displays |
 | `TcpConnect { host, port }` | bi | raw byte splice (ssh = `127.0.0.1:22`) |
 | `Desktop` | bi + uni | hello/capabilities; input events client→server; one uni stream per video frame server→client |
-| `Sync` | bi + uni | manifest offer/request; chunk pull on dedicated streams (WS6) |
+| `Sync` | bi + uni | offer/request → manifest parts → `Need` bitmap → chunk pull on 4 dedicated uni streams → `Done` |
 
 Desktop media: capture → BGRA→I420 → H.264 (OpenH264 baseline, no B-frames;
 hw encoders behind a trait) → per-frame uni stream with a `FrameHeader`
@@ -186,6 +186,22 @@ input acks, heartbeat echoes) runs at max stream priority; per-frame
 priorities were tried and removed — under load they starve in-flight
 streams. This yields decode-what-survives behavior without a custom
 UDP stack.
+
+File sync (`rds send`/`rds recv`, agent `--sync-dir`): the file is cut
+by FastCDC into BLAKE3-addressed chunks. The control stream carries
+`Offer`/`Request` then the manifest in ≤512-entry `ManifestPart`
+batches (a 1 GiB manifest exceeds the 64 KiB frame cap). The receiver
+opens a journal under `<dest>/.rds-sync/<root>/`, re-verifies every
+surviving part by content hash, seeds `have` from an already-present
+destination file (identical resend costs zero wire chunks), and answers
+with a `Need` bitmap (≤256K chunks). The sender pushes `ChunkSet`
+indices (≤4096/batch) then chunk payloads across 4 dedicated uni
+streams; `SetDone`/`Done` close the session. Assembly concatenates
+verified parts, checks the BLAKE3 root, and renames atomically — a
+torn or corrupt part is refetched, a killed transfer resumes from the
+journal, and `rel_path` is validated against traversal, absolute and
+NUL paths. One sync session per connection (chunk streams share the
+connection's `accept_uni` queue).
 
 ### Stability measures
 

@@ -2834,6 +2834,7 @@ dependencies = [
  "rds-desktop",
  "rds-discovery",
  "rds-net",
+ "rds-sync",
  "serde",
  "tokio",
  "tracing",
@@ -2879,6 +2880,7 @@ dependencies = [
  "rds-desktop",
  "rds-discovery",
  "rds-net",
+ "rds-sync",
  "serde_json",
  "tokio",
  "tracing",
@@ -2998,10 +3000,19 @@ dependencies = [
 name = "rds-sync"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "blake3",
  "fastcdc",
+ "noq",
+ "postcard",
+ "proptest",
+ "rds-bench",
+ "rds-core",
+ "rds-net",
  "serde",
  "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

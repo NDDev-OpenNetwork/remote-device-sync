@@ -445,6 +445,107 @@ async fn grant_replay_on_concurrent_connection_rejected() {
     );
 }
 
+// ---- WS6: sync service ------------------------------------------------
+
+/// One sync session per connection: a second `Sync` stream while the
+/// first is open is refused, and the slot frees when the first ends.
+/// Also proves `Info` advertises `Sync` only when `sync_dir` is set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sync_one_session_per_connection() {
+    let (_relay, relay_url) = test_relay().await;
+    let agent_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())
+        .await
+        .unwrap();
+    agent_ep.online().await;
+    let client_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())
+        .await
+        .unwrap();
+    client_ep.online().await;
+
+    let sync_root = std::env::temp_dir().join(format!("rds-agent-sync-{}", std::process::id()));
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.allow.insert(client_ep.id());
+    policy.sync_dir = Some(sync_root.clone());
+    let agent = Agent::new(agent_ep, policy);
+    let ticket = Ticket::of(&agent.endpoint);
+    let _task = tokio::spawn({
+        let agent = Arc::new(agent);
+        async move { agent.run().await }
+    });
+
+    let conn = rds_cli::connect(
+        &client_ep,
+        rds_net::parse_target(&ticket.to_string()).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // Advertised in the service list.
+    let info = rds_cli::info(&conn).await.unwrap();
+    assert!(
+        info.services.contains(&ServiceKind::Sync),
+        "sync not advertised: {:?}",
+        info.services
+    );
+
+    // First session takes the slot — keep its streams alive without an
+    // Offer, so the server handler stays parked inside `serve`.
+    let first = rds_cli::open_sync(&conn).await.unwrap();
+    let second = rds_cli::open_sync(&conn).await;
+    assert!(second.is_err(), "concurrent sync session was accepted");
+
+    // Dropping the first session frees the slot for a third.
+    drop(first);
+    let mut third = None;
+    for _ in 0..50 {
+        match rds_cli::open_sync(&conn).await {
+            Ok(s) => {
+                third = Some(s);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    assert!(third.is_some(), "sync slot never released");
+
+    let _ = std::fs::remove_dir_all(&sync_root);
+}
+
+/// Sync refused cleanly when the agent has no `sync_dir` configured —
+/// the service is off, not broken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sync_unconfigured_is_refused() {
+    let (_relay, relay_url) = test_relay().await;
+    let agent_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())
+        .await
+        .unwrap();
+    agent_ep.online().await;
+    let client_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())
+        .await
+        .unwrap();
+    client_ep.online().await;
+
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.allow.insert(client_ep.id());
+    let agent = Agent::new(agent_ep, policy);
+    let ticket = Ticket::of(&agent.endpoint);
+    let _task = tokio::spawn({
+        let agent = Arc::new(agent);
+        async move { agent.run().await }
+    });
+
+    let conn = rds_cli::connect(
+        &client_ep,
+        rds_net::parse_target(&ticket.to_string()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let info = rds_cli::info(&conn).await.unwrap();
+    assert!(!info.services.contains(&ServiceKind::Sync));
+    assert!(rds_cli::open_sync(&conn).await.is_err());
+}
+
 /// Same direct-path flow on the owned `noq` backend: agent and client
 /// both bind `Backend::Noq` — exercises the facade end to end, not just
 /// the backend in isolation.

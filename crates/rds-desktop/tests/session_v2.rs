@@ -69,11 +69,13 @@ async fn endpoints(
             (server_ep, client_ep, Some((s_stats, c_stats)), target)
         }
         None => {
-            // DIAG: temporarily noq to isolate whether the stall is iroh
-            let (server_ep, s_stats) = impaired_endpoint(Impairment::clean()).await;
-            let (client_ep, c_stats) = impaired_endpoint(Impairment::clean()).await;
+            let server_ep = rds_net::bind_endpoint(EndpointConfig::default())
+                .await
+                .unwrap();
+            let client_ep = rds_net::bind_endpoint(EndpointConfig::default())
+                .await
+                .unwrap();
             let target = server_ep.addr();
-            let _ = (s_stats, c_stats);
             (server_ep, client_ep, None, target)
         }
     }
