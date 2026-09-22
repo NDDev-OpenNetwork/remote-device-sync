@@ -331,10 +331,23 @@ pub async fn serve_desktop_with(
     // Control loop: input + encoder steering + heartbeat, until the
     // peer goes away. `send` also carries DesktopEvent replies.
     let send_clock = clock.clone();
+    let session_display = hello.display;
     let control = async {
         loop {
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
+                    // The grant/display constraint was scoped to the
+                    // hello's display — an event targeting another
+                    // display is out of scope. Skip it (and don't ack:
+                    // an ack reports the event handled).
+                    if ev.display_id != session_display {
+                        tracing::warn!(
+                            event_display = ev.display_id,
+                            session_display,
+                            "input event for out-of-scope display dropped"
+                        );
+                        continue;
+                    }
                     #[cfg(all(target_os = "linux", feature = "x11"))]
                     if let Err(e) = crate::input::x11::inject(&ev) {
                         tracing::warn!("input injection failed: {e}");
@@ -584,6 +597,9 @@ mod x11 {
 
 async fn write_frame_stream(conn: &Connection, produced: Produced) -> Result<(), DesktopError> {
     let mut stream = conn.open_uni().await?;
+    // Every uni stream leads with its UniHello tag — the receiver's
+    // per-connection demux routes on it.
+    write_frame(&mut stream, &rds_core::UniHello::Desktop).await?;
     write_frame(&mut stream, &produced.header).await?;
     stream.write_all(&produced.payload).await?;
     stream.finish()?;

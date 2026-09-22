@@ -40,6 +40,15 @@ impl<T> Clone for Sender<T> {
     }
 }
 
+impl<T> Drop for Sender<T> {
+    /// A parked `recv` must observe the last sender leaving — without a
+    /// wake on drop it would sleep forever, never seeing
+    /// `strong_count == 1`.
+    fn drop(&mut self) {
+        self.0.notify.notify_one();
+    }
+}
+
 impl<T> Sender<T> {
     /// Enqueue `item`; evicts the oldest queued item when full.
     /// Returns the evicted item, if any.
@@ -113,6 +122,23 @@ mod tests {
         drop(tx);
         assert_eq!(rx.recv().await, Some(1));
         assert_eq!(rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn parked_recv_wakes_when_last_sender_drops() {
+        // The session-end order: the consumer is already parked inside
+        // `recv` when the producer's task finishes and drops the sender.
+        let (tx, mut rx) = channel::<u8>(4);
+        let waiter = tokio::spawn(async move { rx.recv().await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(tx);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+                .await
+                .expect("parked recv hung after last sender dropped")
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

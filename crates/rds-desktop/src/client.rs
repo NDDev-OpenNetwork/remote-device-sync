@@ -144,10 +144,13 @@ impl DesktopSession {
             }
         });
 
-        // Frame receiver task: accept uni streams, drop stale, decode
-        // newest. A delivered-seq gap means a delta chain broke — the
-        // session auto-requests an IDR so decode can resync.
-        let conn = conn.clone();
+        // Frame receiver task: desktop-tagged uni streams from the
+        // connection demux, drop stale, decode newest. A delivered-seq
+        // gap means a delta chain broke — the session auto-requests an
+        // IDR so decode can resync.
+        let mut uni = conn
+            .uni_streams(rds_core::UniHello::Desktop)
+            .map_err(|e| DesktopError::Io(std::io::Error::other(e.to_string())))?;
         // `next_seq` is the lowest seq still acceptable — the next
         // expected frame. Init 0 accepts the stream's first frame
         // (seq 0 is fresh, not stale) and lets the gap check catch a
@@ -158,7 +161,7 @@ impl DesktopSession {
         // consumer is strictly the order of their seq numbers.
         let deliver_lock = Arc::new(tokio::sync::Mutex::new(()));
         let frame_task = tokio::spawn(async move {
-            while let Ok(mut stream) = conn.accept_uni().await {
+            while let Some(mut stream) = uni.recv().await {
                 let frame_tx = frame_tx.clone();
                 let header_tx = header_tx.clone();
                 let seq_marker = seq_marker.clone();
