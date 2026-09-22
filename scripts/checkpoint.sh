@@ -300,7 +300,7 @@ c8)
     for unit in deploy/systemd/rds-server.service deploy/systemd/rds-agent.service; do
         for directive in NoNewPrivileges=yes ProtectSystem=strict \
                 ProtectHome=yes PrivateTmp=yes "CapabilityBoundingSet=" \
-                "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" \
+                "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK" \
                 "SystemCallFilter=@system-service" "UMask=0077"; do
             grep -q "^$directive" "$unit" \
                 || fail "$unit missing $directive"
@@ -322,9 +322,9 @@ c8)
     write_checkpoint "c8" "pending review" \
         "- fmt/clippy/test: PASS (default + transport-noq lanes)
 - systemd units: ProtectSystem=strict, NoNewPrivileges, PrivateTmp,
-  empty CapabilityBoundingSet, AF_INET/6/UNIX only, @system-service
-  filter, UMask=0077, StateDirectory-scoped writes: verified in both
-  units
+  empty CapabilityBoundingSet, AF_INET/6/UNIX/NETLINK (netlink for
+  netwatch), @system-service filter, UMask=0077, StateDirectory-scoped
+  writes: verified in both units
 - key permissions: endpoint.key written 0600 by load_or_create_key;
   enforced at create; review checks stat %a on deployed hosts
 - ports/firewall/runbook/failure-modes: docs/deployment.md
