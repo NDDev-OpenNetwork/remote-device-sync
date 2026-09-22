@@ -23,6 +23,10 @@ struct Cli {
     /// device-name resolution; tickets still work without it.
     #[arg(long, global = true)]
     server: Option<SocketAddr>,
+    /// Capability grant file (JSON `Grant` as minted by the estate).
+    /// Required when the target agent runs in grant mode.
+    #[arg(long, global = true)]
+    grant: Option<std::path::PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -103,7 +107,13 @@ async fn main() -> anyhow::Result<()> {
     }
     let endpoint = bind_endpoint(config).await?;
     let directory = cli.server.map(rds_discovery::client::Client::new);
-
+    let grant = cli
+        .grant
+        .as_deref()
+        .map(|p| -> anyhow::Result<rds_core::grant::Grant> {
+            Ok(serde_json::from_slice(&std::fs::read(p)?)?)
+        })
+        .transpose()?;
     match cli.command {
         Command::Id => println!("{}", endpoint.id()),
         Command::Ticket => {
@@ -111,7 +121,12 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", Ticket::of(&endpoint));
         }
         Command::Ping { target, count } => {
-            let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
+            let conn = dial(
+                &endpoint,
+                resolve(&directory, &target).await?,
+                grant.clone(),
+            )
+            .await?;
             println!("connected to {}", conn.remote_id());
             for i in 0..count {
                 let rtt = rds_cli::ping(&conn, i as u64).await?;
@@ -119,7 +134,12 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Info { target } => {
-            let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
+            let conn = dial(
+                &endpoint,
+                resolve(&directory, &target).await?,
+                grant.clone(),
+            )
+            .await?;
             let info = rds_cli::info(&conn).await?;
             println!("{info:#?}");
         }
@@ -128,8 +148,14 @@ async fn main() -> anyhow::Result<()> {
             bind,
             remote,
         } => {
-            let conn =
-                Arc::new(rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?);
+            let conn = Arc::new(
+                dial(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                )
+                .await?,
+            );
             let (host, port) = parse_host_port(&remote)?;
             eprintln!(
                 "endpoint {} — run: ssh -p {} <user>@{}",
@@ -144,8 +170,14 @@ async fn main() -> anyhow::Result<()> {
             bind,
             remote,
         } => {
-            let conn =
-                Arc::new(rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?);
+            let conn = Arc::new(
+                dial(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                )
+                .await?,
+            );
             let (host, port) = parse_host_port(&remote)?;
             rds_cli::forward_listener(conn, bind, host, port).await?;
         }
@@ -156,7 +188,12 @@ async fn main() -> anyhow::Result<()> {
         } => {
             #[cfg(feature = "desktop")]
             {
-                let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
+                let conn = dial(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                )
+                .await?;
                 rds_desktop::client::run_desktop_client(conn, display, max_fps).await?;
             }
             #[cfg(not(feature = "desktop"))]
@@ -174,6 +211,17 @@ fn parse_host_port(s: &str) -> anyhow::Result<(String, u16)> {
         .rsplit_once(':')
         .ok_or_else(|| anyhow::anyhow!("expected host:port, got {s}"))?;
     Ok((host.to_string(), port.parse()?))
+}
+
+async fn dial(
+    endpoint: &rds_net::Endpoint,
+    target: rds_net::EndpointAddr,
+    grant: Option<rds_core::grant::Grant>,
+) -> anyhow::Result<rds_net::Connection> {
+    match grant {
+        Some(g) => rds_cli::connect_authorized(endpoint, target, &g).await,
+        None => rds_cli::connect(endpoint, target).await,
+    }
 }
 
 async fn resolve(

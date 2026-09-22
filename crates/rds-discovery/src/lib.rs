@@ -15,6 +15,7 @@
 pub mod client;
 pub mod http;
 pub mod registry;
+pub mod revocations;
 pub mod service;
 
 use std::collections::HashMap;

@@ -141,15 +141,22 @@ same layer. `docs/conventions.md` holds the enforceable rules.
 - Network identity: the endpoint's Ed25519 key (`EndpointId`). QUIC-TLS
   authentication is built on it — connections are mutually authenticated
   by key, not by password.
-- The agent serves only peers on its `allow` list of `EndpointId`s.
-  The enforced boundary is `EndpointHooks::after_handshake`: the
-  connection is rejected at TLS completion, before any service stream
-  opens. (v0.1 currently checks at first stream; moving to the hook is
-  in the build order.)
-- GDS binding (next milestone): a signed device record ties
-  `device_id` ↔ `EndpointId` and is distributed through the estate/device
-  registry, so `rds ssh nddev-amsterdam` resolves keys from GDS state
-  instead of pasted tickets.
+- **Membership**: the agent serves only peers on its `allow` list of
+  `EndpointId`s, checked at handshake completion.
+- **Capability grants** (WS4): when `policy.issuers` is non-empty, the
+  peer must additionally open `StreamHello::Authz` as the connection's
+  first stream, presenting a grant signed by a trusted estate issuer.
+  Every service stream raced ahead of the grant is refused; after
+  verification each stream is scope-checked (`services`, `tcp_ports`,
+  `displays`, `max_bps`). Grants are short-lived (`grant_max_ttl`),
+  non-replayable across concurrent connections (`active_grants`), and
+  revocable: the directory serves an estate-signed `SignedRevocations`
+  snapshot at `GET /v1/revocations`, agents poll it into their denylist,
+  and a revoked or expired grant closes its live connection.
+- GDS binding: a signed device record ties `device_id` ↔ `EndpointId`
+  and is distributed through the estate/device registry, so
+  `rds ssh nddev-amsterdam` resolves keys from GDS state instead of
+  pasted tickets.
 
 ### Stream protocol (`ALPN = rds/0`)
 
@@ -157,10 +164,12 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 
 | Service | Direction | Payload |
 | --- | --- | --- |
+| `Authz` | bi | capability grant (first stream in grant mode) |
 | `Ping` | bi | nonce echo for RTT |
 | `Info` | bi | agent version, services, displays |
-| `Tcp { host, port }` | bi | raw byte splice (ssh = `127.0.0.1:22`) |
+| `TcpConnect { host, port }` | bi | raw byte splice (ssh = `127.0.0.1:22`) |
 | `Desktop` | bi + uni | hello/capabilities; input events client→server; one uni stream per video frame server→client |
+| `Sync` | bi + uni | manifest offer/request; chunk pull on dedicated streams (WS6) |
 
 Desktop media: capture → BGRA→I420 → H.264 (OpenH264 baseline, no B-frames;
 hw encoders behind a trait) → per-frame uni stream with

@@ -9,6 +9,9 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Capability grants (WS4): signed service-scope tokens presented on
+/// the connection's first stream.
+pub mod grant;
 /// Owned relay protocol wire types (ALPN `rds-relay/0`).
 pub mod relay;
 
@@ -32,6 +35,12 @@ pub enum StreamHello {
     TcpConnect { host: String, port: u16 },
     /// Open a desktop session control channel.
     Desktop(DesktopHello),
+    /// Transfer a file or directory (WS6 sync protocol follows inside).
+    Sync,
+    /// Present a capability [`grant::Grant`]. Must be the first stream
+    /// on the connection when the agent runs in grant mode: every
+    /// service stream opened before the grant verifies is refused.
+    Authz(grant::Grant),
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -63,6 +72,8 @@ pub enum ServiceKind {
     Info,
     Tcp,
     Desktop,
+    /// Bulk file transfer (WS6).
+    Sync,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

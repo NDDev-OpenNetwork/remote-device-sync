@@ -1,7 +1,7 @@
 //! Directory service e2e: real TCP sockets, real HTTP codec, real
 //! store — the same paths `rds-server` runs in production.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -287,6 +287,59 @@ async fn registry_put_requires_estate_signature() {
     );
     // …but replaying the same (not newer) snapshot is stale.
     let err = client.update_registry(&snap).await.unwrap_err();
+    assert!(matches!(err, DiscoveryError::Http { status: 409, .. }));
+}
+
+#[tokio::test]
+async fn revocations_roundtrip_and_authz() {
+    // WS4 denylist channel: the estate signs a snapshot of revoked
+    // grant ids; the directory stores it verbatim and serves it.
+    let reg_key = key(40);
+    let wrong_key = key(41);
+    let store = Arc::new(MemoryStore::default());
+    let dir = service::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        store,
+        ServiceConfig {
+            registry_key: Some(reg_key.verifying_key()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = Client::new(dir.addr());
+
+    // Nothing published yet → 404 → None.
+    assert!(client.fetch_revocations().await.unwrap().is_none());
+
+    // Forged signature refused.
+    let forged = rds_discovery::revocations::SignedRevocations::publish(
+        &wrong_key,
+        BTreeSet::from([[9u8; 32]]),
+        Duration::from_secs(600),
+    )
+    .unwrap();
+    let err = client.update_revocations(&forged).await.unwrap_err();
+    assert!(matches!(err, DiscoveryError::Http { status: 401, .. }));
+
+    // Estate-signed snapshot accepted and served verbatim.
+    let snap = rds_discovery::revocations::SignedRevocations::publish(
+        &reg_key,
+        BTreeSet::from([[1u8; 32], [2u8; 32]]),
+        Duration::from_secs(600),
+    )
+    .unwrap();
+    client.update_revocations(&snap).await.unwrap();
+    let served = client
+        .fetch_revocations()
+        .await
+        .unwrap()
+        .expect("snapshot served");
+    let payload = served.verify(&reg_key.verifying_key()).unwrap();
+    assert!(payload.revoked.contains(&[1u8; 32]));
+
+    // Same-age replay is stale.
+    let err = client.update_revocations(&snap).await.unwrap_err();
     assert!(matches!(err, DiscoveryError::Http { status: 409, .. }));
 }
 

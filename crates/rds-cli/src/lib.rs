@@ -17,6 +17,25 @@ pub async fn connect(endpoint: &Endpoint, target: EndpointAddr) -> anyhow::Resul
         .context("connect to peer")
 }
 
+/// Connect and present `grant` on the connection's first stream —
+/// required when the agent runs in grant mode (`policy.issuers`
+/// non-empty). The grant must verify before any service stream opens;
+/// a rejected grant fails the connect.
+pub async fn connect_authorized(
+    endpoint: &Endpoint,
+    target: EndpointAddr,
+    grant: &rds_core::grant::Grant,
+) -> anyhow::Result<Connection> {
+    let conn = connect(endpoint, target).await?;
+    let (mut send, mut recv) = conn.open_bi().await?;
+    write_frame(&mut send, &StreamHello::Authz(grant.clone())).await?;
+    match read_frame::<_, HelloAck>(&mut recv).await? {
+        HelloAck::Ok => Ok(conn),
+        HelloAck::Error { message } => anyhow::bail!("grant rejected: {message}"),
+        other => anyhow::bail!("unexpected ack {other:?}"),
+    }
+}
+
 /// Send a `Ping` and measure the full round trip.
 pub async fn ping(conn: &Connection, nonce: u64) -> anyhow::Result<std::time::Duration> {
     let start = Instant::now();

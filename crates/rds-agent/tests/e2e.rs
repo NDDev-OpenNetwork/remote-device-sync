@@ -205,6 +205,246 @@ async fn desktop_handshake_completes() {
     }
 }
 
+// ---- WS4: capability grants -------------------------------------------
+
+use rds_core::grant::{Grant, GrantConstraints};
+use rds_core::{HelloAck, ServiceKind, StreamHello, read_frame, write_frame};
+
+fn issuer() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[77u8; 32])
+}
+
+/// A grant-mode agent halves: bound endpoint, policy with `issuers`
+/// set (caller adds `allow` before `Agent::new`), issuer key, ticket.
+async fn grant_agent(
+    relay_url: &str,
+) -> (
+    rds_net::Endpoint,
+    AgentPolicy,
+    ed25519_dalek::SigningKey,
+    Ticket,
+) {
+    let agent_ep = bind_endpoint(EndpointConfig::default().with_relay(relay_url).unwrap())
+        .await
+        .unwrap();
+    agent_ep.online().await;
+    let iss = issuer();
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.issuers.insert(iss.verifying_key().to_bytes());
+    let ticket = Ticket::of(&agent_ep);
+    (agent_ep, policy, iss, ticket)
+}
+
+fn grant_for(
+    iss: &ed25519_dalek::SigningKey,
+    subject: rds_net::EndpointId,
+    services: Vec<ServiceKind>,
+    ttl: Duration,
+) -> Grant {
+    Grant::issue(
+        iss,
+        *subject.as_bytes(),
+        services,
+        ttl,
+        GrantConstraints::default(),
+    )
+}
+
+fn serve(agent: Agent) -> tokio::task::JoinHandle<()> {
+    tokio::spawn({
+        let agent = Arc::new(agent);
+        async move {
+            let _ = agent.run().await;
+        }
+    })
+}
+
+async fn client_ep(relay_url: &str) -> rds_net::Endpoint {
+    let ep = bind_endpoint(EndpointConfig::default().with_relay(relay_url).unwrap())
+        .await
+        .unwrap();
+    ep.online().await;
+    ep
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grant_mode_valid_grant_opens_services() {
+    let (_relay, relay_url) = test_relay().await;
+    let client = client_ep(&relay_url).await;
+    let (ep, mut policy, iss, ticket) = grant_agent(&relay_url).await;
+    policy.allow.insert(client.id());
+    let _task = serve(Agent::new(ep, policy));
+
+    let grant = grant_for(
+        &iss,
+        client.id(),
+        vec![ServiceKind::Ping],
+        Duration::from_secs(120),
+    );
+    let conn = rds_cli::connect_authorized(
+        &client,
+        rds_net::parse_target(&ticket.to_string()).unwrap(),
+        &grant,
+    )
+    .await
+    .unwrap();
+    rds_cli::ping(&conn, 1).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streams_before_grant_are_rejected() {
+    // G4: service streams raced ahead of the Authz stream must all be
+    // refused — none may be served while the grant is unverified.
+    let (_relay, relay_url) = test_relay().await;
+    let client = client_ep(&relay_url).await;
+    let (ep, mut policy, iss, ticket) = grant_agent(&relay_url).await;
+    policy.allow.insert(client.id());
+    let _task = serve(Agent::new(ep, policy));
+
+    let conn = rds_cli::connect(&client, rds_net::parse_target(&ticket.to_string()).unwrap())
+        .await
+        .unwrap();
+
+    // N service streams without a grant — every one refused.
+    for i in 0..8 {
+        match tokio::time::timeout(Duration::from_secs(10), rds_cli::ping(&conn, i)).await {
+            Ok(Ok(_)) => panic!("ping served before grant verification"),
+            Ok(Err(_)) => {}
+            Err(_) => panic!("ping hung instead of failing"),
+        }
+    }
+
+    // The same connection starts serving once the grant lands.
+    let grant = grant_for(
+        &iss,
+        client.id(),
+        vec![ServiceKind::Ping],
+        Duration::from_secs(120),
+    );
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(&mut send, &StreamHello::Authz(grant))
+        .await
+        .unwrap();
+    match read_frame::<_, HelloAck>(&mut recv).await.unwrap() {
+        HelloAck::Ok => {}
+        other => panic!("grant rejected: {other:?}"),
+    }
+    rds_cli::ping(&conn, 99).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_and_wrong_service_grants_rejected() {
+    let (_relay, relay_url) = test_relay().await;
+    let client = client_ep(&relay_url).await;
+    let (ep, mut policy, iss, ticket) = grant_agent(&relay_url).await;
+    policy.allow.insert(client.id());
+    let _task = serve(Agent::new(ep, policy));
+    let target = rds_net::parse_target(&ticket.to_string()).unwrap();
+
+    // Expired grant → Authz ack is an error.
+    let expired = Grant::issue_at(
+        &iss,
+        rds_core::grant::GrantPayload {
+            issuer: iss.verifying_key().to_bytes(),
+            subject: *client.id().as_bytes(),
+            nonce: 1,
+            services: vec![ServiceKind::Ping],
+            not_before: 1,
+            expires_at: 2,
+            constraints: GrantConstraints::default(),
+        },
+    );
+    assert!(
+        rds_cli::connect_authorized(&client, target.clone(), &expired)
+            .await
+            .is_err()
+    );
+
+    // Wrong-service grant: Ping granted, Tcp refused by scope.
+    let grant = grant_for(
+        &iss,
+        client.id(),
+        vec![ServiceKind::Ping],
+        Duration::from_secs(120),
+    );
+    let conn = rds_cli::connect_authorized(&client, target.clone(), &grant)
+        .await
+        .unwrap();
+    rds_cli::ping(&conn, 1).await.unwrap();
+    assert!(rds_cli::open_tcp(&conn, "127.0.0.1", 9).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn revoked_grant_drops_live_and_new_connections() {
+    let (_relay, relay_url) = test_relay().await;
+    let client = client_ep(&relay_url).await;
+    let (ep, mut policy, iss, ticket) = grant_agent(&relay_url).await;
+    policy.allow.insert(client.id());
+    let agent = Agent::new(ep, policy);
+    let policy = agent.policy.clone();
+    let _task = serve(agent);
+    let target = rds_net::parse_target(&ticket.to_string()).unwrap();
+
+    let grant = grant_for(
+        &iss,
+        client.id(),
+        vec![ServiceKind::Ping],
+        Duration::from_secs(120),
+    );
+    let conn = rds_cli::connect_authorized(&client, target.clone(), &grant)
+        .await
+        .unwrap();
+    rds_cli::ping(&conn, 1).await.unwrap();
+
+    // Push the grant id onto the denylist: the live connection dies…
+    policy.revoke(grant.id());
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if rds_cli::ping(&conn, 2).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "revoked grant kept serving");
+
+    // …and a fresh connection presenting it is refused at Authz.
+    assert!(
+        rds_cli::connect_authorized(&client, target, &grant)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grant_replay_on_concurrent_connection_rejected() {
+    let (_relay, relay_url) = test_relay().await;
+    let client = client_ep(&relay_url).await;
+    let (ep, mut policy, iss, ticket) = grant_agent(&relay_url).await;
+    policy.allow.insert(client.id());
+    let _task = serve(Agent::new(ep, policy));
+    let target = rds_net::parse_target(&ticket.to_string()).unwrap();
+
+    let grant = grant_for(
+        &iss,
+        client.id(),
+        vec![ServiceKind::Ping],
+        Duration::from_secs(120),
+    );
+    let conn1 = rds_cli::connect_authorized(&client, target.clone(), &grant)
+        .await
+        .unwrap();
+    rds_cli::ping(&conn1, 1).await.unwrap();
+
+    // Same grant bytes on a second live connection = replay.
+    assert!(
+        rds_cli::connect_authorized(&client, target, &grant)
+            .await
+            .is_err()
+    );
+}
+
 /// Same direct-path flow on the owned `noq` backend: agent and client
 /// both bind `Backend::Noq` — exercises the facade end to end, not just
 /// the backend in isolation.

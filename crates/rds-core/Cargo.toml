@@ -11,7 +11,9 @@ default = []
 desktop = []
 
 [dependencies]
+blake3.workspace = true
 bytes.workspace = true
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 serde.workspace = true
 thiserror.workspace = true

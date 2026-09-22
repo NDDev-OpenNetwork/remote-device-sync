@@ -169,10 +169,33 @@ PY
 - record + http parser fuzz (proptest): PASS
 - G3 cold resolve→connect→first-byte ≤300ms: see bench-${TS}-resolve.{json,md}"
     ;;
+c4)
+    note "gate c4 — capability authorization"
+    green_bars
+
+    note "grant type unit tests + decoder fuzz (rds-core)"
+    cargo test -p rds-core grant || fail "rds-core grant tests"
+
+    note "grant-mode e2e: boundary, scope, expiry, replay, revocation"
+    cargo test -p rds-agent --test e2e || fail "agent e2e"
+
+    note "denylist channel: revocations endpoints + signature authz"
+    cargo test -p rds-discovery || fail "discovery tests"
+
+    write_checkpoint "c4" "pending review" \
+        "- fmt/clippy/test: PASS
+- grant unit tests + proptest decoder fuzz: PASS
+- e2e: valid grant serves; streams before grant refused (G4); expired /
+  wrong-service / untrusted-issuer rejected; denylist push drops the
+  live connection and refuses new ones; concurrent replay rejected: PASS
+- revocations snapshot roundtrip + forged/stale refusal: PASS
+- clock-skew tolerance: documented in rds-core::grant (SKEW_SECS = 30s,
+  not_before tolerant, expires_at strict)"
+    ;;
 *)
     cat <<EOF
 unknown or unregistered gate: '${GATE}'
-registered gates: c0 c1 c2 c3
+registered gates: c0 c1 c2 c3 c4
 a checkpoint with no registered checks is refused by design.
 EOF
     exit 2

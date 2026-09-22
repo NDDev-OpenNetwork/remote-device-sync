@@ -8,6 +8,8 @@
 //! DELETE /v1/records/{key}      body: signed DeleteRequest
 //! GET    /v1/names/{name}       estate registry lookup → {"key": ...}
 //! PUT    /v1/registry           replace the registry snapshot
+//! GET    /v1/revocations        estate-signed grant denylist snapshot
+//! PUT    /v1/revocations        replace the denylist snapshot
 //! GET    /v1/health             liveness
 //! GET    /v1/metrics            prometheus text counters
 //! ```
@@ -30,6 +32,8 @@ use tokio::net::TcpListener;
 
 use crate::http::{self, Request, Response};
 use crate::registry::{RegistryPayload, SignedRegistry};
+use crate::revocations::{RevocationPayload, SignedRevocations};
+
 use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, RecordStore};
 
 /// Tunables for [`serve`].
@@ -80,6 +84,7 @@ struct Metrics {
     deletes: AtomicU64,
     name_lookups: AtomicU64,
     registry_puts: AtomicU64,
+    revocations_puts: AtomicU64,
     requests_bad: AtomicU64,
     writes_rate_limited: AtomicU64,
 }
@@ -141,6 +146,10 @@ impl Drop for Directory {
 struct State {
     store: Arc<dyn RecordStore>,
     registry: RwLock<Option<RegistryPayload>>,
+    /// Latest verified denylist snapshot plus its decoded payload (the
+    /// freshness anchor); `None` until the estate publishes one. The
+    /// signed half is served verbatim so agents verify it themselves.
+    revocations: RwLock<Option<(SignedRevocations, RevocationPayload)>>,
     registry_key: Option<VerifyingKey>,
     limits: Limits,
     limiter: RateLimiter,
@@ -166,6 +175,7 @@ pub async fn serve(
     let state = Arc::new(State {
         store,
         registry: RwLock::new(registry),
+        revocations: RwLock::new(None),
         registry_key: config.registry_key,
         limits: config.limits,
         limiter: RateLimiter {
@@ -224,6 +234,8 @@ fn route(state: &State, req: &Request) -> Response {
         ("DELETE", ["v1", "records", key]) => delete_record(state, key, req),
         ("GET", ["v1", "names", name]) => get_name(state, name),
         ("PUT", ["v1", "registry"]) => put_registry(state, req),
+        ("GET", ["v1", "revocations"]) => get_revocations(state),
+        ("PUT", ["v1", "revocations"]) => put_revocations(state, req),
         ("GET", ["v1", "health"]) => Response::json(200, serde_json::json!({ "ok": true })),
         ("GET", ["v1", "metrics"]) => metrics(state),
         (_, ["v1", ..]) => Response::text(404, "unknown route"),
@@ -359,6 +371,45 @@ fn put_registry(state: &State, req: &Request) -> Response {
     }
 }
 
+/// Serve the current denylist snapshot verbatim — agents verify its
+/// signature themselves, so the stored signed bytes are what travel.
+/// 404 until the estate publishes the first snapshot.
+fn get_revocations(state: &State) -> Response {
+    match &*state.revocations.read().unwrap() {
+        Some((snap, _)) => Response::json(200, snap),
+        None => Response::error(404, &DiscoveryError::NotFound),
+    }
+}
+
+fn put_revocations(state: &State, req: &Request) -> Response {
+    // Same global bound as every verifying write.
+    if !state.limiter.check_global(&state.limits) {
+        return rate_limited(state);
+    }
+    let Some(key) = &state.registry_key else {
+        return Response::error(401, &DiscoveryError::BadSignature);
+    };
+    let snap: SignedRevocations = match serde_json::from_slice(&req.body) {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
+        }
+    };
+    let current = state.revocations.read().unwrap();
+    match snap.verify_fresh(key, current.as_ref().map(|(_, p)| p)) {
+        Ok(payload) => {
+            drop(current);
+            *state.revocations.write().unwrap() = Some((snap, payload));
+            state
+                .metrics
+                .revocations_puts
+                .fetch_add(1, Ordering::Relaxed);
+            Response::json(200, serde_json::json!({ "stored": true }))
+        }
+        Err(e) => Response::error(status_for(&e), &e),
+    }
+}
+
 fn metrics(state: &State) -> Response {
     let m = &state.metrics;
     let body = format!(
@@ -369,6 +420,7 @@ fn metrics(state: &State) -> Response {
          rds_directory_deletes {}\n\
          rds_directory_name_lookups {}\n\
          rds_directory_registry_puts {}\n\
+         rds_directory_revocations_puts {}\n\
          rds_directory_requests_bad {}\n\
          rds_directory_writes_rate_limited {}\n",
         state.store.len(),
@@ -378,6 +430,7 @@ fn metrics(state: &State) -> Response {
         m.deletes.load(Ordering::Relaxed),
         m.name_lookups.load(Ordering::Relaxed),
         m.registry_puts.load(Ordering::Relaxed),
+        m.revocations_puts.load(Ordering::Relaxed),
         m.requests_bad.load(Ordering::Relaxed),
         m.writes_rate_limited.load(Ordering::Relaxed),
     );

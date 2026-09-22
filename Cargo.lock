@@ -2824,7 +2824,10 @@ name = "rds-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "clap",
+ "data-encoding",
+ "ed25519-dalek",
  "iroh-relay",
  "rds-cli",
  "rds-core",
@@ -2875,6 +2878,7 @@ dependencies = [
  "rds-desktop",
  "rds-discovery",
  "rds-net",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2884,7 +2888,9 @@ dependencies = [
 name = "rds-core"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bytes",
+ "ed25519-dalek",
  "postcard",
  "proptest",
  "serde",
