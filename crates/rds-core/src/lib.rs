@@ -21,10 +21,31 @@ pub const ALPN: &[u8] = b"rds/0";
 /// Wire protocol version. Peers refuse mismatched majors.
 /// v2: FrameHeader carries capture/encode/send timestamps, InputEvent
 /// carries metadata, control stream gains heartbeat + input acks.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// v3: every uni-directional stream opens with a [`UniHello`] tag so a
+/// single per-connection demux can route it — v2 consumers each called
+/// `accept_uni` directly and could steal each other's streams.
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Upper bound for a serialized greeting, guard against abusive peers.
 pub const MAX_MESSAGE_LEN: u32 = 64 * 1024;
+
+/// First frame on every uni-directional stream (v3): routes the stream
+/// to the service that owns it. The accepting side runs one
+/// `accept_uni` demux per connection and hands each stream to the
+/// consumer registered for its tag — two services on one connection can
+/// no longer consume each other's streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UniHello {
+    /// Desktop video frame stream: a [`FrameHeader`] then the encoded
+    /// payload follow.
+    Desktop,
+    /// Sync chunk stream: `SyncMsg` frames (`ChunkSet`, `ChunkHdr` +
+    /// bytes, `SetDone`) follow.
+    Sync,
+    /// Audio packet stream: [`AudioFrame`] records follow (codec
+    /// support lands in v0.3).
+    Audio,
+}
 
 /// First frame on every bi-directional stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]

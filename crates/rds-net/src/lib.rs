@@ -331,7 +331,12 @@ impl Future for Incoming {
 /// Stream futures and error types are shared — both backends return
 /// the same `noq` types.
 #[derive(Clone)]
-pub struct Connection(ConnectionInner);
+pub struct Connection {
+    inner: ConnectionInner,
+    /// Routes inbound uni streams to the consumer that claimed their
+    /// `UniHello` tag — see [`Connection::uni_streams`].
+    demux: std::sync::Arc<UniDemux>,
+}
 
 #[derive(Clone)]
 enum ConnectionInner {
@@ -340,19 +345,98 @@ enum ConnectionInner {
     Noq(backends::noq::Connection),
 }
 
+/// Per-connection uni-stream router: one `accept_uni` owner that reads
+/// each stream's `UniHello` tag and hands the stream to the consumer
+/// that claimed the tag. Without it, independent consumers racing on
+/// `accept_uni` steal each other's streams.
+#[derive(Default)]
+struct UniDemux {
+    state: std::sync::Mutex<UniDemuxState>,
+}
+
+#[derive(Default)]
+struct UniDemuxState {
+    routes: std::collections::HashMap<rds_core::UniHello, tokio::sync::mpsc::Sender<RecvStream>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Demux queue depth per kind. Desktop frame streams arrive one per
+/// frame and the consumer drains them into per-stream tasks
+/// immediately, so 128 covers bursts without letting a wedged consumer
+/// grow memory unboundedly.
+const UNI_DEMUX_DEPTH: usize = 128;
+
+/// Inbound uni streams of one [`rds_core::UniHello`] kind — see
+/// [`Connection::uni_streams`].
+pub struct UniStreams {
+    kind: rds_core::UniHello,
+    rx: tokio::sync::mpsc::Receiver<RecvStream>,
+}
+
+impl UniStreams {
+    /// The kind this inbox serves.
+    pub fn kind(&self) -> rds_core::UniHello {
+        self.kind
+    }
+
+    /// Next inbound stream of this kind; `None` once the connection
+    /// dies.
+    pub async fn recv(&mut self) -> Option<RecvStream> {
+        self.rx.recv().await
+    }
+}
+
+/// The demux body: accept, read the tag, route. Runs until the
+/// connection dies; a route whose consumer dropped is removed so a
+/// later `uni_streams` can reclaim the kind.
+async fn uni_demux(conn: Connection, demux: std::sync::Arc<UniDemux>) {
+    loop {
+        let mut stream = match conn.accept_uni().await {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        let kind = match rds_core::read_frame::<_, rds_core::UniHello>(&mut stream).await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::debug!("uni stream dropped, unreadable tag: {e}");
+                continue;
+            }
+        };
+        let tx = demux.state.lock().unwrap().routes.get(&kind).cloned();
+        match tx {
+            Some(tx) => {
+                // Backpressure, not loss: a full queue parks the demux
+                // until the consumer drains it (sync transfers must
+                // never silently lose a chunk stream).
+                if tx.send(stream).await.is_err() {
+                    demux.state.lock().unwrap().routes.remove(&kind);
+                }
+            }
+            None => tracing::debug!("uni {kind:?} stream dropped: no consumer"),
+        }
+    }
+    demux.state.lock().unwrap().task = None;
+}
+
 impl Connection {
     fn new_iroh(inner: iroh::endpoint::Connection) -> Self {
-        Self(ConnectionInner::Iroh(inner))
+        Self {
+            inner: ConnectionInner::Iroh(inner),
+            demux: Default::default(),
+        }
     }
 
     #[cfg(feature = "transport-noq")]
     fn new_noq(inner: backends::noq::Connection) -> Self {
-        Self(ConnectionInner::Noq(inner))
+        Self {
+            inner: ConnectionInner::Noq(inner),
+            demux: Default::default(),
+        }
     }
 
     /// Verified peer identity.
     pub fn remote_id(&self) -> EndpointId {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.remote_id(),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.remote_id(),
@@ -361,7 +445,7 @@ impl Connection {
 
     /// Open a bidirectional stream.
     pub fn open_bi(&self) -> OpenBi<'_> {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.open_bi(),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.open_bi(),
@@ -370,7 +454,7 @@ impl Connection {
 
     /// Accept the next bidirectional stream opened by the peer.
     pub fn accept_bi(&self) -> AcceptBi<'_> {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.accept_bi(),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.accept_bi(),
@@ -379,7 +463,7 @@ impl Connection {
 
     /// Open a unidirectional stream.
     pub fn open_uni(&self) -> OpenUni<'_> {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.open_uni(),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.open_uni(),
@@ -387,17 +471,45 @@ impl Connection {
     }
 
     /// Accept the next unidirectional stream opened by the peer.
+    ///
+    /// Prefer [`uni_streams`](Self::uni_streams): on a connection whose
+    /// services use tagged streams, a direct `accept_uni` races the
+    /// demux and can steal tagged streams from their consumers.
     pub fn accept_uni(&self) -> AcceptUni<'_> {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.accept_uni(),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.accept_uni(),
         }
     }
 
+    /// Claim inbound uni streams tagged `kind` (the `UniHello` first
+    /// frame every v3 sender writes). The first claim on a connection
+    /// spawns the shared demux that owns `accept_uni`; each kind allows
+    /// one live claim — a second registration while the first inbox is
+    /// alive fails rather than splitting the queue, and a dropped
+    /// inbox frees the kind for re-claim.
+    ///
+    /// Must be called inside a tokio runtime.
+    pub fn uni_streams(&self, kind: rds_core::UniHello) -> anyhow::Result<UniStreams> {
+        let (tx, rx) = tokio::sync::mpsc::channel(UNI_DEMUX_DEPTH);
+        let mut st = self.demux.state.lock().unwrap();
+        if st.routes.get(&kind).is_some_and(|s| !s.is_closed()) {
+            anyhow::bail!("uni stream kind {kind:?} already claimed");
+        }
+        st.routes.insert(kind, tx);
+        if st.task.is_none() {
+            st.task = Some(tokio::spawn(uni_demux(
+                self.clone(),
+                std::sync::Arc::clone(&self.demux),
+            )));
+        }
+        Ok(UniStreams { kind, rx })
+    }
+
     /// Send an unreliable datagram.
     pub fn send_datagram(&self, data: bytes::Bytes) -> Result<(), SendDatagramError> {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.send_datagram(data),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.send_datagram(data),
@@ -406,7 +518,7 @@ impl Connection {
 
     /// Receive the next unreliable datagram.
     pub fn read_datagram(&self) -> ReadDatagram<'_> {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.read_datagram(),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.read_datagram(),
@@ -415,7 +527,7 @@ impl Connection {
 
     /// Close the connection.
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.close(error_code, reason),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.close(error_code, reason),
@@ -425,7 +537,7 @@ impl Connection {
     /// Whether the connection has closed (either side). Samplers use
     /// this as their stop condition.
     pub fn is_closed(&self) -> bool {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c.close_reason().is_some(),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.inner().close_reason().is_some(),
@@ -435,7 +547,7 @@ impl Connection {
     /// Snapshot of every live path's transport counters, normalized
     /// across backends. Used by media pacing (WS5) and metrics (WS7).
     pub fn path_stats(&self) -> Vec<PathStats> {
-        match &self.0 {
+        match &self.inner {
             ConnectionInner::Iroh(c) => c
                 .paths()
                 .iter()
