@@ -192,10 +192,46 @@ c4)
 - clock-skew tolerance: documented in rds-core::grant (SKEW_SECS = 30s,
   not_before tolerant, expires_at strict)"
     ;;
+c5)
+    note "gate c5 — session/media protocol v2"
+    green_bars
+
+    note "clippy + tests with transport-noq (impairment lane backend)"
+    cargo clippy --workspace --all-targets \
+        --features rds-net/transport-noq,rds-bench/transport-noq \
+        -- -D warnings || fail "clippy noq"
+
+    note "session v2 e2e: keyframe, newest-wins, control, impairment, soak"
+    cargo test -p rds-desktop --test session_v2 || fail "session_v2 e2e"
+
+    note "session v2 e2e on the owned transport"
+    cargo test -p rds-desktop --test session_v2 \
+        --features rds-net/transport-noq || fail "session_v2 e2e (noq)"
+
+    note "FrameHeader decoder + control demux fuzz (rds-core)"
+    cargo test -p rds-core || fail "rds-core tests"
+
+    write_checkpoint "c5" "pending review" \
+        "- fmt/clippy/test: PASS (default + transport-noq lanes)
+- session_v2 e2e (iroh + noq): PASS
+  - header roundtrip + input metadata: rds-core unit tests
+  - keyframe request roundtrip: PASS
+  - bounded queue + newest-wins (240 fps pressure): PASS
+  - input acks + heartbeat RTT: PASS
+  - impairment 5% loss + 30ms jitter via ImpairingSocket (underneath
+    QUIC, migration-immune): PASS — counters prove real drops
+  - G5 latency: clean-link p95 ≤150ms asserted in soak lane;
+    impaired lane asserts queue_p95 ≤100ms (protocol queues bounded),
+    lat_p50 ≤500ms (median at path speed), tail ≤2s/3s (retransmit
+    physics, not queueing) — split via capture/send/deliver ts
+- soak 60fps: 20s smoke PASS; full 30min via RDS_SOAK_SECS=1800
+  (run before merge or noted honestly)
+- FrameHeader decoder + stream demux fuzz (proptest): PASS"
+    ;;
 *)
     cat <<EOF
 unknown or unregistered gate: '${GATE}'
-registered gates: c0 c1 c2 c3 c4
+registered gates: c0 c1 c2 c3 c4 c5
 a checkpoint with no registered checks is refused by design.
 EOF
     exit 2

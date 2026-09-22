@@ -19,7 +19,9 @@ pub mod relay;
 pub const ALPN: &[u8] = b"rds/0";
 
 /// Wire protocol version. Peers refuse mismatched majors.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// v2: FrameHeader carries capture/encode/send timestamps, InputEvent
+/// carries metadata, control stream gains heartbeat + input acks.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Upper bound for a serialized greeting, guard against abusive peers.
 pub const MAX_MESSAGE_LEN: u32 = 64 * 1024;
@@ -37,6 +39,9 @@ pub enum StreamHello {
     Desktop(DesktopHello),
     /// Transfer a file or directory (WS6 sync protocol follows inside).
     Sync,
+    /// Open an audio channel: one uni stream of [`AudioFrame`] records
+    /// server→client on its own clock (codec support lands in v0.3).
+    Audio(AudioHello),
     /// Present a capability [`grant::Grant`]. Must be the first stream
     /// on the connection when the agent runs in grant mode: every
     /// service stream opened before the grant verifies is refused.
@@ -74,6 +79,8 @@ pub enum ServiceKind {
     Desktop,
     /// Bulk file transfer (WS6).
     Sync,
+    /// Audio forwarding (v0.3 codec; wire shape reserved in v2).
+    Audio,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +91,8 @@ pub struct DesktopHello {
     pub max_fps: u32,
     /// Requested codec.
     pub codec: Codec,
+    /// Measurement mode: server acks each injected input event.
+    pub input_acks: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,18 +115,26 @@ pub enum Codec {
     H264,
 }
 
-/// Header at the start of every uni-directional video frame stream.
+/// Header at the start of every uni-directional video frame stream (v2).
+///
+/// All timestamps are milliseconds on the producer's session clock:
+/// `capture_ts_ms` when the frame was captured, `encode_done_ts_ms` when
+/// the encoder returned it, `send_ts_ms` when it was handed to the
+/// transport — together they split pipeline delay from network delay,
+/// which is what the latency budget is measured against.
 ///
 /// The receiver resets a frame stream when a newer `seq` has already been
 /// fully received: stale streams cost no further bandwidth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameHeader {
     pub seq: u64,
-    pub pts_ms: u64,
+    pub capture_ts_ms: u64,
+    pub encode_done_ts_ms: u64,
+    pub send_ts_ms: u64,
     pub keyframe: bool,
+    pub codec: Codec,
     pub width: u32,
     pub height: u32,
-    pub codec: Codec,
 }
 
 /// Client→server messages on the desktop control stream.
@@ -129,10 +146,36 @@ pub enum DesktopControl {
     SetBitrate(u32),
     /// One input event to inject on the serving side.
     Input(InputEvent),
+    /// Liveness probe; the server echoes it as [`DesktopEvent::Heartbeat`].
+    /// Lets the viewer measure control-plane RTT under video backlog.
+    Heartbeat { seq: u64, ts_ms: u64 },
 }
 
+/// Server→client messages on the desktop control stream (v2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum InputEvent {
+pub enum DesktopEvent {
+    /// One input event was injected (sent when `DesktopHello::input_acks`).
+    InputAck { seq: u64, handled_ts_ms: u64 },
+    /// Echo of [`DesktopControl::Heartbeat`].
+    Heartbeat { seq: u64, ts_ms: u64 },
+}
+
+/// One input event plus the metadata the serving side needs to route and
+/// the viewer needs to correlate acks (v2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputEvent {
+    /// Per-session sequence number, assigned by the viewer.
+    pub seq: u64,
+    /// When the viewer produced the event, ms on its own clock.
+    pub event_ts_ms: u64,
+    /// Display the event targets.
+    pub display_id: u32,
+    pub kind: InputKind,
+}
+
+/// The input action itself; carried inside [`InputEvent`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum InputKind {
     /// Linux evdev key code, pressed.
     KeyDown { code: u32 },
     /// Linux evdev key code, released.
@@ -145,6 +188,31 @@ pub enum InputEvent {
     PointerButton { button: i32, pressed: bool },
     /// High-resolution scroll deltas.
     Scroll { dx: f64, dy: f64 },
+}
+
+/// Audio channel negotiation (`StreamHello::Audio`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioHello {
+    pub codec: AudioCodec,
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioCodec {
+    /// Opus in Ogg-less framing; one [`AudioFrame`] record per packet.
+    Opus,
+}
+
+/// One audio packet on the session's uni audio stream. `capture_ts_ms`
+/// is on the audio device's own clock, independent of the video clock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioFrame {
+    pub seq: u64,
+    pub capture_ts_ms: u64,
+    /// Samples per channel in this packet.
+    pub samples: u32,
+    pub data: Vec<u8>,
 }
 
 /// Serialize `msg` as postcard and write it with a big-endian u32 length.
@@ -217,5 +285,109 @@ mod tests {
             .await
             .unwrap();
         assert!(read_frame::<_, StreamHello>(&mut b).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn frame_header_v2_roundtrip() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let header = FrameHeader {
+            seq: 41,
+            capture_ts_ms: 1_000,
+            encode_done_ts_ms: 1_004,
+            send_ts_ms: 1_005,
+            keyframe: true,
+            codec: Codec::H264,
+            width: 1920,
+            height: 1080,
+        };
+        write_frame(&mut a, &header).await.unwrap();
+        let got = read_frame::<_, FrameHeader>(&mut b).await.unwrap();
+        assert_eq!(got.seq, 41);
+        assert_eq!(got.capture_ts_ms, 1_000);
+        assert_eq!(got.encode_done_ts_ms, 1_004);
+        assert_eq!(got.send_ts_ms, 1_005);
+        assert!(got.keyframe);
+        assert_eq!((got.width, got.height), (1920, 1080));
+    }
+
+    #[tokio::test]
+    async fn input_event_v2_roundtrip() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let msg = DesktopControl::Input(InputEvent {
+            seq: 7,
+            event_ts_ms: 42_000,
+            display_id: 1,
+            kind: InputKind::PointerButton {
+                button: 272,
+                pressed: true,
+            },
+        });
+        write_frame(&mut a, &msg).await.unwrap();
+        match read_frame::<_, DesktopControl>(&mut b).await.unwrap() {
+            DesktopControl::Input(ev) => {
+                assert_eq!(ev.seq, 7);
+                assert_eq!(ev.display_id, 1);
+                assert!(matches!(
+                    ev.kind,
+                    InputKind::PointerButton {
+                        button: 272,
+                        pressed: true
+                    }
+                ));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_roundtrip_both_directions() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        write_frame(&mut a, &DesktopControl::Heartbeat { seq: 3, ts_ms: 9 })
+            .await
+            .unwrap();
+        match read_frame::<_, DesktopControl>(&mut b).await.unwrap() {
+            DesktopControl::Heartbeat { seq, ts_ms } => {
+                assert_eq!((seq, ts_ms), (3, 9));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        write_frame(&mut b, &DesktopEvent::Heartbeat { seq: 3, ts_ms: 9 })
+            .await
+            .unwrap();
+        match read_frame::<_, DesktopEvent>(&mut a).await.unwrap() {
+            DesktopEvent::Heartbeat { seq, ts_ms } => {
+                assert_eq!((seq, ts_ms), (3, 9));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    proptest::proptest! {
+        /// The frame-stream demux path must never panic on arbitrary
+        /// bytes: length-prefix plus postcard decode is bounded and
+        /// error-returning on anything malformed.
+        #[test]
+        fn frame_header_decode_never_panics(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256)) {
+            let mut cur = std::io::Cursor::new(bytes);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _ = rt.block_on(read_frame::<_, FrameHeader>(&mut cur));
+        }
+
+        /// Same for the control-stream demux: every enum pulled off the
+        /// wire is decoded under the length bound.
+        #[test]
+        fn control_demux_never_panics(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256)) {
+            let mut cur = std::io::Cursor::new(bytes.clone());
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _ = rt.block_on(read_frame::<_, DesktopControl>(&mut cur));
+            let mut cur = std::io::Cursor::new(bytes);
+            let _ = rt.block_on(read_frame::<_, StreamHello>(&mut cur));
+        }
     }
 }

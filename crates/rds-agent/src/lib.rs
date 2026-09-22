@@ -393,7 +393,17 @@ async fn serve_stream(
                     Ok(caps) => {
                         write_frame(&mut send, &HelloAck::Desktop(caps)).await?;
                         let max_bps = grant.as_ref().and_then(|g| g.max_bps());
-                        rds_desktop::serve_desktop(conn, send, recv, hello, max_bps).await?;
+                        rds_desktop::serve_desktop_with(
+                            conn,
+                            send,
+                            recv,
+                            hello,
+                            rds_desktop::SessionConfig {
+                                bitrate_ceiling: max_bps,
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
                     }
                     Err(e) => {
                         write_frame(
@@ -429,6 +439,18 @@ async fn serve_stream(
             )
             .await?;
             anyhow::bail!("sync service not implemented");
+        }
+        StreamHello::Audio(_) => {
+            // Wire shape landed in protocol v2; capture/codec support
+            // is v0.3 scope. Refuse politely rather than hang.
+            write_frame(
+                &mut send,
+                &HelloAck::Error {
+                    message: "audio service not implemented".into(),
+                },
+            )
+            .await?;
+            anyhow::bail!("audio service not implemented");
         }
         StreamHello::Authz(_) => unreachable!("Authz handled above"),
     }
@@ -585,6 +607,7 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
             ServiceKind::Desktop
         }
         StreamHello::Sync => ServiceKind::Sync,
+        StreamHello::Audio(_) => ServiceKind::Audio,
         StreamHello::Authz(_) => return Err("authz is not a service".into()),
     };
     if !grant.permits(kind) {

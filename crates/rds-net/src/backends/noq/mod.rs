@@ -52,12 +52,12 @@ const DATAGRAM_BUFFER_SIZE: usize = 1 << 20;
 
 /// QUIC transport parameters, mirroring the iroh backend's choices so
 /// behavior — and benchmark numbers — are comparable across backends.
-fn transport_config() -> Arc<noq::TransportConfig> {
+fn transport_config(max_multipath_paths: Option<u32>) -> Arc<noq::TransportConfig> {
     let mut cfg = noq::TransportConfig::default();
     cfg.keep_alive_interval(Some(HEARTBEAT_INTERVAL));
     cfg.default_path_keep_alive_interval(Some(HEARTBEAT_INTERVAL));
     cfg.default_path_max_idle_timeout(Some(PATH_MAX_IDLE_TIMEOUT));
-    cfg.max_concurrent_multipath_paths(MAX_MULTIPATH_PATHS);
+    cfg.max_concurrent_multipath_paths(max_multipath_paths.unwrap_or(MAX_MULTIPATH_PATHS));
     cfg.max_remote_nat_traversal_addresses(MAX_QNT_ADDRESSES);
     cfg.server_handshake_migration(true);
     cfg.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_SIZE));
@@ -130,7 +130,7 @@ pub async fn bind_with_socket(
     let endpoint_config =
         noq::EndpointConfig::new(Arc::new(hmac::Blake3HmacKey::new(&mut rand::rng())));
 
-    let transport = transport_config();
+    let transport = transport_config(config.max_multipath_paths);
     let mut server_config = noq::ServerConfig::with_crypto(Arc::new(server_crypto));
     server_config.transport = transport.clone();
     let mut client_config = noq::ClientConfig::new(Arc::new(client_crypto));

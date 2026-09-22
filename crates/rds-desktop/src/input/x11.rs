@@ -3,7 +3,7 @@
 //! Injects into the default X11 session. Portable baseline; Wayland paths
 //! live in `input/portal` and `input/wlr`.
 
-use rds_core::InputEvent;
+use rds_core::{InputEvent, InputKind};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::xtest::ConnectionExt as _;
@@ -34,19 +34,19 @@ impl XtestInput {
 
 impl InputSink for XtestInput {
     fn inject(&mut self, event: &InputEvent) -> Result<(), DesktopError> {
-        match *event {
-            InputEvent::KeyDown { code } => self
+        match event.kind {
+            InputKind::KeyDown { code } => self
                 .conn
                 .xtest_fake_input(KEY_PRESS, code as u8, 0, self.root, 0, 0, 0),
-            InputEvent::KeyUp { code } => {
+            InputKind::KeyUp { code } => {
                 self.conn
                     .xtest_fake_input(KEY_RELEASE, code as u8, 0, self.root, 0, 0, 0)
             }
-            InputEvent::PointerMove { x, y } => {
+            InputKind::PointerMove { x, y } => {
                 self.conn
                     .xtest_fake_input(MOTION_NOTIFY, 0, 0, self.root, x as i16, y as i16, 0)
             }
-            InputEvent::PointerMotion { dx, dy } => {
+            InputKind::PointerMotion { dx, dy } => {
                 // Relative motion needs current position; XTEST lacks a
                 // relative primitive, so use XWarpPointer instead. The
                 // cookie is discarded; the flush below delivers it.
@@ -59,7 +59,7 @@ impl InputSink for XtestInput {
                     .flush()
                     .map_err(|e| DesktopError::Input(e.to_string()));
             }
-            InputEvent::PointerButton { button, pressed } => self.conn.xtest_fake_input(
+            InputKind::PointerButton { button, pressed } => self.conn.xtest_fake_input(
                 if pressed {
                     BUTTON_PRESS
                 } else {
@@ -72,7 +72,7 @@ impl InputSink for XtestInput {
                 0,
                 0,
             ),
-            InputEvent::Scroll { dx, dy } => {
+            InputKind::Scroll { dx, dy } => {
                 // Emulate wheel clicks: 4 up, 5 down, 6 left, 7 right.
                 for _ in 0..dy.abs().round() as u32 {
                     let b = if dy > 0.0 { 4 } else { 5 };

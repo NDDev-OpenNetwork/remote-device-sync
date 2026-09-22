@@ -22,5 +22,9 @@ tokio.workspace = true
 tracing.workspace = true
 x11rb = { version = "0.14", features = ["shm", "xtest", "xfixes"], optional = true }
 
+[dev-dependencies]
+noq.workspace = true
+rds-bench = { workspace = true, features = ["transport-noq"] }
+
 [lints]
 workspace = true

@@ -197,6 +197,13 @@ pub async fn spawn(upstream: SocketAddr, cfg: Impairment) -> std::io::Result<Pro
     })
 }
 
+/// Socket-level impairment (`transport-noq` only): an `AsyncUdpSocket`
+/// decorator applying the same model underneath QUIC.
+#[cfg(feature = "transport-noq")]
+mod socket;
+#[cfg(feature = "transport-noq")]
+pub use socket::{ImpairingSocket, StatsHandle};
+
 /// Delay queue + sender shared between the receive loop and dispatcher.
 struct Pipe {
     heap: Mutex<BinaryHeap<Queued>>,
@@ -206,12 +213,18 @@ struct Pipe {
     pace_cursor: Mutex<Instant>,
 }
 
+impl Pipe {
+    fn new() -> Self {
+        Self {
+            heap: Mutex::new(BinaryHeap::new()),
+            notify: Notify::new(),
+            pace_cursor: Mutex::new(Instant::now()),
+        }
+    }
+}
+
 async fn run(sock: Arc<UdpSocket>, upstream: SocketAddr, cfg: Impairment, counters: Arc<Counters>) {
-    let pipe = Arc::new(Pipe {
-        heap: Mutex::new(BinaryHeap::new()),
-        notify: Notify::new(),
-        pace_cursor: Mutex::new(Instant::now()),
-    });
+    let pipe = Arc::new(Pipe::new());
     let dispatcher = tokio::spawn(dispatch(sock.clone(), pipe.clone(), cfg, counters.clone()));
     let mut rng = Rng(cfg.seed);
     let mut seq = 0u64;

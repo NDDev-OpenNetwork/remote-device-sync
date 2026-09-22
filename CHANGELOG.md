@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- WS5 session/media protocol v2: `FrameHeader` gains
+  `capture_ts_ms`/`send_ts_ms` (shared-clock latency measurement),
+  `DesktopControl` gains heartbeat + `RequestIdr` + `SetBitrate`,
+  `DesktopEvent` gains input acks + heartbeat echoes, and
+  `InputEvent` carries `seq`/`ts_ms` metadata. The desktop session
+  now runs a producer/writer pipeline with bounded collapse
+  (keyframe-preserving), serialized sends token-bucket-paced to the
+  adaptive `BitrateController` (RTT/loss/deadline-miss driven), and
+  a receiver that drops frames below a next-expected-seq watermark,
+  auto-requests IDR on delivered-seq gaps, and re-arms IDR when
+  backpressure kills a keyframe. Per-frame stream priorities were
+  removed after they starved in-flight streams under load; the
+  control stream keeps max priority. `rds-net` gains a normalized
+  `PathStats` facade on both backends (RTT, cwnd, sent/lost, relay
+  flag) plus `EndpointConfig::without_discovery()` /
+  `with_path_pinning()` and the feature-gated
+  `bind_noq_with_socket` seam. `rds-bench` gains `ImpairingSocket` —
+  an `AsyncUdpSocket` decorator applying seeded loss/delay/jitter
+  *beneath* QUIC so path migration cannot bypass it. Tests: 5-test
+  `session_v2` e2e suite on both transports proving keyframe
+  roundtrip, 240fps newest-wins collapse, input-ack/heartbeat RTT,
+  socket-verified impairment with split queue/wire latency gates,
+  and a 60fps soak (`RDS_SOAK_SECS` for the 30min checkpoint run).
 - Post-WS3 consistency + hardening: `rds-desktop` now programs
   against the `rds_net` facade (`Connection` plus the stream/error
   re-exports — the documented "+rds-net when streams abstract"

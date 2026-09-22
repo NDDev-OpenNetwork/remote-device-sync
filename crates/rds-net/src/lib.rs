@@ -29,6 +29,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use anyhow::Context as _;
 
@@ -86,6 +87,17 @@ pub struct EndpointConfig {
     /// Custom relay URL. `None` uses the backend's default relay set
     /// (n0 public relays for iroh).
     pub relay: Option<RelayUrl>,
+    /// Publish/resolve addresses via the backend's lookup services
+    /// (iroh: n0 DNS + pkarr). `false` binds the `Minimal` preset —
+    /// dialing uses exactly the `EndpointAddr` given, which is what
+    /// impairment tests need to keep every datagram on the proxied
+    /// path. Default `true`.
+    pub discovery: bool,
+    /// Cap on concurrent QUIC multipath paths. `Some(1)` pins every
+    /// connection to its established path — impairment tests use this to
+    /// keep traffic on a proxied link instead of migrating to a
+    /// discovered direct path. `None` uses the backend default.
+    pub max_multipath_paths: Option<u32>,
     /// Owned-relay attachment (`noq` backend only): the relay server's
     /// endpoint address. When set, a relay tunnel socket joins the
     /// socket mux and the endpoint advertises it as
@@ -104,6 +116,8 @@ impl Default for EndpointConfig {
             secret_key: None,
             bind_addrs: Vec::new(),
             relay: None,
+            discovery: true,
+            max_multipath_paths: None,
             #[cfg(feature = "transport-noq")]
             relay_endpoint: None,
             alpns: vec![rds_core::ALPN.to_vec()],
@@ -124,6 +138,20 @@ impl EndpointConfig {
         self.backend = backend;
         self
     }
+
+    /// Disable address lookup services — the endpoint publishes nothing
+    /// and resolves nothing; only explicitly dialed addresses are used.
+    pub fn without_discovery(mut self) -> Self {
+        self.discovery = false;
+        self
+    }
+
+    /// Pin connections to their established path (single path, no
+    /// multipath migration). Impairment and determinism tests use this.
+    pub fn with_path_pinning(mut self) -> Self {
+        self.max_multipath_paths = Some(1);
+        self
+    }
 }
 
 /// Bind an endpoint on the configured backend.
@@ -137,6 +165,24 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
             .await
             .map(Endpoint::new_noq),
     }
+}
+
+/// Bind a noq endpoint on a caller-provided socket — the injection seam
+/// for impairment sockets, sim harnesses, or any custom
+/// [`noq::AsyncUdpSocket`]. The endpoint drives the socket like any
+/// other transport, so impairment sits underneath QUIC and cannot be
+/// bypassed by path selection.
+#[cfg(feature = "transport-noq")]
+pub async fn bind_noq_with_socket(
+    mut config: EndpointConfig,
+    socket: Box<dyn noq::AsyncUdpSocket>,
+    local_addrs: Vec<SocketAddr>,
+    runtime: std::sync::Arc<dyn noq::Runtime>,
+) -> anyhow::Result<Endpoint> {
+    config.backend = Backend::Noq;
+    backends::noq::bind_with_socket(config, socket, local_addrs, runtime, None)
+        .await
+        .map(Endpoint::new_noq)
 }
 
 /// A bound endpoint on either backend.
@@ -348,6 +394,99 @@ impl Connection {
             ConnectionInner::Noq(c) => c.close(error_code, reason),
         }
     }
+
+    /// Snapshot of every live path's transport counters, normalized
+    /// across backends. Used by media pacing (WS5) and metrics (WS7).
+    pub fn path_stats(&self) -> Vec<PathStats> {
+        match &self.0 {
+            ConnectionInner::Iroh(c) => c
+                .paths()
+                .iter()
+                .map(|p| {
+                    let s = p.stats();
+                    PathStats {
+                        path_id: path_id_u64(p.id()),
+                        rtt: s.rtt,
+                        cwnd: s.cwnd,
+                        sent: s.udp_tx.datagrams,
+                        lost: s.lost_packets,
+                        congestion_events: s.congestion_events,
+                        selected: p.is_selected(),
+                        via_relay: p.is_relay(),
+                    }
+                })
+                .collect(),
+            #[cfg(feature = "transport-noq")]
+            ConnectionInner::Noq(c) => {
+                // PathIds are sequential from ZERO; probe until a run of
+                // misses marks the end of the live set.
+                let mut out = Vec::new();
+                let mut misses = 0u32;
+                for raw in 0..64u32 {
+                    match c.inner().path_stats(noq::PathId::from(raw)) {
+                        Some(s) => {
+                            misses = 0;
+                            out.push(PathStats {
+                                path_id: u64::from(raw),
+                                rtt: s.rtt,
+                                cwnd: s.cwnd,
+                                sent: s.udp_tx.datagrams,
+                                lost: s.lost_packets,
+                                congestion_events: s.congestion_events,
+                                selected: raw == 0,
+                                via_relay: false,
+                            });
+                        }
+                        None => {
+                            misses += 1;
+                            if misses >= 8 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// Stats of the path currently selected for transmission — the one
+    /// media pacing should react to. `None` before the first path exists.
+    pub fn current_path_stats(&self) -> Option<PathStats> {
+        let paths = self.path_stats();
+        paths
+            .iter()
+            .find(|p| p.selected)
+            .copied()
+            .or_else(|| paths.into_iter().max_by_key(|p| p.sent))
+    }
+}
+
+/// Per-path transport counters, backend-normalized. All fields are
+/// cumulative since path creation except `rtt`/`cwnd` (instantaneous).
+#[derive(Debug, Clone, Copy)]
+pub struct PathStats {
+    /// Backend path identifier.
+    pub path_id: u64,
+    /// Smoothed round-trip estimate.
+    pub rtt: Duration,
+    /// Congestion window in bytes.
+    pub cwnd: u64,
+    /// Datagrams sent on this path.
+    pub sent: u64,
+    /// Datagrams declared lost on this path.
+    pub lost: u64,
+    /// Congestion events signalled on this path.
+    pub congestion_events: u64,
+    /// Whether the connection currently transmits on this path.
+    pub selected: bool,
+    /// Whether this path traverses a relay (vs a direct address).
+    pub via_relay: bool,
+}
+
+fn path_id_u64(id: iroh::endpoint::PathId) -> u64 {
+    // PathId's inner u32 is crate-private; its Display prints the number.
+    id.to_string().parse().unwrap_or(u64::MAX)
 }
 
 impl fmt::Debug for Connection {

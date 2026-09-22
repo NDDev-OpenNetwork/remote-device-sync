@@ -172,11 +172,20 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 | `Sync` | bi + uni | manifest offer/request; chunk pull on dedicated streams (WS6) |
 
 Desktop media: capture → BGRA→I420 → H.264 (OpenH264 baseline, no B-frames;
-hw encoders behind a trait) → per-frame uni stream with
-`{seq, pts_ms, keyframe}` header; the receiver resets streams overtaken by
-newer frames; `RequestIdr`/`SetBitrate` control messages; input events on
-the control stream. This yields decode-what-survives behavior without a
-custom UDP stack.
+hw encoders behind a trait) → per-frame uni stream with a `FrameHeader`
+`{seq, keyframe, capture_ts_ms, send_ts_ms}`. Freshness is enforced
+twice rather than by stream reset: the producer→writer channel is a
+bounded collapse (a queued keyframe always survives; otherwise newest
+wins), sends are serialized and token-bucket-paced to the controller's
+bitrate so QUIC's own buffer never fills with stale-on-arrival frames,
+and the receiver drops anything below a "next expected seq" watermark —
+a delivered-seq gap auto-requests an IDR, and a backpressured keyframe
+re-arms the producer's IDR flag. The control stream (`DesktopControl`:
+input events, `RequestIdr`, `SetBitrate`, heartbeats; `DesktopEvent`:
+input acks, heartbeat echoes) runs at max stream priority; per-frame
+priorities were tried and removed — under load they starve in-flight
+streams. This yields decode-what-survives behavior without a custom
+UDP stack.
 
 ### Stability measures
 
@@ -184,7 +193,9 @@ custom UDP stack.
   hole-punch upgrade — both handled by iroh.
 - QUIC connection migration survives NAT rebinding/Wi-Fi↔LTE moves.
 - Agent reconnects to relay with backoff; CLI can pin `--relay`.
-- Frame-stream reset semantics bound worst-case latency under loss.
+- Serialized frame sends + collapse bound worst-case latency under
+  loss: queues stay near-empty and the residual tail is retransmit
+  physics, not queueing.
 
 ## Milestones
 

@@ -2855,6 +2855,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "iroh-relay",
+ "noq",
  "rds-agent",
  "rds-cli",
  "rds-core",
@@ -2904,7 +2905,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "noq",
  "openh264",
+ "rds-bench",
  "rds-core",
  "rds-net",
  "serde",

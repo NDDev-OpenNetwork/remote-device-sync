@@ -24,12 +24,16 @@ pub mod capture;
 pub mod client;
 pub mod codec;
 pub mod input;
+pub mod mailbox;
 pub mod render;
 mod session;
 
 #[cfg(feature = "x11")]
 pub use codec::openh264::{H264Decoder, H264Encoder};
-pub use session::serve_desktop;
+pub use session::{
+    BitrateController, FrameProducer, NullProducer, Produced, ProducerControls, SessionClock,
+    SessionConfig, SyntheticProducer, serve_desktop, serve_desktop_with,
+};
 
 /// One captured video frame, BGRA8 unless noted otherwise.
 ///
