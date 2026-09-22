@@ -27,6 +27,10 @@ pub struct H264Encoder {
     pending_bitrate: Option<u32>,
     fps: f32,
     want_idr: bool,
+    /// Recycled I420 input buffer — a 1080p frame is ~3 MiB, so a fresh
+    /// allocation per frame at 60 fps is ~190 MB/s of pure alloc churn.
+    /// Rebuilt only when frame dimensions change.
+    yuv_buf: Option<YUVBuffer>,
 }
 
 impl H264Encoder {
@@ -38,6 +42,7 @@ impl H264Encoder {
             pending_bitrate: None,
             fps,
             want_idr: true,
+            yuv_buf: None,
         })
     }
 
@@ -84,11 +89,24 @@ impl Encoder for H264Encoder {
             self.inner.force_intra_frame();
             self.want_idr = false;
         }
-        let yuv = bgra_to_i420(frame);
+        let (w, h) = (frame.width as usize, frame.height as usize);
+        let stride = frame.stride as usize;
+        let yuv = if stride.is_multiple_of(4) && frame.data.len() >= stride * h {
+            match self.yuv_buf.take() {
+                Some(mut buf) if buf.dimensions() == (w, h) => {
+                    buf.read_bgra8(StridedBgra(frame));
+                    buf
+                }
+                _ => YUVBuffer::from_bgra8_source(StridedBgra(frame)),
+            }
+        } else {
+            bgra_to_i420_scalar(frame)
+        };
         let stream = self
             .inner
             .encode(&yuv)
             .map_err(|e| DesktopError::Encode(e.to_string()))?;
+        self.yuv_buf = Some(yuv);
         // The flag the writer's collapse trusts must be the truth on
         // the wire, not a schedule assumption: OpenH264 decides when
         // forced and periodic IDRs actually land, so read the NALs.
@@ -171,20 +189,13 @@ impl Decoder for H264Decoder {
             return Ok(None);
         };
         let (w, h) = yuv.dimensions();
-        let mut rgb = vec![0u8; w * h * 3];
-        yuv.write_rgb8(&mut rgb);
-        // Expand RGB to BGRA for a uniform RawFrame layout.
+        // I420→RGBA in one SIMD pass (AVX2 on x86-64), then swap R↔B
+        // in place for the RawFrame BGRA contract — the swap vectorizes
+        // trivially and avoids a separate 3-byte-per-pixel scratch.
         let mut bgra = vec![0u8; w * h * 4];
-        for (dst, src) in bgra
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(rgb.as_chunks::<3>().0)
-        {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = 0xFF;
+        yuv.write_rgba8(&mut bgra);
+        for px in bgra.as_chunks_mut::<4>().0.iter_mut() {
+            px.swap(0, 2);
         }
         Ok(Some(RawFrame {
             width: w as u32,
