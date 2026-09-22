@@ -1,7 +1,7 @@
 //! Directory service e2e: real TCP sockets, real HTTP codec, real
 //! store — the same paths `rds-server` runs in production.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +59,43 @@ async fn publish_fetch_roundtrip() {
     client.health().await.unwrap();
 }
 
+/// C7: `/v1/metrics` carries per-endpoint accounting under anonymized
+/// writer labels — never the public key itself.
+#[tokio::test]
+async fn metrics_scrape_has_anonymized_per_endpoint_counts() {
+    let (dir, client) = serve().await;
+    let k = key(11);
+    let rec = record(&k, now_unix().unwrap(), 300);
+    client.publish(&rec).await.unwrap();
+
+    // Raw HTTP GET — Client has no metrics helper.
+    let mut sock = TcpStream::connect(dir.addr()).await.unwrap();
+    sock.write_all(b"GET /v1/metrics HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    let mut body = String::new();
+    sock.read_to_string(&mut body).await.unwrap();
+
+    assert!(body.contains("rds_directory_puts_ok 1"), "{body}");
+    assert!(body.contains("rds_directory_writers_distinct 1"), "{body}");
+    let line = body
+        .lines()
+        .find(|l| l.starts_with("rds_directory_endpoint_puts_total"))
+        .expect("per-endpoint counter missing");
+    // Label is the 16-hex-char blake3 prefix — and the raw verifying
+    // key (base32 or hex) must appear nowhere in the scrape.
+    let label = line.split('"').nth(1).unwrap();
+    assert_eq!(label.len(), 16, "writer label: {label}");
+    let raw_hex: String = k
+        .verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(!body.contains(&raw_hex), "raw endpoint key in scrape");
+    assert!(!body.contains("10.0.0.1"), "peer address in scrape");
+}
+
 #[tokio::test]
 async fn stale_replay_and_forgery_rejected() {
     let (_dir, client) = serve().await;
@@ -109,6 +146,36 @@ async fn put_rate_limit_enforced() {
     client.publish(&record(&k, now, 300)).await.unwrap();
     // A newer, valid record inside the interval still 429s.
     let err = client.publish(&record(&k, now + 5, 300)).await.unwrap_err();
+    assert!(matches!(err, DiscoveryError::RateLimited));
+}
+
+#[tokio::test]
+async fn global_write_limit_covers_delete_and_registry() {
+    // put_per_minute = 1: the first verifying write consumes the
+    // window; a write on a different route hits the same bound before
+    // any parse or signature work.
+    let store = Arc::new(MemoryStore::default());
+    let dir = service::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        store,
+        ServiceConfig {
+            limits: Limits {
+                put_per_minute: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = Client::new(dir.addr());
+    let k = key(16);
+    let ek = EndpointKey(k.verifying_key().to_bytes());
+    client
+        .publish(&record(&k, now_unix().unwrap(), 300))
+        .await
+        .unwrap();
+    let err = client.remove(&ek, &k).await.unwrap_err();
     assert!(matches!(err, DiscoveryError::RateLimited));
 }
 
@@ -257,6 +324,59 @@ async fn registry_put_requires_estate_signature() {
     );
     // …but replaying the same (not newer) snapshot is stale.
     let err = client.update_registry(&snap).await.unwrap_err();
+    assert!(matches!(err, DiscoveryError::Http { status: 409, .. }));
+}
+
+#[tokio::test]
+async fn revocations_roundtrip_and_authz() {
+    // WS4 denylist channel: the estate signs a snapshot of revoked
+    // grant ids; the directory stores it verbatim and serves it.
+    let reg_key = key(40);
+    let wrong_key = key(41);
+    let store = Arc::new(MemoryStore::default());
+    let dir = service::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        store,
+        ServiceConfig {
+            registry_key: Some(reg_key.verifying_key()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = Client::new(dir.addr());
+
+    // Nothing published yet → 404 → None.
+    assert!(client.fetch_revocations().await.unwrap().is_none());
+
+    // Forged signature refused.
+    let forged = rds_discovery::revocations::SignedRevocations::publish(
+        &wrong_key,
+        BTreeSet::from([[9u8; 32]]),
+        Duration::from_secs(600),
+    )
+    .unwrap();
+    let err = client.update_revocations(&forged).await.unwrap_err();
+    assert!(matches!(err, DiscoveryError::Http { status: 401, .. }));
+
+    // Estate-signed snapshot accepted and served verbatim.
+    let snap = rds_discovery::revocations::SignedRevocations::publish(
+        &reg_key,
+        BTreeSet::from([[1u8; 32], [2u8; 32]]),
+        Duration::from_secs(600),
+    )
+    .unwrap();
+    client.update_revocations(&snap).await.unwrap();
+    let served = client
+        .fetch_revocations()
+        .await
+        .unwrap()
+        .expect("snapshot served");
+    let payload = served.verify(&reg_key.verifying_key()).unwrap();
+    assert!(payload.revoked.contains(&[1u8; 32]));
+
+    // Same-age replay is stale.
+    let err = client.update_revocations(&snap).await.unwrap_err();
     assert!(matches!(err, DiscoveryError::Http { status: 409, .. }));
 }
 

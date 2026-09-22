@@ -20,13 +20,22 @@ use crate::EndpointConfig;
 /// lookup — so a private deployment does not publish to third-party DNS.
 /// Without one, `presets::N0` gives the public relays plus DNS/Pkarr lookup.
 pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
-    let mut builder = match &config.relay {
-        Some(url) => Endpoint::builder(iroh::endpoint::presets::Minimal)
+    let mut builder = match (&config.relay, config.discovery) {
+        (Some(url), _) => Endpoint::builder(iroh::endpoint::presets::Minimal)
             .relay_mode(RelayMode::Custom(RelayMap::from_iter([url.clone()]))),
-        None => Endpoint::builder(iroh::endpoint::presets::N0),
+        (None, true) => Endpoint::builder(iroh::endpoint::presets::N0),
+        // No relay, no lookup: Minimal binds a plain QUIC socket.
+        (None, false) => Endpoint::builder(iroh::endpoint::presets::Minimal),
     };
     if let Some(key) = config.secret_key {
         builder = builder.secret_key(key);
+    }
+    if let Some(max_paths) = config.max_multipath_paths {
+        builder = builder.transport_config(
+            iroh::endpoint::QuicTransportConfig::builder()
+                .max_concurrent_multipath_paths(max_paths)
+                .build(),
+        );
     }
     // iroh manages its own sockets; a single bind address is all it
     // accepts. Multi-interface binding is a `noq`-backend capability.

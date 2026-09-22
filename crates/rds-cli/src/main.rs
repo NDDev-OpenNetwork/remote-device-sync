@@ -23,6 +23,10 @@ struct Cli {
     /// device-name resolution; tickets still work without it.
     #[arg(long, global = true)]
     server: Option<SocketAddr>,
+    /// Capability grant file (JSON `Grant` as minted by the estate).
+    /// Required when the target agent runs in grant mode.
+    #[arg(long, global = true)]
+    grant: Option<std::path::PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -70,6 +74,21 @@ enum Command {
         #[arg(long, default_value = "30")]
         max_fps: u32,
     },
+    /// Push a file into the peer's sync directory (resumable).
+    Send {
+        target: String,
+        /// Local file to send.
+        path: std::path::PathBuf,
+    },
+    /// Pull a file from the peer's sync directory into `dir`.
+    Recv {
+        target: String,
+        /// Relative path inside the peer's sync directory.
+        rel_path: String,
+        /// Local directory to receive into.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -103,7 +122,13 @@ async fn main() -> anyhow::Result<()> {
     }
     let endpoint = bind_endpoint(config).await?;
     let directory = cli.server.map(rds_discovery::client::Client::new);
-
+    let grant = cli
+        .grant
+        .as_deref()
+        .map(|p| -> anyhow::Result<rds_core::grant::Grant> {
+            Ok(serde_json::from_slice(&std::fs::read(p)?)?)
+        })
+        .transpose()?;
     match cli.command {
         Command::Id => println!("{}", endpoint.id()),
         Command::Ticket => {
@@ -111,15 +136,39 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", Ticket::of(&endpoint));
         }
         Command::Ping { target, count } => {
-            let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
+            let conn = dial(
+                &endpoint,
+                resolve(&directory, &target).await?,
+                grant.clone(),
+            )
+            .await?;
             println!("connected to {}", conn.remote_id());
             for i in 0..count {
                 let rtt = rds_cli::ping(&conn, i as u64).await?;
                 println!("pong seq={i} rtt={:.1}ms", rtt.as_secs_f64() * 1000.0);
             }
+            // Path evidence for ops/reports: which transport path the
+            // connection actually selected, with its smoothed RTT.
+            for p in conn.path_stats() {
+                println!(
+                    "path id={} via={} selected={} rtt={:.1}ms sent={} lost={} cwnd={}",
+                    p.path_id,
+                    if p.via_relay { "relay" } else { "direct" },
+                    p.selected,
+                    p.rtt.as_secs_f64() * 1000.0,
+                    p.sent,
+                    p.lost,
+                    p.cwnd,
+                );
+            }
         }
         Command::Info { target } => {
-            let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
+            let conn = dial(
+                &endpoint,
+                resolve(&directory, &target).await?,
+                grant.clone(),
+            )
+            .await?;
             let info = rds_cli::info(&conn).await?;
             println!("{info:#?}");
         }
@@ -128,8 +177,14 @@ async fn main() -> anyhow::Result<()> {
             bind,
             remote,
         } => {
-            let conn =
-                Arc::new(rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?);
+            let conn = Arc::new(
+                dial(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                )
+                .await?,
+            );
             let (host, port) = parse_host_port(&remote)?;
             eprintln!(
                 "endpoint {} — run: ssh -p {} <user>@{}",
@@ -144,8 +199,14 @@ async fn main() -> anyhow::Result<()> {
             bind,
             remote,
         } => {
-            let conn =
-                Arc::new(rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?);
+            let conn = Arc::new(
+                dial(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                )
+                .await?,
+            );
             let (host, port) = parse_host_port(&remote)?;
             rds_cli::forward_listener(conn, bind, host, port).await?;
         }
@@ -156,7 +217,12 @@ async fn main() -> anyhow::Result<()> {
         } => {
             #[cfg(feature = "desktop")]
             {
-                let conn = rds_cli::connect(&endpoint, resolve(&directory, &target).await?).await?;
+                let conn = dial(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                )
+                .await?;
                 rds_desktop::client::run_desktop_client(conn, display, max_fps).await?;
             }
             #[cfg(not(feature = "desktop"))]
@@ -164,6 +230,43 @@ async fn main() -> anyhow::Result<()> {
                 let _ = (target, display, max_fps);
                 anyhow::bail!("rds built without desktop support; enable the `desktop` feature");
             }
+        }
+        Command::Send { target, path } => {
+            let conn = dial(
+                &endpoint,
+                resolve(&directory, &target).await?,
+                grant.clone(),
+            )
+            .await?;
+            let (send, recv) = rds_cli::open_sync(&conn).await?;
+            let stats = rds_sync::engine::send_file(&conn, &path, send, recv).await?;
+            println!(
+                "sent {} ({} chunks, {} bytes)",
+                path.display(),
+                stats.total,
+                stats.bytes
+            );
+        }
+        Command::Recv {
+            target,
+            rel_path,
+            dir,
+        } => {
+            let conn = dial(
+                &endpoint,
+                resolve(&directory, &target).await?,
+                grant.clone(),
+            )
+            .await?;
+            let (send, recv) = rds_cli::open_sync(&conn).await?;
+            let (dest, stats) =
+                rds_sync::engine::recv_file(&conn, &rel_path, &dir, send, recv).await?;
+            println!(
+                "received {} ({} chunks fetched, {} bytes)",
+                dest.display(),
+                stats.fetched,
+                stats.bytes
+            );
         }
     }
     Ok(())
@@ -174,6 +277,17 @@ fn parse_host_port(s: &str) -> anyhow::Result<(String, u16)> {
         .rsplit_once(':')
         .ok_or_else(|| anyhow::anyhow!("expected host:port, got {s}"))?;
     Ok((host.to_string(), port.parse()?))
+}
+
+async fn dial(
+    endpoint: &rds_net::Endpoint,
+    target: rds_net::EndpointAddr,
+    grant: Option<rds_core::grant::Grant>,
+) -> anyhow::Result<rds_net::Connection> {
+    match grant {
+        Some(g) => rds_cli::connect_authorized(endpoint, target, &g).await,
+        None => rds_cli::connect(endpoint, target).await,
+    }
 }
 
 async fn resolve(

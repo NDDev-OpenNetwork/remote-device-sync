@@ -32,6 +32,10 @@ turmoil = "0.7.2"
 
 [features]
 default = []
+## Prometheus text exposition for the metrics registry (WS7). The
+## counters themselves are always live; this gates only the scrape
+## format — no external metrics dependency.
+metrics = []
 ## Owned transport backend on noq (WS1). Off by default until C1 parity.
 transport-noq = [
     "dep:noq",

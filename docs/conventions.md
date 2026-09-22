@@ -52,7 +52,9 @@ Rules every change follows. CI enforces what it can; the rest is review.
 
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
   warnings`, `cargo test --workspace` — green on Ubuntu and macOS in CI.
-- Feature lanes: `--features rds-desktop/x11` on Linux.
+- Feature lanes: `--features rds-desktop/x11` on Linux;
+  `--features rds-agent/desktop,rds-cli/desktop` on both OSes — the
+  desktop feature must compile everywhere, not only where it runs.
 - Protocol/interop tests live in `tests/` of the owning crate; e2e
   transport tests must not require a display.
 - Benchmarks are acceptance gates for the transport and media work —

@@ -14,11 +14,15 @@ transport-noq = ["rds-net/transport-noq"]
 
 [dependencies]
 anyhow.workspace = true
+blake3.workspace = true
 clap.workspace = true
+data-encoding.workspace = true
+ed25519-dalek.workspace = true
 rds-core.workspace = true
 rds-desktop = { workspace = true, optional = true }
 rds-net.workspace = true
 rds-discovery.workspace = true
+rds-sync.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true

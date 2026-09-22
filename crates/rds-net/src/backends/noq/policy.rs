@@ -90,13 +90,15 @@ pub fn advertise_addrs(conn: &noq::Connection, addrs: &[SocketAddr]) {
 
 /// Kick a NAT traversal round: the peer learns our candidates, we learn
 /// theirs. Only the client side may initiate — on a server connection
-/// this is a no-op.
-pub fn initiate_traversal_round(conn: &noq::Connection) {
+/// this is a no-op. A round that actually learned candidates counts as
+/// a QNT attempt in the endpoint's metrics.
+pub fn initiate_traversal_round(conn: &noq::Connection, metrics: &crate::metrics::Registry) {
     if !conn.side().is_client() {
         return;
     }
     match conn.initiate_nat_traversal_round() {
         Ok(addrs) if !addrs.is_empty() => {
+            metrics.qnt_attempt();
             tracing::debug!(n = addrs.len(), "nat traversal round started")
         }
         Ok(_) => {}
@@ -121,10 +123,14 @@ pub async fn connection_driver(
     mut qnt: noq::NatTraversalUpdates,
     mut path_events: noq::PathEvents,
     seed_paths: Vec<noq::PathId>,
+    metrics: crate::metrics::Registry,
 ) {
     use tokio_stream::StreamExt;
 
     let mut paths: HashMap<noq::PathId, noq::WeakPathHandle> = HashMap::new();
+    // Paths opened to QNT-learned candidates — an Established event on
+    // one of these is a QNT success.
+    let mut qnt_paths: std::collections::HashSet<noq::PathId> = std::collections::HashSet::new();
     let mut selected: Option<noq::PathId> = None;
     if let Some(conn) = conn.upgrade() {
         for id in seed_paths {
@@ -143,7 +149,10 @@ pub async fn connection_driver(
         tokio::select! {
             event = qnt.next(), if qnt_open => match event {
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressAdded(addr))) => {
-                    open_learned_path(&conn, &mut paths, addr);
+                    if let Some(id) = open_learned_path(&conn, &mut paths, addr) {
+                        metrics.qnt_attempt();
+                        qnt_paths.insert(id);
+                    }
                 }
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressRemoved(addr))) => {
                     tracing::debug!(%addr, "peer withdrew candidate");
@@ -155,6 +164,9 @@ pub async fn connection_driver(
             },
             event = path_events.next(), if events_open => match event {
                 Some(Ok(noq::PathEvent::Established { id, .. })) => {
+                    if qnt_paths.contains(&id) {
+                        metrics.qnt_success();
+                    }
                     if let Some(c) = conn.upgrade()
                         && let Some(path) = c.path(id)
                     {
@@ -181,17 +193,19 @@ pub async fn connection_driver(
     }
 }
 
-/// Attempt a path to a peer-advertised address and track it.
+/// Attempt a path to a peer-advertised address and track it. Returns
+/// the `PathId` when the open was accepted so the caller can count the
+/// attempt and match its Established event as a QNT success.
 fn open_learned_path(
     conn: &noq::WeakConnectionHandle,
     paths: &mut HashMap<noq::PathId, noq::WeakPathHandle>,
     addr: SocketAddr,
-) {
-    let Some(conn) = conn.upgrade() else { return };
+) -> Option<noq::PathId> {
+    let conn = conn.upgrade()?;
     let open = conn.open_path_ensure(addr, noq::PathStatus::Available);
     let Some(id) = open.path_id() else {
         tracing::debug!(%addr, "QNT-learned candidate path rejected");
-        return;
+        return None;
     };
     // `open` is dropped without awaiting: dropping does not cancel the
     // attempt — the Established event arrives on the path stream.
@@ -199,6 +213,7 @@ fn open_learned_path(
         paths.insert(id, path.weak_handle());
     }
     tracing::debug!(%addr, ?id, "opening path to QNT-learned candidate");
+    Some(id)
 }
 
 /// Apply the biased-RTT selection: the lowest-RTT path becomes

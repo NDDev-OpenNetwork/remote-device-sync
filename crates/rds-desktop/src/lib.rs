@@ -24,12 +24,16 @@ pub mod capture;
 pub mod client;
 pub mod codec;
 pub mod input;
+pub mod mailbox;
 pub mod render;
 mod session;
 
 #[cfg(feature = "x11")]
 pub use codec::openh264::{H264Decoder, H264Encoder};
-pub use session::serve_desktop;
+pub use session::{
+    BitrateController, FrameProducer, NullProducer, Produced, ProducerControls, SessionClock,
+    SessionConfig, SyntheticProducer, serve_desktop, serve_desktop_with,
+};
 
 /// One captured video frame, BGRA8 unless noted otherwise.
 ///
@@ -63,15 +67,15 @@ pub enum DesktopError {
     #[error("input injection failed: {0}")]
     Input(String),
     #[error("connection failed: {0}")]
-    Connection(#[from] iroh::endpoint::ConnectionError),
+    Connection(#[from] rds_net::ConnectionError),
     #[error("stream closed by peer")]
-    Closed(#[from] iroh::endpoint::ClosedStream),
+    Closed(#[from] rds_net::ClosedStream),
     #[error("stream write failed: {0}")]
-    Write(#[from] iroh::endpoint::WriteError),
+    Write(#[from] rds_net::WriteError),
     #[error("stream read failed: {0}")]
-    Read(#[from] iroh::endpoint::ReadError),
+    Read(#[from] rds_net::ReadError),
     #[error("stream read failed: {0}")]
-    ReadExact(#[from] iroh::endpoint::ReadExactError),
+    ReadExact(#[from] rds_net::ReadExactError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

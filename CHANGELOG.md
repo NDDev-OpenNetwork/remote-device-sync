@@ -2,6 +2,101 @@
 
 ## [Unreleased]
 
+- WS8 deployment: `deploy/systemd/rds-server.service` and
+  `rds-agent.service` — hardened units (ProtectSystem=strict,
+  NoNewPrivileges, PrivateTmp/Devices, ProtectKernel*/ControlGroups,
+  empty CapabilityBoundingSet, @system-service filter,
+  AF_INET/6/UNIX/NETLINK only, UMask=0077, StateDirectory-scoped
+  writes). `docs/deployment.md` documents install, ports/firewall
+  (3340/tcp relay, 3341/tcp directory, metrics loopback-only),
+  restart/upgrade/drain procedures and a failure-modes table.
+  `rds ping` now prints per-path stats (via/selected/RTT/sent/lost/
+  cwnd) for ops evidence; `rds-net/examples/ticket` mints
+  restricted-address tickets (e.g. relay-only) for path verification.
+  Deployment findings encoded: AF_NETLINK is required for interface
+  monitoring; a client transiting the relay must itself be on the
+  relay's `--allow`; an agent and a CLI on one host need distinct key
+  files or the relay disconnects the duplicate EndpointId.
+- WS7 observability: `rds-net::metrics` — a per-endpoint `Registry`
+  of atomic counters plus a per-connection `ConnSampler` that folds
+  cumulative `path_stats()` deltas into them. The
+  `via="direct"`/`via="relay"` split is exact across path migration:
+  datagrams and bytes sent/lost, congestion events, paths seen,
+  connection totals, and RTT/cwnd/live-paths/active-connections
+  gauges. QNT attempt/success counters are driven by the noq policy
+  driver (iroh does not expose hole-punch attempts; a `direct` path
+  appearing after a relay-only start is the equivalent signal).
+  `Registry::render_prometheus` emits text exposition behind the new
+  `metrics` feature. `PathStats` gains `sent_bytes`/`recv_bytes`.
+  `rds-server`'s `GET /v1/metrics` now reports per-endpoint PUT
+  counters under anonymized 16-hex BLAKE3-prefix labels and answers
+  loopback peers only — raw keys, peer addresses and content are
+  never exposed; remote scraping goes over SSH or a local exporter.
+  The agent wraps every connection in an `rds.conn{peer, session_id}`
+  span with nested `rds.stream{service}` spans and runs a 1s
+  `ConnSampler` per connection; `rds-sync` logs session-boundary
+  events with byte/chunk counts. `rds-bench` reports embed the
+  `client_`/`agent_` registry snapshot collected at run time, so
+  every reported number is backed by the harness's own counters.
+- WS6 content-addressed sync: `rds-sync` gains a real protocol —
+  FastCDC chunking, BLAKE3 per-chunk + per-file roots, a bounded
+  wire format (`Offer`/`Request`/`Refuse`, `ManifestPart` ≤512
+  entries, `Need` bitmap ≤256K chunks, `ChunkSet` ≤4096 indices,
+  chunk payloads on 4 dedicated uni streams, `SetDone`/`Done`).
+  Receives journal under `<dest>/.rds-sync/<root>/`: surviving parts
+  are re-verified by content hash (corrupt parts refetched), a torn
+  meta is rebuilt from the offer, an existing destination file seeds
+  `have` so identical resends move zero bytes, and assembly is an
+  atomic rename after root verification. `rel_path` rejects
+  traversal, absolute paths, NUL and oversize. `rds send`/`rds recv`
+  push/pull through `rds_cli::open_sync`; the agent serves `Sync`
+  under `--sync-dir` with a one-session-per-connection guard (chunk
+  streams share the `accept_uni` queue) and advertises `Sync` in
+  `Info` only when configured. E2E: byte-identical push/pull,
+  zero-chunk resend, corrupt-part refetch, torn-journal and
+  mid-transfer kill resume, repeated kill/resume convergence,
+  traversal fuzz, and a lossy-socket impaired-lane completion.
+- WS5 session/media protocol v2: `FrameHeader` gains
+  `capture_ts_ms`/`send_ts_ms` (shared-clock latency measurement),
+  `DesktopControl` gains heartbeat + `RequestIdr` + `SetBitrate`,
+  `DesktopEvent` gains input acks + heartbeat echoes, and
+  `InputEvent` carries `seq`/`ts_ms` metadata. The desktop session
+  now runs a producer/writer pipeline with bounded collapse
+  (keyframe-preserving), serialized sends token-bucket-paced to the
+  adaptive `BitrateController` (RTT/loss/deadline-miss driven), and
+  a receiver that drops frames below a next-expected-seq watermark,
+  auto-requests IDR on delivered-seq gaps, and re-arms IDR when
+  backpressure kills a keyframe. Per-frame stream priorities were
+  removed after they starved in-flight streams under load; the
+  control stream keeps max priority. `rds-net` gains a normalized
+  `PathStats` facade on both backends (RTT, cwnd, sent/lost, relay
+  flag) plus `EndpointConfig::without_discovery()` /
+  `with_path_pinning()` and the feature-gated
+  `bind_noq_with_socket` seam. `rds-bench` gains `ImpairingSocket` —
+  an `AsyncUdpSocket` decorator applying seeded loss/delay/jitter
+  *beneath* QUIC so path migration cannot bypass it. Tests: 5-test
+  `session_v2` e2e suite on both transports proving keyframe
+  roundtrip, 240fps newest-wins collapse, input-ack/heartbeat RTT,
+  socket-verified impairment with split queue/wire latency gates,
+  and a 60fps soak (`RDS_SOAK_SECS` for the 30min checkpoint run).
+- Post-WS3 consistency + hardening: `rds-desktop` now programs
+  against the `rds_net` facade (`Connection` plus the stream/error
+  re-exports — the documented "+rds-net when streams abstract"
+  direction), so the `desktop` feature on `rds-agent`/`rds-cli`
+  compiles and serves on both transport backends instead of failing
+  on a raw-`iroh` type mismatch; a new CI lane
+  `--features rds-agent/desktop,rds-cli/desktop` (both OSes) keeps it
+  compiling. Session teardown fixed: `serve_desktop` aborts the
+  frame-writer task and the capture producer exits when its channel
+  closes — `JoinHandle::abort` cannot interrupt `spawn_blocking`
+  work, so ending a session previously leaked a permanently-spinning
+  capture/encode thread; `DesktopSession` drop aborts the
+  frame-receiver task so the connection closes with the session
+  instead of outliving it. The directory's global per-minute window
+  now covers every signature-verifying write — `PUT /v1/records`,
+  `PUT /v1/registry`, `DELETE /v1/records/{key}` — checked before
+  parsing, exported as `rds_directory_writes_rate_limited`.
+  `x11rb` 0.13 → 0.14.
 - WS3 discovery service + publish/resolve (`rds-discovery`):
   `EndpointRecord` payloads carry `issued_at`; stores reject
   forged, expired and same-age-or-older replayed records, and honor

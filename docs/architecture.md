@@ -141,15 +141,22 @@ same layer. `docs/conventions.md` holds the enforceable rules.
 - Network identity: the endpoint's Ed25519 key (`EndpointId`). QUIC-TLS
   authentication is built on it — connections are mutually authenticated
   by key, not by password.
-- The agent serves only peers on its `allow` list of `EndpointId`s.
-  The enforced boundary is `EndpointHooks::after_handshake`: the
-  connection is rejected at TLS completion, before any service stream
-  opens. (v0.1 currently checks at first stream; moving to the hook is
-  in the build order.)
-- GDS binding (next milestone): a signed device record ties
-  `device_id` ↔ `EndpointId` and is distributed through the estate/device
-  registry, so `rds ssh nddev-amsterdam` resolves keys from GDS state
-  instead of pasted tickets.
+- **Membership**: the agent serves only peers on its `allow` list of
+  `EndpointId`s, checked at handshake completion.
+- **Capability grants** (WS4): when `policy.issuers` is non-empty, the
+  peer must additionally open `StreamHello::Authz` as the connection's
+  first stream, presenting a grant signed by a trusted estate issuer.
+  Every service stream raced ahead of the grant is refused; after
+  verification each stream is scope-checked (`services`, `tcp_ports`,
+  `displays`, `max_bps`). Grants are short-lived (`grant_max_ttl`),
+  non-replayable across concurrent connections (`active_grants`), and
+  revocable: the directory serves an estate-signed `SignedRevocations`
+  snapshot at `GET /v1/revocations`, agents poll it into their denylist,
+  and a revoked or expired grant closes its live connection.
+- GDS binding: a signed device record ties `device_id` ↔ `EndpointId`
+  and is distributed through the estate/device registry, so
+  `rds ssh nddev-amsterdam` resolves keys from GDS state instead of
+  pasted tickets.
 
 ### Stream protocol (`ALPN = rds/0`)
 
@@ -157,17 +164,44 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 
 | Service | Direction | Payload |
 | --- | --- | --- |
+| `Authz` | bi | capability grant (first stream in grant mode) |
 | `Ping` | bi | nonce echo for RTT |
 | `Info` | bi | agent version, services, displays |
-| `Tcp { host, port }` | bi | raw byte splice (ssh = `127.0.0.1:22`) |
+| `TcpConnect { host, port }` | bi | raw byte splice (ssh = `127.0.0.1:22`) |
 | `Desktop` | bi + uni | hello/capabilities; input events client→server; one uni stream per video frame server→client |
+| `Sync` | bi + uni | offer/request → manifest parts → `Need` bitmap → chunk pull on 4 dedicated uni streams → `Done` |
 
 Desktop media: capture → BGRA→I420 → H.264 (OpenH264 baseline, no B-frames;
-hw encoders behind a trait) → per-frame uni stream with
-`{seq, pts_ms, keyframe}` header; the receiver resets streams overtaken by
-newer frames; `RequestIdr`/`SetBitrate` control messages; input events on
-the control stream. This yields decode-what-survives behavior without a
-custom UDP stack.
+hw encoders behind a trait) → per-frame uni stream with a `FrameHeader`
+`{seq, keyframe, capture_ts_ms, send_ts_ms}`. Freshness is enforced
+twice rather than by stream reset: the producer→writer channel is a
+bounded collapse (a queued keyframe always survives; otherwise newest
+wins), sends are serialized and token-bucket-paced to the controller's
+bitrate so QUIC's own buffer never fills with stale-on-arrival frames,
+and the receiver drops anything below a "next expected seq" watermark —
+a delivered-seq gap auto-requests an IDR, and a backpressured keyframe
+re-arms the producer's IDR flag. The control stream (`DesktopControl`:
+input events, `RequestIdr`, `SetBitrate`, heartbeats; `DesktopEvent`:
+input acks, heartbeat echoes) runs at max stream priority; per-frame
+priorities were tried and removed — under load they starve in-flight
+streams. This yields decode-what-survives behavior without a custom
+UDP stack.
+
+File sync (`rds send`/`rds recv`, agent `--sync-dir`): the file is cut
+by FastCDC into BLAKE3-addressed chunks. The control stream carries
+`Offer`/`Request` then the manifest in ≤512-entry `ManifestPart`
+batches (a 1 GiB manifest exceeds the 64 KiB frame cap). The receiver
+opens a journal under `<dest>/.rds-sync/<root>/`, re-verifies every
+surviving part by content hash, seeds `have` from an already-present
+destination file (identical resend costs zero wire chunks), and answers
+with a `Need` bitmap (≤256K chunks). The sender pushes `ChunkSet`
+indices (≤4096/batch) then chunk payloads across 4 dedicated uni
+streams; `SetDone`/`Done` close the session. Assembly concatenates
+verified parts, checks the BLAKE3 root, and renames atomically — a
+torn or corrupt part is refetched, a killed transfer resumes from the
+journal, and `rel_path` is validated against traversal, absolute and
+NUL paths. One sync session per connection (chunk streams share the
+connection's `accept_uni` queue).
 
 ### Stability measures
 
@@ -175,7 +209,38 @@ custom UDP stack.
   hole-punch upgrade — both handled by iroh.
 - QUIC connection migration survives NAT rebinding/Wi-Fi↔LTE moves.
 - Agent reconnects to relay with backoff; CLI can pin `--relay`.
-- Frame-stream reset semantics bound worst-case latency under loss.
+- Serialized frame sends + collapse bound worst-case latency under
+  loss: queues stay near-empty and the residual tail is retransmit
+  physics, not queueing.
+
+### Observability
+
+`rds-net::metrics` gives every endpoint a [`Registry`] of atomic
+counters; a per-connection `ConnSampler` diffs cumulative
+`path_stats()` into it, so the `via="direct"`/`via="relay"` split stays
+exact across path migration. Counters: connections opened/accepted,
+datagrams and bytes sent/lost per path kind, congestion events, paths
+seen, QNT attempts/success (driven by the noq policy driver — iroh
+does not expose its hole-punch attempts, where
+`paths_seen{via="direct"}` appearing after a relay-only start is the
+equivalent signal). Gauges: active connections, selected-path RTT,
+cwnd, live paths. `Registry::render_prometheus` emits text exposition
+behind the `metrics` feature — no prometheus dependency.
+
+`rds-server` serves `GET /v1/metrics` on the directory listener with
+per-endpoint PUT counters labelled by a 16-hex BLAKE3 prefix of the
+writer key — raw keys, peer addresses and content never appear. The
+route answers loopback peers only (everyone else gets 404): remote
+scraping goes over SSH or a local exporter.
+
+Session logging is structured `tracing`: every agent connection runs
+inside an `rds.conn` span carrying `peer` and a monotonic
+`session_id`; each service stream nests an `rds.stream{service}` span
+under it, and the sync engine logs accept/complete events with byte
+and chunk counts, so `session_id` filters a whole session across
+services. Bench reports embed the endpoint registry snapshot they ran
+against (`metrics:` block, `client_`/`agent_` prefixed) — every number
+in `docs/reports/` comes from the harness reading these counters.
 
 ## Milestones
 

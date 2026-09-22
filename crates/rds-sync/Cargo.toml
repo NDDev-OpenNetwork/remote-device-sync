@@ -7,10 +7,21 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 blake3.workspace = true
 fastcdc.workspace = true
+postcard.workspace = true
+rds-core.workspace = true
+rds-net.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rds-bench = { workspace = true, features = ["transport-noq"] }
+noq.workspace = true
 
 [lints]
 workspace = true

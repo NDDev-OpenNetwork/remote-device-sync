@@ -39,6 +39,25 @@ struct Cli {
     /// Record TTL when `--directory` is set.
     #[arg(long, default_value = "300")]
     record_ttl: u64,
+    /// Trusted grant issuer (base32 verifying key). Repeatable. When
+    /// set, every connection must present a valid estate-signed grant
+    /// before any service stream opens.
+    #[arg(long = "issuer")]
+    issuers: Vec<String>,
+    /// Maximum grant lifetime accepted, in seconds.
+    #[arg(long, default_value = "300")]
+    grant_ttl: u64,
+    /// Verifying key that signs the estate revocation snapshot
+    /// (`GET /v1/revocations`). Required for denylist polling when
+    /// `--directory` is set.
+    #[arg(long)]
+    revocations_key: Option<String>,
+    /// Revocation poll interval in seconds.
+    #[arg(long, default_value = "30")]
+    revocations_interval: u64,
+    /// Directory the Sync service may read/write under.
+    #[arg(long)]
+    sync_dir: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -68,6 +87,17 @@ async fn main() -> anyhow::Result<()> {
         policy.allow.insert(EndpointId::from_str(id)?);
     }
     policy.allow_any_tcp = cli.allow_any_tcp;
+    policy.grant_max_ttl = std::time::Duration::from_secs(cli.grant_ttl);
+    policy.sync_dir = cli.sync_dir;
+    for s in &cli.issuers {
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(s.to_uppercase().as_bytes())
+            .map_err(|e| anyhow::anyhow!("--issuer not base32: {e}"))?;
+        let raw: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("--issuer is not 32 bytes"))?;
+        policy.issuers.insert(raw);
+    }
 
     let backend = match cli.backend.as_str() {
         "iroh" => rds_net::Backend::Iroh,
@@ -88,11 +118,12 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = bind_endpoint(config).await?;
     endpoint.online().await;
 
+    let policy_handle = std::sync::Arc::new(policy.clone());
     let _announce = cli.directory.map(|addr| {
         rds_net::announce(
             endpoint.clone(),
             rds_net::AnnounceConfig {
-                key: secret_key,
+                key: secret_key.clone(),
                 directory: rds_discovery::client::Client::new(addr),
                 services: vec![
                     rds_discovery::Service::Ping,
@@ -102,6 +133,32 @@ async fn main() -> anyhow::Result<()> {
             },
         )
     });
+
+    // Denylist feed: poll the estate-signed revocation snapshot so
+    // revoked grants die on live connections too, not just new ones.
+    let _revocations = match (cli.directory, &cli.revocations_key) {
+        (Some(addr), Some(s)) => {
+            let bytes = data_encoding::BASE32_NOPAD
+                .decode(s.to_uppercase().as_bytes())
+                .map_err(|e| anyhow::anyhow!("--revocations-key not base32: {e}"))?;
+            let raw: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("--revocations-key is not 32 bytes"))?;
+            let key = ed25519_dalek::VerifyingKey::from_bytes(&raw)
+                .map_err(|e| anyhow::anyhow!("--revocations-key invalid: {e}"))?;
+            Some(rds_agent::watch_revocations(
+                rds_discovery::client::Client::new(addr),
+                key,
+                policy_handle.clone(),
+                std::time::Duration::from_secs(cli.revocations_interval),
+            ))
+        }
+        (Some(_), None) => {
+            eprintln!("note: --directory without --revocations-key — no denylist feed");
+            None
+        }
+        (None, _) => None,
+    };
 
     let agent = Agent::new(endpoint, policy);
     println!("endpoint id: {}", agent.id());

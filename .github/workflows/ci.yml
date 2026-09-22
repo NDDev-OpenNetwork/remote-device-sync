@@ -38,9 +38,17 @@ jobs:
           cargo clippy --workspace --all-targets
           --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay
           -- -D warnings
+      - name: clippy with metrics export feature
+        run: >-
+          cargo clippy -p rds-net --all-targets --features metrics
+          -- -D warnings
       - name: clippy with x11/desktop feature (linux)
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --features rds-desktop/x11 -- -D warnings
+      - name: clippy with desktop feature on agent/cli
+        run: >-
+          cargo clippy --workspace --all-targets
+          --features rds-agent/desktop,rds-cli/desktop -- -D warnings
 
   test:
     strategy:
@@ -56,6 +64,8 @@ jobs:
         run: >-
           cargo test -p rds-net -p rds-agent -p rds-relay
           --features rds-net/transport-noq,rds-agent/transport-noq,rds-relay/owned-relay
+      - name: test metrics (known-traffic + prometheus render)
+        run: cargo test -p rds-net --features metrics --test metrics
       - name: test with x11/desktop feature (linux)
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --features rds-desktop/x11

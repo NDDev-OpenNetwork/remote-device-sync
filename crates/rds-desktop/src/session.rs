@@ -1,27 +1,187 @@
 //! Serving side of a desktop session.
 //!
 //! Frame delivery follows the MoQ pattern: every encoded frame goes out on
-//! its own uni-directional stream carrying a `FrameHeader`, newer frames
+//! its own uni-directional stream carrying a `FrameHeader` v2, newer frames
 //! get higher stream priority, and the peer resets streams overtaken by
-//! fresher ones. Input events arrive on the bi-directional control stream.
+//! fresher ones. Input events, encoder steering and heartbeats arrive on
+//! the bi-directional control stream, which outranks every frame stream.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use iroh::endpoint::{Connection, RecvStream, SendStream};
-use rds_core::{DesktopControl, DesktopHello, FrameHeader, read_frame, write_frame};
+use bytes::Bytes;
+use rds_core::{DesktopControl, DesktopEvent, DesktopHello, FrameHeader, read_frame, write_frame};
+use rds_net::{Connection, PathStats, RecvStream, SendStream};
 use tokio::sync::mpsc;
-use tracing::debug;
 
 use crate::DesktopError;
 
 /// Highest input/control priority; video frames rank below.
 const CONTROL_PRIORITY: i32 = i32::MAX;
 
-struct Produced {
-    header: FrameHeader,
-    payload: bytes::Bytes,
+/// Pacing sample interval for the bitrate controller.
+const PACING_INTERVAL: Duration = Duration::from_millis(250);
+/// Loss ratio that drives the bitrate down (2%).
+const LOSS_STEP_DOWN: f64 = 0.02;
+/// RTT growth over baseline that counts as congestion (1.5×).
+const RTT_STEP_UP: f64 = 1.5;
+
+/// Monotonic clock shared by producer and writer so `FrameHeader`
+/// timestamps are comparable within one session.
+#[derive(Clone)]
+pub struct SessionClock {
+    start: Instant,
+}
+
+impl Default for SessionClock {
+    fn default() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+}
+
+impl SessionClock {
+    /// Milliseconds since the session clock started.
+    pub fn now_ms(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
+    }
+}
+
+/// One produced frame ready for the writer task.
+pub struct Produced {
+    pub header: FrameHeader,
+    pub payload: Bytes,
+}
+
+/// Live knobs the session applies while a producer runs: the pacing
+/// controller writes `bitrate`, the control stream flips `idr`, and the
+/// producer reports `deadline_misses` it observed.
+pub struct ProducerControls {
+    pub bitrate: Arc<AtomicU64>,
+    pub idr: Arc<AtomicBool>,
+    pub deadline_misses: Arc<AtomicU64>,
+}
+
+impl ProducerControls {
+    fn new(initial_bps: u64) -> Self {
+        Self {
+            bitrate: Arc::new(AtomicU64::new(initial_bps)),
+            idr: Arc::new(AtomicBool::new(true)),
+            deadline_misses: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+/// A blocking frame source: captures and encodes at its own cadence.
+///
+/// `produce` runs on a blocking thread; returning `None` ends the video
+/// side of the session. Implementations honor `controls.bitrate` /
+/// `controls.idr` each call and count a slot missed into
+/// `controls.deadline_misses` when a frame lands after its cadence slot.
+pub trait FrameProducer: Send + 'static {
+    fn produce(
+        &mut self,
+        seq: u64,
+        controls: &ProducerControls,
+        clock: &SessionClock,
+    ) -> Option<Produced>;
+}
+
+/// Everything `serve_desktop` needs beyond the negotiated hello.
+#[derive(Default)]
+pub struct SessionConfig {
+    /// Hard ceiling for encoder bitrate — the grant's `max_bps`
+    /// constraint lands here when the connection is grant-authorized.
+    pub bitrate_ceiling: Option<u64>,
+    /// Frame source override; `None` uses the platform capture backend.
+    /// Synthetic sources are how tests pressurize the pipeline.
+    pub producer: Option<Box<dyn FrameProducer>>,
+    /// Session clock override. Tests share one clock with the client so
+    /// header timestamps compare directly to client receive times.
+    pub clock: Option<SessionClock>,
+}
+
+/// Adaptive bitrate for one session (Sunshine lesson: pace the encoder
+/// to *measured* path quality, not a static guess).
+///
+/// Each `step` consumes one sample window: path counters plus the count
+/// of producer deadline misses. Loss, congestion events or RTT growth
+/// over the session baseline push bitrate down multiplicatively; clean
+/// windows probe upward toward the ceiling; deadline misses push down
+/// even when the path looks clean (encoder starvation is congestion too).
+pub struct BitrateController {
+    current: u64,
+    floor: u64,
+    ceiling: u64,
+    baseline_rtt_ms: Option<u64>,
+    last_sent: u64,
+    last_lost: u64,
+    last_congestion: u64,
+    primed: bool,
+}
+
+impl BitrateController {
+    pub fn new(initial: u64, ceiling: u64) -> Self {
+        Self {
+            current: initial.min(ceiling),
+            floor: 100_000,
+            ceiling,
+            baseline_rtt_ms: None,
+            last_sent: 0,
+            last_lost: 0,
+            last_congestion: 0,
+            primed: false,
+        }
+    }
+
+    /// Current target bitrate.
+    pub fn current(&self) -> u64 {
+        self.current
+    }
+
+    /// One pacing step. `path` is the selected path's counters (delta'd
+    /// against the previous call); `deadline_misses` is the count of
+    /// produce calls that missed their cadence slot since the last step.
+    pub fn step(&mut self, path: Option<PathStats>, deadline_misses: u64) -> u64 {
+        let mut next = self.current;
+        if let Some(p) = path {
+            let d_sent = p.sent.saturating_sub(self.last_sent);
+            let d_lost = p.lost.saturating_sub(self.last_lost);
+            let loss = if d_sent > 0 {
+                d_lost as f64 / d_sent as f64
+            } else {
+                0.0
+            };
+            let congestion = p.congestion_events > self.last_congestion;
+            let rtt_ms = p.rtt.as_millis() as u64;
+            let rtt_high = self
+                .baseline_rtt_ms
+                .is_some_and(|b| rtt_ms > (b as f64 * RTT_STEP_UP) as u64);
+            if self.baseline_rtt_ms.is_none() && rtt_ms > 0 {
+                self.baseline_rtt_ms = Some(rtt_ms);
+            }
+            self.last_sent = p.sent;
+            self.last_lost = p.lost;
+            self.last_congestion = p.congestion_events;
+
+            // First sample only establishes the baseline — never react
+            // to counters we didn't watch accumulate.
+            if self.primed && (loss > LOSS_STEP_DOWN || congestion || rtt_high) {
+                next = (next * 7 / 10).max(self.floor);
+            } else if self.primed && deadline_misses > 0 {
+                next = (next * 85 / 100).max(self.floor);
+            } else if self.primed {
+                next = (next * 11 / 10).min(self.ceiling);
+            }
+            self.primed = true;
+        } else if deadline_misses > 0 {
+            next = (next * 85 / 100).max(self.floor);
+        }
+        self.current = next;
+        next
+    }
 }
 
 /// Serve one desktop session on an already-accepted stream pair.
@@ -30,57 +190,181 @@ struct Produced {
 pub async fn serve_desktop(
     conn: Connection,
     send: SendStream,
-    mut recv: RecvStream,
+    recv: RecvStream,
     hello: DesktopHello,
 ) -> Result<(), DesktopError> {
+    serve_desktop_with(conn, send, recv, hello, SessionConfig::default()).await
+}
+
+/// Full session form: explicit config lets callers bound the bitrate
+/// (grant constraints) and substitute the frame source (tests, bench).
+pub async fn serve_desktop_with(
+    conn: Connection,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    hello: DesktopHello,
+    config: SessionConfig,
+) -> Result<(), DesktopError> {
     send.set_priority(CONTROL_PRIORITY)?;
-    let max_fps = hello.max_fps.clamp(1, 60);
+    let clock = config.clock.clone().unwrap_or_default();
+    let max_fps = hello.max_fps.clamp(1, 240);
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(max_fps));
-    let display = hello.display;
-    let bitrate = Arc::new(AtomicU64::new(4_000_000));
-    let idr = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let acks = hello.input_acks;
+    let ceiling = config.bitrate_ceiling.unwrap_or(8_000_000).max(100_000);
+    let controls = ProducerControls::new(4_000_000_u64.min(ceiling));
 
     // Capture+encode runs on a blocking thread; frames flow to the writer.
     let (tx, mut rx) = mpsc::channel::<Produced>(2);
-    let enc_bitrate = bitrate.clone();
-    let enc_idr = idr.clone();
-    let capture_task = tokio::task::spawn_blocking(move || {
-        produce_loop(display, frame_interval, enc_bitrate, enc_idr, tx)
-    });
-
-    // Writer task: one uni stream per frame. When several frames are
-    // queued, collapse them to the newest — a stale frame is latency,
-    // not information.
-    let writer_conn = conn.clone();
-    let mut writer = tokio::spawn(async move {
-        while let Some(mut produced) = rx.recv().await {
-            while let Ok(newer) = rx.try_recv() {
-                produced = newer;
-            }
-            let conn = writer_conn.clone();
-            tokio::spawn(async move {
-                if let Err(e) = write_frame_stream(conn, produced).await {
-                    debug!("frame stream dropped: {e}");
+    let capture_task = {
+        let clock = clock.clone();
+        let bitrate = Arc::clone(&controls.bitrate);
+        let idr = Arc::clone(&controls.idr);
+        let misses = Arc::clone(&controls.deadline_misses);
+        let mut producer = config.producer;
+        tokio::task::spawn_blocking(move || {
+            let producer_controls = ProducerControls {
+                bitrate,
+                idr,
+                deadline_misses: misses,
+            };
+            let mut source = match producer.take() {
+                Some(p) => p,
+                None => platform_producer(hello.display, frame_interval),
+            };
+            let mut seq = 0u64;
+            loop {
+                // The channel is the session's lifecycle: when the
+                // session ends the writer drops `rx` and this loop exits
+                // — abort() cannot interrupt spawn_blocking work.
+                if tx.is_closed() {
+                    return;
                 }
-            });
+                match source.produce(seq, &producer_controls, &clock) {
+                    Some(p) => {
+                        // Bounded queue: when full the writer is behind
+                        // and this frame is dropped — its successor
+                        // lands fresher. A keyframe carries the pending
+                        // IDR request though, so dropping one re-arms the
+                        // flag instead of losing the request to
+                        // backpressure.
+                        let was_keyframe = p.header.keyframe;
+                        if tx.try_send(p).is_err() && was_keyframe {
+                            producer_controls.idr.store(true, Ordering::Relaxed);
+                        }
+                        seq += 1;
+                    }
+                    None => return,
+                }
+            }
+        })
+    };
+
+    // Pacing: sample path counters + deadline misses into the controller,
+    // which writes the bitrate the producer reads each frame.
+    let pacing = {
+        let conn = conn.clone();
+        let bitrate = Arc::clone(&controls.bitrate);
+        let misses = Arc::clone(&controls.deadline_misses);
+        let mut controller = BitrateController::new(4_000_000, ceiling);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(PACING_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let missed = misses.swap(0, Ordering::Relaxed);
+                let bps = controller.step(conn.current_path_stats(), missed);
+                bitrate.store(bps.min(u64::from(u32::MAX)), Ordering::Relaxed);
+            }
+        })
+    };
+
+    // Writer task: one uni stream per frame, sent inline — the send
+    // itself is the only in-flight bound. A continuous producer means
+    // any frame queued behind an in-progress send is already stale:
+    // serializing sends keeps the collapse fresh (each transmitted
+    // frame is the newest available) and bounds concurrent streams
+    // to one, so opened-but-unsent streams can't pile up.
+    // The collapse is decode-aware: a queued keyframe always survives
+    // (deltas produced after it can't decode without it), otherwise
+    // the newest frame wins.
+    let writer_conn = conn.clone();
+    let writer_clock = clock.clone();
+    let writer_bitrate = Arc::clone(&controls.bitrate);
+    let mut writer = tokio::spawn(async move {
+        // Token bucket on the paced bitrate: offering faster than the
+        // path sustains only backlogs QUIC's send buffer with frames
+        // that arrive stale — the collapse cannot reach them once
+        // buffered. Debt is capped at half a second so a large
+        // keyframe can't stall the writer.
+        let mut budget = 0.0f64;
+        let mut last = Instant::now();
+        while let Some(mut produced) = rx.recv().await {
+            let mut have_keyframe = produced.header.keyframe;
+            while let Ok(newer) = rx.try_recv() {
+                if newer.header.keyframe || !have_keyframe {
+                    have_keyframe |= newer.header.keyframe;
+                    produced = newer;
+                }
+                // A non-keyframe newer than a queued keyframe is
+                // undecodable without it — skip it, not the keyframe.
+            }
+            let bps = writer_bitrate.load(Ordering::Relaxed).max(50_000) as f64 / 8.0;
+            let now = Instant::now();
+            budget = (budget + now.duration_since(last).as_secs_f64() * bps).min(bps * 0.25);
+            last = now;
+            let cost = produced.payload.len() as f64 + 64.0;
+            if cost > budget {
+                let wait = ((cost - budget) / bps).min(0.5);
+                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                budget = (budget - cost).max(-bps * 0.5);
+            } else {
+                budget -= cost;
+            }
+            produced.header.send_ts_ms = writer_clock.now_ms();
+            if let Err(e) = write_frame_stream(&writer_conn, produced).await {
+                tracing::debug!("frame send failed, ending writer: {e}");
+                break;
+            }
         }
     });
 
-    // Control loop: input + encoder steering, until the peer goes away.
+    // Control loop: input + encoder steering + heartbeat, until the
+    // peer goes away. `send` also carries DesktopEvent replies.
+    let send_clock = clock.clone();
     let control = async {
         loop {
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
-                    #[cfg(feature = "x11")]
+                    #[cfg(all(target_os = "linux", feature = "x11"))]
                     if let Err(e) = crate::input::x11::inject(&ev) {
                         tracing::warn!("input injection failed: {e}");
                     }
-                    #[cfg(not(feature = "x11"))]
-                    let _ = ev;
+                    #[cfg(not(all(target_os = "linux", feature = "x11")))]
+                    let _ = &ev;
+                    if acks {
+                        let ack = DesktopEvent::InputAck {
+                            seq: ev.seq,
+                            handled_ts_ms: send_clock.now_ms(),
+                        };
+                        if write_frame(&mut send, &ack).await.is_err() {
+                            break;
+                        }
+                    }
                 }
-                Ok(DesktopControl::RequestIdr) => idr.store(true, Ordering::Relaxed),
+                Ok(DesktopControl::RequestIdr) => {
+                    controls.idr.store(true, Ordering::Relaxed);
+                }
                 Ok(DesktopControl::SetBitrate(bps)) => {
-                    bitrate.store(u64::from(bps.max(50_000)), Ordering::Relaxed)
+                    let bps = u64::from(bps.max(50_000)).min(ceiling);
+                    controls.bitrate.store(bps, Ordering::Relaxed);
+                }
+                Ok(DesktopControl::Heartbeat { seq, ts_ms }) => {
+                    if write_frame(&mut send, &DesktopEvent::Heartbeat { seq, ts_ms })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Err(_) => break, // peer closed the control stream
             }
@@ -94,106 +378,279 @@ pub async fn serve_desktop(
             Err(e) => Err(DesktopError::Io(std::io::Error::other(e.to_string()))),
         },
     };
+    // Teardown has to unwind every task: `writer` and `pacing` must be
+    // aborted — dropping their JoinHandles only detaches them. Once the
+    // writer stops, `rx` closes and the blocking producer exits on
+    // `tx.is_closed()` (abort() cannot interrupt spawn_blocking work).
+    writer.abort();
+    pacing.abort();
     capture_task.abort();
     result
 }
 
-fn produce_loop(
-    display: u32,
-    interval: Duration,
-    bitrate: Arc<AtomicU64>,
-    idr: Arc<std::sync::atomic::AtomicBool>,
-    tx: mpsc::Sender<Produced>,
-) {
-    #[cfg(not(feature = "x11"))]
-    {
-        let _ = (display, interval, bitrate, idr, tx);
+/// Platform capture producer, or a `NullProducer` when the build has no
+/// capture backend (session still serves control input + heartbeats).
+fn platform_producer(_display: u32, _interval: Duration) -> Box<dyn FrameProducer> {
+    #[cfg(all(target_os = "linux", feature = "x11"))]
+    match x11::X11Producer::new(_display, _interval) {
+        Ok(p) => return Box::new(p),
+        Err(e) => tracing::warn!("capture init failed: {e}"),
     }
-    #[cfg(feature = "x11")]
-    produce_loop_x11(display, interval, bitrate, idr, tx)
+    Box::new(NullProducer)
 }
 
-#[cfg(feature = "x11")]
-fn produce_loop_x11(
-    display: u32,
-    interval: Duration,
-    bitrate: Arc<AtomicU64>,
-    idr: Arc<std::sync::atomic::AtomicBool>,
-    tx: mpsc::Sender<Produced>,
-) {
-    use std::time::Instant;
+/// Producer that yields nothing — the control plane of the session
+/// stays live while the video side cleanly idles.
+pub struct NullProducer;
 
+impl FrameProducer for NullProducer {
+    fn produce(&mut self, _seq: u64, _c: &ProducerControls, _t: &SessionClock) -> Option<Produced> {
+        None
+    }
+}
+
+/// Deterministic synthetic producer for tests and benches: fixed-size
+/// patterned frames at a precise cadence, honoring bitrate (throttles
+/// byte generation) and IDR requests (marks the next frame a keyframe).
+/// Needs no display, codec or platform — the pressure on the pipeline
+/// (queueing, priority, pacing) is identical to a real encoder.
+pub struct SyntheticProducer {
+    interval: Duration,
+    width: u32,
+    height: u32,
+    frame_bytes: usize,
+    keyframe_every: u64,
+    next_due: Instant,
+}
+
+impl SyntheticProducer {
+    /// `fps` capped by the caller's `max_fps`; `frame_bytes` sets the
+    /// per-frame payload so tests control offered load directly.
+    pub fn new(fps: u32, width: u32, height: u32, frame_bytes: usize) -> Self {
+        Self {
+            interval: Duration::from_secs_f64(1.0 / f64::from(fps.max(1))),
+            width,
+            height,
+            frame_bytes,
+            keyframe_every: 120,
+            next_due: Instant::now(),
+        }
+    }
+
+    pub fn keyframe_every(mut self, n: u64) -> Self {
+        self.keyframe_every = n.max(1);
+        self
+    }
+}
+
+impl FrameProducer for SyntheticProducer {
+    fn produce(
+        &mut self,
+        seq: u64,
+        controls: &ProducerControls,
+        clock: &SessionClock,
+    ) -> Option<Produced> {
+        self.next_due += self.interval;
+        if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
+            std::thread::sleep(sleep);
+        } else {
+            // Landed after our slot — count the deadline miss for the
+            // pacing controller and resync the cadence.
+            controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
+            self.next_due = Instant::now();
+        }
+        let capture_ts_ms = clock.now_ms();
+        // Synthetic encode: bitrate hint throttles frame size (clamped),
+        // IDR requests flip the next frame to keyframe.
+        let wants_idr = controls.idr.swap(false, Ordering::Relaxed);
+        let keyframe = wants_idr || seq.is_multiple_of(self.keyframe_every);
+        let bps = controls.bitrate.load(Ordering::Relaxed);
+        let cap = (bps / 8 / 30).max(256) as usize; // ~30fps byte budget floor
+        let len = self.frame_bytes.min(cap.max(self.frame_bytes.min(256)));
+        let mut payload = vec![0u8; len.max(64)];
+        payload[..8].copy_from_slice(&seq.to_le_bytes());
+        let encode_done_ts_ms = clock.now_ms();
+        Some(Produced {
+            header: FrameHeader {
+                seq,
+                capture_ts_ms,
+                encode_done_ts_ms,
+                send_ts_ms: 0, // stamped by the writer
+                keyframe,
+                codec: rds_core::Codec::H264,
+                width: self.width,
+                height: self.height,
+            },
+            payload: Bytes::from(payload),
+        })
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "x11"))]
+mod x11 {
+    use super::*;
     use crate::capture::x11::X11Capturer;
     use crate::codec::openh264::H264Encoder;
     use crate::{Capturer, Encoder};
 
-    let mut capturer = match X11Capturer::new(display) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("capture init failed: {e}");
-            return;
+    /// Live X11 capture → OpenH264 encode at a fixed cadence.
+    pub struct X11Producer {
+        capturer: X11Capturer,
+        encoder: H264Encoder,
+        interval: Duration,
+        next_due: Instant,
+    }
+
+    impl X11Producer {
+        pub fn new(display: u32, interval: Duration) -> Result<Self, DesktopError> {
+            let capturer = X11Capturer::new(display)?;
+            let fps = 1.0 / interval.as_secs_f32();
+            let encoder = H264Encoder::new(4_000_000, fps)?;
+            Ok(Self {
+                capturer,
+                encoder,
+                interval,
+                next_due: Instant::now(),
+            })
         }
-    };
-    let fps = 1.0 / interval.as_secs_f32();
-    let mut encoder = match H264Encoder::new(bitrate.load(Ordering::Relaxed), fps) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("encoder init failed: {e}");
-            return;
-        }
-    };
-    let start = Instant::now();
-    let mut seq = 0u64;
-    loop {
-        let due = start + interval.mul_f64(seq as f64);
-        if let Some(sleep) = due.checked_duration_since(Instant::now()) {
-            std::thread::sleep(sleep);
-        }
-        let raw = match capturer.capture() {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!("capture failed: {e}");
-                return;
+    }
+
+    impl FrameProducer for X11Producer {
+        fn produce(
+            &mut self,
+            seq: u64,
+            controls: &ProducerControls,
+            clock: &SessionClock,
+        ) -> Option<Produced> {
+            self.next_due += self.interval;
+            if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
+                std::thread::sleep(sleep);
+            } else {
+                controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
+                self.next_due = Instant::now();
             }
-        };
-        if idr.swap(false, Ordering::Relaxed) {
-            encoder.request_idr();
-        }
-        encoder.set_bitrate(bitrate.load(Ordering::Relaxed).min(u64::from(u32::MAX)) as u32);
-        let (width, height) = (raw.width, raw.height);
-        match encoder.encode(&raw) {
-            Ok(frame) => {
-                let produced = Produced {
+            let raw = match self.capturer.capture() {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("capture failed: {e}");
+                    return None;
+                }
+            };
+            let capture_ts_ms = clock.now_ms();
+            if controls.idr.swap(false, Ordering::Relaxed) {
+                self.encoder.request_idr();
+            }
+            self.encoder.set_bitrate(
+                controls
+                    .bitrate
+                    .load(Ordering::Relaxed)
+                    .min(u64::from(u32::MAX)) as u32,
+            );
+            let (width, height) = (raw.width, raw.height);
+            match self.encoder.encode(&raw) {
+                Ok(frame) => Some(Produced {
                     header: FrameHeader {
                         seq,
-                        pts_ms: start.elapsed().as_millis() as u64,
+                        capture_ts_ms,
+                        encode_done_ts_ms: clock.now_ms(),
+                        send_ts_ms: 0,
                         keyframe: frame.keyframe,
+                        codec: frame.codec,
                         width,
                         height,
-                        codec: frame.codec,
                     },
                     payload: frame.data,
-                };
-                // Bounded channel; when full the writer is behind and
-                // this frame is dropped — its successor lands fresher.
-                let _ = tx.try_send(produced);
-                seq += 1;
+                }),
+                Err(e) => {
+                    tracing::warn!("encode failed: {e}");
+                    Some(Produced {
+                        header: FrameHeader {
+                            seq,
+                            capture_ts_ms,
+                            encode_done_ts_ms: clock.now_ms(),
+                            send_ts_ms: 0,
+                            keyframe: false,
+                            codec: rds_core::Codec::H264,
+                            width,
+                            height,
+                        },
+                        payload: Bytes::new(),
+                    })
+                }
             }
-            Err(e) => tracing::warn!("encode failed: {e}"),
         }
     }
 }
 
-async fn write_frame_stream(conn: Connection, produced: Produced) -> Result<(), DesktopError> {
+async fn write_frame_stream(conn: &Connection, produced: Produced) -> Result<(), DesktopError> {
     let mut stream = conn.open_uni().await?;
-    stream.set_priority(stream_priority(produced.header.seq))?;
     write_frame(&mut stream, &produced.header).await?;
     stream.write_all(&produced.payload).await?;
     stream.finish()?;
     Ok(())
 }
 
-/// Newer frames outrank older ones; wrap to stay positive.
-fn stream_priority(seq: u64) -> i32 {
-    (seq % (i32::MAX as u64)) as i32
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(sent: u64, lost: u64, rtt_ms: u64, congestion: u64) -> PathStats {
+        PathStats {
+            path_id: 0,
+            rtt: Duration::from_millis(rtt_ms),
+            cwnd: 64 * 1024,
+            sent,
+            lost,
+            sent_bytes: sent * 1200,
+            recv_bytes: 0,
+            congestion_events: congestion,
+            selected: true,
+            via_relay: false,
+        }
+    }
+
+    #[test]
+    fn controller_drops_bitrate_on_loss() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step(Some(path(1000, 0, 20, 0)), 0); // prime baseline
+        let bps = c.step(Some(path(2000, 80, 20, 0)), 0); // 4% loss
+        assert!(bps < 4_000_000, "loss must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn controller_recovers_toward_ceiling() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step(Some(path(1000, 0, 20, 0)), 0);
+        let mut bps = c.current();
+        for i in 0..20 {
+            bps = c.step(Some(path(2000 + i * 1000, 0, 20, 0)), 0);
+        }
+        assert_eq!(bps, 8_000_000, "clean windows must reach the ceiling");
+    }
+
+    #[test]
+    fn controller_honors_floor_and_misses() {
+        let mut c = BitrateController::new(200_000, 8_000_000);
+        c.step(Some(path(1000, 0, 20, 0)), 0);
+        for _ in 0..10 {
+            c.step(Some(path(0, 0, 20, 0)), 5); // encoder starving
+        }
+        assert_eq!(c.current(), 100_000, "deadline misses bottom out at floor");
+    }
+
+    #[test]
+    fn controller_reacts_to_rtt_growth() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step(Some(path(1000, 0, 20, 0)), 0);
+        let bps = c.step(Some(path(2000, 0, 60, 0)), 0); // 3× baseline RTT
+        assert!(bps < 4_000_000, "RTT growth must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn first_sample_never_penalizes() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        // A path that already lost packets before we started watching.
+        let bps = c.step(Some(path(1_000_000, 500_000, 20, 0)), 0);
+        assert_eq!(bps, 4_000_000, "first sample establishes baseline only");
+    }
 }

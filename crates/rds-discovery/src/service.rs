@@ -8,12 +8,16 @@
 //! DELETE /v1/records/{key}      body: signed DeleteRequest
 //! GET    /v1/names/{name}       estate registry lookup → {"key": ...}
 //! PUT    /v1/registry           replace the registry snapshot
+//! GET    /v1/revocations        estate-signed grant denylist snapshot
+//! PUT    /v1/revocations        replace the denylist snapshot
 //! GET    /v1/health             liveness
-//! GET    /v1/metrics            prometheus text counters
+//! GET    /v1/metrics            prometheus text counters (loopback only)
 //! ```
 //!
 //! Security posture: every write is signature-verified before it
-//! touches the store; `PUT` is rate-limited per key and globally;
+//! touches the store; every signature-verifying write (`PUT` records,
+//! `PUT` registry, `DELETE` records) is globally rate-limited before
+//! verification, and `PUT` records are additionally paced per key;
 //! records are self-certifying so a compromised directory can at worst
 //! withhold updates, never forge reachability.
 
@@ -28,6 +32,8 @@ use tokio::net::TcpListener;
 
 use crate::http::{self, Request, Response};
 use crate::registry::{RegistryPayload, SignedRegistry};
+use crate::revocations::{RevocationPayload, SignedRevocations};
+
 use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, RecordStore};
 
 /// Tunables for [`serve`].
@@ -39,8 +45,11 @@ pub struct Limits {
     /// obstructs legitimate announce republishes. Deployments that
     /// want it anyway can set a non-zero interval.
     pub put_min_interval: Duration,
-    /// Maximum PUTs accepted globally per minute — this is the real
-    /// abuse bound (signature verification costs CPU per request).
+    /// Maximum signature-verifying write requests globally per minute
+    /// — this is the real abuse bound: it caps JSON parse +
+    /// signature-verification CPU an unauthenticated peer can burn.
+    /// Applies to `PUT /v1/records`, `PUT /v1/registry` and
+    /// `DELETE /v1/records/{key}`, checked before any parsing.
     pub put_per_minute: u32,
     /// Client-side and per-connection idle timeout.
     pub conn_timeout: Duration,
@@ -75,10 +84,31 @@ struct Metrics {
     deletes: AtomicU64,
     name_lookups: AtomicU64,
     registry_puts: AtomicU64,
+    revocations_puts: AtomicU64,
     requests_bad: AtomicU64,
+    writes_rate_limited: AtomicU64,
+    /// Per-writer PUT counts keyed by an anonymized id —
+    /// `blake3(endpoint_key)[..8]` hex — so the scrape shows
+    /// per-endpoint accounting without disclosing public keys.
+    /// Bounded; writers past the cap fold into `other`.
+    endpoint_puts: Mutex<HashMap<String, u64>>,
 }
 
-/// Per-source PUT pacing + a global per-minute window.
+/// Anonymized per-endpoint label: a truncated BLAKE3 of the public
+/// key. Stable per endpoint, useless for recovering the key.
+fn writer_label(key: &EndpointKey) -> String {
+    hex16(&blake3::hash(&key.0).as_bytes()[..8])
+}
+
+fn hex16(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Cap on distinct writer labels before accounting folds into `other`
+/// — the scrape stays bounded under a writer flood.
+const MAX_WRITER_LABELS: usize = 4096;
+
+/// Per-key PUT pacing + a global per-minute window over verifying writes.
 struct RateLimiter {
     last_put: Mutex<HashMap<EndpointKey, Instant>>,
     window_start: Mutex<Instant>,
@@ -86,8 +116,9 @@ struct RateLimiter {
 }
 
 impl RateLimiter {
-    fn check(&self, key: &EndpointKey, limits: &Limits) -> bool {
-        // Global window.
+    /// Global window over all PUT requests. Runs before parsing so it
+    /// bounds the verification CPU an unauthenticated peer can burn.
+    fn check_global(&self, limits: &Limits) -> bool {
         {
             let mut start = self.window_start.lock().unwrap();
             if start.elapsed() >= Duration::from_secs(60) {
@@ -95,10 +126,11 @@ impl RateLimiter {
                 self.window_count.store(0, Ordering::Relaxed);
             }
         }
-        if self.window_count.fetch_add(1, Ordering::Relaxed) >= u64::from(limits.put_per_minute) {
-            return false;
-        }
-        // Per-key interval.
+        self.window_count.fetch_add(1, Ordering::Relaxed) < u64::from(limits.put_per_minute)
+    }
+
+    /// Per-key interval between accepted PUTs.
+    fn check_key(&self, key: &EndpointKey, limits: &Limits) -> bool {
         let mut last = self.last_put.lock().unwrap();
         if let Some(t) = last.get(key)
             && t.elapsed() < limits.put_min_interval
@@ -133,6 +165,10 @@ impl Drop for Directory {
 struct State {
     store: Arc<dyn RecordStore>,
     registry: RwLock<Option<RegistryPayload>>,
+    /// Latest verified denylist snapshot plus its decoded payload (the
+    /// freshness anchor); `None` until the estate publishes one. The
+    /// signed half is served verbatim so agents verify it themselves.
+    revocations: RwLock<Option<(SignedRevocations, RevocationPayload)>>,
     registry_key: Option<VerifyingKey>,
     limits: Limits,
     limiter: RateLimiter,
@@ -158,6 +194,7 @@ pub async fn serve(
     let state = Arc::new(State {
         store,
         registry: RwLock::new(registry),
+        revocations: RwLock::new(None),
         registry_key: config.registry_key,
         limits: config.limits,
         limiter: RateLimiter {
@@ -171,7 +208,7 @@ pub async fn serve(
         let state = state.clone();
         async move {
             loop {
-                let Ok((mut sock, _peer)) = listener.accept().await else {
+                let Ok((mut sock, peer)) = listener.accept().await else {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
@@ -180,7 +217,7 @@ pub async fn serve(
                     let _ = tokio::time::timeout(state.limits.conn_timeout, async {
                         match http::read_request(&mut sock).await {
                             Ok(Some(req)) => {
-                                let resp = route(&state, &req);
+                                let resp = route(&state, peer, &req);
                                 let _ = http::write_response(&mut sock, &resp).await;
                             }
                             Ok(None) => {}
@@ -208,7 +245,7 @@ pub async fn serve(
     Ok(Directory { addr: local, task })
 }
 
-fn route(state: &State, req: &Request) -> Response {
+fn route(state: &State, peer: SocketAddr, req: &Request) -> Response {
     let segments: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
     match (req.method.as_str(), segments.as_slice()) {
         ("PUT", ["v1", "records"]) => put_record(state, req),
@@ -216,14 +253,33 @@ fn route(state: &State, req: &Request) -> Response {
         ("DELETE", ["v1", "records", key]) => delete_record(state, key, req),
         ("GET", ["v1", "names", name]) => get_name(state, name),
         ("PUT", ["v1", "registry"]) => put_registry(state, req),
+        ("GET", ["v1", "revocations"]) => get_revocations(state),
+        ("PUT", ["v1", "revocations"]) => put_revocations(state, req),
         ("GET", ["v1", "health"]) => Response::json(200, serde_json::json!({ "ok": true })),
-        ("GET", ["v1", "metrics"]) => metrics(state),
+        // Per-endpoint counters reveal writer activity, so scrapes are
+        // loopback-only; remote monitoring goes over SSH or a local
+        // exporter rather than a public port.
+        ("GET", ["v1", "metrics"]) if peer.ip().is_loopback() => metrics(state),
         (_, ["v1", ..]) => Response::text(404, "unknown route"),
         _ => Response::text(404, "unknown route"),
     }
 }
 
+/// Global-window rejection shared by every verifying write route.
+fn rate_limited(state: &State) -> Response {
+    state
+        .metrics
+        .writes_rate_limited
+        .fetch_add(1, Ordering::Relaxed);
+    Response::error(429, &DiscoveryError::RateLimited)
+}
+
 fn put_record(state: &State, req: &Request) -> Response {
+    // Global window first — bounds parse and signature-verification
+    // CPU for unauthenticated peers, before any per-request work.
+    if !state.limiter.check_global(&state.limits) {
+        return rate_limited(state);
+    }
     let record: EndpointRecord = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
@@ -238,13 +294,20 @@ fn put_record(state: &State, req: &Request) -> Response {
             return Response::error(status_for(&e), &e);
         }
     };
-    if !state.limiter.check(&payload.key, &state.limits) {
+    if !state.limiter.check_key(&payload.key, &state.limits) {
         state.metrics.puts_rejected.fetch_add(1, Ordering::Relaxed);
         return Response::error(429, &DiscoveryError::RateLimited);
     }
     match state.store.put(&record) {
         Ok(()) => {
             state.metrics.puts_ok.fetch_add(1, Ordering::Relaxed);
+            let mut per = state.metrics.endpoint_puts.lock().unwrap();
+            let label = if per.len() >= MAX_WRITER_LABELS {
+                "other".to_string()
+            } else {
+                writer_label(&payload.key)
+            };
+            *per.entry(label).or_insert(0) += 1;
             Response::json(200, serde_json::json!({ "stored": true }))
         }
         Err(e) => {
@@ -267,6 +330,11 @@ fn get_record(state: &State, key: &str) -> Response {
 }
 
 fn delete_record(state: &State, key: &str, req: &Request) -> Response {
+    // Same global bound as PUTs: the tombstone verify below is ed25519
+    // work an unauthenticated peer could otherwise burn unbounded.
+    if !state.limiter.check_global(&state.limits) {
+        return rate_limited(state);
+    }
     let key = match key.parse::<EndpointKey>() {
         Ok(k) => k,
         Err(e) => return Response::error(400, &e),
@@ -307,6 +375,10 @@ fn get_name(state: &State, name: &str) -> Response {
 }
 
 fn put_registry(state: &State, req: &Request) -> Response {
+    // Same global bound as PUTs: snapshot verify below is ed25519 work.
+    if !state.limiter.check_global(&state.limits) {
+        return rate_limited(state);
+    }
     let Some(key) = &state.registry_key else {
         return Response::error(401, &DiscoveryError::BadSignature);
     };
@@ -328,9 +400,48 @@ fn put_registry(state: &State, req: &Request) -> Response {
     }
 }
 
+/// Serve the current denylist snapshot verbatim — agents verify its
+/// signature themselves, so the stored signed bytes are what travel.
+/// 404 until the estate publishes the first snapshot.
+fn get_revocations(state: &State) -> Response {
+    match &*state.revocations.read().unwrap() {
+        Some((snap, _)) => Response::json(200, snap),
+        None => Response::error(404, &DiscoveryError::NotFound),
+    }
+}
+
+fn put_revocations(state: &State, req: &Request) -> Response {
+    // Same global bound as every verifying write.
+    if !state.limiter.check_global(&state.limits) {
+        return rate_limited(state);
+    }
+    let Some(key) = &state.registry_key else {
+        return Response::error(401, &DiscoveryError::BadSignature);
+    };
+    let snap: SignedRevocations = match serde_json::from_slice(&req.body) {
+        Ok(s) => s,
+        Err(e) => {
+            return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
+        }
+    };
+    let current = state.revocations.read().unwrap();
+    match snap.verify_fresh(key, current.as_ref().map(|(_, p)| p)) {
+        Ok(payload) => {
+            drop(current);
+            *state.revocations.write().unwrap() = Some((snap, payload));
+            state
+                .metrics
+                .revocations_puts
+                .fetch_add(1, Ordering::Relaxed);
+            Response::json(200, serde_json::json!({ "stored": true }))
+        }
+        Err(e) => Response::error(status_for(&e), &e),
+    }
+}
+
 fn metrics(state: &State) -> Response {
     let m = &state.metrics;
-    let body = format!(
+    let mut body = format!(
         "rds_directory_records {}\n\
          rds_directory_puts_ok {}\n\
          rds_directory_puts_rejected {}\n\
@@ -338,7 +449,9 @@ fn metrics(state: &State) -> Response {
          rds_directory_deletes {}\n\
          rds_directory_name_lookups {}\n\
          rds_directory_registry_puts {}\n\
-         rds_directory_requests_bad {}\n",
+         rds_directory_revocations_puts {}\n\
+         rds_directory_requests_bad {}\n\
+         rds_directory_writes_rate_limited {}\n",
         state.store.len(),
         m.puts_ok.load(Ordering::Relaxed),
         m.puts_rejected.load(Ordering::Relaxed),
@@ -346,8 +459,19 @@ fn metrics(state: &State) -> Response {
         m.deletes.load(Ordering::Relaxed),
         m.name_lookups.load(Ordering::Relaxed),
         m.registry_puts.load(Ordering::Relaxed),
+        m.revocations_puts.load(Ordering::Relaxed),
         m.requests_bad.load(Ordering::Relaxed),
+        m.writes_rate_limited.load(Ordering::Relaxed),
     );
+    // Per-endpoint accounting: PUT counts by anonymized writer label
+    // (blake3(key)[..8] — never the key itself; C7 security).
+    let per = m.endpoint_puts.lock().unwrap();
+    body.push_str(&format!("rds_directory_writers_distinct {}\n", per.len()));
+    for (writer, count) in per.iter() {
+        body.push_str(&format!(
+            "rds_directory_endpoint_puts_total{{writer=\"{writer}\"}} {count}\n"
+        ));
+    }
     Response::text(200, body)
 }
 

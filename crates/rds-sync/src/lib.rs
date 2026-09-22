@@ -8,9 +8,13 @@
 //! offsets. Reconciliation and transfer run over rds streams; the sync
 //! engine is independent of the interactive desktop path on purpose.
 //!
-//! Scope here is the content model: chunking, manifesting, hashing.
-//! The reconcile/transfer protocol lands next (delta exchange, sparse
-//! fetch, resume journal).
+//! Scope: the content model (chunking, manifesting, hashing) plus the
+//! transfer protocol — `proto` frames, `journal` resumable state, and
+//! `engine` driving send/receive/serve over `rds-net` streams.
+
+pub mod engine;
+pub mod journal;
+pub mod proto;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

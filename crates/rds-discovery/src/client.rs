@@ -102,6 +102,32 @@ impl Client {
         self.expect(resp, &[200]).map(|_| ())
     }
 
+    /// Fetch the current grant-revocation snapshot (`GET /v1/revocations`).
+    /// `None` when the estate has not published one yet.
+    pub async fn fetch_revocations(
+        &self,
+    ) -> Result<Option<crate::revocations::SignedRevocations>, DiscoveryError> {
+        let resp = self.request("GET", "/v1/revocations", &[]).await?;
+        if resp.status == 404 {
+            return Ok(None);
+        }
+        let resp = self.expect(resp, &[200])?;
+        serde_json::from_slice(&resp.body)
+            .map(Some)
+            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))
+    }
+
+    /// Replace the denylist snapshot (`PUT /v1/revocations`).
+    pub async fn update_revocations(
+        &self,
+        snap: &crate::revocations::SignedRevocations,
+    ) -> Result<(), DiscoveryError> {
+        let body =
+            serde_json::to_vec(snap).map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
+        let resp = self.request("PUT", "/v1/revocations", &body).await?;
+        self.expect(resp, &[200]).map(|_| ())
+    }
+
     /// `GET /v1/health`.
     pub async fn health(&self) -> Result<(), DiscoveryError> {
         let resp = self.request("GET", "/v1/health", &[]).await?;
