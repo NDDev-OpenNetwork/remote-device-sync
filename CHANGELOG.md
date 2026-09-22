@@ -30,6 +30,18 @@
   cross-thread wake can't observe a stale count and re-park
   (regression tests `parked_recv_wakes_when_last_sender_drops`,
   `parked_recv_survives_drop_wake_race`).
+- CI/CD: the hand-rolled `ci.yml` is replaced by pinned
+  `ci-workflows` reusables (0.1.26): `rust-ci` (locked build, fmt,
+  five clippy lanes, ubuntu+macos test matrix), `rust-supply-chain`
+  (cargo-deny per `deny.toml`, cargo-audit, cargo-machete — weekly
+  advisory sweep), `public-codeql` (rust + actions, build-mode none)
+  and `release-supply-chain` (tag `X.Y.Z` → immutable release: source
+  archive + SPDX SBOM + SHA256SUMS + SLSA/SBOM attestations, behind a
+  `release` environment). `deny.toml` now allows `Unlicense` and
+  `CDLA-Permissive-2.0` (iroh transitive deps) and ignores the two
+  unfixable unmaintained advisories; 13 unused crate dependencies
+  removed; `VERSION` file added for the release contract; dependabot
+  tracks cargo + github-actions weekly.
 - WS8 deployment: `deploy/systemd/rds-server.service` and
   `rds-agent.service` — hardened units (ProtectSystem=strict,
   NoNewPrivileges, PrivateTmp/Devices, ProtectKernel*/ControlGroups,

@@ -23,7 +23,6 @@ rds-desktop = { workspace = true, optional = true }
 rds-net.workspace = true
 rds-discovery.workspace = true
 rds-sync.workspace = true
-serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
