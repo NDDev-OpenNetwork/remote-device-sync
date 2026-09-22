@@ -64,6 +64,13 @@ table inet rds {
 accepts direct paths opportunistically (hole-punched or via the
 endpoint's discovered addresses).
 
+**Relay redundancy.** `--relay` is repeatable on both `rds` and
+`rds-agent`; iroh probes all configured relays, homes on the
+lowest-latency one, and fails over automatically. Production should run
+≥2 `rds-relay`/`rds-server` instances in different failure domains and
+list all their URLs — no LB or failover plumbing is needed on the relay
+side, since every endpoint carries the full list.
+
 **TLS on the relay.** `rds-server` serves the iroh relay protocol
 (WebSocket over HTTP) on 3340 in plaintext: relayed payloads are
 end-to-end-encrypted QUIC the relay cannot read, and relay admission is

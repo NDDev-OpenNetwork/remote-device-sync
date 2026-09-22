@@ -85,9 +85,10 @@ pub struct EndpointConfig {
     /// bind multiple interfaces on backends that support socket muxing
     /// (`noq`); single-socket backends use the first entry.
     pub bind_addrs: Vec<SocketAddr>,
-    /// Custom relay URL. `None` uses the backend's default relay set
-    /// (n0 public relays for iroh).
-    pub relay: Option<RelayUrl>,
+    /// Custom relay URLs. Empty uses the backend's default relay set
+    /// (n0 public relays for iroh). Multiple relays give the client
+    /// automatic failover — production deployments should run ≥2.
+    pub relays: Vec<RelayUrl>,
     /// Publish/resolve addresses via the backend's lookup services
     /// (iroh: n0 DNS + pkarr). `false` binds the `Minimal` preset —
     /// dialing uses exactly the `EndpointAddr` given, which is what
@@ -116,7 +117,7 @@ impl Default for EndpointConfig {
             backend: Backend::default(),
             secret_key: None,
             bind_addrs: Vec::new(),
-            relay: None,
+            relays: Vec::new(),
             discovery: true,
             max_multipath_paths: None,
             #[cfg(feature = "transport-noq")]
@@ -130,7 +131,20 @@ impl EndpointConfig {
     /// Relay URL string, e.g. `https://relay.example.com` or `http://127.0.0.1:3340`.
     pub fn with_relay(mut self, url: &str) -> anyhow::Result<Self> {
         use std::str::FromStr;
-        self.relay = Some(RelayUrl::from_str(url)?);
+        self.relays.push(RelayUrl::from_str(url)?);
+        Ok(self)
+    }
+
+    /// Multiple relay URLs — the client fails over between them.
+    pub fn with_relays<I, S>(mut self, urls: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        use std::str::FromStr;
+        for url in urls {
+            self.relays.push(RelayUrl::from_str(url.as_ref())?);
+        }
         Ok(self)
     }
 

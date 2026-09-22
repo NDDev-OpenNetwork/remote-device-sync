@@ -14,7 +14,9 @@ data-encoding.workspace = true
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 iroh.workspace = true
 noq = { workspace = true, optional = true }
-noq-proto = { workspace = true, optional = true }
+# Non-optional: iroh runs on noq internally, so it is in the tree either
+# way — needed for transport tuning (BBRv3, windows) on the iroh backend.
+noq-proto.workspace = true
 rand = { workspace = true, optional = true }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
@@ -37,7 +39,6 @@ metrics = []
 ## Owned transport backend on noq (WS1). Off by default until C1 parity.
 transport-noq = [
     "dep:noq",
-    "dep:noq-proto",
     "dep:tokio-stream",
     "dep:blake3",
     "dep:rand",

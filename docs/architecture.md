@@ -241,9 +241,17 @@ connection.
 ### Stability measures
 
 - Relay-first connect (works on any egress-only network), in-band
-  hole-punch upgrade — both handled by iroh.
+  hole-punch upgrade — both handled by iroh. `--relay` is repeatable:
+  multiple custom relays give automatic client-side failover, which is
+  the iroh-recommended production topology (≥2 relays).
 - QUIC connection migration survives NAT rebinding/Wi-Fi↔LTE moves.
 - Agent reconnects to relay with backoff; CLI can pin `--relay`.
+- QUIC transport tuning on both backends: BBRv3 congestion control
+  (paced, bufferbloat-resistant — vs loss-based Cubic default),
+  4 MiB stream receive window / 32 MiB connection send window so a
+  large keyframe or sync chunk stream does not stall on high-BDP
+  links (upstream defaults target ~100 Mbps × 100 ms). iroh's own
+  multipath keep-alive and path idle-timeout defaults are preserved.
 - Serialized frame sends + collapse + mid-send stale reset bound
   worst-case latency under loss: queues stay near-empty and the
   residual tail is retransmit physics, not queueing.

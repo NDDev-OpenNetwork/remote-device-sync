@@ -62,6 +62,12 @@ fn transport_config(max_multipath_paths: Option<u32>) -> Arc<noq::TransportConfi
     cfg.server_handshake_migration(true);
     cfg.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_SIZE));
     cfg.datagram_send_buffer_size(DATAGRAM_BUFFER_SIZE);
+    // Same tuning as the iroh backend: BBRv3 pacing for latency +
+    // bufferbloat resistance, and windows above the 100Mbps x 100ms
+    // defaults so bulk streams do not stall on high-BDP links.
+    cfg.congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()));
+    cfg.stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024));
+    cfg.send_window(32 * 1024 * 1024);
     Arc::new(cfg)
 }
 

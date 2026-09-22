@@ -12,9 +12,10 @@ struct Cli {
     /// Path to the endpoint secret key.
     #[arg(long, global = true)]
     key_file: Option<std::path::PathBuf>,
-    /// Custom relay URL; default is the n0 public relays.
+    /// Custom relay URL; default is the n0 public relays. Repeatable —
+    /// ≥2 relays give automatic client-side failover.
     #[arg(long, global = true)]
-    relay: Option<String>,
+    relay: Vec<String>,
     /// Transport backend: `iroh` (default) or `noq` (with the
     /// `transport-noq` feature).
     #[arg(long, global = true, default_value = "iroh")]
@@ -127,9 +128,7 @@ async fn main() -> anyhow::Result<()> {
         backend,
         ..Default::default()
     };
-    if let Some(url) = &cli.relay {
-        config = config.with_relay(url)?;
-    }
+    config = config.with_relays(&cli.relay)?;
     let endpoint = bind_endpoint(config).await?;
     let directory = cli.server.map(rds_discovery::client::Client::new);
     let grant = cli
