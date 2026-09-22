@@ -1,10 +1,13 @@
 //! Serving side of a desktop session.
 //!
 //! Frame delivery follows the MoQ pattern: every encoded frame goes out on
-//! its own uni-directional stream carrying a `FrameHeader` v2, newer frames
-//! get higher stream priority, and the peer resets streams overtaken by
-//! fresher ones. Input events, encoder steering and heartbeats arrive on
-//! the bi-directional control stream, which outranks every frame stream.
+//! its own uni-directional stream carrying a `FrameHeader`, a fresher
+//! queued frame always supersedes a stale one, and a stale frame still
+//! in flight is reset mid-send rather than finishing on the wire.
+//! Keyframes are never superseded — every delta behind them depends on
+//! their landing. Input events, encoder steering and heartbeats arrive
+//! on the bi-directional control stream, which outranks every frame
+//! stream.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,6 +22,10 @@ use crate::DesktopError;
 
 /// Highest input/control priority; video frames rank below.
 const CONTROL_PRIORITY: i32 = i32::MAX;
+/// Frame streams sit at the midpoint: strictly below control, above
+/// QUIC's default so they can't be starved by lower-priority traffic
+/// the connection might one day carry.
+const FRAME_PRIORITY: i32 = i32::MAX / 2;
 
 /// Pacing sample interval for the bitrate controller.
 const PACING_INTERVAL: Duration = Duration::from_millis(250);
@@ -278,18 +285,19 @@ pub async fn serve_desktop_with(
         })
     };
 
-    // Writer task: one uni stream per frame, sent inline — the send
-    // itself is the only in-flight bound. A continuous producer means
-    // any frame queued behind an in-progress send is already stale:
-    // serializing sends keeps the collapse fresh (each transmitted
-    // frame is the newest available) and bounds concurrent streams
-    // to one, so opened-but-unsent streams can't pile up.
-    // The collapse is decode-aware: a queued keyframe always survives
-    // (deltas produced after it can't decode without it), otherwise
-    // the newest frame wins.
+    // Writer task: one uni stream per frame. A continuous producer
+    // means any frame queued behind an in-progress send is already
+    // stale — the collapse keeps only the newest (decode-aware: a
+    // queued keyframe always survives since deltas behind it can't
+    // decode without it), and a send still in flight when a fresher
+    // frame arrives is reset mid-write rather than allowed to finish
+    // (MoQ-style stale reset): the client would drop the tail anyway,
+    // so its unsent bytes only consume path capacity the fresh frame
+    // needs.
     let writer_conn = conn.clone();
     let writer_clock = clock.clone();
     let writer_bitrate = Arc::clone(&controls.bitrate);
+    let writer_idr = Arc::clone(&controls.idr);
     let mut writer = tokio::spawn(async move {
         // Token bucket on the paced bitrate: offering faster than the
         // path sustains only backlogs QUIC's send buffer with frames
@@ -298,15 +306,21 @@ pub async fn serve_desktop_with(
         // keyframe can't stall the writer.
         let mut budget = 0.0f64;
         let mut last = Instant::now();
-        while let Some(mut produced) = rx.recv().await {
-            let mut have_keyframe = produced.header.keyframe;
-            while let Ok(newer) = rx.try_recv() {
-                if newer.header.keyframe || !have_keyframe {
-                    have_keyframe |= newer.header.keyframe;
-                    produced = newer;
-                }
-                // A non-keyframe newer than a queued keyframe is
-                // undecodable without it — skip it, not the keyframe.
+        let mut pending: Option<Produced> = None;
+        'writer: loop {
+            let mut produced = match pending.take() {
+                Some(p) => p,
+                None => match rx.recv().await {
+                    Some(p) => p,
+                    None => break,
+                },
+            };
+            produced = collapse(produced, &mut rx);
+            // Encode-failure placeholders carry no payload: sending one
+            // decodes to garbage on the client, while a skipped seq is
+            // what the client's gap→IDR resync is for.
+            if produced.payload.is_empty() {
+                continue;
             }
             let bps = writer_bitrate.load(Ordering::Relaxed).max(50_000) as f64 / 8.0;
             let now = Instant::now();
@@ -317,13 +331,32 @@ pub async fn serve_desktop_with(
                 let wait = ((cost - budget) / bps).min(0.5);
                 tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                 budget = (budget - cost).max(-bps * 0.5);
+                // Frames produced during the pacing wait are fresher —
+                // collapse once more before committing to the wire.
+                produced = collapse(produced, &mut rx);
+                if produced.payload.is_empty() {
+                    continue;
+                }
             } else {
                 budget -= cost;
             }
             produced.header.send_ts_ms = writer_clock.now_ms();
-            if let Err(e) = write_frame_stream(&writer_conn, produced).await {
-                tracing::debug!("frame send failed, ending writer: {e}");
-                break;
+            match send_frame(&writer_conn, &produced, &mut rx).await {
+                SendOutcome::Sent => {}
+                SendOutcome::Superseded(newer) => pending = Some(newer),
+                SendOutcome::ResetStale => {
+                    // The dropped tail broke the delta chain — the next
+                    // produced frame must be an IDR, and the queued
+                    // deltas in front of it are undecodable.
+                    writer_idr.store(true, Ordering::Relaxed);
+                    while let Ok(queued) = rx.try_recv() {
+                        if queued.header.keyframe {
+                            pending = Some(queued);
+                            continue 'writer;
+                        }
+                    }
+                }
+                SendOutcome::Done | SendOutcome::Failed => break 'writer,
             }
         }
     });
@@ -595,15 +628,109 @@ mod x11 {
     }
 }
 
-async fn write_frame_stream(conn: &Connection, produced: Produced) -> Result<(), DesktopError> {
-    let mut stream = conn.open_uni().await?;
+/// Drain queued frames newest-wins. Decode-aware: once a keyframe is
+/// in the mix it absorbs everything — deltas produced after it cannot
+/// decode without it, so the keyframe is kept and later deltas are
+/// skipped rather than the other way around.
+fn collapse(mut produced: Produced, rx: &mut mpsc::Receiver<Produced>) -> Produced {
+    let mut have_keyframe = produced.header.keyframe;
+    while let Ok(newer) = rx.try_recv() {
+        if newer.header.keyframe || !have_keyframe {
+            have_keyframe |= newer.header.keyframe;
+            produced = newer;
+        }
+    }
+    produced
+}
+
+/// Reset code for a frame stream abandoned mid-send — the frame went
+/// stale while still in flight, so its tail is dropped instead of
+/// consuming path capacity the fresher frame needs.
+const STALE_FRAME_RESET: u32 = 0x1;
+
+/// How one frame send ended.
+enum SendOutcome {
+    /// Frame fully sent.
+    Sent,
+    /// A fresher decodable frame supersedes — send it next.
+    Superseded(Produced),
+    /// A stale delta was reset mid-send: the reference chain is broken
+    /// on the client and only an IDR resyncs it, so queued deltas are
+    /// worthless and the next produced frame must be a keyframe.
+    ResetStale,
+    /// Producer closed mid-send; the final frame was finished.
+    Done,
+    /// Transport failure — the writer ends.
+    Failed,
+}
+
+/// Send one frame on its own tagged uni stream, aborting mid-write if
+/// a fresher frame lands: an in-flight keyframe is finished (the chain
+/// behind it depends on it), a stale delta is reset.
+async fn send_frame(
+    conn: &Connection,
+    produced: &Produced,
+    rx: &mut mpsc::Receiver<Produced>,
+) -> SendOutcome {
+    let mut stream = match conn.open_uni().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("frame stream open failed: {e}");
+            return SendOutcome::Failed;
+        }
+    };
+    // Frame streams rank below the control stream — a stale frame
+    // must never delay an input event or a resync request.
+    if let Err(e) = stream.set_priority(FRAME_PRIORITY) {
+        tracing::debug!("frame stream priority failed: {e}");
+    }
     // Every uni stream leads with its UniHello tag — the receiver's
     // per-connection demux routes on it.
-    write_frame(&mut stream, &rds_core::UniHello::Desktop).await?;
-    write_frame(&mut stream, &produced.header).await?;
-    stream.write_all(&produced.payload).await?;
-    stream.finish()?;
-    Ok(())
+    if let Err(e) = write_frame(&mut stream, &rds_core::UniHello::Desktop).await {
+        tracing::debug!("frame tag write failed: {e}");
+        return SendOutcome::Failed;
+    }
+    if let Err(e) = write_frame(&mut stream, &produced.header).await {
+        tracing::debug!("frame header write failed: {e}");
+        return SendOutcome::Failed;
+    }
+    tokio::select! {
+        res = async {
+            stream.write_all(&produced.payload).await.map_err(std::io::Error::other)?;
+            stream.finish().map_err(std::io::Error::other)
+        } => match res {
+            Ok(()) => SendOutcome::Sent,
+            Err(e) => {
+                tracing::debug!("frame send failed: {e}");
+                SendOutcome::Failed
+            }
+        },
+        newer = rx.recv() => match newer {
+            // The producer ended: this is the freshest frame that will
+            // ever exist — finish it, then the writer drains out.
+            None => match stream.write_all(&produced.payload).await {
+                Ok(()) => {
+                    let _ = stream.finish();
+                    SendOutcome::Done
+                }
+                Err(_) => SendOutcome::Failed,
+            },
+            Some(newer) => {
+                if produced.header.keyframe {
+                    let _ = stream.write_all(&produced.payload).await;
+                    let _ = stream.finish();
+                    SendOutcome::Superseded(newer)
+                } else {
+                    let _ = stream.reset(STALE_FRAME_RESET.into());
+                    if newer.header.keyframe {
+                        SendOutcome::Superseded(newer)
+                    } else {
+                        SendOutcome::ResetStale
+                    }
+                }
+            }
+        },
+    }
 }
 
 #[cfg(test)]
