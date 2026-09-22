@@ -106,6 +106,26 @@ async fn main() -> anyhow::Result<()> {
     let relay = rds_relay::serve(cli.relay_addr, allow).await?;
     info!(addr = %relay.http_addr().expect("relay config enabled"), "relay listening");
 
-    tokio::signal::ctrl_c().await?;
+    shutdown_signal().await;
+    // Graceful stop: close listener + client websockets instead of
+    // letting attached endpoints hit a silent RST.
+    let _ = relay.shutdown().await;
     Ok(())
+}
+
+/// SIGINT on every platform, SIGTERM on unix (systemd stop).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

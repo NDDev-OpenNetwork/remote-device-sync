@@ -64,6 +64,29 @@ table inet rds {
 accepts direct paths opportunistically (hole-punched or via the
 endpoint's discovered addresses).
 
+**TLS on the relay.** `rds-server` serves the iroh relay protocol
+(WebSocket over HTTP) on 3340 in plaintext: relayed payloads are
+end-to-end-encrypted QUIC the relay cannot read, and relay admission is
+keyed by `EndpointId` signature challenge, so a network MITM can only
+disrupt, not decrypt. For defence-in-depth on a public IP, terminate TLS
+in front of 3340 with any TCP-level TLS terminator (nginx `stream`,
+haproxy) and give endpoints `--relay https://<host>:<tls-port>`; the
+relay protocol rides WebSocket inside TLS unchanged. The embedded
+iroh-relay also supports ACME natively — wiring `TlsConfig` through
+`rds_relay::serve` is future work, not required for launch.
+
+**No tunnel/VPN dependency.** The design assumes only *outbound*
+connectivity from endpoints: tcp/3340 (relay) + tcp/3341 (directory) +
+udp for direct paths. A Cloudflare Tunnel could front the *directory*
+(plain HTTP — works) and probably the relay (WebSocket — unverified, and
+Cloudflare terminates long-lived proxied connections at the edge, so
+attached endpoints would drop whenever `cloudflared` reconnects), but it
+cannot carry the endpoints' QUIC/UDP data path at all — public hostnames
+do not proxy UDP, and private-network UDP requires every device enrolled
+in WARP/Zero Trust. WARP itself is a client VPN solving a problem the
+relay already solves without a per-device client dependency. If the
+services host has no public IP, prefer any small VPS over a tunnel.
+
 ## Sandboxing
 
 Both units set `NoNewPrivileges`, `ProtectSystem=strict`,

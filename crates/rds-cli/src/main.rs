@@ -269,6 +269,9 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+    // Dropping the endpoint without close() makes iroh log an
+    // "ungraceful abort" error on every command exit.
+    endpoint.close().await;
     Ok(())
 }
 

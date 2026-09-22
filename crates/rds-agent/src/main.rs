@@ -166,5 +166,29 @@ async fn main() -> anyhow::Result<()> {
     if agent.policy.allow.is_empty() {
         eprintln!("warning: empty --allow list; every peer will be rejected");
     }
-    agent.run().await
+    tokio::select! {
+        res = agent.run() => res?,
+        _ = shutdown_signal() => {}
+    }
+    // Close the endpoint so peers get CONNECTION_CLOSE instead of an
+    // abrupt socket death (and iroh does not log an ungraceful drop).
+    agent.endpoint.close().await;
+    Ok(())
+}
+
+/// SIGINT on every platform, SIGTERM on unix (systemd stop).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
