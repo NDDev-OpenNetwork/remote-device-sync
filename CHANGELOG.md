@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- Relay TLS and lifecycle polish:
+  - `rds-server`/`rds-relay` gain native TLS on the relay listener:
+    `--tls-cert/--tls-key` for PEM files (rustls `ring` provider), or
+    in-process Let's Encrypt via `--tls-acme-domain/--tls-acme-contact/
+    --tls-acme-cache` (TLS-ALPN-01, needs :443). HTTPS binds
+    `--tls-https-addr` (default 3443); the HTTP port keeps only the
+    captive-portal probe and `/healthz` for monitoring.
+  - All binaries shut down gracefully: `rds` closes its endpoint on
+    exit (no more iroh "ungraceful abort" on `rds id`/`ticket`), and
+    `rds-agent`/`rds-server`/`rds-relay` handle SIGINT+SIGTERM —
+    peers get `CONNECTION_CLOSE` and relay websockets close cleanly
+    under `systemctl stop` instead of dying mid-accept.
+  - `rds id` no longer binds a socket: it prints the key's identity
+    directly, so it is instant, offline, and refuses clearly when no
+    key file can be resolved instead of printing a fresh ephemeral id.
 - Stability/latency hardening across the workspace:
   - `rds-net`: the uni demux hands each accepted stream its own
     tag-read task under a 10s bound — a peer that opens a stream and

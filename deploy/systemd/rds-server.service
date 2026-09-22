@@ -22,6 +22,11 @@ ExecStart=/usr/local/bin/rds-server \
 #   --registry-key <base32 verifying key> --registry /var/lib/rds/registry.json
 #   --allow <endpoint-id>…   (empty = open relay — do NOT expose open
 #   relays on a public IP beyond short-lived bring-up)
+# Optional native relay TLS (docs/deployment.md):
+#   --tls-cert /var/lib/rds/cert.pem --tls-key /var/lib/rds/key.pem
+#   or --tls-acme-domain … --tls-acme-cache /var/lib/rds/acme
+#   ACME's TLS-ALPN-01 needs :443 reachable — that also requires
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE below (default :3443).
 
 Environment=RUST_LOG=info
 Restart=on-failure
