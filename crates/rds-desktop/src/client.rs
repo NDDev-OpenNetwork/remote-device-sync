@@ -224,7 +224,9 @@ impl DesktopSession {
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<DesktopControl>(64);
         let (events_tx, events) = mailbox::channel::<DesktopEvent>(128);
         let next_seq = Arc::new(AtomicU64::new(0));
-        let control_rtt_ms = Arc::new(AtomicU64::new(0));
+        // `u64::MAX` = "not measured": a loopback heartbeat can
+        // legitimately round-trip in 0 ms, so 0 cannot be the sentinel.
+        let control_rtt_ms = Arc::new(AtomicU64::new(u64::MAX));
 
         // Control writer task: single writer on `send`.
         tokio::spawn(async move {
@@ -361,7 +363,7 @@ impl DesktopSession {
     /// `None` until the first heartbeat returns.
     pub fn control_rtt(&self) -> Option<std::time::Duration> {
         match self.control_rtt_ms.load(Ordering::Relaxed) {
-            0 => None,
+            u64::MAX => None,
             ms => Some(std::time::Duration::from_millis(ms)),
         }
     }

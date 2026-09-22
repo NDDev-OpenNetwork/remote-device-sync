@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use ed25519_dalek::VerifyingKey;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 
 use crate::http::{self, Request, Response};
 use crate::registry::{RegistryPayload, SignedRegistry};
@@ -53,6 +54,11 @@ pub struct Limits {
     pub put_per_minute: u32,
     /// Client-side and per-connection idle timeout.
     pub conn_timeout: Duration,
+    /// Maximum concurrently held connections. Without a bound a SYN
+    /// flood spends one task + one FD + one 8 KiB read buffer each —
+    /// cheap per connection but unbounded in count. Excess connections
+    /// are accepted and dropped immediately (the peer sees a close).
+    pub max_conns: usize,
 }
 
 impl Default for Limits {
@@ -61,6 +67,7 @@ impl Default for Limits {
             put_min_interval: Duration::ZERO,
             put_per_minute: 600,
             conn_timeout: Duration::from_secs(10),
+            max_conns: 1024,
         }
     }
 }
@@ -188,6 +195,7 @@ struct State {
     registry_key: Option<VerifyingKey>,
     limits: Limits,
     limiter: RateLimiter,
+    conn_permits: Semaphore,
     metrics: Metrics,
 }
 
@@ -212,6 +220,7 @@ pub async fn serve(
         registry: RwLock::new(registry),
         revocations: RwLock::new(None),
         registry_key: config.registry_key,
+        conn_permits: Semaphore::new(config.limits.max_conns),
         limits: config.limits,
         limiter: RateLimiter {
             last_put: Mutex::new(HashMap::new()),
@@ -230,6 +239,11 @@ pub async fn serve(
                 };
                 let state = state.clone();
                 tokio::spawn(async move {
+                    // At capacity: drop the socket immediately rather
+                    // than queueing unbounded per-conn state.
+                    let Ok(_permit) = state.conn_permits.try_acquire() else {
+                        return;
+                    };
                     let _ = tokio::time::timeout(state.limits.conn_timeout, async {
                         match http::read_request(&mut sock).await {
                             Ok(Some(req)) => {
