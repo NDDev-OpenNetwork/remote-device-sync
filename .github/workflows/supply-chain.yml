@@ -1,0 +1,35 @@
+name: supply-chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly: RustSec advisories land continuously — catch one that
+    # appeared after the last commit.
+    - cron: "23 4 * * 3"
+
+# cargo-deny (deny.toml: bans/licenses/advisories/sources), cargo-audit
+# (RustSec) and cargo-machete (unused deps) via the pinned reusable.
+
+permissions: {}
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  supply-chain:
+    name: rust supply chain
+    permissions:
+      contents: read
+    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-supply-chain.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
+    with:
+      runner: ubuntu-latest
+      toolchain: stable
+      enable_deny: true
+      enable_audit: true
+      enable_machete: true
+      working_directory: "."
+      deny_arguments: "--all-features --config deny.toml"
+      deny_command: "check bans licenses advisories sources"

@@ -7,65 +7,46 @@ on:
 
 # Two supported targets: Linux x86_64 (Ubuntu) and macOS arm64.
 # GitHub-hosted runners only — this is a public module.
+#
+# The build/test/lint jobs are the pinned `rust-ci` reusable from
+# NDDev-OpenNetwork/ci-workflows; one pin per repository (see
+# supply-chain.yml, codeql.yml, release.yml — same SHA).
 
-env:
-  CARGO_TERM_COLOR: always
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --check
-
-  check:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: clippy with owned transport backend (noq) and owned relay
-        run: >-
-          cargo clippy --workspace --all-targets
-          --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay
-          -- -D warnings
-      - name: clippy with metrics export feature
-        run: >-
-          cargo clippy -p rds-net --all-targets --features metrics
-          -- -D warnings
-      - name: clippy with x11/desktop feature (linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --workspace --all-targets --features rds-desktop/x11 -- -D warnings
-      - name: clippy with desktop feature on agent/cli
-        run: >-
-          cargo clippy --workspace --all-targets
-          --features rds-agent/desktop,rds-cli/desktop -- -D warnings
-
-  test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test --workspace
-      - name: test owned transport backend (noq) and owned relay
-        run: >-
-          cargo test -p rds-net -p rds-agent -p rds-relay
-          --features rds-net/transport-noq,rds-agent/transport-noq,rds-relay/owned-relay
-      - name: test metrics (known-traffic + prometheus render)
-        run: cargo test -p rds-net --features metrics --test metrics
-      - name: test with x11/desktop feature (linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo test --workspace --features rds-desktop/x11
+  rust:
+    name: rust
+    permissions:
+      contents: read
+    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-ci.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
+    with:
+      runner: ubuntu-latest
+      toolchain: stable
+      components: "clippy,rustfmt"
+      build_command: "cargo build --locked --workspace --all-targets"
+      # Tests run per-OS. The noq/owned-relay and metrics lanes run on both
+      # targets; the x11 lane is Linux-only (no X11 on macOS runners).
+      test_matrix_os: '["ubuntu-latest", "macos-latest"]'
+      test_command: >-
+        cargo test --locked --workspace
+        && cargo test --locked -p rds-net -p rds-agent -p rds-relay
+           --features rds-net/transport-noq,rds-agent/transport-noq,rds-relay/owned-relay
+        && cargo test --locked -p rds-net --features metrics --test metrics
+        && { [ "$(uname -s)" != "Linux" ] || cargo test --locked --workspace --features rds-desktop/x11; }
+      fmt_command: "cargo fmt --all -- --check"
+      # Clippy runs once on Linux: default features, then every
+      # feature-gated lane (owned transport, metrics export, x11/desktop).
+      clippy_command: >-
+        cargo clippy --locked --workspace --all-targets -- -D warnings
+        && cargo clippy --locked --workspace --all-targets
+           --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-bench/transport-noq,rds-relay/owned-relay
+           -- -D warnings
+        && cargo clippy --locked -p rds-net --all-targets --features metrics -- -D warnings
+        && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings
+        && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
+      timeout_minutes: 45
