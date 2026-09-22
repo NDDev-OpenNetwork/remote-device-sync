@@ -25,6 +25,7 @@ x11rb = { version = "0.14", features = ["shm", "xtest", "xfixes"], optional = tr
 [dev-dependencies]
 noq.workspace = true
 rds-bench = { workspace = true, features = ["transport-noq"] }
+rds-sync.workspace = true
 
 [lints]
 workspace = true

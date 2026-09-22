@@ -442,6 +442,130 @@ async fn soak_60fps() {
     h.server_task.abort();
 }
 
+/// v3 uni demux: a live desktop session and a sync pull share ONE
+/// connection. Both consume uni streams — Desktop-tagged frame streams
+/// and Sync-tagged chunk streams — which the connection demux routes
+/// to their own consumer. Pre-v3, two `accept_uni` callers raced and
+/// each could swallow the other's streams.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desktop_and_sync_share_one_connection() {
+    let clock = SessionClock::default();
+    let (server_ep, client_ep, _imp, target) = endpoints(None).await;
+
+    // Sync root with a multi-chunk file to pull while frames stream.
+    let sync_root = std::env::temp_dir().join(format!(
+        "rds-coexist-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let data: Vec<u8> = (0..400_000u32).map(|i| (i * 31 % 251) as u8).collect();
+    std::fs::write(sync_root.join("media.bin"), &data).unwrap();
+
+    // Server: dispatch each control stream — Desktop session or Sync —
+    // like the agent does.
+    let server_task = tokio::spawn({
+        let sync_root = sync_root.clone();
+        let clock = clock.clone();
+        async move {
+            let conn = server_ep.accept().await.unwrap().await.unwrap();
+            while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                let conn = conn.clone();
+                let dir = sync_root.clone();
+                let clock = clock.clone();
+                tokio::spawn(async move {
+                    match read_frame::<_, StreamHello>(&mut recv).await {
+                        Ok(StreamHello::Desktop(hello)) => {
+                            rds_core::write_frame(
+                                &mut send,
+                                &HelloAck::Desktop(rds_core::DesktopCaps {
+                                    displays: vec![],
+                                    codecs: vec![Codec::H264],
+                                }),
+                            )
+                            .await
+                            .unwrap();
+                            let _ = serve_desktop_with(
+                                conn,
+                                send,
+                                recv,
+                                hello,
+                                SessionConfig {
+                                    producer: Some(Box::new(
+                                        SyntheticProducer::new(90, 320, 240, 1500)
+                                            .keyframe_every(30),
+                                    )),
+                                    clock: Some(clock),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        }
+                        Ok(StreamHello::Sync) => {
+                            let _ = rds_sync::engine::serve(conn, send, recv, dir).await;
+                        }
+                        _ => {}
+                    }
+                });
+            }
+        }
+    });
+
+    let conn = client_ep.connect(target, rds_core::ALPN).await.unwrap();
+    let mut session = DesktopSession::connect_opts(
+        &conn,
+        DesktopHello {
+            display: 0,
+            max_fps: 90,
+            codec: Codec::H264,
+            input_acks: false,
+        },
+        SessionOpts {
+            clock: Some(clock.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Pull while frames stream: the sync engine claims `UniHello::Sync`
+    // streams; the session owns `UniHello::Desktop`. A misrouted stream
+    // either stalls the pull or kills the frame task — both would fail
+    // the asserts below.
+    let dest_dir = sync_root.join("dest");
+    let conn2 = conn.clone();
+    let pull = tokio::spawn(async move {
+        let (mut send, recv) = conn2.open_bi().await.unwrap();
+        rds_core::write_frame(&mut send, &StreamHello::Sync)
+            .await
+            .unwrap();
+        rds_sync::engine::recv_file(&conn2, "media.bin", &dest_dir, send, recv).await
+    });
+
+    // Consume frames while the pull runs.
+    let mut frames = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut pull_done = false;
+    while Instant::now() < deadline && !(pull_done && frames >= 30) {
+        tokio::select! {
+            h = session.frame_headers.recv() => if h.is_some() { frames += 1; },
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                pull_done |= pull.is_finished();
+            }
+        }
+    }
+    let (dest, stats) = pull.await.unwrap().unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), data, "pull bytes differ");
+    assert!(stats.fetched > 0);
+    assert!(
+        frames >= 30,
+        "desktop starved by concurrent sync: {frames} frames"
+    );
+    server_task.abort();
+}
+
 #[cfg(target_os = "linux")]
 fn self_rss_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;

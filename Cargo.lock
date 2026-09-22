@@ -2912,6 +2912,7 @@ dependencies = [
  "rds-bench",
  "rds-core",
  "rds-net",
+ "rds-sync",
  "serde",
  "thiserror 2.0.20",
  "tokio",
