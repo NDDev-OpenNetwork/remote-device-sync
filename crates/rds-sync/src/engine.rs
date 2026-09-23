@@ -28,7 +28,7 @@ use crate::proto::{
     CHUNKSET_BATCH, FETCH_STREAMS, MANIFEST_BATCH, MAX_CHUNKS, SyncMsg, bits_to_indices,
     check_manifest, check_rel_path, need_bits, resolve_under,
 };
-use crate::{Manifest, manifest_of_path};
+use crate::{MAX_CHUNK, Manifest, manifest_of_path};
 
 /// No protocol read may stall longer than this — a peer that is alive
 /// but silent still must not hang a transfer forever. Generous because
@@ -461,6 +461,9 @@ async fn push_chunks(
             // tokio's fs file runs every op on the blocking pool — the
             // chunk reads below never park an async worker.
             let mut file = tokio::fs::File::open(&path).await?;
+            // One scratch per stream — chunks are ≤256 KiB, so this is
+            // a single allocation rather than one per chunk.
+            let mut buf = Vec::with_capacity(MAX_CHUNK as usize);
             for batch in mine.chunks(CHUNKSET_BATCH) {
                 write_frame(
                     &mut stream,
@@ -471,7 +474,8 @@ async fn push_chunks(
                 .await?;
                 for &index in batch {
                     let c = manifest.chunks[index as usize];
-                    let mut buf = vec![0u8; c.len as usize];
+                    buf.clear();
+                    buf.resize(c.len as usize, 0);
                     file.seek(SeekFrom::Start(c.offset)).await?;
                     file.read_exact(&mut buf).await?;
                     write_frame(

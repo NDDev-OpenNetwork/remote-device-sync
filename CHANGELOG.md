@@ -9,6 +9,8 @@
   refresh frame at least once a second so teardown stays prompt and the
   delta chain stays fresh. Backends without damage tracking report
   `changed() == true` and behave as before.
+- Sync send path: the per-chunk `vec![0; len]` allocation is now one
+  256 KiB scratch buffer per stream — zero allocation per chunk.
 - Desktop capture/encode throughput:
   - X11 capture uses MIT-SHM (`CreateSegment` fd-passing, server ≥1.2)
     when available — the pixmap lands in a shared segment instead of an
