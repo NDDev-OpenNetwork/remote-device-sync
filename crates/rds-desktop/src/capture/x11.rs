@@ -21,6 +21,8 @@ use bytes::Bytes;
 use memmap2::{MmapMut, MmapOptions};
 use rds_core::{DesktopCaps, DisplayInfo};
 use x11rb::connection::{Connection as _, RequestConnection as _};
+use x11rb::protocol::Event;
+use x11rb::protocol::damage::{self, ConnectionExt as _, Damage, ReportLevel};
 use x11rb::protocol::shm::{self, ConnectionExt as _, Seg};
 use x11rb::protocol::xproto::{ConnectionExt, GetImageReply, ImageFormat};
 use x11rb::rust_connection::RustConnection;
@@ -46,6 +48,12 @@ pub struct X11Capturer {
     height: u16,
     screen: usize,
     shm: Option<ShmPath>,
+    /// DAMAGE object on the root window — idle detection so a still
+    /// desktop costs no capture/encode work at all.
+    damage: Option<Damage>,
+    /// Sticky flag: the first `changed` call must be true (the screen
+    /// existed before the damage object did).
+    dirty: bool,
 }
 
 impl X11Capturer {
@@ -62,6 +70,7 @@ impl X11Capturer {
         );
         let _ = default_screen;
         let shm = Self::try_shm(&conn, width, height);
+        let damage = Self::try_damage(&conn, root);
         Ok(Self {
             conn,
             root,
@@ -69,6 +78,8 @@ impl X11Capturer {
             height,
             screen: idx,
             shm,
+            damage,
+            dirty: true,
         })
     }
 
@@ -99,6 +110,21 @@ impl X11Capturer {
             len,
             _fd: fd,
         })
+    }
+
+    /// DAMAGE (XFixes ≥ 4): one object on the root window reporting
+    /// `NON_EMPTY` transitions — enough for a changed/not-changed bit.
+    /// `None` where the extension is absent.
+    fn try_damage(conn: &RustConnection, root: x11rb::protocol::xproto::Window) -> Option<Damage> {
+        conn.extension_information(damage::X11_EXTENSION_NAME)
+            .ok()??;
+        conn.damage_query_version(1, 1).ok()?.reply().ok()?;
+        let dmg = conn.generate_id().ok()?;
+        conn.damage_create(dmg, root, ReportLevel::NON_EMPTY)
+            .ok()?
+            .check()
+            .ok()?;
+        Some(dmg)
     }
 }
 
@@ -169,10 +195,33 @@ impl Capturer for X11Capturer {
             primary: true,
         }]
     }
+
+    /// Damage-driven change detection: drains pending events; any
+    /// `DamageNotify` on our object marks the screen dirty. `NON_EMPTY`
+    /// reports only the empty→non-empty transition, so a dirty read
+    /// subtracts the region back to empty to re-arm notification.
+    fn changed(&mut self) -> bool {
+        let mut dirty = std::mem::take(&mut self.dirty);
+        let Some(dmg) = self.damage else {
+            return true;
+        };
+        while let Ok(Some(ev)) = self.conn.poll_for_event() {
+            if matches!(ev, Event::DamageNotify(e) if e.damage == dmg) {
+                dirty = true;
+            }
+        }
+        if dirty {
+            let _ = self.conn.damage_subtract(dmg, 0u32, 0u32);
+        }
+        dirty
+    }
 }
 
 impl Drop for X11Capturer {
     fn drop(&mut self) {
+        if let Some(dmg) = self.damage.take() {
+            let _ = self.conn.damage_destroy(dmg);
+        }
         if let Some(shm) = self.shm.take() {
             let _ = self.conn.shm_detach(shm.seg);
         }
@@ -192,6 +241,8 @@ pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     /// Real capture needs an X server — skipped silently when `$DISPLAY`
@@ -208,11 +259,24 @@ mod tests {
         };
         if local {
             assert!(cap.shm.is_some(), "local X server without MIT-SHM 1.2?");
+            assert!(cap.damage.is_some(), "local X server without DAMAGE?");
         }
         for _ in 0..3 {
             let frame = cap.capture().unwrap();
             assert_eq!(frame.data.len(), (frame.width * frame.height * 4) as usize);
             assert_eq!(frame.stride, frame.width * 4);
         }
+        if !local {
+            return;
+        }
+        // Damage bookkeeping: first read is dirty (screen predates the
+        // damage object), a still screen then reports clean, and a
+        // server-side repaint re-dirties it.
+        assert!(cap.changed(), "first changed() must be dirty");
+        assert!(!cap.changed(), "still screen reported damage");
+        x11rb::protocol::xproto::clear_area(&cap.conn, false, cap.root, 0, 0, 100, 100).unwrap();
+        cap.conn.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(cap.changed(), "root repaint produced no damage");
     }
 }

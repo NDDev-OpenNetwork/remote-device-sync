@@ -19,7 +19,7 @@ rds-net.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-x11rb = { version = "0.14", features = ["shm", "xtest", "xfixes"], optional = true }
+x11rb = { version = "0.14", features = ["shm", "xtest", "xfixes", "damage"], optional = true }
 
 [dev-dependencies]
 noq.workspace = true

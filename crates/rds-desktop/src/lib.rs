@@ -85,6 +85,12 @@ pub trait Capturer: Send + 'static {
     /// Next frame in display order; blocks the calling thread as needed.
     fn capture(&mut self) -> Result<RawFrame, DesktopError>;
     fn displays(&self) -> Vec<rds_core::DisplayInfo>;
+    /// Whether display content changed since the previous `capture`.
+    /// `true` is the conservative default — backends without damage
+    /// tracking always report changed.
+    fn changed(&mut self) -> bool {
+        true
+    }
 }
 
 /// Frame encoder. Implementations must emit Annex-B streams and honor
