@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Idle-desktop suppression: the X11 capturer subscribes a DAMAGE object
+  on the root window (`NON_EMPTY` report level, re-armed via
+  `DamageSubtract`); while the screen is still, the producer skips the
+  capture→convert→encode path entirely, polling at 25 ms and emitting a
+  refresh frame at least once a second so teardown stays prompt and the
+  delta chain stays fresh. Backends without damage tracking report
+  `changed() == true` and behave as before.
+- Sync send path: the per-chunk `vec![0; len]` allocation is now one
+  256 KiB scratch buffer per stream — zero allocation per chunk.
 - Desktop capture/encode throughput:
   - X11 capture uses MIT-SHM (`CreateSegment` fd-passing, server ≥1.2)
     when available — the pixmap lands in a shared segment instead of an

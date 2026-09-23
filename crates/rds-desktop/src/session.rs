@@ -561,6 +561,36 @@ mod x11 {
         }
     }
 
+    impl X11Producer {
+        /// Damage-aware pause: while the screen is still, capture and
+        /// encode cost nothing. Polls every `IDLE_POLL` for a damage
+        /// event, bounded by `IDLE_MAX` so the stream still emits a
+        /// refresh frame about once a second and session teardown
+        /// (the caller's `is_closed` check) is never deferred past it.
+        /// `idr` wakes the loop early: a viewer joining or recovering
+        /// from loss asks for a keyframe and must not wait out the cap.
+        fn idle_wait(&mut self, idr: &AtomicBool) {
+            const IDLE_POLL: Duration = Duration::from_millis(25);
+            const IDLE_MAX: Duration = Duration::from_secs(1);
+            if self.capturer.changed() || idr.load(Ordering::Relaxed) {
+                return;
+            }
+            let deadline = Instant::now() + IDLE_MAX;
+            loop {
+                std::thread::sleep(IDLE_POLL);
+                if self.capturer.changed()
+                    || idr.load(Ordering::Relaxed)
+                    || Instant::now() >= deadline
+                {
+                    break;
+                }
+            }
+            // Idle time is not a cadence miss: reset the schedule so
+            // the skipped slots don't count as deadline misses.
+            self.next_due = Instant::now();
+        }
+    }
+
     impl FrameProducer for X11Producer {
         fn produce(
             &mut self,
@@ -568,6 +598,7 @@ mod x11 {
             controls: &ProducerControls,
             clock: &SessionClock,
         ) -> Option<Produced> {
+            self.idle_wait(&controls.idr);
             self.next_due += self.interval;
             if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
                 std::thread::sleep(sleep);
