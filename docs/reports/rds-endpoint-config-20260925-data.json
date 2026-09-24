@@ -1,0 +1,197 @@
+{
+  "source_base": "01935fc",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "Cargo.lock": "f90624d65e4f0fd27f47596f9167f0bd40dc2c184aa303ad835e8ae257ff8197",
+    "crates/rds-agent/src/main.rs": "1622b97ae48f2c0696e19c21672bb0d870c19181cccb6cb4f7b845a65eeb1964",
+    "crates/rds-agent/tests/configuration.rs": "d44305f844da36057bc0ab2f3bc743fefd44bca26b902cfbef5fc8e90eef5000",
+    "crates/rds-cli/src/main.rs": "1c9adf246393f41de8e07d84db2d7cba4ea43dc2cf85b5407c075b2ae9350183",
+    "crates/rds-cli/tests/configuration.rs": "86795a49dbd9cc90d7b53347723e25d8bc723f6840fe0277a8525a1af50dd0f9",
+    "crates/rds-net/Cargo.toml": "eb12d8fadebc14c9e8eee7d7c88c85872ee12859b8628aaa131561bbcc77befc",
+    "crates/rds-net/src/backends/iroh.rs": "8293ad823e17fd8ea2775c38d067a2c4006a23778b4896e35c5568be88daaeef",
+    "crates/rds-net/src/backends/noq/mod.rs": "deff03b7ef3687197f47628030923f415b73f567144736d3dfbeb09c607445d5",
+    "crates/rds-net/src/config.rs": "4a719ad56aa00115a3513797ab94b8edb3b219ce8722c93c0c0c651c1e5496d2",
+    "crates/rds-net/src/config/tests.rs": "9d5394e530eb525c8cbed06bf82e781acd4f0e26d4aeba673e38aa69ca78b886",
+    "crates/rds-net/src/lib.rs": "f77d8e06ac34c0cf2fdbba25dd88eb9d300e8c6220fbb45fbac23c9739ed76ef",
+    "crates/rds-net/tests/configuration.rs": "ec251381b1cc78a4604eca60fb6dc20ac130b5e6d306f6ae38e3aabbb38f0b36",
+    "crates/rds-relay/tests/owned_e2e.rs": "957547244dd4aac74d4de8d4d64e41379fc7952e13e6d753549e2df557ae00cc",
+    "examples/endpoint-direct.json": "9a4660eefc68997738fa6203ad115f592667511adda6fb20e70336ce59503e83",
+    "examples/endpoint-iroh.json": "120b343e9eba55781912fe2a160c79b372254ff60bb819c44b5b4de2f7a2aa42",
+    "examples/endpoint-owned.json": "41b02eb77d649f372ddc3ad1d15b1c63569484053ca4ab191eb5892d2e4f8c85",
+    "tests/support/endpoint_cli.rs": "2046df0f7f2ec38cd7ef446ca20b223aa960b543c91765556e09ffc07e6de55e"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6602386910235509,
+      "build_jobs": 2
+    },
+    {
+      "name": "support-fmt",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/endpoint_cli.rs"
+      ],
+      "code": 0,
+      "seconds": 0.04215180198661983,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.582130030030385,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.907896537915803,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 19.243403248954564,
+      "build_jobs": 2
+    },
+    {
+      "name": "workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 222.81015429098625,
+      "build_jobs": 2
+    },
+    {
+      "name": "owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 168.282992945984,
+      "build_jobs": 2
+    },
+    {
+      "name": "isolated-config",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--lib",
+        "config::tests"
+      ],
+      "code": 0,
+      "seconds": 10.683888019993901,
+      "build_jobs": 2
+    },
+    {
+      "name": "isolated-binaries",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-agent",
+        "--no-default-features",
+        "--test",
+        "configuration"
+      ],
+      "code": 0,
+      "seconds": 34.75948750798125,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 285,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 53
+    },
+    "owned": {
+      "passed": 72,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 24
+    },
+    "isolated-config": {
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 1
+    },
+    "isolated-binaries": {
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 2
+    }
+  },
+  "before_fix_failures": [
+    "Iroh ignored extra bind addresses",
+    "Owned transport ignored iroh relay URLs",
+    "Owned relay outer socket conflicted with fixed primary port"
+  ],
+  "limits": [
+    "Endpoint schema only; unified service/authority/session configuration remains open",
+    "Local functional checks, not latency percentiles or real NAT/IPv6 reachability matrix",
+    "No native macOS or production rollout",
+    "Build-cache disk exhaustion is not runtime journal full-disk qualification"
+  ]
+}

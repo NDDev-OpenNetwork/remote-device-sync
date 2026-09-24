@@ -4,7 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use rds_net::{EndpointConfig, Ticket, bind_endpoint, default_key_path, load_or_create_key};
+use rds_net::{
+    EndpointOverrides, EndpointSettings, Ticket, bind_endpoint, default_key_path,
+    load_or_create_key,
+};
 
 #[derive(Parser)]
 #[command(version, about = "Remote device access for the GDS estate")]
@@ -14,12 +17,24 @@ struct Cli {
     key_file: Option<std::path::PathBuf>,
     /// Custom relay URL; default is the n0 public relays. Repeatable —
     /// ≥2 relays give automatic client-side failover.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with_all = ["owned_relay", "no_relay"])]
     relay: Vec<String>,
     /// Transport backend: `iroh` (default) or `noq` (with the
     /// `transport-noq` feature).
-    #[arg(long, global = true, default_value = "iroh")]
-    backend: String,
+    #[arg(long, global = true)]
+    backend: Option<rds_net::Backend>,
+    /// Versioned endpoint JSON configuration. Explicit flags override it.
+    #[arg(long, global = true)]
+    endpoint_config: Option<std::path::PathBuf>,
+    /// Key-pinned owned relay: rds-relay://PUBLIC_HEX_KEY@IP:PORT.
+    #[arg(long, global = true, conflicts_with_all = ["relay", "no_relay"])]
+    owned_relay: Option<String>,
+    /// Disable relay and public address lookup services.
+    #[arg(long, global = true, conflicts_with_all = ["relay", "owned_relay"])]
+    no_relay: bool,
+    /// Local UDP bind address; repeatable on the owned backend.
+    #[arg(long, global = true)]
+    bind_address: Vec<SocketAddr>,
     /// Directory HTTP(S) origin or legacy IP:port. Enables bare-key lookups and GDS
     /// device-name resolution; tickets still work without it.
     #[arg(long, global = true)]
@@ -117,6 +132,21 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let cli = Cli::parse();
 
+    let mut config = cli
+        .endpoint_config
+        .as_deref()
+        .map(EndpointSettings::load)
+        .transpose()?
+        .unwrap_or_default()
+        .apply(EndpointOverrides {
+            backend: cli.backend,
+            bind_addrs: cli.bind_address,
+            relays: cli.relay,
+            owned_relay: cli.owned_relay,
+            no_relay: cli.no_relay,
+        })?
+        .into_endpoint()?;
+
     let key = match &cli.key_file {
         Some(path) => Some(load_or_create_key(path)?),
         None => default_key_path()
@@ -133,18 +163,7 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", key.public());
         return Ok(());
     }
-    let backend = match cli.backend.as_str() {
-        "iroh" => rds_net::Backend::Iroh,
-        #[cfg(feature = "transport-noq")]
-        "noq" => rds_net::Backend::Noq,
-        other => anyhow::bail!("unknown or unavailable backend {other:?}"),
-    };
-    let mut config = EndpointConfig {
-        secret_key: key,
-        backend,
-        ..Default::default()
-    };
-    config = config.with_relays(&cli.relay)?;
+    config.secret_key = key;
     let directory = cli
         .server
         .as_deref()

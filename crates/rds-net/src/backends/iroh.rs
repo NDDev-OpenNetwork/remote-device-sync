@@ -20,6 +20,7 @@ use crate::EndpointConfig;
 /// lookup — so a private deployment does not publish to third-party DNS.
 /// Without one, `presets::N0` gives the public relays plus DNS/Pkarr lookup.
 pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
+    config.validate_for(crate::Backend::Iroh)?;
     let mut builder = match (config.relays.is_empty(), config.discovery) {
         (false, _) => Endpoint::builder(iroh::endpoint::presets::Minimal).relay_mode(
             RelayMode::Custom(RelayMap::from_iter(config.relays.clone())),

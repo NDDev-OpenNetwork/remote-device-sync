@@ -34,6 +34,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 
 pub mod announce;
+pub mod config;
 pub mod backends {
     /// Current transport substrate (iroh 1.x on noq underneath).
     pub mod iroh;
@@ -59,10 +60,12 @@ pub use announce::{Announce, AnnounceConfig, announce};
 pub use backends::iroh::{
     Ticket, default_key_path, load_or_create_key, parse_target, relay_url_of,
 };
+pub use config::{ConfigError, EndpointOverrides, EndpointSettings, RelaySettings};
 pub use resolve::resolve_target;
 
 /// Which transport substrate an endpoint binds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Backend {
     /// iroh endpoint: relay fallback, hole punching, n0 discovery.
     /// The default until `noq` passes the C1 parity gate.
@@ -83,11 +86,11 @@ pub struct EndpointConfig {
     pub secret_key: Option<SecretKey>,
     /// UDP bind addresses. Empty binds `0.0.0.0:0`. Multiple entries
     /// bind multiple interfaces on backends that support socket muxing
-    /// (`noq`); single-socket backends use the first entry.
+    /// (`noq`); iroh refuses more than one entry.
     pub bind_addrs: Vec<SocketAddr>,
-    /// Custom relay URLs. Empty uses the backend's default relay set
-    /// (n0 public relays for iroh). Multiple relays give the client
-    /// automatic failover — production deployments should run ≥2.
+    /// Custom iroh relay URLs. Refused by the owned backend, which uses
+    /// `relay_endpoint`. Empty uses the backend's preset (iroh public relays
+    /// when discovery is enabled; otherwise direct only).
     pub relays: Vec<RelayUrl>,
     /// Publish/resolve addresses via the backend's lookup services
     /// (iroh: n0 DNS + pkarr). `false` binds the `Minimal` preset —

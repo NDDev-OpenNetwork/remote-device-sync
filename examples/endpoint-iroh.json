@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "backend": "iroh",
+  "relay": {
+    "mode": "iroh",
+    "urls": ["https://relay-a.example/", "https://relay-b.example/"]
+  },
+  "max_multipath_paths": 4
+}

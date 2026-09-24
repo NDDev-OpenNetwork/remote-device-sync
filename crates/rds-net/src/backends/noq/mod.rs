@@ -77,6 +77,7 @@ fn transport_config(max_multipath_paths: Option<u32>) -> Arc<noq::TransportConfi
 /// negotiated so additional paths and NAT traversal can be layered on
 /// after connect.
 pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<Endpoint> {
+    config.validate_for(crate::Backend::Noq)?;
     let runtime = Arc::new(noq::TokioRuntime);
     let binds = if config.bind_addrs.is_empty() {
         vec![SocketAddr::from(([0, 0, 0, 0], 0))]
@@ -100,8 +101,11 @@ pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<
     config.secret_key = Some(key.clone());
     let relay_handle = match &config.relay_endpoint {
         Some(relay_addr) => {
+            // The primary socket already owns its configured port. The outer
+            // relay connection needs a separate ephemeral port on that interface.
+            let relay_bind = SocketAddr::new(binds[0].ip(), 0);
             let (socket, handle) =
-                relay::RelaySocket::connect(relay_addr.clone(), key, binds[0]).await?;
+                relay::RelaySocket::connect(relay_addr.clone(), key, relay_bind).await?;
             sockets.push(Box::new(socket));
             Some(handle)
         }
@@ -127,6 +131,11 @@ pub async fn bind_with_socket(
     runtime: Arc<dyn Runtime>,
     relay: Option<relay::RelayHandle>,
 ) -> anyhow::Result<Endpoint> {
+    config.validate_for(crate::Backend::Noq)?;
+    anyhow::ensure!(
+        config.relay_endpoint.is_some() == relay.is_some(),
+        "injected transport relay configuration does not match its attached relay"
+    );
     let secret_key = config.secret_key.unwrap_or_else(SecretKey::generate);
     let tls = tls::TlsConfig::new(secret_key.clone());
 

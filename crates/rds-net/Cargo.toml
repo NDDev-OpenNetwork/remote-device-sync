@@ -22,13 +22,15 @@ postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
 rds-discovery.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rustix.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
 iroh-relay = { workspace = true, features = ["server"] }
-serde_json.workspace = true
 turmoil = "0.7.2"
 
 [features]

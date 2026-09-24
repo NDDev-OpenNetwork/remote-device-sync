@@ -24,6 +24,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
+| W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, identity-before-network preflight and owned-relay CLI/agent selection are implemented. Role-level service/authority settings and timeout policy remain open. |
 
 ## Authorization change
 
@@ -537,3 +538,34 @@ No new dependency, unsafe block, external runtime helper or deployment was added
 Next local implementation is W2.1 endpoint configuration validation and explicit
 backend/relay selection, followed by negotiation and lifecycle ownership. No
 wave is closed by this local increment.
+
+## Versioned endpoint configuration
+
+CLI and agent now share a bounded JSON endpoint schema with explicit defaults,
+file/flag precedence and mutually exclusive relay modes. Unknown fields, unused
+backend-specific relay settings and invalid dimensions fail before endpoint
+identity creation. Iroh refuses extra bind addresses; noq refuses iroh relay
+URLs instead of ignoring them. Its key-pinned owned relay is configurable through
+both binaries. An outer relay socket now uses an independent ephemeral port,
+preserving a fixed primary bind. Endpoint secrets and policy authorities remain
+separately provisioned. See [configuration](endpoint-configuration.md) and the
+[receipt](reports/rds-endpoint-config-20260925.md).
+
+Two new baseline tests failed for ignored settings. A fixed-port owned relay
+fixture failed during integration and now passes against a real local relay.
+The strict-schema tests caught an ignored-field serde corner case. The original
+socket-mux test also caught an overly strict duplicate rule: repeated port 0
+requests now correctly allocate independent sockets, while fixed duplicates fail.
+
+Final formatting and three Clippy lanes passed, along with **285 workspace tests**,
+**72 all-feature network/agent/CLI/relay tests**, four feature-isolated schema tests
+and five isolated binary tests. An initial disk-full build was recovered by
+clearing only this workspace's generated incremental cache and limiting compiler
+parallelism; it is not runtime durability evidence. Existing dependency versions
+are unchanged; `rustix` and `thiserror` become direct network dependencies and
+`serde_json` moves from test to runtime use. No runtime helper program was added.
+
+W2.1 remains partial for unified role/service/authority configuration and timeout
+policy. The next local correction is common SSH/TCP destination parsing and
+preflight, followed by negotiated sessions, scopes and structured lifecycle work.
+Native macOS, real reachability/failover and deployed integration remain open.

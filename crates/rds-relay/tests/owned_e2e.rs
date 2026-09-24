@@ -8,6 +8,44 @@ use rds_net::{Backend, EndpointConfig};
 
 const ALPN: &[u8] = b"rds/0";
 
+#[tokio::test]
+async fn configured_owned_relay_preserves_a_fixed_primary_bind_port() {
+    let relay = rds_relay::server::serve(
+        EndpointConfig {
+            backend: Backend::Noq,
+            secret_key: Some(key(81)),
+            bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+            ..Default::default()
+        },
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let address = relay.endpoint_addr();
+    let route = rds_net::backends::noq::relay::relay_url_for(&address).unwrap();
+    let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let bind = reservation.local_addr().unwrap();
+    drop(reservation);
+    let file = format!(
+        r#"{{"schema_version":1,"backend":"noq","bind_addrs":["{bind}"],"relay":{{"mode":"owned","route":"{route}"}}}}"#
+    );
+    let config = rds_net::EndpointSettings::from_json(file.as_bytes())
+        .unwrap()
+        .into_endpoint()
+        .unwrap();
+    let endpoint = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        rds_net::bind_endpoint(config),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(endpoint.addr().addrs.contains(&TransportAddr::Ip(bind)));
+    assert_eq!(relay.endpoints(), 1);
+    endpoint.close().await;
+    relay.close().await;
+}
+
 fn key(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
 }
