@@ -242,6 +242,11 @@ sessions.
 
 ### Failure modes
 
+The W1.5 record-store format is changing. Legacy per-key JSON directories now
+refuse startup instead of discarding replay history. Deployment migration is
+pending the versioned publisher work; see [record-state.md](record-state.md).
+Preserve the complete directory, and never remove an anchor to force startup.
+
 | Symptom | Likely cause | Check | Fix |
 | --- | --- | --- | --- |
 | `rds ssh`/`ping` never connects | relay unreachable | `curl http://<host>:3340/` ; `ss -tlnp \| grep 3340` | open tcp/3340, restart unit |

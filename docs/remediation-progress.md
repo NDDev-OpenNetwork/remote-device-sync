@@ -252,3 +252,24 @@ recorded above. `cargo-deny` is not installed. Native macOS, physical suspend,
 power loss and real estate deployment were not run. No wave is closed and no
 performance qualification is claimed. See the [policy receipt](reports/rds-policy-20260924.md)
 and [migration/operational contract](policy-state.md).
+
+## Record transaction foundation
+
+W1.5 now keeps delete tombstones in both stores, serializes mutations and stores
+record/tombstone/catalog updates in an embedded Rust transaction. The file
+store's separately synced generation anchor refuses database-only rollback of
+acknowledged history. Corrupt/missing initialized files and legacy directories
+are refused; unexpected I/O closes the instance until recovery. Eight new
+integration tests and six unit tests cover replay, concurrency, confinement,
+bounded storage, partial writes, sync faults and process exits. No runtime
+subprocess or database service is added. Migration is deliberately not inferred
+from old files; deployment remains pending the versioned publisher work.
+
+Formatting and all three Clippy lanes passed. The default workspace run failed
+the existing parallel desktop soak latency gate (p95 176 ms/p99 1447 ms); a
+single isolated diagnostic rerun passed at 10/16 ms. The complete sequential
+test run passed **184 tests, 44 targets**. This does not erase the default-run
+failure or close W0/W6 performance evidence. No thresholds changed. See the
+[record transaction receipt](reports/rds-records-20260924.md) for exact scope.
+W1.5 remains open: explicit signed revisions and durable publisher allocation
+are next, followed by expiry/quotas, enrollment fairness and HTTP framing.

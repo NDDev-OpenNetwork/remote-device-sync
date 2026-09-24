@@ -202,7 +202,14 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   default absolute connection deadline includes TLS and response I/O; dropping
   the directory aborts its owned async requests. Store/signature operations run
   in a bounded blocking pool; permits remain held through disk completion even
-  after request timeout. Endpoint-record transactions/quotas remain W1.5. Directory
+  after request timeout. Endpoint records and delete tombstones now share an
+  embedded redb transaction. A separately synced generation anchor refuses
+  rollback of an acknowledged database generation, including recovery to an
+  older root. Both commits finish before readers or HTTP success can observe
+  the mutation; uncertain I/O closes the store until reopen. Storage uses a
+  protected, single-owner directory and a bounded no-follow file backend.
+  Explicit publisher revisions, expiry GC and admission quotas remain W1.5;
+  see [record-state.md](record-state.md) for migration and current limits. Directory
   certificate renewal is external provisioning plus restart for now; automatic
   renewal and hot reload are not implied by the relay's separate ACME support.
 

@@ -18,12 +18,13 @@ pub mod clock;
 pub mod http;
 mod persist;
 pub mod policy;
+mod records;
+pub use records::{FileStore, MemoryStore};
 pub mod registry;
 pub mod revocations;
 pub mod service;
 pub mod tls;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
 
@@ -272,111 +273,6 @@ pub trait RecordStore: Send + Sync {
     /// Whether the store holds no live records.
     fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-}
-
-/// In-memory store; rejects forged or expired records on `put`.
-#[derive(Default)]
-pub struct MemoryStore {
-    records: std::sync::RwLock<HashMap<EndpointKey, EndpointRecord>>,
-}
-
-impl RecordStore for MemoryStore {
-    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        let payload = record.verify()?;
-        let mut records = self
-            .records
-            .write()
-            .map_err(|_| DiscoveryError::Store("store poisoned".into()))?;
-        check_freshness(records.get(&payload.key), &payload)?;
-        records.insert(payload.key, record.clone());
-        Ok(())
-    }
-
-    fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
-        self.records
-            .read()
-            .map_err(|_| DiscoveryError::Store("store poisoned".into()))?
-            .get(key)
-            .cloned()
-            .ok_or(DiscoveryError::NotFound)
-    }
-
-    fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError> {
-        let del = tombstone.verify()?;
-        let mut records = self
-            .records
-            .write()
-            .map_err(|_| DiscoveryError::Store("store poisoned".into()))?;
-        if let Some(stored) = records.get(&del.key)
-            && stored.verify()?.issued_at > del.issued_at
-        {
-            return Err(DiscoveryError::Stale);
-        }
-        records.remove(&del.key);
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.records.read().map(|r| r.len()).unwrap_or(0)
-    }
-}
-
-/// Append-only file store: one `<base32-key>.json` record file per
-/// endpoint under `dir`. Suitable for the GDS server's on-disk directory.
-pub struct FileStore {
-    dir: std::path::PathBuf,
-}
-
-impl FileStore {
-    pub fn new(dir: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
-        let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
-    }
-
-    fn path(&self, key: &EndpointKey) -> std::path::PathBuf {
-        self.dir.join(format!("{key}.json"))
-    }
-}
-
-impl RecordStore for FileStore {
-    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        let payload = record.verify()?;
-        check_freshness(self.get(&payload.key).ok().as_ref(), &payload)?;
-        let bytes = serde_json::to_vec_pretty(record)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        std::fs::write(self.path(&payload.key), bytes)
-            .map_err(|e| DiscoveryError::Store(e.to_string()))
-    }
-
-    fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
-        let path = self.path(key);
-        let bytes = std::fs::read(&path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => DiscoveryError::NotFound,
-            _ => DiscoveryError::Store(e.to_string()),
-        })?;
-        serde_json::from_slice(&bytes).map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))
-    }
-
-    fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError> {
-        let del = tombstone.verify()?;
-        if let Ok(stored) = self.get(&del.key)
-            && stored.verify()?.issued_at > del.issued_at
-        {
-            return Err(DiscoveryError::Stale);
-        }
-        match std::fs::remove_file(self.path(&del.key)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(DiscoveryError::Store(e.to_string())),
-        }
-    }
-
-    fn len(&self) -> usize {
-        std::fs::read_dir(&self.dir)
-            .map(|rd| rd.flatten().count())
-            .unwrap_or(0)
     }
 }
 

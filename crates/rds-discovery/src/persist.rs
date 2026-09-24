@@ -11,12 +11,12 @@ use std::{
 
 use crate::DiscoveryError;
 
-const STATE: &str = "policy.json";
 const MAX_STATE: usize = 2 * 1024 * 1024;
 
 pub(crate) struct AtomicFile {
     directory: File,
     _lock: File,
+    state_name: &'static str,
     #[cfg(test)]
     pub(crate) fault: Option<(Phase, bool)>,
 }
@@ -35,7 +35,7 @@ fn store(e: impl std::fmt::Display) -> DiscoveryError {
     DiscoveryError::Store(e.to_string())
 }
 
-fn regular(file: &File) -> Result<(), DiscoveryError> {
+pub(crate) fn regular(file: &File) -> Result<(), DiscoveryError> {
     let meta = file.metadata().map_err(store)?;
     if !meta.is_file() || meta.nlink() != 1 {
         return Err(store("policy state must be a singly linked regular file"));
@@ -57,6 +57,18 @@ impl AtomicFile {
     /// Lifetime-exclusive ownership. CLI transactions open/release around one
     /// commit; long-running services own their state directory until shutdown.
     pub(crate) fn open(path: &Path) -> Result<Self, DiscoveryError> {
+        Self::open_named(path, "policy.json", "policy.lock")
+    }
+
+    pub(crate) fn directory(&self) -> &File {
+        &self.directory
+    }
+
+    pub(crate) fn open_named(
+        path: &Path,
+        state_name: &'static str,
+        lock_name: &'static str,
+    ) -> Result<Self, DiscoveryError> {
         std::fs::create_dir_all(path).map_err(store)?;
         let directory = File::from(
             rustix::fs::open(
@@ -74,7 +86,7 @@ impl AtomicFile {
         let lock = File::from(
             openat(
                 &directory,
-                "policy.lock",
+                lock_name,
                 OFlags::RDWR
                     | OFlags::CREATE
                     | OFlags::NOFOLLOW
@@ -92,6 +104,7 @@ impl AtomicFile {
         Ok(Self {
             directory,
             _lock: lock,
+            state_name,
             #[cfg(test)]
             fault: None,
         })
@@ -114,7 +127,7 @@ impl AtomicFile {
     pub(crate) fn read(&self) -> Result<Option<Vec<u8>>, DiscoveryError> {
         let fd = match openat(
             &self.directory,
-            STATE,
+            self.state_name,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
@@ -166,7 +179,7 @@ impl AtomicFile {
             file.sync_all().map_err(store)?;
             #[cfg(test)]
             self.checkpoint(Phase::AfterFileSync)?;
-            renameat(&self.directory, &name, &self.directory, STATE).map_err(store)?;
+            renameat(&self.directory, &name, &self.directory, self.state_name).map_err(store)?;
             #[cfg(test)]
             self.checkpoint(Phase::AfterRename)?;
             self.directory.sync_all().map_err(store)?;

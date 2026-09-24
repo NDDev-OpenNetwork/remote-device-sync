@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Keep signed delete tombstones in both record stores and serialize mutations.
+  Replace per-key JSON writes with an embedded Rust redb transaction plus a
+  durable generation anchor; refuse corrupt/missing state and database-only
+  rollback. Bound and exclusively own the protected database file. Legacy
+  directories require explicit migration, which remains pending along with
+  publisher revisions and quota/GC work; see [record-state.md](docs/record-state.md).
+
 - Persist signed policy revisions, authority rotations and absolute freshness
   leases across restart. Managed grant mode now requires a configured revocation
   feed; missing/stale policy, feed shutdown or failed durable commit closes

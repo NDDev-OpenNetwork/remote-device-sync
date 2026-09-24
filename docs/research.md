@@ -435,6 +435,15 @@ interop option, not a dependency.
 This keeps shipping value continuous while every layer transitions to
 owned code on standards — no big-bang rewrite.
 
+### 9.10 Record transaction backend (W1.5)
+
+Use embedded Rust redb behind `RecordStore` for atomic record/tombstone and
+metadata updates. Retain owned descriptor confinement, hard storage bounds and
+a separate durable generation anchor so database recovery cannot silently undo
+an acknowledged deletion. This replaces nontransactional per-key JSON files;
+it adds no external runtime program. Dependency rationale, failure boundaries
+and the outstanding migration steps are in [record-state.md](record-state.md).
+
 ## Sources (selected)
 
 - iroh: noq announcement & multipath write-ups (iroh.computer/blog),
