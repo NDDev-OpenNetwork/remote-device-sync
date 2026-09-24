@@ -1,0 +1,118 @@
+{
+  "destination_database_bytes": 1056768,
+  "exact_floor_and_source_bytes_checks": "passed",
+  "identities": 4096,
+  "migration_seconds": 67.658058815,
+  "profile": "default cargo test dev (unoptimized)",
+  "scenario": "format2-full-capacity-migration",
+  "source_database_bytes": 33771520,
+  "source_base": "02d8646",
+  "implementation": "migration change recorded by the commit containing this receipt",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "test_binary_sha256": "cb248d14aa66a82ee0034dfd69bdbcb69eab2ef30a6ab4705a7a756fd9291630",
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.9785945030162111
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 12.476971402997151
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 15.226211331086233
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 10.554026789031923
+    },
+    {
+      "name": "workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 200.71550420101266
+    },
+    {
+      "name": "owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 91.23461874900386
+    },
+    {
+      "name": "capacity",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-discovery",
+        "--lib",
+        "records::migration::tests::full_capacity_migration_preserves_every_floor",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ],
+      "code": 0,
+      "seconds": 157.51791742898058
+    }
+  ],
+  "limits": [
+    "One synthetic run; no release latency or throughput claim",
+    "No physical power-loss, native macOS or live cutover qualification"
+  ]
+}

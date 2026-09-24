@@ -20,8 +20,10 @@ pub const MAX_IDENTITIES: usize = 4096;
 const GC_BATCH: usize = 64;
 mod entry;
 mod memory;
+mod migration;
 use entry::{Entry, Stored, decide, decode, exact, observe};
 pub use memory::MemoryStore;
+pub use migration::{MigrationReceipt, migrate_v2};
 
 #[cfg(test)]
 mod expiry_tests;
@@ -172,6 +174,9 @@ impl FileStore {
     }
     fn open(path: &Path) -> Result<Self, DiscoveryError> {
         let anchor = AtomicFile::open_named(path, "records.anchor", "records.lock")?;
+        Self::open_owned(anchor, false)
+    }
+    fn open_owned(anchor: AtomicFile, migrating: bool) -> Result<Self, DiscoveryError> {
         // This namespace is exclusively ours. Refuse legacy/unrecognized
         // files instead of silently initializing over unrelated history.
         for (index, entry) in rustix::fs::Dir::read_from(anchor.directory())
@@ -187,6 +192,7 @@ impl FileStore {
                 name,
                 b"." | b".." | b"records.lock" | b"records.anchor" | b"records.redb"
             ) && !(name.starts_with(b".policy-") && name.ends_with(b".tmp"))
+                && !(migrating && name == b"migration.pending")
             {
                 return Err(error(
                     "legacy or unknown record files require explicit migration",

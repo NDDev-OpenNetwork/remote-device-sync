@@ -8,7 +8,7 @@ pub(super) enum Entry {
     Deleted(DeleteRequest),
 }
 impl Entry {
-    fn details(&self, key: &EndpointKey) -> Result<(u64, u64, u64), DiscoveryError> {
+    pub(super) fn details(&self, key: &EndpointKey) -> Result<(u64, u64, u64), DiscoveryError> {
         let (actual, revision, issued, expires) = match self {
             Self::Record(record) => {
                 let p = record.verify()?;
@@ -24,7 +24,7 @@ impl Entry {
         }
         Ok((revision, issued, expires))
     }
-    fn digest(&self) -> Result<[u8; 32], DiscoveryError> {
+    pub(super) fn digest(&self) -> Result<[u8; 32], DiscoveryError> {
         Ok(*blake3::hash(&postcard::to_stdvec(self).map_err(error)?).as_bytes())
     }
 }

@@ -3,7 +3,8 @@
 Status: W1.5 transactions, versioned publication and expiry retention implemented,
 not a completed directory acceptance gate. Configured enrollment and write-budget
 fairness and strict HTTP framing are implemented. A bounded 4096-identity Linux
-capacity/churn/reopen run passed. Migration, longer load/physical-failure tests
+capacity/churn/reopen run passed. Explicit format-2 offline conversion is implemented.
+Legacy cutover, longer load/physical-failure tests
 and native macOS qualification remain in [the remediation plan](remediation-plan.md).
 
 ## Directory HTTP profile
@@ -295,11 +296,15 @@ recycle stored identity slots; authenticated retirement remains W4/migration.
 The previous per-key JSON directory and experimental format-1/format-2 databases
 are not accepted or automatically imported. The leased database uses format 3
 (`records-v3` and `metadata-v3`). Stored postcard values reject trailing bytes.
-Unknown legacy files are preserved and startup refuses them. There is no
-migration command in this patch. Do not delete the legacy directory or start
-an empty replacement to bypass this refusal: that would discard replay history.
-Keep deployment on its existing version until the explicit migration procedure
-lands in W1.5. Legacy record/delete signatures without a domain prefix are
+Unknown legacy files are preserved and startup refuses them.
+`rds-server migrate-v2 --source <old> --destination <new-sibling>` explicitly
+verifies and imports format-2 revisions as retired floors while preserving the
+source bytes. The complete new directory is published only after validation and
+a durable receipt. See [operation and remaining qualification](record-migration-plan.md)
+before cutover. Timestamp format-1 and per-key legacy JSON still require a separate
+authenticated procedure. Do not delete the legacy directory or start an empty
+replacement to bypass refusal: that would discard replay history. Migration
+availability is not deployment acceptance. Legacy signatures without a domain prefix are
 rejected by the new wire format; consumers and publishers must upgrade together. Never invent
 publisher revisions from wall time or copy one issuer state into multiple live
 agents. Synthetic tests use new isolated

@@ -18,7 +18,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
 | W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
-| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment, fair write admission and strict HTTP framing are implemented. A 4096-identity Linux capacity/churn/reopen run passed. Explicit migration, release-load/startup profiling, physical failure and native macOS qualification remain open; see validation below. |
+| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment, fair write admission, strict HTTP framing and explicit format-2 offline migration are implemented. A 4096-identity Linux capacity/churn/reopen run passed. Legacy cutover, release-load/startup profiling, physical failure and native macOS qualification remain open; see validation below. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -431,13 +431,38 @@ first unoptimized attempt was deliberately stopped after filling the catalog
 to replace its undersized overall harness deadline; it is retained as partial
 evidence, not counted as a pass.
 
-The next implementation step is the
+At that checkpoint the next implementation step was the
 [offline migration checklist](record-migration-plan.md): preserve format-2 signed
 revision floors without inventing new leases; treat timestamp/legacy formats as
-a separate authenticated cutover. There is no migration command or deployment
-approval implied by this plan. W1.9 follows the remaining directory work.
+a separate authenticated cutover. That plan alone did not provide a migration
+command or deployment approval. The implementation update follows below.
 
 Final Linux checks passed: formatting; default/X11/all-feature workspace Clippy
 with warnings denied; **245 workspace tests across 49 targets**; both harness
 build profiles and the CLI state-preservation guards. No dependency or external
 runtime helper was added. All waves remain open.
+
+## Explicit format-2 offline migration
+
+`rds-server migrate-v2` now verifies a read-only source copy and imports all signed
+revisions/deletions as retired format-3 floors. It retains the original bytes,
+rejects existing or ambiguous destinations and publishes the complete new sibling
+only after catalog validation, a durable receipt and exclusive rename. Imported
+addresses require a newer signed publication. Intent and receipt files remain in
+protected sibling audit state; there is no automatic live cutover, retry or cleanup.
+See [operation and remaining qualification](record-migration-plan.md) and the
+[2026-09-25 receipt](reports/rds-migration-20260925.md).
+
+Linux validation passed returned-error and abrupt-exit cases at 12 migration
+checkpoints, malformed/history/ownership cases and real HTTP 410 → durable
+successor → unread reply → issuer restart/exact retry. The separately invoked
+4096-identity capacity migration preserved every floor and source byte. Import
+took 67.658 seconds in an unoptimized test build; it is an offline conversion
+measurement, not connection latency. Final formatting, three workspace Clippy
+lanes, **256 workspace tests** and **59 all-feature network/agent/relay tests**
+passed. No dependencies or external runtime helpers were added.
+
+W1.5 remains open for timestamp/per-key legacy cutover, external GDS anchoring,
+release load/startup, physical-failure and native macOS qualification. Next local
+implementation work is W1.9: bind sync requests and acknowledgments to their
+intended file and enforce unique chunk accounting and bounded protocol progress.

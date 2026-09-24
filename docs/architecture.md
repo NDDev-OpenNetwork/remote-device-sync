@@ -225,7 +225,10 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   admission only for verified higher revisions under the compare/commit owner;
   exact retries and stale mutations never debit the publisher's quota. Known identities
   have protected renewal capacity; new identities, extra writes and each policy
-  role use separate budgets. Migration and file-capacity qualification remain W1.5;
+  role use separate budgets. Offline format-2 migration preserves signed revisions
+  as retired floors in a new, fully verified directory; it requires successor
+  publications and never changes the original database. Bounded Linux capacity
+  evidence is available; legacy cutover and broader qualification remain W1.5;
   see [record-state.md](record-state.md) for migration and current limits. Directory
   certificate renewal is external provisioning plus restart for now; automatic
   renewal and hot reload are not implied by the relay's separate ACME support.

@@ -92,15 +92,27 @@ impl AtomicFile {
                 .set_permissions(std::fs::Permissions::from_mode(0o700))
                 .map_err(store)?;
         }
+        Self::from_directory(directory, state_name, lock_name, true)
+    }
+
+    /// Use an already pinned directory. Migration's source uses existing,
+    /// read-only ownership: no creation, permission changes or marker writes.
+    pub(crate) fn from_directory(
+        directory: File,
+        state_name: &'static str,
+        lock_name: &'static str,
+        create: bool,
+    ) -> Result<Self, DiscoveryError> {
+        let flags = if create {
+            OFlags::RDWR | OFlags::CREATE
+        } else {
+            OFlags::RDONLY
+        };
         let lock = File::from(
             openat(
                 &directory,
                 lock_name,
-                OFlags::RDWR
-                    | OFlags::CREATE
-                    | OFlags::NOFOLLOW
-                    | OFlags::NONBLOCK
-                    | OFlags::CLOEXEC,
+                flags | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
                 Mode::RUSR | Mode::WUSR,
             )
             .map_err(store)?,

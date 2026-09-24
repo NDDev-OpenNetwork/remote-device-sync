@@ -18,15 +18,21 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rds_discovery::registry::SignedRegistry;
 use rds_discovery::service::{self, ServiceConfig};
 use rds_discovery::{FileStore, RecordStore};
 use tracing::info;
 
 #[derive(Parser)]
-#[command(version, about = "RDS services host: relay + discovery directory")]
+#[command(
+    version,
+    about = "RDS services host: relay + discovery directory",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Address the relay endpoint binds to.
     #[arg(long, default_value = "0.0.0.0:3340")]
     relay_addr: SocketAddr,
@@ -90,6 +96,18 @@ struct Cli {
     tls_acme_staging: bool,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Offline format-2 import; preserve the source and create a NEW sibling.
+    /// Imported addresses require a newer signed publication before use.
+    MigrateV2 {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -98,6 +116,17 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
+    if let Some(Command::MigrateV2 {
+        source,
+        destination,
+    }) = cli.command
+    {
+        let receipt =
+            tokio::task::spawn_blocking(move || rds_discovery::migrate_v2(&source, &destination))
+                .await??;
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
+        return Ok(());
+    }
 
     let enrolled_publishers = cli.directory_allow.len();
     let enrollment = rds_discovery::Enrollment::new(cli.directory_allow)?;
@@ -217,5 +246,46 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offline_migration_requires_both_paths_and_refuses_service_flags() {
+        assert!(
+            Cli::try_parse_from(["rds-server"])
+                .unwrap()
+                .command
+                .is_none()
+        );
+        let cli = Cli::try_parse_from([
+            "rds-server",
+            "migrate-v2",
+            "--source",
+            "/state/old",
+            "--destination",
+            "/state/new",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Command::MigrateV2 { .. })));
+        assert!(
+            Cli::try_parse_from(["rds-server", "migrate-v2", "--source", "/state/old"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rds-server",
+                "--http-addr",
+                "127.0.0.1:9000",
+                "migrate-v2",
+                "--source",
+                "/state/old",
+                "--destination",
+                "/state/new",
+            ])
+            .is_err()
+        );
     }
 }

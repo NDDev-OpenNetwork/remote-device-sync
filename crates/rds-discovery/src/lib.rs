@@ -30,7 +30,7 @@ pub mod policy;
 mod records;
 pub use records::{
     FileStore, MAX_DATABASE as MAX_RECORD_DATABASE_BYTES, MAX_IDENTITIES as MAX_RECORD_IDENTITIES,
-    MemoryStore,
+    MemoryStore, MigrationReceipt, migrate_v2,
 };
 mod admission;
 pub use admission::Enrollment;
