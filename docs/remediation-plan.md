@@ -133,6 +133,15 @@ Primary areas: `rds-agent`, `rds-core::grant`, `rds-discovery`, `rds-sync`.
 | W1.9 | Bind pull Offer/Done to requested path/root/transfer; count unique verified chunks; enforce every declared reader bound and absolute transfer/idle budgets. | Malicious safe-but-different path, duplicate indices, oversized bitmap, empty-batch loops, wrong Done digest and stalled peer fail without unrelated writes. |
 | W1.10 | Add global destination/journal ownership and durable staging/commit order for the current single-file engine before expanding sync scope. | Concurrent peers cannot delete/overwrite each other's state. Process crash leaves either prior file or complete verified new file; temp/journal recovery is deterministic. |
 
+W1.3 implementation constraint: return a proof for the requested name without
+publishing the entire estate inventory to a lookup caller. Prepare individually
+signed bindings at the registry issuer, with a versioned, domain-separated
+payload covering name, endpoint key and validity; the directory keeps no issuer
+secret. Provision the verifying key independently through GDS/configuration.
+Missing anchors, unsigned legacy responses and mismatched names fail closed;
+pinned ticket/key resolution remains a separate path. Snapshot revisions,
+authority rotation and durable rollback protection are coordinated with W1.4.
+
 Exit: all P0 trust/data failures corrected and demonstrated on both supported
 OSes where applicable. Remaining P1 capability work stays visibly open.
 

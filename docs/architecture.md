@@ -223,30 +223,54 @@ a custom UDP stack.
 
 File sync (`rds send`/`rds recv`, agent `--sync-dir`): the file is cut
 by FastCDC into BLAKE3-addressed chunks — streamed (`StreamCDC`), so
-manifest memory stays at one max-size chunk regardless of file size and
+content buffering stays at one max-size chunk (the bounded manifest itself
+still scales with chunk count) and
 disk-bound work (manifest scan, journal open/verify, assembly) runs on
 the blocking pool, never an async worker. The control stream carries
 `Offer`/`Request` then the manifest in ≤512-entry `ManifestPart`
 batches (a 1 GiB manifest exceeds the 64 KiB frame cap). The receiver
 opens a journal under `<dest>/.rds-sync/<root>/`, re-verifies every
-surviving part by content hash, seeds `have` from an already-present
-destination file (identical resend costs zero wire chunks), and answers
+surviving part by content hash, copies matching chunks from an already-present
+destination into verified parts before advertising `have` (identical resend
+costs zero wire chunks), and answers
 with a `Need` bitmap (≤256K chunks). The sender pushes `ChunkSet`
 indices (≤4096/batch) then chunk payloads across 4 dedicated uni
 streams; `SetDone`/`Done` close the session. Assembly concatenates
-verified parts, checks the BLAKE3 root, and renames atomically — a
-torn or corrupt part is refetched, a killed transfer resumes from the
-journal, and `rel_path` is validated twice: lexically (traversal,
-absolute, NUL, the `.rds-sync` journal namespace) and by resolution —
-the canonicalized destination must stay inside the canonicalized sync
-root, so a symlinked component can't redirect reads, journal state or
-assembly outside it. Verified chunks are written by a dedicated
+verified parts, checks the BLAKE3 root, and installs an exclusively created,
+randomly named staging file by atomic rename. Parts, metadata, assembled
+data and their parent directories are synced before their successful return;
+an error after rename is reported as an uncertain commit, not success.
+A torn or corrupt part is refetched. `rel_path` is validated lexically
+(traversal, absolute, NUL, the `.rds-sync` journal namespace); every subsequent
+read/write uses directory-relative no-follow operations through `rustix`.
+Journal descendants, destination parents and pull source inodes are held open,
+so changing a path to a symlink after admission cannot redirect I/O. The
+configured root's ancestors and the local OS identity are trusted: a directory
+capability continues to name the same inode after rename; this is not a sandbox
+against a local process moving already-open directories out of the tree.
+`Journal::assemble` consumes its journal and takes no new destination root.
+
+Each root has one persistent `receive.lock` inode, locked nonblockingly across
+processes for a receive's lifetime. Competing receives are refused; independent
+roots remain concurrent. Root-level serialization also covers case/Unicode
+aliases on supported filesystems and keeps lock storage bounded. More granular
+parallel writes need a proven filesystem alias model first. Cleanup only removes
+known part/metadata names through held handles; it never traverses unknown
+entries. A canceled control stream ends its receive, and chunk sender tasks
+are owned by a `JoinSet`. Verified chunks are written by a dedicated
 blocking-pool sink behind a bounded queue, so disk latency never parks
 the wire pipeline; completion is counted on the wire (the peer sends
 exactly the `Need` set), not on the sink's lagging counter. Every
 protocol read and chunk body is bounded by a 300s stall — a peer alive
 but silent aborts rather than parking the session. One sync session per
-connection.
+connection. Unique wire accounting and aggregate/deadline bounds are still
+tracked by remediation W1.9; process/power-loss qualification by W1.10/W8.
+
+The new direct `rustix` dependency is a thin safe OS API for `openat`, no-follow
+flags and relative rename/unlink on Linux/macOS; sync does not introduce local
+unsafe blocks or external commands. `rand` supplies staging-name entropy.
+Both versions were already present in the lockfile; no dependency versions
+changed with this filesystem adapter.
 
 ### Stability measures
 

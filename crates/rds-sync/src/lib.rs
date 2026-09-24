@@ -16,6 +16,8 @@ pub mod engine;
 pub mod journal;
 pub mod proto;
 
+mod confined;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

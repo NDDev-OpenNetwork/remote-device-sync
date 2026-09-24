@@ -155,6 +155,124 @@ async fn pull_recv_completes() {
     assert_eq!(std::fs::read(&dest).unwrap(), data);
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pull_keeps_original_inode_after_offer_path_is_replaced() {
+    use rds_core::{read_frame, write_frame};
+    use rds_sync::proto::SyncMsg;
+    let (server, client, target, task, server_dir) = pair().await;
+    let original = b"original file bytes";
+    let outside = scratch("pull-substitution-outside");
+    std::fs::write(outside.join("secret"), b"different file data").unwrap();
+    let path = server_dir.join("data.bin");
+    std::fs::write(&path, original).unwrap();
+    let conn = client_conn(&client, target).await;
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(
+        &mut send,
+        &SyncMsg::Request {
+            rel_path: "data.bin".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let SyncMsg::Offer {
+        root,
+        chunk_count: 1,
+        ..
+    } = read_frame(&mut recv).await.unwrap()
+    else {
+        panic!("expected one-chunk offer")
+    };
+    let SyncMsg::ManifestPart { .. } = read_frame(&mut recv).await.unwrap() else {
+        panic!("expected manifest")
+    };
+    // The source path changes after its manifest is sent, before any chunk read.
+    std::fs::rename(&path, server_dir.join("held.bin")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret"), &path).unwrap();
+    let mut inbox = conn.uni_streams(rds_core::UniHello::Sync).unwrap();
+    write_frame(&mut send, &SyncMsg::Need { bits: vec![1] })
+        .await
+        .unwrap();
+    let mut stream = tokio::time::timeout(Duration::from_secs(3), inbox.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        read_frame(&mut stream).await.unwrap(),
+        SyncMsg::ChunkSet { .. }
+    ));
+    let SyncMsg::ChunkHdr { len, .. } = read_frame(&mut stream).await.unwrap() else {
+        panic!("expected chunk")
+    };
+    let mut bytes = vec![0; len as usize];
+    stream.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(bytes, original);
+    assert!(matches!(
+        read_frame(&mut stream).await.unwrap(),
+        SyncMsg::SetDone
+    ));
+    write_frame(&mut send, &SyncMsg::Done { root })
+        .await
+        .unwrap();
+    client.close().await;
+    server.close().await;
+    task.abort();
+    std::fs::remove_dir_all(server_dir).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canceled_control_stream_releases_receive_lock() {
+    use rds_core::{read_frame, write_frame};
+    use rds_sync::{journal::Journal, proto::SyncMsg};
+    let (server, client, target, task, server_dir) = pair().await;
+    let manifest = manifest_of(b"one chunk");
+    let conn = client_conn(&client, target).await;
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(
+        &mut send,
+        &SyncMsg::Offer {
+            rel_path: "data.bin".into(),
+            size: manifest.size,
+            root: manifest.root,
+            chunk_count: manifest.chunks.len() as u32,
+        },
+    )
+    .await
+    .unwrap();
+    write_frame(
+        &mut send,
+        &SyncMsg::ManifestPart {
+            chunks: manifest.chunks.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        read_frame(&mut recv).await.unwrap(),
+        SyncMsg::Need { .. }
+    ));
+    assert!(Journal::open(&server_dir, "data.bin", &manifest).is_err());
+    recv.stop(0u32.into()).unwrap();
+    send.reset(0u32.into()).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(journal) = Journal::open(&server_dir, "data.bin", &manifest) {
+                assert_eq!(journal.need(), vec![0]);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("canceled receive retained the journal lock");
+    client.close().await;
+    server.close().await;
+    task.abort();
+    std::fs::remove_dir_all(server_dir).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn corrupt_part_is_refetched() {
     let (_s, c_ep, target, _task, server_dir) = pair().await;
@@ -345,7 +463,7 @@ async fn path_traversal_rejected() {
 
 /// Symlink confinement: a sync root containing links to outside must
 /// not serve or write through them — `check_rel_path` is lexical, so
-/// `resolve_under` proves the resolved path stays inside.
+/// Directory-relative no-follow operations refuse symlink traversal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn symlink_escape_refused() {
     let (_s, c_ep, target, _task, server_dir) = pair().await;
@@ -373,7 +491,7 @@ async fn symlink_escape_refused() {
     assert!(err.is_err(), "pull of symlink-to-outside was served");
 
     // Push into the linked dir: the offer passes the lexical check but
-    // resolve_under refuses it — the transfer aborts before a chunk
+    // preflight refuses it — the transfer aborts before a chunk
     // moves and nothing lands outside.
     let data = b"payload-bytes".to_vec();
     let manifest = manifest_of(&data);
@@ -442,8 +560,8 @@ async fn symlink_escape_refused() {
     )
     .await;
     match verdict {
-        // Journal::open fails → the stream dies without Need.
-        Err(_) | Ok(Err(_)) => {}
+        Ok(Ok(rds_sync::proto::SyncMsg::Refuse { .. })) => {}
+        Err(_) | Ok(Err(_)) => panic!("journal refusal did not reach the peer"),
         Ok(Ok(other)) => panic!("journal-through-symlink got {other:?}"),
     }
     assert!(

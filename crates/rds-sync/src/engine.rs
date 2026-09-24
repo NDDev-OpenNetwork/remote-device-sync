@@ -11,7 +11,8 @@
 //! dead stream only stalls its own indices and a dropped connection
 //! resumes from the receiver's journal.
 
-use std::io::SeekFrom;
+use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,15 +21,14 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use rds_core::{read_frame, write_frame};
 use rds_net::{Connection, RecvStream, SendStream};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
 
-use crate::journal::Journal;
 use crate::proto::{
     CHUNKSET_BATCH, FETCH_STREAMS, MANIFEST_BATCH, MAX_CHUNKS, SyncMsg, bits_to_indices,
-    check_manifest, check_rel_path, need_bits, resolve_under,
+    check_manifest, check_rel_path, need_bits,
 };
-use crate::{MAX_CHUNK, Manifest, manifest_of_path};
+use crate::{MAX_CHUNK, Manifest, manifest_of_reader};
+use crate::{confined::Directory, journal::Journal};
 
 /// No protocol read may stall longer than this — a peer that is alive
 /// but silent still must not hang a transfer forever. Generous because
@@ -71,16 +71,22 @@ pub async fn serve(
                     bail!("offer refused: {e}");
                 }
             };
-            // The journal creates the root on demand; the resolve below
-            // needs it to exist.
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                refuse(&mut send, &e.to_string()).await?;
-                bail!("sync root not writable: {e}");
-            }
-            // Fail fast when the resolved destination would escape the
-            // root through a symlinked component — assemble re-checks at
-            // write time, but refusing here saves moving the chunks.
-            if let Err(e) = resolve_under(&dir, &rel) {
+            // Preserve early refusal before requesting a manifest. This is
+            // only a preflight: Journal::open independently pins and checks
+            // every handle again before any state or destination I/O.
+            let preflight = {
+                let (dir, rel) = (dir.clone(), rel.clone());
+                tokio::task::spawn_blocking(move || {
+                    match Directory::open_root(&dir, false).and_then(|root| root.read_path(&rel)) {
+                        Ok(_) => Ok(()),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(e) => Err(e),
+                    }
+                })
+                .await
+                .context("destination preflight task")?
+            };
+            if let Err(e) = preflight {
                 refuse(&mut send, &e.to_string()).await?;
                 bail!("offer refused: {e}");
             }
@@ -111,17 +117,24 @@ pub async fn serve(
                     bail!("request refused: {e}");
                 }
             };
-            // Lexical check passed — now prove the resolved path stays
-            // inside the sync root (a symlinked component can't be used
-            // to read outside it).
-            let path = match resolve_under(&dir, &rel) {
-                Ok(p) if p.is_file() => p,
-                _ => {
+            // Pin the source once. Both manifest and chunk reads use this
+            // same inode, even if the path is replaced after the offer.
+            let source = {
+                let rel = rel.clone();
+                tokio::task::spawn_blocking(move || {
+                    Directory::open_root(&dir, false)?.read_path(&rel)
+                })
+                .await
+                .context("open source task")?
+            };
+            let source = match source {
+                Ok(file) => Arc::new(file),
+                Err(_) => {
                     refuse(&mut send, "no such file").await?;
                     bail!("requested file absent or outside root: {}", rel.display());
                 }
             };
-            let manifest = manifest_from_disk(&path).await?;
+            let manifest = manifest_from_file(source.clone()).await?;
             tracing::info!(
                 peer = %conn.remote_id(),
                 rel = %rel.display(),
@@ -134,7 +147,7 @@ pub async fn serve(
                 bail!("expected Need");
             };
             let indices = bits_to_indices(&bits, manifest.chunks.len());
-            push_chunks(&conn, &path, &manifest, &indices).await?;
+            push_chunks(&conn, source, &manifest, &indices).await?;
             match read_timed::<_, SyncMsg>(&mut recv).await? {
                 SyncMsg::Done { .. } => {
                     tracing::info!(sent = indices.len(), "sync pull complete");
@@ -159,7 +172,8 @@ pub async fn send_file(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .ok_or_else(|| anyhow::anyhow!("{path:?} has no file name"))?;
-    let manifest = manifest_from_disk(path).await?;
+    let source = Arc::new(tokio::fs::File::open(path).await?.into_std().await);
+    let manifest = manifest_from_file(source.clone()).await?;
     tracing::info!(
         peer = %conn.remote_id(),
         rel = %rel,
@@ -173,7 +187,7 @@ pub async fn send_file(
         SyncMsg::Refuse { reason } => bail!("offer refused: {reason}"),
         other => bail!("expected Need, got {other:?}"),
     };
-    push_chunks(conn, path, &manifest, &indices).await?;
+    push_chunks(conn, source, &manifest, &indices).await?;
     match read_timed::<_, SyncMsg>(&mut recv).await? {
         SyncMsg::Done { root } if root == manifest.root => {}
         SyncMsg::Refuse { reason } => bail!("receiver refused: {reason}"),
@@ -241,11 +255,10 @@ where
     }
 }
 
-/// Manifest of `path` on the blocking pool — chunking + hashing a
+/// Manifest of a pinned file on the blocking pool — chunking + hashing a
 /// large file must not park an async worker.
-async fn manifest_from_disk(path: &Path) -> anyhow::Result<Manifest> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || manifest_of_path(&path))
+async fn manifest_from_file(file: Arc<File>) -> anyhow::Result<Manifest> {
+    tokio::task::spawn_blocking(move || manifest_of_reader(&*file))
         .await
         .context("manifest task")?
         .context("build manifest")
@@ -278,7 +291,7 @@ impl JournalSink {
                     }
                     Ok(false) => {}
                     Err(e) => {
-                        *error_w.lock().unwrap() = Some(e.to_string());
+                        *error_w.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
                         return Err(e);
                     }
                 }
@@ -301,7 +314,12 @@ impl JournalSink {
     /// disk side falls behind.
     async fn put(&self, index: u32, data: Vec<u8>) -> anyhow::Result<()> {
         self.jobs.send((index, data)).await.map_err(|_| {
-            let why = self.error.lock().unwrap().take().unwrap_or_default();
+            let why = self
+                .error
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take()
+                .unwrap_or_default();
             anyhow::anyhow!("journal writer died {why}")
         })
     }
@@ -319,7 +337,7 @@ impl JournalSink {
 
 /// Receiver half, shared by push and pull: journal the offer, answer
 /// `Need`, collect chunk streams until complete, assemble, `Done`.
-/// Returns the assembled destination path (resolved under the root).
+/// Returns the destination's informational path; I/O stays on held handles.
 async fn receive(
     conn: &Connection,
     send: &mut SendStream,
@@ -334,11 +352,37 @@ async fn receive(
         tokio::task::spawn_blocking(move || Journal::open(&dir, &rel, &manifest))
             .await
             .context("journal open task")?
-            .map_err(|e| anyhow::anyhow!("{e}"))?
     };
-    let total = journal.total() as u64;
+    let journal = match journal {
+        Ok(journal) => journal,
+        Err(e) => {
+            refuse(send, &e.to_string()).await?;
+            return Err(e.into());
+        }
+    };
     let bits = need_bits(journal.total(), journal.have_set());
     write_frame(send, &SyncMsg::Need { bits }).await?;
+
+    let result = tokio::select! {
+        result = receive_chunks(conn, journal, manifest) => result?,
+        _ = send.stopped() => bail!("sync control stream closed during receive"),
+    };
+    write_frame(
+        send,
+        &SyncMsg::Done {
+            root: manifest.root,
+        },
+    )
+    .await?;
+    Ok(result)
+}
+
+async fn receive_chunks(
+    conn: &Connection,
+    journal: Journal,
+    manifest: &Manifest,
+) -> anyhow::Result<(PathBuf, Stats)> {
+    let total = journal.total() as u64;
 
     // Chunk streams arrive tagged `UniHello::Sync` — routed by the
     // connection's demux so a concurrent desktop session on the same
@@ -407,19 +451,11 @@ async fn receive(
     let fetched = journal.fetched();
     // Assembly concatenates and rehashes every part — blocking pool.
     let dest = {
-        let dir = dir.to_path_buf();
-        tokio::task::spawn_blocking(move || journal.assemble(&dir))
+        tokio::task::spawn_blocking(move || journal.assemble())
             .await
             .context("assemble task")?
             .map_err(|e| anyhow::anyhow!("{e}"))?
     };
-    write_frame(
-        send,
-        &SyncMsg::Done {
-            root: manifest.root,
-        },
-    )
-    .await?;
     tracing::debug!(?dest, "sync file assembled");
     Ok((
         dest,
@@ -435,14 +471,14 @@ async fn receive(
 /// interleaved share of `indices` in `CHUNKSET_BATCH` batches.
 async fn push_chunks(
     conn: &Connection,
-    path: &Path,
+    file: Arc<File>,
     manifest: &Manifest,
     indices: &[u32],
 ) -> anyhow::Result<()> {
-    let mut tasks = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
     for k in 0..FETCH_STREAMS {
         let conn = conn.clone();
-        let path = path.to_path_buf();
+        let file = file.clone();
         let manifest = manifest.clone();
         let mine: Vec<u32> = indices
             .iter()
@@ -450,7 +486,7 @@ async fn push_chunks(
             .skip(k)
             .step_by(FETCH_STREAMS)
             .collect();
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             if mine.is_empty() {
                 return Ok::<(), anyhow::Error>(());
             }
@@ -458,9 +494,6 @@ async fn push_chunks(
             // First frame on every uni stream is its UniHello tag —
             // the receiver's demux routes on it.
             write_frame(&mut stream, &rds_core::UniHello::Sync).await?;
-            // tokio's fs file runs every op on the blocking pool — the
-            // chunk reads below never park an async worker.
-            let mut file = tokio::fs::File::open(&path).await?;
             // One scratch per stream — chunks are ≤256 KiB, so this is
             // a single allocation rather than one per chunk.
             let mut buf = Vec::with_capacity(MAX_CHUNK as usize);
@@ -476,8 +509,15 @@ async fn push_chunks(
                     let c = manifest.chunks[index as usize];
                     buf.clear();
                     buf.resize(c.len as usize, 0);
-                    file.seek(SeekFrom::Start(c.offset)).await?;
-                    file.read_exact(&mut buf).await?;
+                    // Positioned reads do not share a seek cursor across
+                    // streams and never reopen the peer-controlled path.
+                    let source = file.clone();
+                    buf = tokio::task::spawn_blocking(move || {
+                        source.read_exact_at(&mut buf, c.offset)?;
+                        Ok::<_, std::io::Error>(buf)
+                    })
+                    .await
+                    .context("chunk read task")??;
                     write_frame(
                         &mut stream,
                         &SyncMsg::ChunkHdr {
@@ -493,10 +533,10 @@ async fn push_chunks(
             write_frame(&mut stream, &SyncMsg::SetDone).await?;
             stream.finish()?;
             Ok(())
-        }));
+        });
     }
-    for t in tasks {
-        t.await??;
+    while let Some(result) = tasks.join_next().await {
+        result??;
     }
     Ok(())
 }

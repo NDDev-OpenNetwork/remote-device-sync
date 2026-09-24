@@ -69,12 +69,15 @@ async fn endpoints(
             (server_ep, client_ep, Some((s_stats, c_stats)), target)
         }
         None => {
-            let server_ep = rds_net::bind_endpoint(EndpointConfig::default())
-                .await
-                .unwrap();
-            let client_ep = rds_net::bind_endpoint(EndpointConfig::default())
-                .await
-                .unwrap();
+            // G5's clean in-process lane must not use public discovery or
+            // bootstrap through an external relay while local addresses settle.
+            let config = EndpointConfig {
+                bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                discovery: false,
+                ..Default::default()
+            };
+            let server_ep = rds_net::bind_endpoint(config.clone()).await.unwrap();
+            let client_ep = rds_net::bind_endpoint(config).await.unwrap();
             let target = server_ep.addr();
             (server_ep, client_ep, None, target)
         }

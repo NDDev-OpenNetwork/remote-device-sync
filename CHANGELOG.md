@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Persist verified destination chunks before advertising reuse, including
+  edits and size changes. Assemble through uniquely owned staging files;
+  preserve unrelated `.rds-part` siblings and clean only owned journal names.
+  Pin all journal/destination operations to no-follow directory handles and
+  hold the pull source inode across manifest/chunk reads. Serialize receives
+  per root across processes, sync data/parents before success, and release
+  receives when their control stream is canceled. No external helper added.
+  Library API: `Journal::assemble(self)` now consumes the pinned journal;
+  the path-returning `proto::resolve_under` helper is removed because it
+  cannot provide race-free filesystem confinement.
+
 - Preserve revocations without subscribers and during concurrent updates.
   Make grant admission atomic: failed/canceled Authz responses close the
   connection, release replay reservations and stop watchdogs. Recheck expiry

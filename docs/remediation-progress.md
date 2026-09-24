@@ -7,15 +7,19 @@ this file records implementation progress rather than rewriting that evidence.
 
 ## Current state
 
-All waves remain open. W1.1/W1.2 passed the local Linux check matrix; the
+All waves remain open. W1.1/W1.2 and W1.6–W1.8 passed the local Linux check matrix; the
 other tasks remain planned unless listed below. No deployment or owned-backend
 promotion has occurred. Native macOS checks still require their platform lane.
 
 | Task | State | Evidence / remaining scope |
 |---|---|---|
-| W0.1 | Partial | R01 and R10 are regression tests in `rds-agent/tests/e2e.rs`; baseline failures were observed before the fix. R02–R09 and desktop body cancellation still need their owning fixes/tests. |
+| W0.1 | Partial | R01/R10 are agent regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R02/R06–R09 and desktop body cancellation still need their owning fixes/tests. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
+| W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
+| W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
+| W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
+| W1.10 | Partial; Linux checks passed | Persistent per-root receive lock covers processes and filesystem name aliases; parts and assembly use sync/rename/parent-sync ordering. Abrupt-process-exit regression added. Power-loss, every commit boundary, orphan collection and native macOS durability still need qualification. |
 
 ## Authorization change
 
@@ -54,10 +58,78 @@ The signed revocation feed still needs durable anti-rollback/freshness/offline
 policy (W1.4); this patch does not close all of audit A02. Audience binding and
 renewable leases remain W2.3. Long-lived service task ownership remains W2.5.
 
+## Sync correctness and filesystem change
+
+Baseline `cargo test -p rds-sync --test journal` failed four regressions:
+partial reuse was lost on reopening, repeated reused chunks could not assemble,
+and both the ordinary `.rds-part` sibling and its link variants were deleted.
+The new journal materializes reused content, including size-changing deltas,
+then assembles only verified parts. `fetched` counts network chunks, not reuse.
+
+`confined::Directory` holds directory handles and uses safe `rustix` bindings
+for relative no-follow opens, rename and unlink. The private state directory
+has mode 0700, including journals created by the earlier implementation.
+Staging files use exclusive creation and random 128-bit names; collision
+handling never removes someone else's entry. All state reads are length-bounded
+and refuse special files, symlinks and multiply linked part files. Cleanup
+does not recursively walk arbitrary journal entries.
+The journal namespace is reserved regardless of ASCII case; a second check
+compares opened directory identities to refuse filesystem case/Unicode aliases
+of `.rds-sync` before descending into a peer-requested path.
+
+The configured root's ancestors and the local OS identity are trusted. A held
+directory is an inode capability, including after rename; this does not promise
+an absolute pathname boundary against a privileged/local actor relocating that
+inode. A remote peer cannot select arbitrary roots or enter `.rds-sync`.
+Journal and destination directory handles stay pinned throughout I/O; pull
+chunk reads use the same opened file as the manifest, with positioned reads
+shared across senders.
+
+Receives within one root are serialized by one persistent lock inode. This
+intentionally also prevents alias races on case/Unicode-insensitive filesystems
+and avoids an unbounded collection of per-filename locks. Separate roots remain
+independent. More granular parallel receives require a proven alias model.
+Existing parts remain readable after upgrading, but old and new receive
+processes must not share a root concurrently: old binaries do not take the
+new lock. New staging files have mode 0600; file metadata preservation is W8.5.
+The receiver watches control-stream cancellation while collecting chunks;
+sender task ownership uses `JoinSet` so cancellation aborts its async children.
+Blocking disk jobs can finish their current operation and drain their bounded
+queue; fully interruptible scans and absolute budgets remain W1.9/W2.5.
+
+File and parent sync occur before reporting commit. A parent-sync error after
+rename reports uncertainty and keeps recovery state; the caller receives no
+false `Done`. The process-crash test targets committed parts and lock recovery;
+it does not simulate loss of OS caches or certify macOS power-loss durability.
+Unknown orphan staging entries are preserved for future owned-state GC (W8).
+
+Dependency rationale: `rustix` supplies thin safe OS calls; `rand` supplies
+staging entropy. Both versions were already in `Cargo.lock`. No helper process,
+native code block or new dependency version is introduced by the sync runtime.
+
+## Measurement fixture correction
+
+An intermediate workspace run failed the existing 20-second desktop soak:
+frame age p95 1319 ms, p99 1657 ms, 835 received frames. Running the **same
+compiled test alone**, without changing its thresholds, passed at p95 32 ms,
+p99 63 ms and 1110 frames. This indicates sensitivity to the execution context;
+it does not establish a unique root cause or certify production latency.
+
+Inspection also found that the supposed clean in-process desktop lane used
+default endpoints with public discovery enabled. That fixture now explicitly
+binds loopback and disables discovery, so its direct-path claim is enforced.
+Impairment remains on the separately configured controlled socket lane. The
+150/250 ms p95/p99 budgets are unchanged. The final check matrix passed after this fixture correction and the journal
+namespace-alias check: format; workspace clippy in default, X11 and all-feature
+configurations; and `cargo test --workspace` (135 tests in 36 targets). The
+sync crate contributes 5 unit, 13 journal and 14 end-to-end tests. Native macOS
+and power-loss qualification remain open; no entire wave is closed.
+
 ## Next sequence
 
-Address W1.6/W1.7 partial-delta assembly and staging-file ownership, followed
-by W1.8 filesystem confinement and W1.3 signed name trust. Each change retains
+Proceed with W1.3 signed name trust and W1.4 durable
+revocation freshness, followed by W1.5 directory transactions and W1.9 wire
+binding/accounting. Each change retains
 its own failing-before/passing-after evidence. No general CI or long soak is
 made a blanket barrier to independent development; actual invariant failures
 are repaired and platform evidence is recorded separately.
