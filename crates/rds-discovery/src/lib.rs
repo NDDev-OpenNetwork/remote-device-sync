@@ -17,6 +17,7 @@ pub mod http;
 pub mod registry;
 pub mod revocations;
 pub mod service;
+pub mod tls;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -96,6 +97,8 @@ pub struct Payload {
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
+    #[error("directory configuration invalid: {0}")]
+    Configuration(String),
     #[error("record signature invalid")]
     BadSignature,
     #[error("record malformed: {0}")]

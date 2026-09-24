@@ -30,9 +30,15 @@ struct Cli {
     /// Address the relay endpoint binds to.
     #[arg(long, default_value = "0.0.0.0:3340")]
     relay_addr: SocketAddr,
-    /// Address the discovery HTTP API binds to.
+    /// Address the discovery HTTP(S) API binds to.
     #[arg(long, default_value = "0.0.0.0:3341")]
     http_addr: SocketAddr,
+    /// PEM chain enabling native HTTPS on --http-addr (separate from relay TLS).
+    #[arg(long, requires = "directory_tls_key")]
+    directory_tls_cert: Option<PathBuf>,
+    /// PEM private key matching --directory-tls-cert.
+    #[arg(long, requires = "directory_tls_cert")]
+    directory_tls_key: Option<PathBuf>,
     /// Directory holding signed endpoint records.
     #[arg(long, default_value = "/var/lib/rds/directory")]
     directory: PathBuf,
@@ -108,17 +114,27 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("--registry given without --registry-key");
     }
 
+    let directory_tls = match (&cli.directory_tls_cert, &cli.directory_tls_key) {
+        (Some(cert), Some(key)) => Some(rds_discovery::tls::server_config_from_pem(
+            &std::fs::read(cert)?,
+            &std::fs::read(key)?,
+        )?),
+        (None, None) => None,
+        _ => anyhow::bail!("directory TLS requires both certificate and key"),
+    };
+    let https = directory_tls.is_some();
     let dir = service::serve(
         cli.http_addr,
         store,
         ServiceConfig {
+            tls: directory_tls,
             registry_key,
             registry,
             ..Default::default()
         },
     )
     .await?;
-    info!(addr = %dir.addr(), "discovery directory listening");
+    info!(addr = %dir.addr(), https, "discovery directory listening");
     let _dir = dir; // serves until process exit
 
     let allow: Vec<iroh::EndpointId> = cli

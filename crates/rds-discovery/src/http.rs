@@ -157,8 +157,28 @@ pub async fn write_request(
     path: &str,
     body: &[u8],
 ) -> Result<(), DiscoveryError> {
+    write_request_with_host(stream, "localhost", method, path, body).await
+}
+
+/// Serialize a request with the configured origin authority (also used by
+/// HTTP/1.1 virtual hosts). Reject header injection before any bytes are sent.
+pub async fn write_request_with_host(
+    stream: &mut (impl AsyncWriteExt + Unpin),
+    authority: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<(), DiscoveryError> {
+    if authority.is_empty()
+        || authority.len() > 2048
+        || !authority
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+    {
+        return Err(bad("invalid host authority"));
+    }
     let head = format!(
-        "{method} {path} HTTP/1.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream

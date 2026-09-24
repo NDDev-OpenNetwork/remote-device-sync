@@ -177,8 +177,25 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   `issued_at <= now < expires_at`, with no future clock allowance. A bounded
   client cache shared by clones rejects older or conflicting same-timestamp
   bindings; it is volatile. Durable revisions, rollback across restart and
-  authority rotation remain W1.4; HTTPS/DNS remain part of W1.3. Tickets and
+  authority rotation remain W1.4. Tickets and
   explicitly pinned endpoint keys do not depend on registry-name trust.
+- Directory clients accept HTTP(S) origins with DNS/IP hosts. HTTPS uses
+  in-process rustls, verifies the certificate chain and hostname/IP SAN, and
+  never falls back to plaintext or follows redirects. Public WebPKI roots are
+  the default; an explicit PEM CA bundle replaces them for private estates.
+  A single default 3-second deadline covers DNS, staggered TCP candidates
+  (at most 16), TLS and the HTTP exchange. Pending dials are owned and canceled
+  with the request. Native OS resolver work may finish after the async timeout;
+  it cannot extend the caller's deadline. HTTP/1.1 uses an explicit Host header
+  and the existing bounded Content-Length codec.
+- `rds-server --directory-tls-cert/--directory-tls-key` enables a TLS-only
+  listener on `--http-addr`; relay TLS is configured separately. The directory
+  reserves its connection budget before spawning/handshaking. Its 10-second
+  default absolute connection deadline includes TLS and response I/O; dropping
+  the directory aborts its owned async requests. Store operations still run
+  synchronously and need the W1.5 transaction/worker change. Directory
+  certificate renewal is external provisioning plus restart for now; automatic
+  renewal and hot reload are not implied by the relay's separate ACME support.
 
 ### Stream protocol (`ALPN = rds/0`)
 

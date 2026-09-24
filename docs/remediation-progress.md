@@ -7,8 +7,8 @@ this file records implementation progress rather than rewriting that evidence.
 
 ## Current state
 
-All waves remain open. W1.1/W1.2, W1.3 name proofs and W1.6–W1.8 passed the local Linux check matrix; the
-other tasks remain planned unless listed below. No deployment or owned-backend
+All waves remain open. W1.1–W1.3 and W1.6–W1.8 passed the local Linux check
+matrix; other tasks remain planned unless listed below. No deployment or owned-backend
 promotion has occurred. Native macOS checks still require their platform lane.
 
 | Task | State | Evidence / remaining scope |
@@ -16,7 +16,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W0.1 | Partial | R01/R10 are agent regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R02/R08/R09 and desktop body cancellation still need their owning fixes/tests. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
-| W1.3 | Partial; name-proof Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback are implemented. Directory HTTPS/DNS and durable revision linkage remain open. |
+| W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -147,8 +147,8 @@ refuses new names instead of discarding freshness evidence.
 
 The timestamp cache is shared across client clones and rejects older or
 conflicting same-issued-at responses. It is not durable and cannot discover a
-withheld newer revocation or name removal. HTTPS/DNS is still W1.3;
-revision/epoch persistence, authority rotation and outage policy are W1.4.
+withheld newer revocation or name removal. Revision/epoch persistence,
+authority rotation and outage policy are W1.4.
 Pinned ticket/key paths remain independent of name resolution.
 
 Local validation: format, default/X11/all-feature workspace clippy and
@@ -157,10 +157,46 @@ tests exercise unsigned answers, wrong names/issuers/records, signature-domain
 confusion, malformed/oversized proofs, redirects, future/expired/excessive
 lifetimes, rollback/equivocation and server expiry. Native macOS remains open.
 
+## Directory HTTPS and DNS
+
+`Client::from_endpoint` accepts a validated HTTP(S) origin or legacy plaintext
+socket address. TLS checks public WebPKI roots and hostname/IP SAN; explicit
+private CA bundles replace the roots. URL credentials, paths, queries,
+fragments, malformed origins and CA configuration on plaintext are refused.
+Requests send the correct Host authority. There is no TLS-verification bypass,
+HTTP downgrade or redirect following. Signed identity checks still run over TLS.
+
+One deadline covers DNS, bounded staggered TCP attempts (16 maximum), handshake
+and response. Dropping that future aborts its pending dial tasks; native OS
+resolver work can complete later without extending the caller's deadline.
+The TLS-only server listener reserves capacity before spawning and bounds the
+entire handshake/request. Its owned JoinSet bounds active/completed handles and
+aborts async request children on service drop. Blocking stores remain W1.5;
+this is not a claim of complete W2.5
+task ownership throughout the agent.
+
+Six TLS tests passed locally: DNS lookup and signed record/name roundtrip;
+missing/wrong name authority despite valid TLS; untrusted CA, wrong hostname
+and expired certificate rejection; strict origin/PEM configuration and Host
+header; stalled handshake timeout without plaintext retry; capacity recovery
+and pending request teardown. The full Linux matrix passed: format;
+default/X11/all-feature workspace clippy with warnings denied; and
+`cargo test --workspace` (147 tests in 39 targets). Native macOS, edge proxy
+compatibility and certificate renewal automation remain open.
+All three binaries (`rds`, `rds-agent`, `rds-server`) also built and executed
+`--help` successfully with their new directory TLS/CA options present.
+
+Dependency rationale: rustls/tokio-rustls provide standard TLS, rustls-pki-types
+parses PEM, webpki-roots supplies trust data, and url validates/normalizes DNS/IP
+origins. rcgen generates synthetic test certificates only. All versions already
+existed in Cargo.lock. No helper binary is added. The selected existing ring
+crypto provider contains native code/assembly; this is not a pure-Rust crypto
+implementation claim. TLS and protocol policy stay in RDS Rust code.
+
 ## Next sequence
 
-Complete W1.3 HTTPS/DNS and W1.4 durable
-revocation freshness, followed by W1.5 directory transactions and W1.9 wire
+Complete W1.4 durable revocation freshness, followed by W1.5 directory
+transactions and W1.9 wire
 binding/accounting. Each change retains
 its own failing-before/passing-after evidence. No general CI or long soak is
 made a blanket barrier to independent development; actual invariant failures

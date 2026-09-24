@@ -142,6 +142,38 @@ Missing anchors, unsigned legacy responses and mismatched names fail closed;
 pinned ticket/key resolution remains a separate path. Snapshot revisions,
 authority rotation and durable rollback protection are coordinated with W1.4.
 
+W1.4 implementation order (required before claiming bounded revocation):
+
+1. Define versioned, domain-separated snapshot metadata with authority/epoch,
+   monotonic revision and bounded validity. Order updates by revision instead
+   of second-resolution wall time; equal-revision differing content is an error.
+   Link name proofs to the same defined authority/revision model.
+2. Implement one durable acceptance transaction: verify and compare, write the
+   signed snapshot and high-water mark through owned staging, sync/rename/sync,
+   then publish runtime policy. A persistence failure cannot advance an
+   in-memory cursor or reopen admission. Directory restart must not load an
+   older bootstrap snapshot over its committed state.
+3. Load verified policy before privileged admission. Missing, corrupt, expired
+   or rolled-back state keeps admission closed. Keep revocation contents and
+   freshness in one observable policy value; a failed fetch must never replace
+   it with an empty denylist. Distinguish explicit local allowlist operation
+   from managed grant mode rather than silently falling back between them.
+4. Apply freshness at admission and during active sessions. A valid cached
+   snapshot may be used only until its signed expiry; retries cannot extend
+   that lease. Bound it with monotonic elapsed time as well as wall-clock
+   checks so a backward clock step cannot lengthen access. Test forward steps,
+   suspend/resume and the expiry boundary. Document the resulting worst-case
+   revocation delay separately from the healthy poll interval.
+5. Define authenticated authority rotation with explicit continuity and epoch
+   rules. An unknown key, lower epoch, or cache deletion is not an automatic
+   recovery path. Keep durable high-water marks protected by the local service
+   identity; rollback of the entire trusted local state needs an external GDS
+   anchor and must not be claimed solved by atomic file replacement alone.
+6. Exercise network withholding/replay, restart with older bootstrap data,
+   concurrent refresh/admission, failures at each persistence boundary,
+   authority rotation and live-service closure. Reuse W1.1/W1.2 ownership;
+   do not introduce a second independent authorization state machine.
+
 Exit: all P0 trust/data failures corrected and demonstrated on both supported
 OSes where applicable. Remaining P1 capability work stays visibly open.
 

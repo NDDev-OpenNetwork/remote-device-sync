@@ -33,10 +33,13 @@ struct Cli {
     /// Permit TcpConnect to any host:port (development only).
     #[arg(long)]
     allow_any_tcp: bool,
-    /// Discovery directory address; when set the agent publishes its
+    /// Directory HTTP(S) origin or legacy IP:port; the agent publishes its
     /// signed record and keeps it fresh.
     #[arg(long)]
-    directory: Option<std::net::SocketAddr>,
+    directory: Option<String>,
+    /// PEM CA bundle for directory HTTPS; replaces the public root store.
+    #[arg(long, requires = "directory")]
+    directory_ca: Option<std::path::PathBuf>,
     /// Record TTL when `--directory` is set.
     #[arg(long, default_value = "300")]
     record_ttl: u64,
@@ -114,16 +117,27 @@ async fn main() -> anyhow::Result<()> {
     };
     config = config.with_relays(&cli.relay)?;
 
+    let directory = cli
+        .directory
+        .as_deref()
+        .map(|origin| -> anyhow::Result<_> {
+            let mut client = rds_discovery::client::Client::from_endpoint(origin)?;
+            if let Some(path) = &cli.directory_ca {
+                client = client.with_ca_pem(&std::fs::read(path)?)?;
+            }
+            Ok(client)
+        })
+        .transpose()?;
     let endpoint = bind_endpoint(config).await?;
     endpoint.online().await;
 
     let policy_handle = std::sync::Arc::new(policy.clone());
-    let _announce = cli.directory.map(|addr| {
+    let _announce = directory.clone().map(|client| {
         rds_net::announce(
             endpoint.clone(),
             rds_net::AnnounceConfig {
                 key: secret_key.clone(),
-                directory: rds_discovery::client::Client::new(addr),
+                directory: client,
                 services: vec![
                     rds_discovery::Service::Ping,
                     rds_discovery::Service::TcpForward,
@@ -135,8 +149,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Denylist feed: poll the estate-signed revocation snapshot so
     // revoked grants die on live connections too, not just new ones.
-    let _revocations = match (cli.directory, &cli.revocations_key) {
-        (Some(addr), Some(s)) => {
+    let _revocations = match (directory, &cli.revocations_key) {
+        (Some(client), Some(s)) => {
             let bytes = data_encoding::BASE32_NOPAD
                 .decode(s.to_uppercase().as_bytes())
                 .map_err(|e| anyhow::anyhow!("--revocations-key not base32: {e}"))?;
@@ -146,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
             let key = ed25519_dalek::VerifyingKey::from_bytes(&raw)
                 .map_err(|e| anyhow::anyhow!("--revocations-key invalid: {e}"))?;
             Some(rds_agent::watch_revocations(
-                rds_discovery::client::Client::new(addr),
+                client,
                 key,
                 policy_handle.clone(),
                 std::time::Duration::from_secs(cli.revocations_interval),

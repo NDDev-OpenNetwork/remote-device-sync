@@ -20,10 +20,13 @@ struct Cli {
     /// `transport-noq` feature).
     #[arg(long, global = true, default_value = "iroh")]
     backend: String,
-    /// Discovery directory address. Enables bare-key lookups and GDS
+    /// Directory HTTP(S) origin or legacy IP:port. Enables bare-key lookups and GDS
     /// device-name resolution; tickets still work without it.
     #[arg(long, global = true)]
-    server: Option<SocketAddr>,
+    server: Option<String>,
+    /// PEM CA bundle for directory HTTPS; replaces the public root store.
+    #[arg(long, global = true, requires = "server")]
+    directory_ca: Option<std::path::PathBuf>,
     /// Trusted registry verifying key (base32), provisioned by GDS.
     /// Required for device names; tickets and pinned keys are independent.
     #[arg(long, global = true, requires = "server")]
@@ -135,12 +138,16 @@ async fn main() -> anyhow::Result<()> {
     config = config.with_relays(&cli.relay)?;
     let directory = cli
         .server
-        .map(|addr| {
-            let client = rds_discovery::client::Client::new(addr);
-            match cli.registry_key.as_deref() {
-                Some(key) => client.with_registry_key_base32(key),
-                None => Ok(client),
+        .as_deref()
+        .map(|origin| -> anyhow::Result<_> {
+            let mut client = rds_discovery::client::Client::from_endpoint(origin)?;
+            if let Some(path) = &cli.directory_ca {
+                client = client.with_ca_pem(&std::fs::read(path)?)?;
             }
+            if let Some(key) = cli.registry_key.as_deref() {
+                client = client.with_registry_key_base32(key)?;
+            }
+            Ok(client)
         })
         .transpose()?;
     let endpoint = bind_endpoint(config).await?;

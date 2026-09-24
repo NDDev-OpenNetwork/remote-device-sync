@@ -1,16 +1,19 @@
 //! Directory client: publish, fetch, delete, name resolution.
 //!
-//! One TCP connection per request with a single overall timeout —
+//! One HTTP(S) exchange per request with a single overall timeout —
 //! the directory is a control-plane dependency, and a hanging lookup
 //! must never wedge an announce loop or a CLI resolve.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use rustls_pki_types::ServerName;
 use tokio::net::TcpStream;
+use tokio::task::JoinSet;
+use tokio_rustls::TlsConnector;
 
 use crate::http::{self, Response};
 use crate::registry::{NameBindingPayload, SignedNameBinding, SignedRegistry, valid_name};
@@ -19,7 +22,10 @@ use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord};
 /// Client for one directory address.
 #[derive(Debug, Clone)]
 pub struct Client {
-    addr: SocketAddr,
+    host: String,
+    port: u16,
+    authority: String,
+    tls: Option<Arc<rustls::ClientConfig>>,
     timeout: Duration,
     registry_key: Option<VerifyingKey>,
     // Shared by cloned clients. Durable anti-rollback state is W1.4;
@@ -32,11 +38,99 @@ impl Client {
     /// enough that an unreachable directory fails fast.
     pub fn new(addr: SocketAddr) -> Self {
         Self {
-            addr,
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            authority: addr.to_string(),
+            tls: None,
             timeout: Duration::from_secs(3),
             registry_key: None,
             seen_names: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// HTTPS/HTTP origin with a DNS name or IP literal, or a legacy plaintext
+    /// socket address. Credentials, paths, query and fragment are refused.
+    /// HTTPS verifies public WebPKI roots and the configured hostname/IP SAN.
+    pub fn from_endpoint(endpoint: &str) -> Result<Self, DiscoveryError> {
+        if let Ok(addr) = endpoint.parse::<SocketAddr>() {
+            return Ok(Self::new(addr));
+        }
+        let invalid = || {
+            DiscoveryError::Configuration(
+                "expected http(s)://host[:port] without credentials, path, query or fragment"
+                    .into(),
+            )
+        };
+        if endpoint.len() > 2048
+            || endpoint
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+            || !(endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+        {
+            return Err(invalid());
+        }
+        let remainder = endpoint.split_once("://").ok_or_else(invalid)?.1;
+        let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+        if authority_end == 0
+            || remainder[..authority_end].contains('@')
+            || !matches!(&remainder[authority_end..], "" | "/")
+        {
+            return Err(invalid());
+        }
+        let url = url::Url::parse(endpoint).map_err(|_| invalid())?;
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid());
+        }
+        let host = match url.host().ok_or_else(invalid)? {
+            url::Host::Domain(name) => name.to_owned(),
+            url::Host::Ipv4(ip) => ip.to_string(),
+            url::Host::Ipv6(ip) => ip.to_string(),
+        };
+        let port = url
+            .port_or_known_default()
+            .filter(|port| *port != 0)
+            .ok_or_else(invalid)?;
+        let authority = match url.host().ok_or_else(invalid)? {
+            url::Host::Ipv6(_) => format!("[{host}]:{port}"),
+            _ => format!("{host}:{port}"),
+        };
+        let tls = if url.scheme() == "https" {
+            ServerName::try_from(host.clone()).map_err(|_| invalid())?;
+            Some(crate::tls::client_config(None)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            host,
+            port,
+            authority,
+            tls,
+            timeout: Duration::from_secs(3),
+            registry_key: None,
+            seen_names: Arc::new(Mutex::new(BTreeMap::new())),
+        })
+    }
+
+    /// Use only this PEM CA bundle for HTTPS. Refused on a plaintext endpoint.
+    pub fn with_ca_pem(mut self, pem: &[u8]) -> Result<Self, DiscoveryError> {
+        if self.tls.is_none() {
+            return Err(DiscoveryError::Configuration(
+                "CA bundle requires HTTPS".into(),
+            ));
+        }
+        self.tls = Some(crate::tls::client_config(Some(pem))?);
+        Ok(self)
+    }
+
+    /// Absolute DNS + TCP + TLS + HTTP deadline, including all dial candidates.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     pub fn with_timeout(addr: SocketAddr, timeout: Duration) -> Self {
@@ -63,9 +157,12 @@ impl Client {
         Ok(self.with_registry_key(key))
     }
 
-    /// Directory address this client talks to.
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
+    /// Literal address, if configured with an IP. DNS is resolved per request.
+    pub fn addr(&self) -> Option<SocketAddr> {
+        self.host
+            .parse::<IpAddr>()
+            .ok()
+            .map(|ip| SocketAddr::new(ip, self.port))
     }
 
     /// Publish a signed record (`PUT /v1/records`).
@@ -194,16 +291,58 @@ impl Client {
         path: &str,
         body: &[u8],
     ) -> Result<Response, DiscoveryError> {
-        let addr = self.addr;
         tokio::time::timeout(self.timeout, async move {
-            let mut sock = TcpStream::connect(addr)
-                .await
+            let mut sock = self.connect().await?;
+            sock.set_nodelay(true)
                 .map_err(|e| DiscoveryError::Unreachable(e.to_string()))?;
-            http::write_request(&mut sock, method, path, body).await?;
-            http::read_response(&mut sock).await
+            if let Some(config) = &self.tls {
+                let name = ServerName::try_from(self.host.clone())
+                    .map_err(|e| DiscoveryError::Configuration(e.to_string()))?;
+                let mut tls = TlsConnector::from(config.clone())
+                    .connect(name, sock)
+                    .await
+                    .map_err(|e| DiscoveryError::Unreachable(format!("TLS handshake: {e}")))?;
+                http::write_request_with_host(&mut tls, &self.authority, method, path, body)
+                    .await?;
+                http::read_response(&mut tls).await
+            } else {
+                http::write_request_with_host(&mut sock, &self.authority, method, path, body)
+                    .await?;
+                http::read_response(&mut sock).await
+            }
         })
         .await
         .map_err(|_| DiscoveryError::Unreachable("request timed out".into()))?
+    }
+
+    async fn connect(&self) -> Result<TcpStream, DiscoveryError> {
+        let unreachable = |e: std::io::Error| DiscoveryError::Unreachable(e.to_string());
+        if let Some(addr) = self.addr() {
+            return TcpStream::connect(addr).await.map_err(unreachable);
+        }
+        let addresses = tokio::net::lookup_host((self.host.as_str(), self.port))
+            .await
+            .map_err(unreachable)?;
+        // Bound sockets/tasks and stagger candidates. A dead first address
+        // must not consume the entire request deadline before IPv4/IPv6 fallback.
+        let mut attempts = JoinSet::new();
+        for (i, addr) in addresses.take(16).enumerate() {
+            attempts.spawn(async move {
+                if i != 0 {
+                    tokio::time::sleep(Duration::from_millis(i as u64 * 100)).await;
+                }
+                TcpStream::connect(addr).await
+            });
+        }
+        let mut last = "DNS returned no addresses".to_string();
+        while let Some(result) = attempts.join_next().await {
+            match result {
+                Ok(Ok(sock)) => return Ok(sock), // JoinSet drops/aborts losers.
+                Ok(Err(e)) => last = e.to_string(),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(DiscoveryError::Unreachable(last))
     }
 
     fn expect(&self, resp: Response, ok: &[u16]) -> Result<Response, DiscoveryError> {

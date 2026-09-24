@@ -206,7 +206,7 @@ async fn signed_delete_removes_record() {
 }
 
 fn client_addr(c: &Client) -> std::net::SocketAddr {
-    c.addr()
+    c.addr().unwrap()
 }
 
 #[tokio::test]

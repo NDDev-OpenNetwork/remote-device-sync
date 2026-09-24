@@ -43,7 +43,7 @@ alike.
 | Port | Proto | Service | Exposure |
 | --- | --- | --- | --- |
 | 3340 | tcp | relay (iroh relay protocol over HTTP) | public — endpoints behind NAT dial in |
-| 3341 | tcp | discovery HTTP API (`PUT/GET/DELETE /v1/records`, `/v1/registry`, `/v1/revocations`, `/v1/health`) | public to estate members; writes are signature-verified |
+| 3341 | tcp | discovery HTTP(S) API (`PUT/GET/DELETE /v1/records`, `/v1/registry`, `/v1/revocations`, `/v1/health`) | estate members; configure directory TLS for lookup confidentiality; writes are signature-verified |
 | 3341 | tcp | `GET /v1/metrics` | **loopback only** — the router returns 404 to non-loopback peers; scrape over SSH (`ssh -L`) or a local exporter |
 | — | udp | endpoint QUIC data path + hole-punching | endpoints need outbound UDP; inbound UDP only required to *receive* direct paths (relay fallback covers its absence) |
 
@@ -100,17 +100,54 @@ haproxy) in front of 3340 remains a valid alternative.
 The relay serves `GET /healthz` → `200` on its HTTP(S) listener for
 load-balancer and monitoring probes.
 
-**No tunnel/VPN dependency.** The design assumes only *outbound*
-connectivity from endpoints: tcp/3340 (relay) + tcp/3341 (directory) +
-udp for direct paths. A Cloudflare Tunnel could front the *directory*
-(plain HTTP — works) and probably the relay (WebSocket — unverified, and
-Cloudflare terminates long-lived proxied connections at the edge, so
-attached endpoints would drop whenever `cloudflared` reconnects), but it
-cannot carry the endpoints' QUIC/UDP data path at all — public hostnames
-do not proxy UDP, and private-network UDP requires every device enrolled
-in WARP/Zero Trust. WARP itself is a client VPN solving a problem the
-relay already solves without a per-device client dependency. If the
-services host has no public IP, prefer any small VPS over a tunnel.
+**Tunnel/VPN integration is optional.** RDS does not invoke tunnel or VPN
+helper processes. Direct connections use UDP; the relay and directory have
+separately configured TCP listeners. Cloudflare Tunnel/WARP may be evaluated
+as estate deployment options under W3, using measured setup latency, ongoing
+SSH/desktop/sync traffic, idle timeout, reconnect and outage behavior. The
+native directory HTTPS tests below do not qualify a Cloudflare route or any
+other edge proxy. Keep endpoint identity and policy independent of whichever
+route is selected, and retain a separately tested recovery path.
+
+### Native directory HTTPS
+
+The directory supports its own TLS listener inside `rds-server`, with no
+proxy/helper process required. It is separate from relay TLS: supplying
+`--tls-cert` alone does not encrypt the directory. Example configuration
+(synthetic hostname and paths):
+
+```sh
+rds-server --http-addr 0.0.0.0:3341 \
+  --directory-tls-cert /etc/rds/directory-chain.pem \
+  --directory-tls-key /etc/rds/directory-key.pem
+rds --server https://directory.example.com:3341 \
+  --registry-key <base32-verifying-key> ping device-a
+rds-agent --directory https://directory.example.com:3341 <agent-policy-flags>
+```
+
+The certificate must cover the configured hostname (or IP SAN for an IP URL).
+Clients use public WebPKI roots by default. For a private CA, supply
+`--directory-ca /etc/rds/directory-ca.pem` to `rds` and `rds-agent`; the bundle
+**replaces** public roots. Empty/invalid bundles and a CA flag on an HTTP
+endpoint are errors. There is no skip-verification option, redirect following
+or HTTP fallback. The registry verifying key remains separately provisioned;
+a TLS certificate cannot authorize a name binding.
+
+Client origins accept `https://host[:port]`, explicit `http://host[:port]`,
+or legacy `IP:port` (plaintext). Paths, credentials, queries and fragments are
+refused. DNS is resolved on each request with a bounded, staggered dial race;
+all work shares a default 3-second deadline. The directory uses HTTP/1.1 with
+Content-Length framing. Compatibility with particular edge proxies/tunnels
+has not been qualified by these loopback TLS tests.
+
+When directory TLS is enabled, `--http-addr` accepts only TLS. Health probes
+must also use HTTPS with normal certificate validation. The listener uses
+the same connection cap and a 10-second absolute deadline including TLS.
+Provision a renewed certificate and restart the server to load it; directory
+hot reload/ACME is not implemented. Keep the PEM key readable only by the
+service identity. A loopback reverse proxy changes the source address seen by
+the metrics route; if one is introduced, keep `/v1/metrics` private at that
+boundary instead of relying on the directory's peer-IP check.
 
 ## Sandboxing
 
@@ -162,8 +199,8 @@ The directory refuses expired names even if no newer snapshot has arrived.
 Client clones share a 1024-name freshness cache; it refuses capacity overflow
 instead of evicting anti-rollback history. That cache is not persistent and does
 not prove current membership after a process restart; durable revisions and
-revocation outage policy remain W1.4. Directory HTTPS/DNS support remains open
-in W1.3; signatures provide integrity, not lookup confidentiality.
+revocation outage policy remain W1.4. HTTPS protects the lookup exchange;
+signatures preserve identity verification independently of that transport.
 
 ### Restart
 

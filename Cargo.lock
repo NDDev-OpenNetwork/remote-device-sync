@@ -2933,10 +2933,16 @@ dependencies = [
  "ed25519-dalek",
  "postcard",
  "proptest",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
+ "url",
+ "webpki-roots",
 ]
 
 [[package]]

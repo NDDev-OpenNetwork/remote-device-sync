@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Add native directory HTTPS and DNS origins to `rds --server` and
+  `rds-agent --directory`. Verify certificate chains/hostnames, support explicit
+  private CA bundles, and keep one deadline across DNS/TCP/TLS/HTTP. No insecure
+  fallback, redirect following or external TLS helper. Server flags
+  `--directory-tls-cert/--directory-tls-key` configure the directory separately
+  from relay TLS. Pending requests and their connection budget now belong to the
+  service lifetime. Library API: `Client::addr()` returns `Option<SocketAddr>`
+  because DNS origins have no fixed literal address.
+
 - Verify device names at the client using an independently configured registry
   key and a per-name signature proof. Bind name, endpoint identity and validity;
   reject unsigned replies, redirects, expired/future bindings and in-process

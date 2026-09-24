@@ -61,12 +61,14 @@ rds-server --relay-addr 0.0.0.0:3340 --http-addr 0.0.0.0:3341 \
     --directory /var/lib/rds/directory --allow <endpoint-id>...
 
 # Name lookup requires a registry key provisioned through GDS/configuration:
-rds --server 127.0.0.1:3341 --registry-key <base32-verifying-key> ping device-a
+rds --server https://directory.example.com:3341 --registry-key <base32-verifying-key> ping device-a
 ```
 
 Remote-session traffic is end-to-end encrypted between the endpoints; the
-relay sees ciphertext. The directory currently uses HTTP and signed records;
-lookup confidentiality awaits W1.3 HTTPS support. The agent rejects any peer not on its `--allow` list before
+relay sees ciphertext. Directory HTTPS runs in-process with certificate and
+hostname verification; use `--directory-ca` for a private CA. Signed name proofs
+remain required independently of TLS. Explicit HTTP/IP:port remains available
+for local deployments; HTTPS never falls back to it. The agent rejects any peer not on its `--allow` list before
 a service stream opens, and can additionally require estate-signed capability
 grants (`--issuer`, scope-checked per stream, revocable via the directory's
 `/v1/revocations` feed).

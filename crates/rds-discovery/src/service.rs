@@ -29,7 +29,6 @@ use std::time::{Duration, Instant};
 
 use ed25519_dalek::VerifyingKey;
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
 
 use crate::http::{self, Request, Response};
 use crate::registry::{RegistryPayload, SignedRegistry, check_lifetime, valid_name};
@@ -52,7 +51,7 @@ pub struct Limits {
     /// Applies to `PUT /v1/records`, `PUT /v1/registry` and
     /// `DELETE /v1/records/{key}`, checked before any parsing.
     pub put_per_minute: u32,
-    /// Client-side and per-connection idle timeout.
+    /// Absolute per-connection timeout, including TLS handshake and response.
     pub conn_timeout: Duration,
     /// Maximum concurrently held connections. Without a bound a SYN
     /// flood spends one task + one FD + one 8 KiB read buffer each —
@@ -75,6 +74,8 @@ impl Default for Limits {
 /// Runtime configuration for [`serve`].
 #[derive(Default)]
 pub struct ServiceConfig {
+    /// When set, this listener accepts only TLS; there is no plaintext fallback.
+    pub tls: Option<Arc<rustls::ServerConfig>>,
     /// Verifying key the estate signs registry snapshots with. Without
     /// it the name API is disabled: lookups 404 and registry PUTs 401.
     pub registry_key: Option<VerifyingKey>,
@@ -166,14 +167,14 @@ impl RateLimiter {
     }
 }
 
-/// A running directory service. `Drop` stops the accept task.
+/// A running directory service. `Drop` aborts its listener and owned requests.
 pub struct Directory {
     addr: SocketAddr,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl Directory {
-    /// Bound HTTP address (port is concrete even when bound to `:0`).
+    /// Bound HTTP(S) address (port is concrete even when bound to `:0`).
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
@@ -195,7 +196,6 @@ struct State {
     registry_key: Option<VerifyingKey>,
     limits: Limits,
     limiter: RateLimiter,
-    conn_permits: Semaphore,
     metrics: Metrics,
 }
 
@@ -222,7 +222,6 @@ pub async fn serve(
         registry: RwLock::new(registry),
         revocations: RwLock::new(None),
         registry_key: config.registry_key,
-        conn_permits: Semaphore::new(config.limits.max_conns),
         limits: config.limits,
         limiter: RateLimiter {
             last_put: Mutex::new(HashMap::new()),
@@ -233,40 +232,35 @@ pub async fn serve(
     });
     let task = tokio::spawn({
         let state = state.clone();
+        let tls = config.tls.map(tokio_rustls::TlsAcceptor::from);
         async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let Ok((mut sock, peer)) = listener.accept().await else {
+                let accepted = tokio::select! {
+                    result = listener.accept() => result,
+                    _ = connections.join_next(), if !connections.is_empty() => continue,
+                };
+                let Ok((mut sock, peer)) = accepted else {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
+                // Reap completed requests before admission. The owned set is
+                // the budget, bounding completed handles as well as active
+                // tasks. There is no await between admission and spawn.
+                while connections.try_join_next().is_some() {}
+                if connections.len() >= state.limits.max_conns {
+                    continue;
+                }
                 let state = state.clone();
-                tokio::spawn(async move {
-                    // At capacity: drop the socket immediately rather
-                    // than queueing unbounded per-conn state.
-                    let Ok(_permit) = state.conn_permits.try_acquire() else {
-                        return;
-                    };
+                let tls = tls.clone();
+                connections.spawn(async move {
                     let _ = tokio::time::timeout(state.limits.conn_timeout, async {
-                        match http::read_request(&mut sock).await {
-                            Ok(Some(req)) => {
-                                let resp = route(&state, peer, &req);
-                                let _ = http::write_response(&mut sock, &resp).await;
+                        if let Some(tls) = tls {
+                            if let Ok(mut stream) = tls.accept(sock).await {
+                                serve_request(&mut stream, &state, peer).await;
                             }
-                            Ok(None) => {}
-                            Err(e) => {
-                                state.metrics.requests_bad.fetch_add(1, Ordering::Relaxed);
-                                let status = match &e {
-                                    DiscoveryError::InvalidRecord(m)
-                                        if m.contains("body too large") =>
-                                    {
-                                        413
-                                    }
-                                    _ => 400,
-                                };
-                                let _ =
-                                    http::write_response(&mut sock, &Response::error(status, &e))
-                                        .await;
-                            }
+                        } else {
+                            serve_request(&mut sock, &state, peer).await;
                         }
                     })
                     .await;
@@ -275,6 +269,27 @@ pub async fn serve(
         }
     });
     Ok(Directory { addr: local, task })
+}
+
+async fn serve_request(
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    state: &State,
+    peer: SocketAddr,
+) {
+    let response = match http::read_request(stream).await {
+        Ok(Some(req)) => route(state, peer, &req),
+        Ok(None) => return,
+        Err(e) => {
+            state.metrics.requests_bad.fetch_add(1, Ordering::Relaxed);
+            let status = match &e {
+                DiscoveryError::InvalidRecord(m) if m.contains("body too large") => 413,
+                _ => 400,
+            };
+            Response::error(status, &e)
+        }
+    };
+    let _ = http::write_response(stream, &response).await;
+    let _ = tokio::io::AsyncWriteExt::shutdown(stream).await;
 }
 
 fn route(state: &State, peer: SocketAddr, req: &Request) -> Response {
