@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Persist signed policy revisions, authority rotations and absolute freshness
+  leases across restart. Managed grant mode now requires a configured revocation
+  feed; missing/stale policy, feed shutdown or failed durable commit closes
+  admission and live connections. Registry/name signatures move to v2 and
+  revocations to domain-separated v1 with positive epoch/revision metadata.
+  Re-sign snapshots and upgrade consumers together. Add protected state and
+  rotation options to all three binaries; see [policy-state.md](docs/policy-state.md)
+  for restart/boot behavior, migration, limits and outstanding qualification.
+  Directory disk/signature jobs use a bounded blocking pool. No external runtime
+  program added; OS clock/filesystem bindings reuse locked dependencies.
+
 - Add native directory HTTPS and DNS origins to `rds --server` and
   `rds-agent --directory`. Verify certificate chains/hostnames, support explicit
   private CA bundles, and keep one deadline across DNS/TCP/TLS/HTTP. No insecure

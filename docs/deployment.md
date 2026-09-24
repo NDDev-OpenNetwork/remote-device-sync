@@ -196,10 +196,15 @@ rds --server 127.0.0.1:3341 --registry-key <base32-verifying-key> ping device-a
 New clients refuse missing anchors and unsigned legacy responses. Existing
 tickets and pinned endpoint-key lookups retain their independent trust path.
 The directory refuses expired names even if no newer snapshot has arrived.
-Client clones share a 1024-name freshness cache; it refuses capacity overflow
-instead of evicting anti-rollback history. That cache is not persistent and does
-not prove current membership after a process restart; durable revisions and
-revocation outage policy remain W1.4. HTTPS protects the lookup exchange;
+The CLI uses a durable 1024-name freshness cache and a global registry revision;
+it refuses capacity overflow instead of evicting anti-rollback history.
+Snapshots now require positive authority epoch/revision metadata, registry/name
+signature domain v2, and revocation domain v1. The issuer must persist revision
+allocation and publish renewals. See [durable policy migration](policy-state.md)
+for state paths, dual-signed authority rotation and reboot behavior. Managed
+`--issuer` mode also requires `--directory` and `--revocations-key`. A missing or
+stale revocation lease closes admission and live connections; a fetch failure
+cannot replace the denylist or extend its lifetime. HTTPS protects the lookup exchange;
 signatures preserve identity verification independently of that transport.
 
 ### Restart

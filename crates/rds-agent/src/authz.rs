@@ -104,6 +104,9 @@ impl ConnAuthz {
         // this read is either seen by the watchdog's initial check or
         // wakes changed(); there is no check/subscribe gap.
         let denied = policy.denylist.subscribe();
+        if !denied.borrow().fresh() {
+            return Err("revocation policy unavailable or stale");
+        }
         if denied.borrow().contains(&verified.id) {
             return Err("grant revoked");
         }
@@ -127,7 +130,7 @@ impl ConnAuthz {
             State::Authorizing(Some(lease))
                 if !conn.is_closed()
                     && lease.grant.live_at(grant::now_unix())
-                    && !policy.denied().contains(&lease.grant.id) =>
+                    && policy.revocations_permit(&lease.grant.id) =>
             {
                 *state = State::Granted(lease);
                 Ok(())
@@ -155,7 +158,11 @@ impl ConnAuthz {
                 if !lease.grant.live_at(grant::now_unix()) {
                     return Err(ScopeError::Expired);
                 }
-                if policy.denied().contains(&lease.grant.id) {
+                let revocations = policy.denylist.borrow();
+                if !revocations.fresh() {
+                    return Err(ScopeError::PolicyStale);
+                }
+                if revocations.contains(&lease.grant.id) {
                     return Err(ScopeError::Revoked);
                 }
                 Ok(Some(lease.grant.clone()))
@@ -180,6 +187,7 @@ pub(crate) enum ScopeError {
     Closed,
     Expired,
     Revoked,
+    PolicyStale,
 }
 
 impl ScopeError {
@@ -189,6 +197,7 @@ impl ScopeError {
             Self::Closed => "connection closed",
             Self::Expired => "grant expired",
             Self::Revoked => "grant revoked",
+            Self::PolicyStale => "revocation policy unavailable or stale",
         }
     }
 
@@ -274,12 +283,17 @@ pub(crate) async fn authorize(
 async fn watch_grant(
     conn: Connection,
     grant: Arc<VerifiedGrant>,
-    mut denied: watch::Receiver<Arc<HashSet<GrantId>>>,
+    mut denied: watch::Receiver<Arc<crate::RevocationPolicy>>,
 ) {
     loop {
         // borrow_and_update also covers a revocation that happened before
         // this task's first poll, without losing a concurrent later update.
-        if denied.borrow_and_update().contains(&grant.id) {
+        let snapshot = denied.borrow_and_update().clone();
+        if !snapshot.fresh() {
+            conn.close(4u32.into(), b"revocation policy stale");
+            return;
+        }
+        if snapshot.contains(&grant.id) {
             conn.close(4u32.into(), b"grant revoked");
             return;
         }
@@ -322,6 +336,7 @@ mod tests {
     }
 
     fn verified(policy: &AgentPolicy, subject: rds_net::EndpointId) -> VerifiedGrant {
+        policy.use_local_revocations();
         let issuer = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
         let grant = grant::Grant::issue(
             &issuer,

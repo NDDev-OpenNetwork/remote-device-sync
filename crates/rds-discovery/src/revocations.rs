@@ -14,10 +14,16 @@
 
 use std::collections::BTreeSet;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use crate::authority::{self, SnapshotStamp, invalid, lifetime};
 use crate::{DiscoveryError, now_unix};
+
+const DOMAIN: &[u8] = b"rds/revocations/v1\0";
+pub const MAX_REVOCATION_TTL_SECS: u64 = 300;
+pub const MAX_REVOKED_GRANTS: usize = 1024;
+const MAX_PAYLOAD: usize = 40 * 1024;
 
 /// A revoked grant id (`blake3` of the grant's signed payload).
 pub type GrantHash = [u8; 32];
@@ -32,8 +38,9 @@ pub struct SignedRevocations {
 }
 
 /// Signed portion of a [`SignedRevocations`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationPayload {
+    pub stamp: SnapshotStamp,
     /// Revoked grant ids. BTreeSet keeps the encoding canonical.
     pub revoked: BTreeSet<GrantHash>,
     /// Unix seconds when the estate issued this snapshot.
@@ -46,35 +53,76 @@ impl SignedRevocations {
     /// Sign a fresh snapshot: `revoked` valid for `ttl`.
     pub fn publish(
         key: &SigningKey,
+        epoch: u64,
+        revision: u64,
         revoked: BTreeSet<GrantHash>,
         ttl: std::time::Duration,
     ) -> Result<Self, DiscoveryError> {
         let issued_at = now_unix()?;
         let payload = RevocationPayload {
+            stamp: SnapshotStamp::new(&key.verifying_key(), epoch, revision)?,
             revoked,
             issued_at,
-            expires_at: issued_at + ttl.as_secs(),
+            expires_at: issued_at
+                .checked_add(ttl.as_secs())
+                .ok_or_else(|| invalid("TTL overflow"))?,
         };
+        lifetime(
+            payload.issued_at,
+            payload.expires_at,
+            issued_at,
+            MAX_REVOCATION_TTL_SECS,
+        )?;
+        Self::sign(&payload, key)
+    }
+
+    pub fn sign(payload: &RevocationPayload, key: &SigningKey) -> Result<Self, DiscoveryError> {
+        payload.stamp.verify(&key.verifying_key())?;
+        if payload.revoked.len() > MAX_REVOKED_GRANTS {
+            return Err(invalid("too many revoked grants"));
+        }
         let bytes = postcard::to_stdvec(&payload)
             .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let signature = key.sign(&bytes);
+        if bytes.len() > MAX_PAYLOAD {
+            return Err(invalid("revocations payload too large"));
+        }
+        let signature = authority::sign(DOMAIN, &bytes, key);
         Ok(Self {
             payload: bytes,
-            signature: signature.to_bytes().to_vec(),
+            signature,
         })
     }
 
     /// Verify the signature against the registry `key`.
     pub fn verify(&self, key: &VerifyingKey) -> Result<RevocationPayload, DiscoveryError> {
+        authority::verify(DOMAIN, &self.payload, &self.signature, key, MAX_PAYLOAD)?;
         let payload: RevocationPayload = postcard::from_bytes(&self.payload)
             .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let sig_bytes: [u8; 64] = self
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| DiscoveryError::InvalidRecord("signature is not 64 bytes".into()))?;
-        key.verify_strict(&self.payload, &Signature::from_bytes(&sig_bytes))
-            .map_err(|_| DiscoveryError::BadSignature)?;
+        payload.stamp.verify(key)?;
+        if payload.revoked.len() > MAX_REVOKED_GRANTS {
+            return Err(invalid("too many revoked grants"));
+        }
+        lifetime(
+            payload.issued_at,
+            payload.expires_at,
+            payload.issued_at,
+            MAX_REVOCATION_TTL_SECS,
+        )?;
+        Ok(payload)
+    }
+
+    pub fn verify_at(
+        &self,
+        key: &VerifyingKey,
+        now: u64,
+    ) -> Result<RevocationPayload, DiscoveryError> {
+        let payload = self.verify(key)?;
+        lifetime(
+            payload.issued_at,
+            payload.expires_at,
+            now,
+            MAX_REVOCATION_TTL_SECS,
+        )?;
         Ok(payload)
     }
 
@@ -85,14 +133,9 @@ impl SignedRevocations {
         key: &VerifyingKey,
         current: Option<&RevocationPayload>,
     ) -> Result<RevocationPayload, DiscoveryError> {
-        let payload = self.verify(key)?;
-        if payload.expires_at < now_unix()? {
-            return Err(DiscoveryError::Expired);
-        }
-        if let Some(cur) = current
-            && payload.issued_at <= cur.issued_at
-        {
-            return Err(DiscoveryError::Stale);
+        let payload = self.verify_at(key, now_unix()?)?;
+        if let Some(cur) = current {
+            payload.stamp.newer_than(&cur.stamp)?;
         }
         Ok(payload)
     }
@@ -107,7 +150,8 @@ mod tests {
         let key = SigningKey::from_bytes(&[5u8; 32]);
         let revoked = BTreeSet::from([[1u8; 32], [2u8; 32]]);
         let snap =
-            SignedRevocations::publish(&key, revoked, std::time::Duration::from_secs(60)).unwrap();
+            SignedRevocations::publish(&key, 1, 1, revoked, std::time::Duration::from_secs(60))
+                .unwrap();
         let payload = snap
             .verify_fresh(&key.verifying_key(), None)
             .expect("fresh snapshot verifies");

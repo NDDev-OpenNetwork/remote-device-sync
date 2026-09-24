@@ -17,7 +17,8 @@ Rules every change follows. CI enforces what it can; the rest is review.
 ## Safety
 
 - `unsafe` is confined to platform-backend modules (`rds-desktop`
-  capture/codec/input, `rds-net` socket layer). Workspace lint flags it
+  capture/codec/input, `rds-net` socket layer, and the read-only
+  `rds-discovery/clock/macos.rs` boot-identifier adapter). Workspace lint flags it
   everywhere else; backends opt out per module with a `// SAFETY:` note
   per block.
 - Never trust the wire: every decoder/parser bounds its inputs; every

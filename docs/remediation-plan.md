@@ -174,6 +174,35 @@ W1.4 implementation order (required before claiming bounded revocation):
    authority rotation and live-service closure. Reuse W1.1/W1.2 ownership;
    do not introduce a second independent authorization state machine.
 
+W1.5 implementation order (the bounded blocking-worker part lands with W1.4):
+
+1. Preserve R02 as a failing replay-after-delete regression for both stores.
+   Add corruption, concurrent update/delete and interrupted-write cases before
+   replacing the truncating file implementation.
+2. Give record updates and deletion a shared signed ordering contract, explicit
+   domain/version, bounded payload/candidates/lifetime and equality semantics.
+   Persist issuer revision allocation for the announce loop; retries reuse the
+   exact signed operation. Do not use second-resolution timestamps to allocate
+   revisions or silently reset a publisher counter on restart.
+3. Store a live record or signed tombstone in one atomic per-identity transaction.
+   Serialize compare/commit across threads and processes, use directory handles
+   and owned staging, sync before acknowledgment, and refuse corrupt/ambiguous
+   state. Reads verify identity/file agreement and current lifetime. Define
+   migration from old record files explicitly rather than trusting them by shape.
+4. Bound identities, per-record bytes and total storage. Preserve required replay
+   evidence while collecting expired content; define the retention floor and
+   clock-rollback behavior before deleting history. Unknown staging orphans must
+   not be removed by an unbounded request-time sweep.
+5. Separate new-publisher admission from known-device renewal and enforce limits
+   per authenticated identity before charging shared write budgets. Provide a
+   configured enrollment boundary until the GDS reconciler supplies it in W4.
+   Distinguish resource bounds and protection against one enrolled abusive
+   publisher from a claim of availability under arbitrary network flooding.
+6. Make HTTP framing unambiguous; exercise duplicate/conflicting Content-Length,
+   transfer encoding and malformed start/header lines against both directions.
+   Prove delete/update replay, restart/crash behavior, bounded saturation and
+   continued admitted-device renewal before closing the directory task.
+
 Exit: all P0 trust/data failures corrected and demonstrated on both supported
 OSes where applicable. Remaining P1 capability work stays visibly open.
 

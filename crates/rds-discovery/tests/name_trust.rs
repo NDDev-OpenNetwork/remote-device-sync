@@ -21,7 +21,10 @@ fn issuer() -> SigningKey {
 fn payload() -> NameBindingPayload {
     let now = now_unix().unwrap();
     NameBindingPayload {
-        version: 1,
+        stamp: rds_discovery::authority::SnapshotStamp::new(&issuer().verifying_key(), 1, 1)
+            .unwrap(),
+        registry_digest: [30; 32],
+        version: 2,
         name: "device-a".into(),
         key: EndpointKey([18; 32]),
         issued_at: now - 10,
@@ -65,6 +68,10 @@ async fn configured_anchor_rejects_unsigned_wrong_name_issuer_expiry_and_redirec
         signature: key.sign(&raw).to_bytes().to_vec(),
         payload: raw,
     };
+    let wrong_key = SigningKey::from_bytes(&[19; 32]);
+    let mut wrong_authority = good.clone();
+    wrong_authority.stamp =
+        rds_discovery::authority::SnapshotStamp::new(&wrong_key.verifying_key(), 1, 1).unwrap();
     let responses = vec![
         Response::json(200, serde_json::json!({"key": good.key.to_string()})),
         signed(&bad_name),
@@ -73,7 +80,7 @@ async fn configured_anchor_rejects_unsigned_wrong_name_issuer_expiry_and_redirec
         signed(&too_long),
         Response::json(
             200,
-            SignedNameBinding::sign(&good, &SigningKey::from_bytes(&[19; 32])).unwrap(),
+            SignedNameBinding::sign(&wrong_authority, &wrong_key).unwrap(),
         ),
         Response::json(200, tampered),
         Response::json(200, cross_protocol),
@@ -95,7 +102,7 @@ async fn cloned_clients_reject_rollback_and_same_revision_equivocation() {
     let key = issuer();
     let initial = payload();
     let mut newer = initial.clone();
-    newer.issued_at += 1;
+    newer.stamp.revision += 1;
     newer.key = EndpointKey([20; 32]);
     let mut conflict = newer.clone();
     conflict.key = EndpointKey([21; 32]);
@@ -116,10 +123,47 @@ async fn cloned_clients_reject_rollback_and_same_revision_equivocation() {
 }
 
 #[tokio::test]
+async fn separately_constructed_clients_share_a_durable_global_revision_floor() {
+    let path =
+        std::env::temp_dir().join(format!("rds-name-restart-{:032x}", rand::random::<u128>()));
+    std::fs::create_dir(&path).unwrap();
+    let key = issuer();
+    let authority = rds_discovery::authority::Authority::new(&key.verifying_key(), 1).unwrap();
+    let initial = payload();
+    let mut newer = initial.clone();
+    newer.stamp.revision += 1;
+    newer.key = EndpointKey([23; 32]);
+    let mut other_old_name = initial.clone();
+    other_old_name.name = "device-b".into();
+    let responses = [&newer, &initial, &other_old_name, &newer]
+        .map(|p| Response::json(200, SignedNameBinding::sign(p, &key).unwrap()));
+    let (remote, task) = responder(responses.into()).await;
+    let client = Client::new(remote.addr().unwrap())
+        .with_registry_store(authority, path.clone(), vec![])
+        .unwrap();
+    assert_eq!(client.resolve_name("device-a").await.unwrap(), newer.key);
+    drop(client);
+    let restarted = Client::new(remote.addr().unwrap())
+        .with_registry_store(authority, path.clone(), vec![])
+        .unwrap();
+    for name in ["device-a", "device-b"] {
+        assert!(matches!(
+            restarted.resolve_name(name).await,
+            Err(DiscoveryError::Stale)
+        ));
+    }
+    assert_eq!(restarted.resolve_name("device-a").await.unwrap(), newer.key);
+    task.await.unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
 async fn response_discloses_only_requested_binding_and_expired_names_stop_serving() {
     let key = issuer();
     let snapshot = SignedRegistry::publish(
         &key,
+        1,
+        1,
         BTreeMap::from([
             ("device-a".into(), EndpointKey([18; 32])),
             ("device-b".into(), EndpointKey([19; 32])),
@@ -186,6 +230,8 @@ fn registry_requires_complete_matching_proofs_and_bounds() {
     let key = issuer();
     let snapshot = SignedRegistry::publish(
         &key,
+        1,
+        1,
         BTreeMap::from([("device-a".into(), EndpointKey([18; 32]))]),
         Duration::from_secs(60),
     )
@@ -206,7 +252,10 @@ fn registry_requires_complete_matching_proofs_and_bounds() {
             .verify(&key.verifying_key(), "device-a", now_unix().unwrap())
             .is_err()
     );
-    assert!(SignedRegistry::publish(&key, BTreeMap::new(), Duration::from_secs(u64::MAX)).is_err());
+    assert!(
+        SignedRegistry::publish(&key, 1, 1, BTreeMap::new(), Duration::from_secs(u64::MAX))
+            .is_err()
+    );
     assert!(
         Client::new("127.0.0.1:1".parse().unwrap())
             .with_registry_key_base32("bad")

@@ -332,6 +332,8 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     let reg_key = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
     let snap = SignedRegistry::publish(
         &reg_key,
+        1,
+        1,
         BTreeMap::from([(
             "bench-agent".to_string(),
             EndpointKey(*agent_key.public().as_bytes()),

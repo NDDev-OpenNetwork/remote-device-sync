@@ -12,8 +12,12 @@
 //! [`http`], [`service`] and [`client`]; the estate-signed name
 //! registry in [`registry`].
 
+pub mod authority;
 pub mod client;
+pub mod clock;
 pub mod http;
+mod persist;
+pub mod policy;
 pub mod registry;
 pub mod revocations;
 pub mod service;
@@ -97,6 +101,8 @@ pub struct Payload {
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
+    #[error("policy state is owned by another process")]
+    Busy,
     #[error("directory configuration invalid: {0}")]
     Configuration(String),
     #[error("record signature invalid")]

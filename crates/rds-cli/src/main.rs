@@ -31,6 +31,15 @@ struct Cli {
     /// Required for device names; tickets and pinned keys are independent.
     #[arg(long, global = true, requires = "server")]
     registry_key: Option<String>,
+    /// Bootstrap registry authority epoch.
+    #[arg(long, global = true, default_value = "1")]
+    registry_epoch: u64,
+    /// Private name-trust state directory; default is beside the endpoint key.
+    #[arg(long, global = true, requires = "registry_key")]
+    registry_state: Option<std::path::PathBuf>,
+    /// Dual-signed authority rotation receipt. Repeat in epoch order.
+    #[arg(long, global = true, requires = "registry_key")]
+    authority_rotation: Vec<std::path::PathBuf>,
     /// Capability grant file (JSON `Grant` as minted by the estate).
     /// Required when the target agent runs in grant mode.
     #[arg(long, global = true)]
@@ -145,7 +154,24 @@ async fn main() -> anyhow::Result<()> {
                 client = client.with_ca_pem(&std::fs::read(path)?)?;
             }
             if let Some(key) = cli.registry_key.as_deref() {
-                client = client.with_registry_key_base32(key)?;
+                let authority =
+                    rds_discovery::authority::Authority::from_base32(key, cli.registry_epoch)?;
+                let path = cli
+                    .registry_state
+                    .clone()
+                    .or_else(|| {
+                        cli.key_file
+                            .clone()
+                            .or_else(default_key_path)
+                            .map(|key| key.with_extension("registry-state"))
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "name resolution requires --registry-state or a key/config directory"
+                        )
+                    })?;
+                let rotations = rds_discovery::policy::read_rotations(&cli.authority_rotation)?;
+                client = client.with_registry_store(authority, path, rotations)?;
             }
             Ok(client)
         })

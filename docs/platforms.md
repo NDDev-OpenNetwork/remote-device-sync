@@ -54,6 +54,21 @@ negotiate only after both endpoints probe them.
 
 ## cfg conventions
 
+Policy leases use safe `rustix::time::clock_gettime`: `CLOCK_BOOTTIME` on Linux
+and `CLOCK_MONOTONIC` on Darwin, both including suspend. These clocks have
+different semantics across platforms; do not substitute Rust `Instant` for the
+persisted lease deadline. References: [Linux clock documentation](https://man7.org/linux/man-pages/man2/clock_gettime.2.html),
+[Apple clock documentation](https://github.com/apple-oss-distributions/Libc/blob/main/gen/clock_gettime.3)
+and [Apple implementation](https://github.com/apple-oss-distributions/Libc/blob/main/gen/clock_gettime.c).
+
+The Linux boot UUID is read from `/proc/sys/kernel/random/boot_id`; macOS uses
+the read-only `kern.bootsessionuuid` sysctl ([XNU declaration](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c)).
+The macOS adapter contains one bounded `libc::sysctlbyname` call with a documented
+unsafe block. This extends the platform FFI boundary for durable leases; no
+external clock/OS command is invoked. Failure to obtain either clock or boot
+identity closes policy admission. Native macOS and real suspend qualification
+remain pending; Linux tests also inject boot changes and discontinuous clocks.
+
 - Gate on `#[cfg(target_os = "...")]` for platform code, on features
   only for *optional* capability bundles (`x11`).
 - Platform file naming: one backend per file under its function dir

@@ -218,7 +218,7 @@ async fn registry_names_resolve() {
         "amsterdam".to_string(),
         EndpointKey(device_key.verifying_key().to_bytes()),
     );
-    let snap = SignedRegistry::publish(&reg_key, entries, Duration::from_secs(3600)).unwrap();
+    let snap = SignedRegistry::publish(&reg_key, 1, 1, entries, Duration::from_secs(3600)).unwrap();
     let store = Arc::new(MemoryStore::default());
     let dir = service::serve(
         "127.0.0.1:0".parse().unwrap(),
@@ -298,6 +298,8 @@ async fn registry_put_requires_estate_signature() {
     // A snapshot signed by a non-estate key is refused.
     let forged = SignedRegistry::publish(
         &wrong_key,
+        1,
+        1,
         BTreeMap::from([("evil".into(), EndpointKey([9; 32]))]),
         Duration::from_secs(600),
     )
@@ -313,6 +315,8 @@ async fn registry_put_requires_estate_signature() {
     // The estate key's snapshot is accepted…
     let snap = SignedRegistry::publish(
         &reg_key,
+        1,
+        1,
         BTreeMap::from([("amsterdam".into(), EndpointKey([2; 32]))]),
         Duration::from_secs(600),
     )
@@ -322,9 +326,8 @@ async fn registry_put_requires_estate_signature() {
         client.resolve_name("amsterdam").await.unwrap(),
         EndpointKey([2; 32])
     );
-    // …but replaying the same (not newer) snapshot is stale.
-    let err = client.update_registry(&snap).await.unwrap_err();
-    assert!(matches!(err, DiscoveryError::Http { status: 409, .. }));
+    // An exact retry is idempotent and does not refresh the lease.
+    client.update_registry(&snap).await.unwrap();
 }
 
 #[tokio::test]
@@ -352,8 +355,10 @@ async fn revocations_roundtrip_and_authz() {
     // Forged signature refused.
     let forged = rds_discovery::revocations::SignedRevocations::publish(
         &wrong_key,
+        1,
+        1,
         BTreeSet::from([[9u8; 32]]),
-        Duration::from_secs(600),
+        Duration::from_secs(60),
     )
     .unwrap();
     let err = client.update_revocations(&forged).await.unwrap_err();
@@ -362,8 +367,10 @@ async fn revocations_roundtrip_and_authz() {
     // Estate-signed snapshot accepted and served verbatim.
     let snap = rds_discovery::revocations::SignedRevocations::publish(
         &reg_key,
+        1,
+        1,
         BTreeSet::from([[1u8; 32], [2u8; 32]]),
-        Duration::from_secs(600),
+        Duration::from_secs(60),
     )
     .unwrap();
     client.update_revocations(&snap).await.unwrap();
@@ -375,9 +382,110 @@ async fn revocations_roundtrip_and_authz() {
     let payload = served.verify(&reg_key.verifying_key()).unwrap();
     assert!(payload.revoked.contains(&[1u8; 32]));
 
-    // Same-age replay is stale.
-    let err = client.update_revocations(&snap).await.unwrap_err();
-    assert!(matches!(err, DiscoveryError::Http { status: 409, .. }));
+    // An exact retry is idempotent and does not refresh the lease.
+    client.update_revocations(&snap).await.unwrap();
+}
+
+#[tokio::test]
+async fn policy_survives_directory_restart_and_expiry_is_checked_on_get() {
+    use rds_discovery::{
+        authority::Authority, clock::Reading, policy::PolicyStore, revocations::SignedRevocations,
+    };
+    let path = std::env::temp_dir().join(format!(
+        "rds-directory-policy-{:032x}",
+        rand::random::<u128>()
+    ));
+    std::fs::create_dir(&path).unwrap();
+    let issuer = key(44);
+    let authority = Authority::new(&issuer.verifying_key(), 1).unwrap();
+    let old = SignedRegistry::publish(
+        &issuer,
+        1,
+        1,
+        BTreeMap::from([("device-a".into(), EndpointKey([1; 32]))]),
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    let new = SignedRegistry::publish(
+        &issuer,
+        1,
+        2,
+        BTreeMap::from([("device-a".into(), EndpointKey([2; 32]))]),
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    let policy = PolicyStore::open(&path, authority, Reading::now().unwrap()).unwrap();
+    let directory = service::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(MemoryStore::default()),
+        ServiceConfig {
+            registry: Some(old.clone()),
+            policy: Some(policy),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = Client::new(directory.addr());
+    client.update_registry(&new).await.unwrap();
+    let revocations = SignedRevocations::publish(
+        &issuer,
+        1,
+        2,
+        BTreeSet::from([[7; 32]]),
+        Duration::from_secs(4),
+    )
+    .unwrap();
+    let expires = revocations
+        .verify(&issuer.verifying_key())
+        .unwrap()
+        .expires_at;
+    client.update_revocations(&revocations).await.unwrap();
+    drop(directory);
+    let policy = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match PolicyStore::open(&path, authority, Reading::now().unwrap()) {
+                Ok(store) => break store,
+                Err(DiscoveryError::Busy) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("restart failed: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let directory = service::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(MemoryStore::default()),
+        ServiceConfig {
+            registry: Some(old),
+            policy: Some(policy),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = Client::new(directory.addr()).with_registry_key(issuer.verifying_key());
+    assert_eq!(
+        client.resolve_name("device-a").await.unwrap(),
+        EndpointKey([2; 32])
+    );
+    assert_eq!(
+        client.fetch_revocations().await.unwrap().unwrap().payload,
+        revocations.payload
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while now_unix().unwrap() < expires {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        client.fetch_revocations().await,
+        Err(DiscoveryError::Http { status: 410, .. })
+    ));
+    drop(directory);
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 /// Two racing valid PUTs must never leave the older snapshot stored:
@@ -405,12 +513,17 @@ async fn concurrent_registry_puts_cannot_regress() {
     let n = 8u64;
     let mut tasks = Vec::new();
     for i in 0..n {
-        // Snapshot i maps "device" to key byte i, issued_at strictly
-        // increasing — the identifiable winner is n-1.
+        // Same-second snapshots are ordered by revision; the winner is n-1.
         let snap = SignedRegistry::sign(
             &RegistryPayload {
+                stamp: rds_discovery::authority::SnapshotStamp::new(
+                    &reg_key.verifying_key(),
+                    1,
+                    i + 1,
+                )
+                .unwrap(),
                 entries: BTreeMap::from([("device".into(), EndpointKey([i as u8; 32]))]),
-                issued_at: now - n + i,
+                issued_at: now,
                 expires_at: now + 3600,
             },
             &reg_key,
@@ -442,6 +555,8 @@ async fn registry_put_refused_without_configured_key() {
     let (_dir, client) = serve().await;
     let snap = SignedRegistry::publish(
         &key(32),
+        1,
+        1,
         BTreeMap::from([("amsterdam".into(), EndpointKey([2; 32]))]),
         Duration::from_secs(600),
     )

@@ -49,6 +49,15 @@ struct Cli {
     /// Required for name resolution and `PUT /v1/registry`.
     #[arg(long)]
     registry_key: Option<String>,
+    /// Bootstrap authority epoch (rotation receipts advance it durably).
+    #[arg(long, default_value = "1")]
+    registry_epoch: u64,
+    /// Private policy state directory; default is a sibling of endpoint records.
+    #[arg(long, requires = "registry_key")]
+    policy_state: Option<PathBuf>,
+    /// Dual-signed authority rotation receipt. Repeat in epoch order.
+    #[arg(long, requires = "registry_key")]
+    authority_rotation: Vec<PathBuf>,
     /// JSON file with the initial estate-signed registry snapshot.
     #[arg(long)]
     registry: Option<PathBuf>,
@@ -114,6 +123,27 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("--registry given without --registry-key");
     }
 
+    let policy = if let Some(key) = &registry_key {
+        let authority = rds_discovery::authority::Authority::new(key, cli.registry_epoch)?;
+        let path = cli
+            .policy_state
+            .unwrap_or_else(|| cli.directory.with_extension("policy"));
+        let receipts = cli.authority_rotation;
+        Some(
+            tokio::task::spawn_blocking(move || -> Result<_, rds_discovery::DiscoveryError> {
+                let now = rds_discovery::clock::Reading::now()?;
+                let mut store = rds_discovery::policy::PolicyStore::open(&path, authority, now)?;
+                for receipt in rds_discovery::policy::read_rotations(&receipts)? {
+                    store.apply_rotation(&receipt, now)?;
+                }
+                Ok(store)
+            })
+            .await??,
+        )
+    } else {
+        None
+    };
+
     let directory_tls = match (&cli.directory_tls_cert, &cli.directory_tls_key) {
         (Some(cert), Some(key)) => Some(rds_discovery::tls::server_config_from_pem(
             &std::fs::read(cert)?,
@@ -128,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         ServiceConfig {
             tls: directory_tls,
+            policy,
             registry_key,
             registry,
             ..Default::default()

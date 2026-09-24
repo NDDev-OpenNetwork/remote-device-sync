@@ -164,8 +164,9 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   the connection and releases the lease. Denylist values survive without
   watchers; service admission rechecks revocation and expiry directly.
 - GDS names: `GET /v1/names/{name}` returns one `SignedNameBinding`, signed
-  by the registry issuer over `rds/name-binding/v1\0` plus the postcard
-  payload `{version, name, key, issued_at, expires_at}`. The client requires
+  by the registry issuer over `rds/name-binding/v2\0` plus the postcard
+  payload `{stamp, registry_digest, version, name, key, issued_at, expires_at}`.
+  The client requires
   an independently provisioned trust anchor (`rds --registry-key <base32>`),
   verifies the exact requested name and validity, then verifies the endpoint
   record against that key. No unsigned-name fallback or HTTP redirect is
@@ -175,9 +176,16 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   rechecks snapshot lifetime on GET. Old snapshots need re-signing, and old
   clients cannot use the new name response. Validity is at most 24 hours,
   `issued_at <= now < expires_at`, with no future clock allowance. A bounded
-  client cache shared by clones rejects older or conflicting same-timestamp
-  bindings; it is volatile. Durable revisions, rollback across restart and
-  authority rotation remain W1.4. Tickets and
+  durable client cache rejects older revisions, cross-name rollback and
+  conflicting same-revision proofs. Directory and managed agents use the same
+  acceptance store with sync/rename/sync before runtime publication. Revocation
+  freshness is bounded to 300 seconds, checked at admission and during active
+  sessions; missing/stale policy closes access. Leases retain absolute
+  suspend-inclusive deadlines across process restart, and an OS reboot requires
+  a newer signed revision. Dual-signed receipts advance authority epochs.
+  See [policy-state.md](policy-state.md) for the complete contract, migration
+  and limits, including the external GDS anchor still needed to detect rollback
+  of the entire trusted local state. Tickets and
   explicitly pinned endpoint keys do not depend on registry-name trust.
 - Directory clients accept HTTP(S) origins with DNS/IP hosts. HTTPS uses
   in-process rustls, verifies the certificate chain and hostname/IP SAN, and
@@ -192,8 +200,9 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   listener on `--http-addr`; relay TLS is configured separately. The directory
   reserves its connection budget before spawning/handshaking. Its 10-second
   default absolute connection deadline includes TLS and response I/O; dropping
-  the directory aborts its owned async requests. Store operations still run
-  synchronously and need the W1.5 transaction/worker change. Directory
+  the directory aborts its owned async requests. Store/signature operations run
+  in a bounded blocking pool; permits remain held through disk completion even
+  after request timeout. Endpoint-record transactions/quotas remain W1.5. Directory
   certificate renewal is external provisioning plus restart for now; automatic
   renewal and hot reload are not implied by the relay's separate ACME support.
 

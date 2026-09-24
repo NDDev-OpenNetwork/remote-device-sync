@@ -4,8 +4,8 @@
 //! the directory is a control-plane dependency, and a hanging lookup
 //! must never wedge an announce loop or a CLI resolve.
 
-use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,8 +16,13 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsConnector;
 
 use crate::http::{self, Response};
-use crate::registry::{NameBindingPayload, SignedNameBinding, SignedRegistry, valid_name};
+use crate::registry::{SignedNameBinding, SignedRegistry, valid_name};
 use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord};
+use crate::{
+    authority::{Authority, SignedRotation},
+    clock::Reading,
+    policy::PolicyStore,
+};
 
 /// Client for one directory address.
 #[derive(Debug, Clone)]
@@ -27,10 +32,7 @@ pub struct Client {
     authority: String,
     tls: Option<Arc<rustls::ClientConfig>>,
     timeout: Duration,
-    registry_key: Option<VerifyingKey>,
-    // Shared by cloned clients. Durable anti-rollback state is W1.4;
-    // this bounded cache prevents regression within one client lifetime.
-    seen_names: Arc<Mutex<BTreeMap<String, NameBindingPayload>>>,
+    name_trust: Option<NameTrust>,
 }
 
 impl Client {
@@ -43,8 +45,7 @@ impl Client {
             authority: addr.to_string(),
             tls: None,
             timeout: Duration::from_secs(3),
-            registry_key: None,
-            seen_names: Arc::new(Mutex::new(BTreeMap::new())),
+            name_trust: None,
         }
     }
 
@@ -111,8 +112,7 @@ impl Client {
             authority,
             tls,
             timeout: Duration::from_secs(3),
-            registry_key: None,
-            seen_names: Arc::new(Mutex::new(BTreeMap::new())),
+            name_trust: None,
         })
     }
 
@@ -141,11 +141,36 @@ impl Client {
     }
 
     /// Trust anchor provisioned independently of the directory response.
+    /// Ephemeral embedding/test cache; production callers use `with_registry_store`.
     /// Reconfiguration starts a separate authority/cache namespace.
     pub fn with_registry_key(mut self, key: VerifyingKey) -> Self {
-        self.registry_key = Some(key);
-        self.seen_names = Arc::new(Mutex::new(BTreeMap::new()));
+        // The strongly typed key and fixed positive epoch cannot fail validation.
+        let authority = Authority::new(&key, 1).expect("fixed positive authority epoch");
+        let store = PolicyStore::memory(authority).expect("validated authority");
+        self.name_trust = Some(NameTrust::Memory(Arc::new(Mutex::new(store))));
         self
+    }
+
+    /// Durable name trust. Each lookup opens a short exclusive transaction so
+    /// concurrent CLI processes share one high-water mark. No volatile fallback.
+    pub fn with_registry_store(
+        mut self,
+        authority: Authority,
+        path: PathBuf,
+        rotations: Vec<SignedRotation>,
+    ) -> Result<Self, DiscoveryError> {
+        authority.verifying_key()?;
+        if rotations.len() > 16 {
+            return Err(DiscoveryError::Configuration(
+                "too many rotation receipts".into(),
+            ));
+        }
+        self.name_trust = Some(NameTrust::Persistent {
+            authority,
+            path,
+            rotations,
+        });
+        Ok(self)
     }
 
     /// Base32 configuration form, shared by applications without duplicating
@@ -190,7 +215,7 @@ impl Client {
         if !valid_name(name) {
             return Err(DiscoveryError::InvalidRecord("invalid device name".into()));
         }
-        let key = self.registry_key.as_ref().ok_or_else(|| {
+        let trust = self.name_trust.as_ref().ok_or_else(|| {
             DiscoveryError::InvalidRecord("name resolution requires a trusted registry key".into())
         })?;
         let resp = self
@@ -199,23 +224,25 @@ impl Client {
         let resp = self.expect(resp, &[200])?;
         let answer: SignedNameBinding = serde_json::from_slice(&resp.body)
             .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let binding = answer.verify(key, name, crate::now_unix()?)?;
-        let mut seen = self
-            .seen_names
-            .lock()
-            .map_err(|_| DiscoveryError::Store("name cache poisoned".into()))?;
-        if let Some(previous) = seen.get(name) {
-            if binding.issued_at < previous.issued_at
-                || (binding.issued_at == previous.issued_at && binding != *previous)
-            {
-                return Err(DiscoveryError::Stale);
+        let name = name.to_owned();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let trust = trust.clone();
+                let answer = answer.clone();
+                let name = name.clone();
+                let result = tokio::task::spawn_blocking(move || trust.accept(answer, &name))
+                    .await
+                    .map_err(|e| DiscoveryError::Store(e.to_string()))?;
+                match result {
+                    Err(DiscoveryError::Busy) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await
+                    }
+                    other => return other,
+                }
             }
-        } else if seen.len() >= 1024 {
-            return Err(DiscoveryError::Store("name freshness cache full".into()));
-        }
-        let endpoint = binding.key;
-        seen.insert(name.into(), binding);
-        Ok(endpoint)
+        })
+        .await
+        .map_err(|_| DiscoveryError::Unreachable("policy acceptance timed out".into()))?
     }
 
     /// Delete `key`'s record with a signed tombstone (`DELETE`).
@@ -357,5 +384,54 @@ impl Client {
             429 => DiscoveryError::RateLimited,
             status => DiscoveryError::Http { status, message },
         })
+    }
+}
+
+#[derive(Clone)]
+enum NameTrust {
+    Memory(Arc<Mutex<PolicyStore>>),
+    Persistent {
+        authority: Authority,
+        path: PathBuf,
+        rotations: Vec<SignedRotation>,
+    },
+}
+
+impl std::fmt::Debug for NameTrust {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Memory(_) => "MemoryNameTrust",
+            Self::Persistent { .. } => "PersistentNameTrust",
+        })
+    }
+}
+
+impl NameTrust {
+    fn accept(&self, proof: SignedNameBinding, name: &str) -> Result<EndpointKey, DiscoveryError> {
+        let now = Reading::now()?;
+        let binding = match self {
+            Self::Memory(store) => {
+                let mut store = store
+                    .lock()
+                    .map_err(|_| DiscoveryError::Store("name state poisoned".into()))?;
+                let binding = store.accept_name(&proof, name, now)?;
+                store.check_name_lease(Reading::now()?)?;
+                binding
+            }
+            Self::Persistent {
+                authority,
+                path,
+                rotations,
+            } => {
+                let mut store = PolicyStore::open(path, *authority, now)?;
+                for receipt in rotations {
+                    store.apply_rotation(receipt, now)?;
+                }
+                let binding = store.accept_name(&proof, name, now)?;
+                store.check_name_lease(Reading::now()?)?;
+                binding
+            }
+        };
+        Ok(binding.key)
     }
 }

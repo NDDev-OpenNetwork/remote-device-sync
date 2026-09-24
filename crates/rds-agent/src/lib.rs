@@ -33,11 +33,12 @@ use rds_core::{
 use rds_net::{Connection, Endpoint, EndpointId};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 mod authz;
+mod revocations;
 use authz::{ConnAuthz, ConnectionLifetime, authorize};
+pub use revocations::{RevocationFeed, RevocationPolicy, watch_revocations};
 
 /// Monotonic session ids for structured tracing — every connection's
 /// `rds.conn` span carries one, so `session_id` filters a whole
@@ -78,11 +79,11 @@ pub struct AgentPolicy {
     pub issuers: HashSet<[u8; 32]>,
     /// Maximum grant lifetime accepted at verify time.
     pub grant_max_ttl: Duration,
-    /// Revoked grant ids; updated by [`Agent::denylist`] feeds (the
-    /// estate's signed revocation snapshot) or tests pushing directly.
+    /// Revoked grant ids and freshness; updated by [`watch_revocations`]
+    /// from the estate's signed snapshot or by explicit local policy.
     /// The `watch` channel notifies live connections so a revoked grant
     /// drops its session, not just future ones.
-    pub denylist: watch::Sender<Arc<HashSet<GrantId>>>,
+    pub denylist: watch::Sender<Arc<RevocationPolicy>>,
     /// Grant ids currently bound to a live connection — the replay
     /// guard: the same grant cannot run two concurrent sessions.
     pub active_grants: Arc<Mutex<HashSet<GrantId>>>,
@@ -112,7 +113,7 @@ impl AgentPolicy {
             allow_any_tcp: false,
             issuers: HashSet::new(),
             grant_max_ttl: Duration::from_secs(300),
-            denylist: watch::channel(Arc::new(HashSet::new())).0,
+            denylist: watch::channel(Arc::new(RevocationPolicy::default())).0,
             active_grants: Arc::new(Mutex::new(HashSet::new())),
             sync_dir: None,
         }
@@ -135,55 +136,23 @@ impl AgentPolicy {
     /// live connection watcher. The value is retained without subscribers.
     pub fn revoke(&self, id: GrantId) {
         self.denylist.send_modify(|set| {
-            Arc::make_mut(set).insert(id);
+            Arc::make_mut(&mut Arc::make_mut(set).ids).insert(id);
         });
     }
 
     /// Read the current denylist snapshot.
     pub fn denied(&self) -> Arc<HashSet<GrantId>> {
-        self.denylist.borrow().clone()
+        self.denylist.borrow().ids.clone()
     }
 
-    /// Replace the whole denylist — what a fresh estate revocation
-    /// snapshot means. Live connections re-check on the notification.
+    /// Replace revoked ids without changing freshness. Managed feeds commit
+    /// and publish their own complete snapshots; this does not renew a lease.
+    /// Live connections re-check on the notification.
     pub fn replace_denylist(&self, ids: HashSet<GrantId>) {
-        self.denylist.send_replace(Arc::new(ids));
+        self.denylist.send_modify(|value| {
+            Arc::make_mut(value).ids = Arc::new(ids);
+        });
     }
-}
-
-/// Poll the directory's denylist snapshot into `policy` every
-/// `interval`. Verifies against the estate registry key; a missing
-/// snapshot clears nothing (denylist stays as last seen). Returns the
-/// task handle — abort it to stop polling.
-///
-/// The interval controls refresh while the directory is reachable; it is
-/// not an outage staleness bound. Durable freshness and offline policy are
-/// tracked by remediation W1.4. Signatures protect snapshot integrity.
-pub fn watch_revocations(
-    client: rds_discovery::client::Client,
-    registry_key: ed25519_dalek::VerifyingKey,
-    policy: Arc<AgentPolicy>,
-    interval: Duration,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut seen_issued_at = 0u64;
-        loop {
-            match client.fetch_revocations().await {
-                Ok(Some(snap)) => match snap.verify(&registry_key) {
-                    Ok(payload) if payload.issued_at > seen_issued_at => {
-                        seen_issued_at = payload.issued_at;
-                        policy.replace_denylist(payload.revoked.into_iter().collect());
-                        debug!(issued_at = payload.issued_at, "denylist refreshed");
-                    }
-                    Ok(_) => {}
-                    Err(e) => debug!("revocations snapshot rejected: {e}"),
-                },
-                Ok(None) => {}
-                Err(e) => debug!("revocations fetch failed: {e}"),
-            }
-            tokio::time::sleep(interval).await;
-        }
-    })
 }
 
 /// A bound agent: endpoint plus policy, ready to `run`.

@@ -24,15 +24,16 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::VerifyingKey;
 use tokio::net::TcpListener;
 
 use crate::http::{self, Request, Response};
-use crate::registry::{RegistryPayload, SignedRegistry, check_lifetime, valid_name};
-use crate::revocations::{RevocationPayload, SignedRevocations};
+use crate::registry::{SignedRegistry, valid_name};
+use crate::revocations::SignedRevocations;
+use crate::{authority::Authority, clock::Reading, policy::PolicyStore};
 
 use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, RecordStore};
 
@@ -58,6 +59,8 @@ pub struct Limits {
     /// cheap per connection but unbounded in count. Excess connections
     /// are accepted and dropped immediately (the peer sees a close).
     pub max_conns: usize,
+    /// Blocking signature/storage jobs, including jobs whose request timed out.
+    pub max_workers: usize,
 }
 
 impl Default for Limits {
@@ -67,6 +70,7 @@ impl Default for Limits {
             put_per_minute: 600,
             conn_timeout: Duration::from_secs(10),
             max_conns: 1024,
+            max_workers: 16,
         }
     }
 }
@@ -81,6 +85,8 @@ pub struct ServiceConfig {
     pub registry_key: Option<VerifyingKey>,
     /// Snapshot loaded at startup (verified against `registry_key`).
     pub registry: Option<SignedRegistry>,
+    /// Pre-opened durable authority state. Omitting it explicitly uses memory.
+    pub policy: Option<PolicyStore>,
     pub limits: Limits,
 }
 
@@ -118,14 +124,6 @@ fn hex16(b: &[u8]) -> String {
 /// fail every request the directory serves from then on.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn read<T>(l: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    l.read().unwrap_or_else(|e| e.into_inner())
-}
-
-fn write<T>(l: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    l.write().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Cap on distinct writer labels before accounting folds into `other`
@@ -188,12 +186,8 @@ impl Drop for Directory {
 
 struct State {
     store: Arc<dyn RecordStore>,
-    registry: RwLock<Option<(SignedRegistry, RegistryPayload)>>,
-    /// Latest verified denylist snapshot plus its decoded payload (the
-    /// freshness anchor); `None` until the estate publishes one. The
-    /// signed half is served verbatim so agents verify it themselves.
-    revocations: RwLock<Option<(SignedRevocations, RevocationPayload)>>,
-    registry_key: Option<VerifyingKey>,
+    policy: Mutex<Option<PolicyStore>>,
+    workers: Arc<tokio::sync::Semaphore>,
     limits: Limits,
     limiter: RateLimiter,
     metrics: Metrics,
@@ -208,20 +202,39 @@ pub async fn serve(
 ) -> std::io::Result<Directory> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
-    let registry = match (&config.registry, &config.registry_key) {
-        (Some(snap), Some(key)) => Some((
-            snap.clone(),
-            snap.verify_fresh(key, None).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-            })?,
-        )),
-        _ => None,
-    };
+    let policy = tokio::task::spawn_blocking(move || -> Result<_, DiscoveryError> {
+        let mut policy = match config.policy {
+            Some(policy) => {
+                if config
+                    .registry_key
+                    .is_some_and(|k| policy.bootstrap().key.0 != k.to_bytes())
+                {
+                    return Err(DiscoveryError::Configuration(
+                        "policy bootstrap key mismatch".into(),
+                    ));
+                }
+                Some(policy)
+            }
+            None => config
+                .registry_key
+                .map(|key| PolicyStore::memory(Authority::new(&key, 1)?))
+                .transpose()?,
+        };
+        if let Some(snap) = config.registry {
+            policy
+                .as_mut()
+                .ok_or(DiscoveryError::BadSignature)?
+                .bootstrap_registry(&snap, Reading::now()?)?;
+        }
+        Ok(policy)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
     let state = Arc::new(State {
         store,
-        registry: RwLock::new(registry),
-        revocations: RwLock::new(None),
-        registry_key: config.registry_key,
+        policy: Mutex::new(policy),
+        workers: Arc::new(tokio::sync::Semaphore::new(config.limits.max_workers)),
         limits: config.limits,
         limiter: RateLimiter {
             last_put: Mutex::new(HashMap::new()),
@@ -273,11 +286,22 @@ pub async fn serve(
 
 async fn serve_request(
     stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
-    state: &State,
+    state: &Arc<State>,
     peer: SocketAddr,
 ) {
     let response = match http::read_request(stream).await {
-        Ok(Some(req)) => route(state, peer, &req),
+        Ok(Some(req)) => match state.workers.clone().try_acquire_owned() {
+            Ok(permit) => {
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    route(&state, peer, &req)
+                })
+                .await
+                .unwrap_or_else(|e| Response::error(500, &DiscoveryError::Store(e.to_string())))
+            }
+            Err(_) => Response::error(429, &DiscoveryError::RateLimited),
+        },
         Ok(None) => return,
         Err(e) => {
             state.metrics.requests_bad.fetch_add(1, Ordering::Relaxed);
@@ -414,87 +438,79 @@ fn get_name(state: &State, name: &str) -> Response {
             &DiscoveryError::InvalidRecord("invalid device name".into()),
         );
     }
-    let registry = read(&state.registry);
-    let Some((signed, payload)) = registry.as_ref() else {
-        return Response::error(404, &DiscoveryError::NotFound);
-    };
-    if let Err(e) =
-        crate::now_unix().and_then(|now| check_lifetime(payload.issued_at, payload.expires_at, now))
-    {
-        return Response::error(status_for(&e), &e);
-    }
-    match signed.bindings.get(name) {
-        Some(proof) => Response::json(200, proof),
-        None => Response::error(404, &DiscoveryError::NotFound),
-    }
-}
-
-fn put_registry(state: &State, req: &Request) -> Response {
-    // Same global bound as PUTs: snapshot verify below is ed25519 work.
-    if !state.limiter.check_global(&state.limits) {
-        return rate_limited(state);
-    }
-    let Some(key) = &state.registry_key else {
-        return Response::error(401, &DiscoveryError::BadSignature);
-    };
-    let snap: SignedRegistry = match serde_json::from_slice(&req.body) {
-        Ok(s) => s,
-        Err(e) => {
-            return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
-        }
-    };
-    // Hold the write lock across verify+store — same reason as
-    // `put_revocations`: the monotonic check runs against `current`,
-    // and a dropped read lock would let two valid PUTs race so the
-    // older snapshot wins.
-    let mut current = write(&state.registry);
-    match snap.verify_fresh(key, current.as_ref().map(|(_, payload)| payload)) {
-        Ok(payload) => {
-            *current = Some((snap, payload));
-            state.metrics.registry_puts.fetch_add(1, Ordering::Relaxed);
-            Response::json(200, serde_json::json!({ "stored": true }))
-        }
+    let result = with_policy(state, |policy| policy.name(name, Reading::now()?));
+    match result {
+        Ok(proof) => Response::json(200, proof),
         Err(e) => Response::error(status_for(&e), &e),
     }
 }
 
-/// Serve the current denylist snapshot verbatim — agents verify its
-/// signature themselves, so the stored signed bytes are what travel.
-/// 404 until the estate publishes the first snapshot.
+fn with_policy<T>(
+    state: &State,
+    apply: impl FnOnce(&mut PolicyStore) -> Result<T, DiscoveryError>,
+) -> Result<T, DiscoveryError> {
+    let mut guard = state
+        .policy
+        .lock()
+        .map_err(|_| DiscoveryError::Store("policy state poisoned".into()))?;
+    apply(guard.as_mut().ok_or(DiscoveryError::NotFound)?)
+}
+
+fn put_registry(state: &State, req: &Request) -> Response {
+    if !state.limiter.check_global(&state.limits) {
+        return rate_limited(state);
+    }
+    let result = with_policy(state, |policy| {
+        let snap: SignedRegistry = serde_json::from_slice(&req.body)
+            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
+        policy.accept_registry(&snap, Reading::now()?)
+    });
+    match result {
+        Ok(changed) => {
+            if changed {
+                state.metrics.registry_puts.fetch_add(1, Ordering::Relaxed);
+            }
+            Response::json(
+                200,
+                serde_json::json!({ "stored": true, "changed": changed }),
+            )
+        }
+        Err(DiscoveryError::NotFound) => Response::error(401, &DiscoveryError::BadSignature),
+        Err(e) => Response::error(status_for(&e), &e),
+    }
+}
+
 fn get_revocations(state: &State) -> Response {
-    match &*read(&state.revocations) {
-        Some((snap, _)) => Response::json(200, snap),
-        None => Response::error(404, &DiscoveryError::NotFound),
+    match with_policy(state, |policy| policy.revocations(Reading::now()?)) {
+        Ok(Some((snap, _, _))) => Response::json(200, snap),
+        Ok(None) => Response::error(404, &DiscoveryError::NotFound),
+        Err(e) => Response::error(status_for(&e), &e),
     }
 }
 
 fn put_revocations(state: &State, req: &Request) -> Response {
-    // Same global bound as every verifying write.
     if !state.limiter.check_global(&state.limits) {
         return rate_limited(state);
     }
-    let Some(key) = &state.registry_key else {
-        return Response::error(401, &DiscoveryError::BadSignature);
-    };
-    let snap: SignedRevocations = match serde_json::from_slice(&req.body) {
-        Ok(s) => s,
-        Err(e) => {
-            return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
+    let result = with_policy(state, |policy| {
+        let snap: SignedRevocations = serde_json::from_slice(&req.body)
+            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
+        policy.accept_revocations(&snap, Reading::now()?)
+    });
+    match result {
+        Ok(changed) => {
+            if changed {
+                state
+                    .metrics
+                    .revocations_puts
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Response::json(
+                200,
+                serde_json::json!({ "stored": true, "changed": changed }),
+            )
         }
-    };
-    // Hold the write lock across verify+store: the monotonic check runs
-    // against `current`, so it must be the same snapshot we replace —
-    // a dropped read lock would let two valid PUTs race and regress.
-    let mut current = write(&state.revocations);
-    match snap.verify_fresh(key, current.as_ref().map(|(_, p)| p)) {
-        Ok(payload) => {
-            *current = Some((snap, payload));
-            state
-                .metrics
-                .revocations_puts
-                .fetch_add(1, Ordering::Relaxed);
-            Response::json(200, serde_json::json!({ "stored": true }))
-        }
+        Err(DiscoveryError::NotFound) => Response::error(401, &DiscoveryError::BadSignature),
         Err(e) => Response::error(status_for(&e), &e),
     }
 }

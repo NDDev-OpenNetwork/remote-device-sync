@@ -7,7 +7,7 @@ this file records implementation progress rather than rewriting that evidence.
 
 ## Current state
 
-All waves remain open. W1.1–W1.3 and W1.6–W1.8 passed the local Linux check
+All waves remain open. W1.1–W1.4 and W1.6–W1.8 passed the local Linux check
 matrix; other tasks remain planned unless listed below. No deployment or owned-backend
 promotion has occurred. Native macOS checks still require their platform lane.
 
@@ -17,6 +17,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
+| W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -204,9 +205,50 @@ limit remain asserted; no capacity or latency budget was relaxed. The focused
 regression passed after this W0.1 fixture correction. Full matrix results are
 recorded with the policy change that triggered the run.
 
-Complete W1.4 durable revocation freshness, followed by W1.5 directory
-transactions and W1.9 wire
+Continue W1.5 directory transactions and W1.9 wire
 binding/accounting. Each change retains
 its own failing-before/passing-after evidence. No general CI or long soak is
 made a blanket barrier to independent development; actual invariant failures
 are repaired and platform evidence is recorded separately.
+
+## Durable policy acceptance and managed revocation
+
+W1.4 replaces second-resolution timestamp ordering with explicit authority
+epochs and revisions. Name proofs bind to the signed registry digest; the CLI
+persists one global revision floor across names/processes. Policy snapshots and
+lease metadata commit together through protected, exclusively owned staging
+before publication. Failed writes poison the store and close managed access;
+corruption, missing initialized state or unknown bootstrap keys never select an
+empty fallback. A lower-revision bootstrap cannot replace the directory's
+committed state. Unchanged cache hits do not rewrite/sync the marker file.
+
+The managed agent observes revoked IDs and freshness in one value. Startup can
+use a verified same-boot cache only until its original absolute lease ends;
+replies and restarts cannot rearm that lease. OS reboot needs a newer revision.
+Admission, admission commit, new service requests and the live watchdog all
+check policy. A feed has one owner; shutdown/fatal persistence error prevents
+late publication, and obsolete callbacks cannot overwrite a successor.
+Authority rotation requires signatures by both the current and next key and
+advances the epoch by exactly one.
+
+Five real-QUIC managed-feed cases passed, covering fresh/missing policy,
+revocation, outage, cached restart with older network replies, feed drop and
+failed disk commit. Nine policy-state cases cover ordering, boot/clock changes,
+rotation, linked/corrupt/missing state and bounded wire inputs. Fault and abrupt
+child-exit tests cover five persistence boundaries. Directory/client integration
+tests cover actual restart and cross-process-style cache reuse. The worker
+budget test confirms a timed-out HTTP request cannot free a still-running disk
+job's permit. Its initial test assertion was corrected to use the client's
+typed `RateLimited` error for HTTP 429; no production limit changed.
+
+Linux validation: `cargo fmt --check`; default, X11 and all-feature workspace
+Clippy with warnings denied; `cargo test --workspace` (**170 tests, 43 targets**).
+The owned transport/relay feature suite also passed (**52 tests, 17 targets**).
+The five managed-feed cases were additionally rerun with their endpoints
+explicitly selecting noq, and all passed. `rds`, `rds-agent` and `rds-server`
+built and executed `--help` with the new state/epoch/rotation flags.
+The first workspace failure and the separate desktop fixture correction are
+recorded above. `cargo-deny` is not installed. Native macOS, physical suspend,
+power loss and real estate deployment were not run. No wave is closed and no
+performance qualification is claimed. See the [policy receipt](reports/rds-policy-20260924.md)
+and [migration/operational contract](policy-state.md).

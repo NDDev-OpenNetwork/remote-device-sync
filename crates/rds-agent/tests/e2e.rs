@@ -231,6 +231,7 @@ async fn grant_agent(
     let iss = issuer();
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
     policy.issuers.insert(iss.verifying_key().to_bytes());
+    policy.use_local_revocations(); // This fixture tests local grant rules; managed feeds have their own suite.
     let ticket = Ticket::of(&agent_ep);
     (agent_ep, policy, iss, ticket)
 }

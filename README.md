@@ -70,8 +70,11 @@ hostname verification; use `--directory-ca` for a private CA. Signed name proofs
 remain required independently of TLS. Explicit HTTP/IP:port remains available
 for local deployments; HTTPS never falls back to it. The agent rejects any peer not on its `--allow` list before
 a service stream opens, and can additionally require estate-signed capability
-grants (`--issuer`, scope-checked per stream, revocable via the directory's
-`/v1/revocations` feed).
+grants (`--issuer`, scope-checked per stream). Managed grant mode requires
+`--directory` and `--revocations-key`; stale policy closes access. Directory,
+agent and name CLI persist their policy revisions and freshness state. See
+[policy configuration and migration](docs/policy-state.md) before upgrading
+the issuer or deploying managed access.
 
 Observability: `rds-net` exposes a per-endpoint metrics registry (per-path
 RTT/loss/cwnd, datagrams and bytes split by `via="direct"`/`via="relay"`,

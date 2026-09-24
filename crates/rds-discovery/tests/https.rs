@@ -76,6 +76,8 @@ async fn dns_https_preserves_the_signed_identity_chain() {
         .update_registry(
             &SignedRegistry::publish(
                 &issuer,
+                1,
+                1,
                 BTreeMap::from([("device-a".into(), identity)]),
                 Duration::from_secs(60),
             )

@@ -19,6 +19,8 @@ async fn resolver_binds_the_verified_name_to_the_record_identity() {
     for wrong_record in [false, true] {
         let snapshot = SignedRegistry::publish(
             &issuer,
+            1,
+            1,
             BTreeMap::from([(
                 "device-a".into(),
                 EndpointKey(expected.verifying_key().to_bytes()),

@@ -54,8 +54,17 @@ struct Cli {
     /// Verifying key that signs the estate revocation snapshot
     /// (`GET /v1/revocations`). Required for denylist polling when
     /// `--directory` is set.
-    #[arg(long)]
+    #[arg(long, requires_all = ["directory", "issuers"])]
     revocations_key: Option<String>,
+    /// Epoch of the independently provisioned bootstrap revocation authority.
+    #[arg(long, default_value = "1")]
+    revocations_epoch: u64,
+    /// Private durable policy directory; default is beside --key-file.
+    #[arg(long, requires = "revocations_key")]
+    revocations_state: Option<std::path::PathBuf>,
+    /// Dual-signed authority rotation receipt. Repeat in epoch order.
+    #[arg(long, requires = "revocations_key")]
+    authority_rotation: Vec<std::path::PathBuf>,
     /// Revocation poll interval in seconds.
     #[arg(long, default_value = "30")]
     revocations_interval: u64,
@@ -128,10 +137,42 @@ async fn main() -> anyhow::Result<()> {
             Ok(client)
         })
         .transpose()?;
+    if !policy.issuers.is_empty() && cli.revocations_key.is_none() {
+        anyhow::bail!("managed grants require --directory and --revocations-key");
+    }
+    let policy_handle = std::sync::Arc::new(policy.clone());
+    let _revocations = if let (Some(client), Some(key)) =
+        (directory.clone(), cli.revocations_key.as_deref())
+    {
+        let authority =
+            rds_discovery::authority::Authority::from_base32(key, cli.revocations_epoch)?;
+        let path = cli
+            .revocations_state
+            .unwrap_or_else(|| key_path.with_extension("revocations-state"));
+        let rotations = cli.authority_rotation;
+        let store =
+            tokio::task::spawn_blocking(move || -> Result<_, rds_discovery::DiscoveryError> {
+                let now = rds_discovery::clock::Reading::now()?;
+                let mut store = rds_discovery::policy::PolicyStore::open(&path, authority, now)?;
+                for receipt in rds_discovery::policy::read_rotations(&rotations)? {
+                    store.apply_rotation(&receipt, now)?;
+                }
+                Ok(store)
+            })
+            .await??;
+        Some(rds_agent::watch_revocations(
+            client,
+            store,
+            policy_handle,
+            std::time::Duration::from_secs(cli.revocations_interval),
+        )?)
+    } else {
+        None
+    };
+
     let endpoint = bind_endpoint(config).await?;
     endpoint.online().await;
 
-    let policy_handle = std::sync::Arc::new(policy.clone());
     let _announce = directory.clone().map(|client| {
         rds_net::announce(
             endpoint.clone(),
@@ -146,32 +187,6 @@ async fn main() -> anyhow::Result<()> {
             },
         )
     });
-
-    // Denylist feed: poll the estate-signed revocation snapshot so
-    // revoked grants die on live connections too, not just new ones.
-    let _revocations = match (directory, &cli.revocations_key) {
-        (Some(client), Some(s)) => {
-            let bytes = data_encoding::BASE32_NOPAD
-                .decode(s.to_uppercase().as_bytes())
-                .map_err(|e| anyhow::anyhow!("--revocations-key not base32: {e}"))?;
-            let raw: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("--revocations-key is not 32 bytes"))?;
-            let key = ed25519_dalek::VerifyingKey::from_bytes(&raw)
-                .map_err(|e| anyhow::anyhow!("--revocations-key invalid: {e}"))?;
-            Some(rds_agent::watch_revocations(
-                client,
-                key,
-                policy_handle.clone(),
-                std::time::Duration::from_secs(cli.revocations_interval),
-            ))
-        }
-        (Some(_), None) => {
-            eprintln!("note: --directory without --revocations-key — no denylist feed");
-            None
-        }
-        (None, _) => None,
-    };
 
     let agent = Agent::new(endpoint, policy);
     println!("endpoint id: {}", agent.id());
