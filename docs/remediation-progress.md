@@ -693,3 +693,20 @@ helper changed. W2.5/W2.6 remain partial for global budgets, startup, relay/medi
 ownership and full timeout/retry classes. Next: shared bounded owned-relay
 control framing, actual Drain/PeerGone receipt and preserved grace traffic.
 No remediation wave or deployed release is closed.
+
+## Cancellation of queued sync stores
+
+The relay-control full matrix exposed a G6 immediate-retry refusal while prior
+disk work still held its exclusive receive lock. Two deterministic regressions
+confirmed a canceled sink continued storing queued chunks. Its guard now aborts
+unstarted blocking work and stops running workers between stores, including
+when finish is canceled. Normal finish still drains and verifies every chunk.
+
+Formatting, sync Clippy, **3 focused unit tests** and **14 sync e2e tests** passed.
+See [contract](sync-journal.md#receive-cancellation) and
+[receipt](reports/rds-sync-cancel-20260925.md). G6's final phase now tests bounded
+byte-identical convergence after transient refusal; a fixed 30 ms wait does not
+guarantee remote cleanup. Executing syscalls and commits remain protected by
+their journal lock. Open/scan and assembly cancellation barriers stay open.
+No dependency, wire type or wave status changed. The final relay-control matrix
+will revalidate this correction together with its pending network changes.

@@ -15,6 +15,7 @@ use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -374,10 +375,28 @@ async fn manifest_from_file(file: Arc<File>) -> anyhow::Result<Manifest> {
 /// the wire read pipeline never waits on a flush. Owns the journal;
 /// closing `jobs` ends it and hands the journal back for assembly.
 struct JournalSink {
+    // Fields drop in declaration order: publish cancellation before closing
+    // the sender wakes the blocking receiver with its remaining queued data.
+    cancel: StoreCancellation,
     jobs: mpsc::Sender<(u32, Vec<u8>)>,
     /// First store failure, for error reporting across the task split.
     error: Arc<std::sync::Mutex<Option<String>>>,
     task: tokio::task::JoinHandle<Result<Journal, crate::SyncError>>,
+}
+
+/// A running filesystem syscall cannot be aborted. Stop between stores and
+/// also cancel a blocking task that has not started. The guard remains owned
+/// while finish awaits the task, so canceling finish has the same semantics.
+struct StoreCancellation {
+    canceled: Arc<AtomicBool>,
+    task: tokio::task::AbortHandle,
+}
+
+impl Drop for StoreCancellation {
+    fn drop(&mut self) {
+        self.canceled.store(true, Ordering::Release);
+        self.task.abort();
+    }
 }
 
 impl JournalSink {
@@ -386,11 +405,16 @@ impl JournalSink {
         let (finished, stopped) = tokio::sync::oneshot::channel();
         let error = Arc::new(std::sync::Mutex::new(None));
         let error_w = error.clone();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let canceled_w = canceled.clone();
         let task = tokio::task::spawn_blocking(move || {
             // Drop signals every exit, including panic, without depending on
             // a reader already waiting. Normal exit requires closing jobs.
             let _finished = finished;
             while let Some((index, data)) = job_rx.blocking_recv() {
+                if canceled_w.load(Ordering::Acquire) {
+                    break;
+                }
                 match journal.store(index, &data) {
                     Ok(_) => {}
                     Err(e) => {
@@ -401,7 +425,19 @@ impl JournalSink {
             }
             Ok(journal)
         });
-        (Self { jobs, error, task }, stopped)
+        let cancel = StoreCancellation {
+            canceled,
+            task: task.abort_handle(),
+        };
+        (
+            Self {
+                jobs,
+                error,
+                task,
+                cancel,
+            },
+            stopped,
+        )
     }
 
     /// Queue one bounded chunk for verification and storage; backpressures when the
@@ -420,8 +456,16 @@ impl JournalSink {
 
     /// Drain queued stores and take the journal back.
     async fn finish(self) -> anyhow::Result<Journal> {
-        drop(self.jobs);
-        match self.task.await {
+        let Self {
+            jobs,
+            task,
+            cancel,
+            error: _,
+        } = self;
+        drop(jobs);
+        let result = task.await;
+        drop(cancel);
+        match result {
             Ok(Ok(j)) => Ok(j),
             Ok(Err(e)) => Err(anyhow::anyhow!("chunk store failed: {e}")),
             Err(e) => Err(anyhow::anyhow!("journal task join: {e}")),
@@ -749,3 +793,6 @@ async fn refuse(send: &mut SendStream, reason: &str) -> anyhow::Result<()> {
     .await
     .context("send refuse")
 }
+
+#[cfg(test)]
+mod tests;

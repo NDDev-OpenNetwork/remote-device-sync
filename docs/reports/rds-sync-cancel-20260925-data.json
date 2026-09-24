@@ -1,0 +1,94 @@
+{
+  "source_base": "245c0ff",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-sync/src/engine.rs": "adad3bb0e39c0a315e07a1997ef26727167bd272a9e33a08ba1a5bf8ce2120eb",
+    "crates/rds-sync/src/engine/tests.rs": "589113390fd2430f77316d17f0f51c4104a1f7c4fd32603aa1de7986ea45b8fa",
+    "crates/rds-sync/tests/sync_e2e.rs": "29d611415f43711ede41f7a5433e63f3a96afab60ce58197d8d59aec38fda979"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 1.732554211979732,
+      "build_jobs": 2
+    },
+    {
+      "name": "units",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-sync",
+        "--lib",
+        "engine::tests"
+      ],
+      "code": 0,
+      "seconds": 49.91690293303691,
+      "build_jobs": 2
+    },
+    {
+      "name": "e2e",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-sync",
+        "--test",
+        "sync_e2e"
+      ],
+      "code": 0,
+      "seconds": 26.86680800607428,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "rds-sync",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 42.09536559099797,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "units": {
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 1
+    },
+    "e2e": {
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 1
+    }
+  },
+  "before_fix_failures": [
+    "dropping_sink_discards_stores_that_have_not_started",
+    "canceling_finish_discards_stores_that_have_not_started"
+  ],
+  "trigger": "G6 immediate retry encountered an exclusive receiver journal lock in the relay-control full matrix",
+  "validation_context": "Focused checks ran with the pending shared relay-control working changes; final combined workspace checks follow in the relay-control receipt",
+  "limits": [
+    "Executing filesystem transactions are not interrupted or rolled back",
+    "Cancellation does not force journal lock release",
+    "G6 proves bounded convergence, not immediate admission after cancellation",
+    "Journal open/scan and assembly cancellation remain open",
+    "No new dependency, wire type, runtime helper, deployment or wave closure"
+  ]
+}

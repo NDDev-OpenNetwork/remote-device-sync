@@ -384,11 +384,23 @@ async fn g6_repeated_kill_resume() {
             }
         }
     }
-    // A kill window may out-last a whole transfer on a slow runner —
-    // the loop proves "no kill corrupts state"; the final un-killed
-    // push proves resume still converges to byte-identical (G6).
+    // Cancellation is asynchronous: an in-flight filesystem operation still
+    // owns its exclusive journal lock. G6 promises eventual byte-identical
+    // convergence, not that a 30ms sleep makes immediate readmission safe.
+    // Bound the entire recovery phase; persistent errors still fail the test.
     if !completed {
-        push(&c_ep, target.clone(), &src).await.unwrap();
+        let mut last_error = None;
+        let resumed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match push(&c_ep, target.clone(), &src).await {
+                    Ok(stats) => break stats,
+                    Err(error) => last_error = Some(error),
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(resumed.is_ok(), "resume did not converge: {last_error:?}");
     }
     assert_eq!(std::fs::read(server_dir.join("fragile.bin")).unwrap(), data);
 }

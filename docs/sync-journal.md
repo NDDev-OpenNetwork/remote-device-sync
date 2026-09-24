@@ -42,6 +42,24 @@ Only successful durable publication allows the engine to emit Done. Async
 cancellation cannot revoke an already-running filesystem syscall or started
 assembly; reconcile actual content after an uncertain result.
 
+## Receive cancellation
+
+The async chunk sink owns a cancellation guard for its bounded disk queue.
+Dropping the sink or canceling its `finish` future requests abort if the blocking
+worker has not started, and tells a running worker to stop between stores. The
+flag is published before dropping the job sender. Pending chunk stores are not
+drained merely because a canceled producer closed its channel. Normal `finish`
+keeps the guard alive while the writer drains and returns its journal.
+
+A store already executing remains atomic at its existing filesystem transaction
+boundary; cancellation cannot interrupt a filesystem syscall or roll back a
+committed part. Journal scan/open and assembly retain their separate cancellation
+limits. The receive lock remains owned for as long as that work needs it; it is
+never forcibly removed to let a retry overlap. Immediate reconnection may still
+be refused while the previous operation unwinds. Recovery must reconcile actual
+verified content and allow bounded convergence, not assume a fixed sleep proves
+remote cleanup. See the [queued-store receipt](reports/rds-sync-cancel-20260925.md).
+
 ## Recovery and cleanup
 
 Opening a receive under its locks discards known `assembly` and `pending`
