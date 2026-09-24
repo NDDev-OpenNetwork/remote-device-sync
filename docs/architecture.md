@@ -38,6 +38,12 @@ and live inboxes, without a task/connection ownership cycle. A bounded task grou
 handles tags and inbox handoff; QUIC closure cancels and joins its workers.
 Its local budgets do not yet supply negotiated session IDs or per-service QoS.
 
+The [agent task boundary](agent-lifecycle.md) owns connection and bidirectional
+service task groups. Positive admission budgets cover pending handshakes and
+service workers; normal closure joins services and the authorization watchdog.
+Metrics sampling runs within the owning connection future. These application
+limits do not establish global media/disk/relay resource bounds.
+
 ## Research summary
 
 ### Connectivity models surveyed

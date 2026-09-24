@@ -506,6 +506,12 @@ impl Connection {
         self.inner.is_closed()
     }
 
+    /// Wait for transport closure. Service owners coordinate their own cleanup;
+    /// this notification does not imply all application tasks have been joined.
+    pub async fn wait_closed(&self) {
+        self.inner.closed().await;
+    }
+
     /// Snapshot of every live path's transport counters, normalized
     /// across backends. Used by media pacing (WS5) and metrics (WS7).
     pub fn path_stats(&self) -> Vec<PathStats> {

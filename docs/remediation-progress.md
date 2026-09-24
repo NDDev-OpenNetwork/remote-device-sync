@@ -25,7 +25,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
-| W2.5 | Partial; path-driver and uni-router lifecycle | Owned policy tasks terminate and endpoint close waits for them. Shared uni routing has acyclic ownership, 64 pending workers, bounded inboxes and cancel/join on closure. Agent/service task groups, global budgets, per-service fairness, relay queues and disk cancellation remain open. |
+| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate; uni routing is bounded and acyclic. Agent connection/service groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, client forwarding, relay queues and disk cancellation remain open. |
 
 ## Authorization change
 
@@ -653,3 +653,24 @@ budgets, relay pumps and disk cancellation. Kind-based routing still needs
 session IDs, negotiated limits and per-service fairness; local task bounds are
 not RSS/FD or latency-percentile acceptance. The next local lifecycle work is
 owned agent connection/service tasks and bounded admission. No wave is closed.
+
+## Agent service ownership and admission
+
+Two before-fix regressions showed runner cancellation left child sessions alive
+on both transports. The agent now owns connection/service groups and inline
+metrics sampling. Normal closure joins its authorization watchdog and service
+workers. Admission slots cover pending handshakes and live connections, while
+per-connection stream budgets apply backpressure. The positive CLI limits
+validate before identity creation. See [contract](agent-lifecycle.md) and
+[receipt](reports/rds-agent-lifecycle-20260925.md).
+
+Real TCP forwarding, runner/direct-serve cancellation, saturated partial hellos,
+refusal/readmission, watchdog cleanup and invalid binary limits passed. Final
+formatting, three Clippy lanes, **314 workspace tests** and **100 all-feature
+network/agent/CLI/relay tests** passed. No dependency or wire version changed.
+
+W2.5 and W2.6 remain partial: cancellation destructors request nested aborts;
+only the normal path joins all these children. Global resource bounds, client
+forwarding, relay pumps, media/disk cancellation, service fairness and complete
+timeout/retry policy remain open. Next: complete client request deadlines and
+owned bounded local forwarding. No remediation wave or deployment is closed.

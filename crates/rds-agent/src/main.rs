@@ -3,7 +3,7 @@
 use std::str::FromStr;
 
 use clap::Parser;
-use rds_agent::{Agent, AgentPolicy};
+use rds_agent::{Agent, AgentLimits, AgentPolicy};
 use rds_net::EndpointId;
 use rds_net::{
     EndpointOverrides, EndpointSettings, Ticket, bind_endpoint, default_key_path,
@@ -48,6 +48,12 @@ struct Cli {
     /// Permit TcpConnect to any host:port (development only).
     #[arg(long)]
     allow_any_tcp: bool,
+    /// Pending handshakes and admitted connections; positive 16-bit limit.
+    #[arg(long, default_value = "32")]
+    max_connections: std::num::NonZeroU16,
+    /// Concurrent service tasks per connection, including hello/Authz I/O.
+    #[arg(long, default_value = "64")]
+    max_streams: std::num::NonZeroU16,
     /// Directory HTTP(S) origin or legacy IP:port; the agent publishes its
     /// signed record and keeps it fresh.
     #[arg(long)]
@@ -220,7 +226,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let agent = Agent::new(endpoint, policy);
+    let agent = Agent::new(endpoint, policy)
+        .with_limits(AgentLimits::new(cli.max_connections, cli.max_streams));
     println!("endpoint id: {}", agent.id());
     println!("ticket: {}", Ticket::of(&agent.endpoint));
     if agent.policy.allow.is_empty() {

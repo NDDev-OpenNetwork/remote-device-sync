@@ -8,8 +8,9 @@
 //! - **Capability** — when `policy.issuers` is non-empty the peer must
 //!   additionally present a [`Grant`](rds_core::grant::Grant) signed by
 //!   a trusted issuer as the first stream on the connection. Until a
-//!   grant verifies, every service stream is refused; afterwards each
-//!   stream is checked against the grant's service scope and
+//!   authorization begins, service streams are refused; streams overlapping
+//!   its reply/commit transaction wait with a deadline. Afterwards each
+//!   stream is checked against the committed grant's service scope and
 //!   constraints (TCP ports, displays, bitrate ceiling).
 //!
 //! Revocation: `policy.denylist` holds revoked grant ids — a live
@@ -32,12 +33,15 @@ use rds_core::{
 };
 use rds_net::{Connection, Endpoint, EndpointId};
 use tokio::net::TcpStream;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 mod authz;
+mod limits;
 mod revocations;
 use authz::{ConnAuthz, ConnectionLifetime, authorize};
+pub use limits::AgentLimits;
 pub use revocations::{RevocationFeed, RevocationPolicy, watch_revocations};
 
 /// Monotonic session ids for structured tracing — every connection's
@@ -53,6 +57,8 @@ fn next_session_id() -> u64 {
 /// otherwise park a task per stream for the connection's lifetime —
 /// bounded here so silent streams cost seconds, not the session.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Mutex acquisition that survives a poisoned lock: every mutex here
 /// guards plain data (a state word, an `Option`, a `HashSet`) whose
@@ -166,15 +172,42 @@ pub struct Agent {
     pub endpoint: Endpoint,
     pub policy: Arc<AgentPolicy>,
     desktop: bool,
+    limits: AgentLimits,
+    admission: Arc<Semaphore>,
+    stream_counter: limits::StreamCounter,
 }
 
 impl Agent {
     pub fn new(endpoint: Endpoint, policy: AgentPolicy) -> Self {
+        let limits = AgentLimits::default();
         Self {
             endpoint,
             policy: Arc::new(policy),
             desktop: cfg!(feature = "desktop"),
+            limits,
+            admission: Arc::new(Semaphore::new(limits.connections())),
+            stream_counter: Default::default(),
         }
+    }
+
+    /// Select budgets before starting the agent. Consuming self prevents
+    /// replacing the admission semaphore while a runner borrows this agent.
+    pub fn with_limits(mut self, limits: AgentLimits) -> Self {
+        self.limits = limits;
+        self.admission = Arc::new(Semaphore::new(limits.connections()));
+        self
+    }
+
+    /// Occupied connection slots, including pending handshakes. This differs
+    /// from the transport sampler's count of established allowed connections.
+    pub fn active_connections(&self) -> usize {
+        self.limits.connections() - self.admission.available_permits()
+    }
+
+    /// Service tasks across this agent, including hello/Authz waits. This does
+    /// not count uni routing, blocking disk jobs or native media workers.
+    pub fn active_streams(&self) -> usize {
+        self.stream_counter.active()
     }
 
     pub fn id(&self) -> EndpointId {
@@ -184,34 +217,74 @@ impl Agent {
     /// Accept connections until the endpoint closes.
     pub async fn run(&self) -> anyhow::Result<()> {
         info!(id = %self.endpoint.id(), "agent listening");
-        while let Some(incoming) = self.endpoint.accept().await {
-            let policy = self.policy.clone();
-            let desktop = self.desktop;
-            let metrics = self.endpoint.metrics();
-            tokio::spawn(async move {
-                match incoming.await {
-                    Ok(conn) => {
-                        let span = info_span!(
-                            "rds.conn",
-                            peer = %conn.remote_id(),
-                            session_id = next_session_id(),
-                        );
-                        let res = serve_connection(conn, policy, desktop, metrics)
-                            .instrument(span)
-                            .await;
-                        if let Err(e) = res {
-                            debug!("connection ended: {e}");
-                        }
+        let mut connections = JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                result = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(Err(error)) = result {
+                        debug!(%error, "connection task ended");
                     }
-                    Err(e) => debug!("incoming handshake failed: {e}"),
                 }
-            });
+                incoming = self.endpoint.accept() => {
+                    let Some(incoming) = incoming else { break; };
+                    let Ok(permit) = self.admission.clone().try_acquire_owned() else {
+                        // Dropping Incoming refuses the handshake without a
+                        // parked application task or a new connection slot.
+                        drop(incoming);
+                        debug!("connection refused: admission budget exhausted");
+                        continue;
+                    };
+                    let policy = self.policy.clone();
+                    let desktop = self.desktop;
+                    let metrics = self.endpoint.metrics();
+                    let limits = self.limits;
+                    let stream_counter = self.stream_counter.clone();
+                    connections.spawn(async move {
+                        let _permit = permit;
+                        match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
+                            Ok(Ok(conn)) => {
+                                let span = info_span!(
+                                    "rds.conn",
+                                    peer = %conn.remote_id(),
+                                    session_id = next_session_id(),
+                                );
+                                if let Err(error) = serve_connection(conn, policy, desktop, metrics, limits, stream_counter)
+                                    .instrument(span).await {
+                                    debug!(%error, "connection ended");
+                                }
+                            }
+                            Ok(Err(error)) => debug!(%error, "incoming handshake failed"),
+                            Err(_) => debug!("incoming handshake timed out"),
+                        }
+                    });
+                }
+            }
+        }
+        // Endpoint closure wakes established connections and handshakes. Let
+        // their normal paths join service workers before this runner returns.
+        if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+            while let Some(result) = connections.join_next().await {
+                if let Err(error) = result {
+                    debug!(%error, "connection task ended");
+                }
+            }
+        })
+        .await
+        .is_err()
+        {
+            debug!("agent shutdown budget expired; aborting connection tasks");
+            connections.shutdown().await;
         }
         Ok(())
     }
 
     /// Serve a single already-established connection.
     pub async fn serve(&self, conn: Connection) -> anyhow::Result<()> {
+        let Ok(_permit) = self.admission.clone().try_acquire_owned() else {
+            conn.close(5u32.into(), b"agent connection budget exhausted");
+            anyhow::bail!("agent connection budget exhausted");
+        };
         let span = info_span!(
             "rds.conn",
             peer = %conn.remote_id(),
@@ -222,6 +295,8 @@ impl Agent {
             self.policy.clone(),
             self.desktop,
             self.endpoint.metrics(),
+            self.limits,
+            self.stream_counter.clone(),
         )
         .instrument(span)
         .await
@@ -233,6 +308,8 @@ async fn serve_connection(
     policy: Arc<AgentPolicy>,
     desktop: bool,
     metrics: rds_net::metrics::Registry,
+    limits: AgentLimits,
+    stream_counter: limits::StreamCounter,
 ) -> anyhow::Result<()> {
     let peer = conn.remote_id();
     if !policy.allow.contains(&peer) {
@@ -241,35 +318,52 @@ async fn serve_connection(
         anyhow::bail!("peer {peer} not in allowlist");
     }
     info!(%peer, "peer connected");
-    // Fold this connection's per-path transport counters into the
-    // endpoint registry for the connection's lifetime.
-    tokio::spawn(metrics.sampler(conn.clone()).run(Duration::from_secs(1)));
     let authz = Arc::new(ConnAuthz::new(policy.grants_required()));
-    let _lifetime = ConnectionLifetime {
+    let lifetime = ConnectionLifetime {
         conn: conn.clone(),
         authz: authz.clone(),
     };
+    // The sampler is part of this future, so cancellation drops its gauges
+    // immediately rather than leaving a detached observer holding Connection.
+    let mut sampler = metrics.sampler(conn.clone());
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut streams = JoinSet::new();
     loop {
-        let (send, recv) = match conn.accept_bi().await {
-            Ok(streams) => streams,
-            Err(e) => {
-                debug!(%peer, "connection closed: {e}");
-                return Ok(());
+        tokio::select! {
+            biased;
+            _ = conn.wait_closed() => break,
+            result = streams.join_next(), if !streams.is_empty() => {
+                if let Some(Err(error)) = result { debug!(%error, "stream task ended"); }
             }
-        };
-        let policy = policy.clone();
-        let conn = conn.clone();
-        let authz = authz.clone();
-        let span = tracing::Span::current();
-        tokio::spawn(
-            async move {
-                if let Err(e) = serve_stream(conn, send, recv, policy, authz, desktop).await {
-                    debug!("stream ended: {e}");
-                }
+            _ = tick.tick() => sampler.sample(),
+            incoming = conn.accept_bi(), if streams.len() < limits.streams() => {
+                let (send, recv) = match incoming {
+                    Ok(streams) => streams,
+                    Err(error) => {
+                        debug!(%peer, %error, "connection closed");
+                        break;
+                    }
+                };
+                let policy = policy.clone();
+                let conn = conn.clone();
+                let authz = authz.clone();
+                let span = tracing::Span::current();
+                let active = stream_counter.enter();
+                streams.spawn(async move {
+                    let _active = active;
+                    if let Err(error) = serve_stream(conn, send, recv, policy, authz, desktop).await {
+                        debug!(%error, "stream ended");
+                    }
+                }.instrument(span));
             }
-            .instrument(span),
-        );
+        }
     }
+    sampler.sample();
+    authz.close_and_wait().await;
+    drop(lifetime);
+    streams.shutdown().await;
+    Ok(())
 }
 
 async fn serve_stream(

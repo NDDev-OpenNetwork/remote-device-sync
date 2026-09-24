@@ -48,13 +48,15 @@ impl Drop for GrantSlot {
 
 struct GrantLease {
     grant: Arc<VerifiedGrant>,
-    watcher: JoinHandle<()>,
+    watcher: Option<JoinHandle<()>>,
     _slot: GrantSlot,
 }
 
 impl Drop for GrantLease {
     fn drop(&mut self) {
-        self.watcher.abort();
+        if let Some(watcher) = &self.watcher {
+            watcher.abort();
+        }
     }
 }
 
@@ -120,7 +122,7 @@ impl ConnAuthz {
         let watcher = tokio::spawn(watch_grant(conn.clone(), grant.clone(), denied));
         *state = State::Authorizing(Some(GrantLease {
             grant,
-            watcher,
+            watcher: Some(watcher),
             _slot: slot,
         }));
         Ok(())
@@ -150,6 +152,26 @@ impl ConnAuthz {
         let previous = std::mem::replace(&mut *lock(&self.state), State::Closed);
         drop(previous);
         self.changed.send_replace(());
+    }
+
+    /// Normal teardown joins the watchdog. The synchronous close/drop path
+    /// still aborts it when the owning service future is itself canceled.
+    pub(crate) async fn close_and_wait(&self) {
+        let previous = std::mem::replace(&mut *lock(&self.state), State::Closed);
+        self.changed.send_replace(());
+        let watcher = match previous {
+            State::Authorizing(Some(mut lease)) | State::Granted(mut lease) => lease.watcher.take(),
+            _ => None,
+        };
+        // The lease and replay reservation have already dropped before await.
+        if let Some(watcher) = watcher {
+            watcher.abort();
+            if let Err(error) = watcher.await
+                && !error.is_cancelled()
+            {
+                tracing::debug!(%error, "grant watchdog ended");
+            }
+        }
     }
 
     pub(crate) fn scope(
@@ -476,6 +498,36 @@ mod tests {
             client.close().await;
             server.close().await;
         }
+    }
+
+    #[tokio::test]
+    async fn normal_teardown_joins_watchdog_and_releases_reservation() {
+        let (server, client, conn, _peer) = connection_pair().await;
+        let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+        let authz = ConnAuthz::new(true);
+        authz.begin().unwrap();
+        authz
+            .install(&conn, &policy, verified(&policy, conn.remote_id()))
+            .unwrap();
+        authz.commit(&policy, &conn).unwrap();
+        let watcher = {
+            let state = lock(&authz.state);
+            let State::Granted(lease) = &*state else {
+                panic!("missing committed grant");
+            };
+            lease.watcher.as_ref().unwrap().abort_handle()
+        };
+        assert!(!watcher.is_finished());
+        authz.close_and_wait().await;
+        assert!(watcher.is_finished());
+        assert!(lock(&policy.active_grants).is_empty());
+        assert!(matches!(
+            authz.service_scope(&policy).await,
+            Err(ScopeError::Closed)
+        ));
+        conn.close(0u32.into(), b"done");
+        client.close().await;
+        server.close().await;
     }
 
     #[tokio::test]

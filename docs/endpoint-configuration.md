@@ -4,7 +4,7 @@ Both `rds` and `rds-agent` accept `--endpoint-config FILE`. This versioned JSON
 file controls the endpoint transport. It does not contain the endpoint secret,
 grant issuer, registry/revocation authority, directory credentials or service
 policy; their existing provisioning options remain separate. Unified role-level
-policy and session-budget configuration is still W2.1 work.
+policy and negotiated session-budget configuration is still W2.1 work.
 
 ## Precedence and validation
 
@@ -111,3 +111,11 @@ and policy consistency, not DNS address pinning, SSH host-key verification or
 an implementation of the SSH protocol. Those remain separate workstreams.
 No wire tags or protocol version changed. See the
 [TCP destination receipt](reports/rds-tcp-target-20260925.md).
+
+## Agent admission options
+
+`rds-agent --max-connections N --max-streams N` selects positive 16-bit
+application budgets (defaults 32 and 64). Connections include pending handshakes;
+streams are per connection. Invalid values fail during argument parsing before
+key creation. These flags are independent of the transport JSON schema. See
+[agent lifecycle](agent-lifecycle.md) for refusal, backpressure and cleanup.
