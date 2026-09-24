@@ -47,3 +47,27 @@ fn id_uses_valid_file_and_explicit_overrides_without_network() {
         .unwrap();
     assert_eq!(id, rds_net::SecretKey::from_bytes(&seed).public());
 }
+
+#[test]
+fn invalid_forward_budget_fails_before_identity_or_dial() {
+    for command in ["ssh", "forward"] {
+        for limit in ["0", "65536", "-1", "unlimited"] {
+            let dir = Scratch::new();
+            let output = run_with_tail(
+                &[
+                    "--no-relay",
+                    command,
+                    "unused-peer",
+                    "--remote",
+                    "127.0.0.1:22",
+                    "--max-connections",
+                    limit,
+                ],
+                &[],
+                &dir,
+            );
+            assert!(!output.status.success());
+            assert!(!dir.0.join("endpoint.key").exists(), "{command}/{limit}");
+        }
+    }
+}

@@ -119,3 +119,11 @@ application budgets (defaults 32 and 64). Connections include pending handshakes
 streams are per connection. Invalid values fail during argument parsing before
 key creation. These flags are independent of the transport JSON schema. See
 [agent lifecycle](agent-lifecycle.md) for refusal, backpressure and cleanup.
+
+## Client forwarding options
+
+`rds ssh` and `rds forward` accept `--max-connections N` (1–65535, default 64)
+for their local listener's concurrent forwarding workers. This is independent
+of the agent's connection budget. Invalid values fail before identity creation
+or dial; these service options do not extend the endpoint JSON schema. See
+[client lifecycle](client-lifecycle.md) for request deadlines and cancellation.

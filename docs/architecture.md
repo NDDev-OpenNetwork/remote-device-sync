@@ -44,6 +44,11 @@ service workers; normal closure joins services and the authorization watchdog.
 Metrics sampling runs within the owning connection future. These application
 limits do not establish global media/disk/relay resource bounds.
 
+The [client request boundary](client-lifecycle.md) applies one deadline to stream
+opening, request write and response completion. Pending streams reset on
+cancellation; incomplete authorization closes its connection. Local forwarding
+owns a bounded worker group with connection-close joins and cancellation cleanup.
+
 ## Research summary
 
 ### Connectivity models surveyed

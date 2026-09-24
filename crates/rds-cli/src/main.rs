@@ -88,6 +88,9 @@ enum Command {
         /// Remote sshd address.
         #[arg(long, default_value = "127.0.0.1:22")]
         remote: rds_core::TcpTarget,
+        /// Maximum simultaneous local forwarding workers (positive 16-bit).
+        #[arg(long, default_value = "64")]
+        max_connections: std::num::NonZeroU16,
     },
     /// Forward a local port to an arbitrary peer-side TCP target.
     Forward {
@@ -97,6 +100,9 @@ enum Command {
         /// Remote target host:port.
         #[arg(long)]
         remote: rds_core::TcpTarget,
+        /// Maximum simultaneous local forwarding workers (positive 16-bit).
+        #[arg(long, default_value = "64")]
+        max_connections: std::num::NonZeroU16,
     },
     /// Open a remote desktop session (requires the `desktop` feature).
     Desktop {
@@ -257,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
             target,
             bind,
             remote,
+            max_connections,
         } => {
             let conn = Arc::new(
                 dial(
@@ -266,19 +273,21 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?,
             );
-            let (host, port) = remote.into_parts();
+            let listener = tokio::net::TcpListener::bind(bind).await?;
+            let local = listener.local_addr()?;
             eprintln!(
                 "endpoint {} — run: ssh -p {} <user>@{}",
                 conn.remote_id(),
-                bind.port(),
-                bind.ip()
+                local.port(),
+                local.ip()
             );
-            rds_cli::forward_listener(conn, bind, host, port).await?;
+            rds_cli::forward_bound_listener(conn, listener, remote, max_connections).await?;
         }
         Command::Forward {
             target,
             bind,
             remote,
+            max_connections,
         } => {
             let conn = Arc::new(
                 dial(
@@ -288,8 +297,8 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?,
             );
-            let (host, port) = remote.into_parts();
-            rds_cli::forward_listener(conn, bind, host, port).await?;
+            let listener = tokio::net::TcpListener::bind(bind).await?;
+            rds_cli::forward_bound_listener(conn, listener, remote, max_connections).await?;
         }
         Command::Desktop {
             target,

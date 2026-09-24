@@ -25,7 +25,8 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
-| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate; uni routing is bounded and acyclic. Agent connection/service groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, client forwarding, relay queues and disk cancellation remain open. |
+| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, relay queues and disk cancellation remain open. |
+| W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
 
 ## Authorization change
 
@@ -674,3 +675,21 @@ only the normal path joins all these children. Global resource bounds, client
 forwarding, relay pumps, media/disk cancellation, service fairness and complete
 timeout/retry policy remain open. Next: complete client request deadlines and
 owned bounded local forwarding. No remediation wave or deployment is closed.
+
+## Complete client preludes and owned TCP forwarding
+
+Two real-QUIC regressions reproduced unbounded stream-credit/write waits before
+the old ACK timeout. Requests now have one 15-second prelude budget, and failed
+or canceled streams reset/stop. Authz cancellation closes its connection;
+successful one-shot responses end at FIN. TCP/Sync bodies retain their own
+service policy. Local forwarding uses a positive configurable worker limit and
+owned cleanup, with normal joins and cancellation-triggered socket closure.
+
+Final formatting, three Clippy lanes, **323 workspace tests**, **109 all-feature
+network/agent/CLI/relay tests** and **13 isolated CLI tests** passed. See
+[contract](client-lifecycle.md) and [receipt](reports/rds-client-lifecycle-20260925.md).
+Existing iroh is a new test-only direct dependency; no package version or runtime
+helper changed. W2.5/W2.6 remain partial for global budgets, startup, relay/media
+ownership and full timeout/retry classes. Next: shared bounded owned-relay
+control framing, actual Drain/PeerGone receipt and preserved grace traffic.
+No remediation wave or deployed release is closed.
