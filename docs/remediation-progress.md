@@ -195,6 +195,15 @@ implementation claim. TLS and protocol policy stay in RDS Rust code.
 
 ## Next sequence
 
+While validating W1.4, the workspace run exposed a measurement race in
+`bounded_queue_newest_wins`: draining a live queue returned 65 headers over
+time even though the instantaneous capacity is 64. Receiver depth now has the
+same atomic diagnostic access as sender depth, and the test checks occupancy
+before and during a bounded batch. Frame order, freshness and the 64-entry
+limit remain asserted; no capacity or latency budget was relaxed. The focused
+regression passed after this W0.1 fixture correction. Full matrix results are
+recorded with the policy change that triggered the run.
+
 Complete W1.4 durable revocation freshness, followed by W1.5 directory
 transactions and W1.9 wire
 binding/accounting. Each change retains

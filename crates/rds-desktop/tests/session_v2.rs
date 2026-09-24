@@ -234,11 +234,19 @@ async fn bounded_queue_newest_wins() {
     let mut h = harness(240, 1024, 60, None, false).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    // Drain: mailbox depth is capped at 64; every seq is still
-    // monotonically increasing — stale frames were dropped upstream.
+    // Measure occupancy atomically. Counting a drain while the producer keeps
+    // sending can exceed 64 without the queue ever exceeding its capacity.
+    let depth = h.session.frame_headers.len();
+    assert!(depth <= 64, "queue held {depth} headers, cap is 64");
+    // Bound this batch to the observed depth; arrivals can evict older entries,
+    // but sequence numbers must still increase and total occupancy stays capped.
     let mut last = 0u64;
-    let mut count = 0usize;
-    while let Some(h) = h.session.frame_headers.try_recv() {
+    for _ in 0..depth {
+        let depth = h.session.frame_headers.len();
+        assert!(depth <= 64, "queue held {depth} headers, cap is 64");
+        let Some(h) = h.session.frame_headers.try_recv() else {
+            break;
+        };
         assert!(
             h.seq > last || last == 0,
             "stale seq {} after {}",
@@ -246,9 +254,7 @@ async fn bounded_queue_newest_wins() {
             last
         );
         last = h.seq;
-        count += 1;
     }
-    assert!(count <= 64, "queue held {count} headers, cap is 64");
     // Producer runs at 240fps; the latest delivered seq must keep
     // advancing past the queue cap — freshness proven. Poll with a
     // deadline: slow CI runners produce/deliver slower but the seq
