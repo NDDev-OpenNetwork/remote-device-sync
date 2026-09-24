@@ -44,7 +44,7 @@ struct Cli {
     allow: Vec<String>,
     /// SSH socket the TcpConnect service may reach.
     #[arg(long, default_value = "127.0.0.1:22")]
-    ssh: String,
+    ssh: rds_core::TcpTarget,
     /// Permit TcpConnect to any host:port (development only).
     #[arg(long)]
     allow_any_tcp: bool,
@@ -121,12 +121,7 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no --key-file and no config dir"))?;
     let secret_key = load_or_create_key(&key_path)?;
 
-    let (ssh_host, ssh_port) = cli
-        .ssh
-        .split_once(':')
-        .map(|(h, p)| (h.to_string(), p.parse::<u16>()))
-        .ok_or_else(|| anyhow::anyhow!("--ssh must be host:port"))
-        .and_then(|(h, p)| p.map(|p| (h, p)).map_err(Into::into))?;
+    let (ssh_host, ssh_port) = cli.ssh.into_parts();
 
     let mut policy = AgentPolicy::ssh_only((ssh_host, ssh_port));
     for id in &cli.allow {
@@ -262,5 +257,20 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn tcp_target_flags_reject_invalid_destinations() {
+        for target in [":22", "host:0", "host:nope", "::1:22", "[::1]22"] {
+            assert!(
+                Cli::try_parse_from(["rds-agent", "--ssh", target]).is_err(),
+                "{target}"
+            );
+        }
     }
 }

@@ -26,6 +26,10 @@ impl Drop for Scratch {
 }
 
 fn run(args: &[&str], scratch: &Scratch) -> std::process::Output {
+    run_with_tail(args, TAIL, scratch)
+}
+
+fn run_with_tail(args: &[&str], tail: &[&str], scratch: &Scratch) -> std::process::Output {
     struct Child(std::process::Child);
     impl Drop for Child {
         fn drop(&mut self) {
@@ -38,7 +42,7 @@ fn run(args: &[&str], scratch: &Scratch) -> std::process::Output {
             .arg("--key-file")
             .arg(scratch.0.join("endpoint.key"))
             .args(args)
-            .args(TAIL)
+            .args(tail)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

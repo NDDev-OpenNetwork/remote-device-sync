@@ -19,6 +19,9 @@ updated build order — lives in [research.md](research.md).
 CLI and agent share [versioned endpoint configuration](endpoint-configuration.md)
 with explicit file/flag precedence, backend/relay validation and preflight before
 identity creation. The owned relay uses a separately pinned public identity.
+TCP service flags, client requests and agent policy use the same canonical
+`rds-core::TcpTarget`; IPv6 spelling and IPv4-mapped addresses normalize before
+policy comparison and dialing. Parsing has no DNS or socket side effects.
 Role-level authority/service policy, negotiated session limits and lifecycle
 configuration remain W2 work; the endpoint schema does not claim to cover them.
 

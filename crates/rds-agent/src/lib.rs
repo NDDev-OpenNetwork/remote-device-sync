@@ -120,11 +120,17 @@ impl AgentPolicy {
     }
 
     pub fn permits_tcp(&self, host: &str, port: u16) -> bool {
+        let Ok(target) = rds_core::TcpTarget::new(host, port) else {
+            return false;
+        };
+        self.permits_tcp_target(&target)
+    }
+
+    fn permits_tcp_target(&self, target: &rds_core::TcpTarget) -> bool {
         self.allow_any_tcp
-            || self
-                .tcp_targets
-                .iter()
-                .any(|(h, p)| *p == port && h.eq_ignore_ascii_case(host))
+            || self.tcp_targets.iter().any(|(host, port)| {
+                rds_core::TcpTarget::new(host, *port).is_ok_and(|allowed| &allowed == target)
+            })
     }
 
     /// Whether this connection's peer must present a grant.
@@ -282,7 +288,7 @@ async fn serve_stream(
     if let StreamHello::Authz(grant) = hello {
         return authorize(&conn, send, grant, &policy, &authz).await;
     }
-    let grant = match authz.scope(&policy) {
+    let grant = match authz.service_scope(&policy).await {
         Ok(g) => g,
         Err(why) => {
             if why.terminal() {
@@ -333,7 +339,20 @@ async fn serve_stream(
                 send.finish()?;
             }
             StreamHello::TcpConnect { host, port } => {
-                if !policy.permits_tcp(&host, port) {
+                let target = match rds_core::TcpTarget::new(&host, port) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        write_frame(
+                            &mut send,
+                            &HelloAck::Error {
+                                message: format!("invalid TCP destination: {error}"),
+                            },
+                        )
+                        .await?;
+                        return Err(error.into());
+                    }
+                };
+                if !policy.permits_tcp_target(&target) {
                     write_frame(
                         &mut send,
                         &HelloAck::Error {
@@ -343,6 +362,7 @@ async fn serve_stream(
                     .await?;
                     anyhow::bail!("tcp target {host}:{port} rejected");
                 }
+                let (host, port) = target.into_parts();
                 match TcpStream::connect((host.as_str(), port)).await {
                     Ok(mut tcp) => {
                         write_frame(&mut send, &HelloAck::Ok).await?;

@@ -24,7 +24,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
-| W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, identity-before-network preflight and owned-relay CLI/agent selection are implemented. Role-level service/authority settings and timeout policy remain open. |
+| W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 
 ## Authorization change
 
@@ -569,3 +569,38 @@ W2.1 remains partial for unified role/service/authority configuration and timeou
 policy. The next local correction is common SSH/TCP destination parsing and
 preflight, followed by negotiated sessions, scopes and structured lifecycle work.
 Native macOS, real reachability/failover and deployed integration remain open.
+
+## Canonical SSH/TCP destination preflight
+
+W2.1 now shares `rds-core::TcpTarget` between both command-line frontends,
+the client library and agent wire handling. Canonical IP/hostname representation
+is used by both policy matching and actual TCP dialing. IPv6 flags use brackets;
+invalid syntax, oversized names, non-unicast literal addresses and zero ports
+fail before network operations. Actual binary tests verify invalid flags leave
+the identity file absent. Development `allow_any_tcp` still validates targets.
+
+Two baseline argument regressions and two policy regressions failed before the
+fix. A real IPv6 TCP service is reached through both QUIC backends while an
+off-policy address stays denied; malformed raw requests are rejected and do not
+prevent a subsequent valid request. See the
+[contract](endpoint-configuration.md#tcp-service-destinations) and
+[receipt](reports/rds-tcp-target-20260925.md). No dependency, wire version or runtime
+helper changed. Syntax normalization does not replace DNS address pinning or
+SSH host-key/authentication policy. Role configuration, timeout classes and
+negotiated session ownership remain open. The next local correction is the
+owned path driver's terminal lifecycle (audit T05 / W2.5).
+
+The all-feature matrix exposed a W1.2 ordering race: a successful Authz ACK can
+reach the peer before the authorization task resumes to commit, so an immediate
+service was incorrectly rejected as pending. A deterministic real-QUIC test
+reproduced it. Services now wait for an in-progress admission with a deadline,
+subscribing before inspecting state, then recheck the committed grant and policy.
+Failed commit and closure wake the waiters without granting access. Tests cover
+commit, abort and revocation; the original managed-policy integration fixture
+remains unchanged. Requests arriving before authorization starts still fail.
+
+Final formatting and three Clippy lanes passed, as did **296 workspace tests**,
+**81 all-feature network/agent/CLI/relay tests** and **7 isolated binary tests**.
+The initial full-feature failure and its deterministic reproduction are retained
+in private evidence; only the corrected final matrix supports these totals.
+No deployment or remediation wave closure occurred.

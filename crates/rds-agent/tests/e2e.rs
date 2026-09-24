@@ -39,6 +39,102 @@ async fn tcp_echo() -> u16 {
     port
 }
 
+#[cfg(feature = "transport-noq")]
+fn tcp_target_backends() -> Vec<rds_net::Backend> {
+    vec![rds_net::Backend::Iroh, rds_net::Backend::Noq]
+}
+
+#[test]
+fn tcp_target_policy_matches_equivalent_ip_spellings() {
+    let policy = AgentPolicy::ssh_only(("0:0:0:0:0:0:0:1".into(), 22));
+    assert!(policy.permits_tcp("::1", 22));
+    assert!(!policy.permits_tcp("::1", 23));
+    assert!(!policy.permits_tcp("127.0.0.1", 22));
+    let mapped = AgentPolicy::ssh_only(("::ffff:127.0.0.1".into(), 22));
+    assert!(mapped.permits_tcp("127.0.0.1", 22));
+}
+
+#[test]
+fn tcp_target_policy_rejects_malformed_targets_in_development_mode() {
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 22));
+    policy.allow_any_tcp = true;
+    for (host, port) in [
+        ("", 22),
+        ("localhost", 0),
+        ("[::1]", 22),
+        ("0.0.0.0", 22),
+        ("a\0b", 22),
+    ] {
+        assert!(!policy.permits_tcp(host, port), "accepted invalid target");
+    }
+}
+
+#[cfg(not(feature = "transport-noq"))]
+fn tcp_target_backends() -> Vec<rds_net::Backend> {
+    vec![rds_net::Backend::Iroh]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canonical_ipv6_tcp_target_connects_without_widening_policy() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for backend in tcp_target_backends() {
+            let listener = TcpListener::bind("[::1]:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let destination: rds_core::TcpTarget =
+                format!("[0:0:0:0:0:0:0:1]:{port}").parse().unwrap();
+            assert_eq!(destination.host(), "::1");
+            let echo = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0u8; 8];
+                socket.read_exact(&mut bytes).await.unwrap();
+                socket.write_all(&bytes).await.unwrap();
+                socket.shutdown().await.unwrap();
+            });
+            let config = || EndpointConfig {
+                backend,
+                discovery: false,
+                bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                ..Default::default()
+            };
+            let server = bind_endpoint(config()).await.unwrap();
+            let client = bind_endpoint(config()).await.unwrap();
+            let mut policy = AgentPolicy::ssh_only(destination.clone().into_parts());
+            policy.allow.insert(client.id());
+            let agent = Agent::new(server.clone(), policy);
+            let serving = tokio::spawn(async move { agent.run().await });
+            let conn = rds_cli::connect(&client, server.addr()).await.unwrap();
+            // Bypass the client validator to exercise the untrusted wire path.
+            let oversized = "a".repeat(254);
+            for (host, port) in [("", port), ("::1", 0), (oversized.as_str(), port)] {
+                let (mut raw_send, mut raw_recv) = conn.open_bi().await.unwrap();
+                write_frame(&mut raw_send, &StreamHello::TcpConnect { host: host.into(), port }).await.unwrap();
+                raw_send.finish().unwrap();
+                let ack: HelloAck = read_frame(&mut raw_recv).await.unwrap();
+                assert!(matches!(ack, HelloAck::Error { message } if message.starts_with("invalid TCP destination:")));
+            }
+            // Same port on a different address remains outside this policy.
+            assert!(rds_cli::open_tcp(&conn, "127.0.0.1", port).await.is_err());
+            let (mut send, mut recv) =
+                rds_cli::open_tcp(&conn, destination.host(), destination.port())
+                    .await
+                    .unwrap();
+            send.write_all(b"ipv6-rds").await.unwrap();
+            send.finish().unwrap();
+            let mut bytes = [0u8; 8];
+            recv.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"ipv6-rds");
+            echo.await.unwrap();
+            conn.close(0u32.into(), b"test complete");
+            serving.abort();
+            let _ = serving.await;
+            client.close().await;
+            server.close().await;
+        }
+    })
+    .await
+    .expect("IPv6 TCP service must complete over each transport");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ping_and_tcp_forward_over_relay() {
     let (_relay, relay_url) = test_relay().await;

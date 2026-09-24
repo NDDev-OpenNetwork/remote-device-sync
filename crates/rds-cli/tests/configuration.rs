@@ -3,6 +3,22 @@ const TAIL: &[&str] = &["id"];
 include!("../../../tests/support/endpoint_cli.rs");
 
 #[test]
+fn invalid_tcp_destination_fails_before_identity_or_dial() {
+    for command in ["ssh", "forward"] {
+        for target in [":22", "host:0", "host:nope", "::1:22", "[::1]22"] {
+            let dir = Scratch::new();
+            let output = run_with_tail(
+                &["--no-relay", command, "unused-peer", "--remote", target],
+                &[],
+                &dir,
+            );
+            assert!(!output.status.success());
+            assert!(!dir.0.join("endpoint.key").exists(), "{command}/{target}");
+        }
+    }
+}
+
+#[test]
 fn id_uses_valid_file_and_explicit_overrides_without_network() {
     let dir = Scratch::new();
     let config = dir.0.join("endpoint.json");

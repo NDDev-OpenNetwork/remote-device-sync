@@ -62,6 +62,7 @@ impl Drop for GrantLease {
 /// occurs under it; a concurrent Authz can never overwrite a live lease.
 pub(crate) struct ConnAuthz {
     state: Mutex<State>,
+    changed: watch::Sender<()>,
     sync_busy: std::sync::atomic::AtomicBool,
 }
 
@@ -73,6 +74,7 @@ impl ConnAuthz {
             } else {
                 State::Open
             }),
+            changed: watch::channel(()).0,
             sync_busy: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -126,7 +128,7 @@ impl ConnAuthz {
 
     fn commit(&self, policy: &AgentPolicy, conn: &Connection) -> Result<(), &'static str> {
         let mut state = lock(&self.state);
-        match std::mem::replace(&mut *state, State::Closed) {
+        let result = match std::mem::replace(&mut *state, State::Closed) {
             State::Authorizing(Some(lease))
                 if !conn.is_closed()
                     && lease.grant.live_at(grant::now_unix())
@@ -136,7 +138,10 @@ impl ConnAuthz {
                 Ok(())
             }
             _ => Err("authorization interrupted"),
-        }
+        };
+        drop(state);
+        self.changed.send_replace(());
+        result
     }
 
     fn close(&self) {
@@ -144,6 +149,7 @@ impl ConnAuthz {
         // replay slot and aborts the watchdog even if stream tasks live on.
         let previous = std::mem::replace(&mut *lock(&self.state), State::Closed);
         drop(previous);
+        self.changed.send_replace(());
     }
 
     pub(crate) fn scope(
@@ -152,7 +158,8 @@ impl ConnAuthz {
     ) -> Result<Option<Arc<VerifiedGrant>>, ScopeError> {
         match &*lock(&self.state) {
             State::Open => Ok(None),
-            State::Pending | State::Authorizing(_) => Err(ScopeError::Pending),
+            State::Pending => Err(ScopeError::Pending),
+            State::Authorizing(_) => Err(ScopeError::Authorizing),
             State::Closed => Err(ScopeError::Closed),
             State::Granted(lease) => {
                 if !lease.grant.live_at(grant::now_unix()) {
@@ -170,6 +177,31 @@ impl ConnAuthz {
         }
     }
 
+    /// The peer may observe the successful ACK before the authorization task
+    /// resumes to commit. Wait for that transaction without granting early or
+    /// rejecting a correctly sequenced service on another QUIC stream.
+    pub(crate) async fn service_scope(
+        &self,
+        policy: &AgentPolicy,
+    ) -> Result<Option<Arc<VerifiedGrant>>, ScopeError> {
+        // Subscribe before reading the state so commit/close cannot be missed.
+        let mut changed = self.changed.subscribe();
+        tokio::time::timeout(AUTHZ_REPLY_TIMEOUT, async {
+            loop {
+                match self.scope(policy) {
+                    Err(ScopeError::Authorizing) => {
+                        if changed.changed().await.is_err() {
+                            return Err(ScopeError::Closed);
+                        }
+                    }
+                    result => return result,
+                }
+            }
+        })
+        .await
+        .unwrap_or(Err(ScopeError::AuthorizationTimeout))
+    }
+
     pub(crate) fn try_sync_slot(&self) -> bool {
         !self
             .sync_busy
@@ -184,6 +216,8 @@ impl ConnAuthz {
 
 pub(crate) enum ScopeError {
     Pending,
+    Authorizing,
+    AuthorizationTimeout,
     Closed,
     Expired,
     Revoked,
@@ -194,6 +228,8 @@ impl ScopeError {
     pub(crate) fn message(&self) -> &'static str {
         match self {
             Self::Pending => "grant required: send Authz first",
+            Self::Authorizing => "authorization in progress",
+            Self::AuthorizationTimeout => "authorization completion timed out",
             Self::Closed => "connection closed",
             Self::Expired => "grant expired",
             Self::Revoked => "grant revoked",
@@ -202,7 +238,7 @@ impl ScopeError {
     }
 
     pub(crate) fn terminal(&self) -> bool {
-        !matches!(self, Self::Pending)
+        !matches!(self, Self::Pending | Self::Authorizing)
     }
 }
 
@@ -356,6 +392,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_during_authorization_reply_waits_for_commit() {
+        let (server, client, conn, peer) = connection_pair().await;
+        let policy = Arc::new(AgentPolicy::ssh_only(("127.0.0.1".into(), 9)));
+        let authz = Arc::new(ConnAuthz::new(true));
+        authz.begin().unwrap();
+        authz
+            .install(&conn, &policy, verified(&policy, conn.remote_id()))
+            .unwrap();
+        // Hold the real admission state in the reply/commit window. A service
+        // can arrive on another QUIC stream before that task runs commit().
+        let (mut send, mut recv) = peer.open_bi().await.unwrap();
+        write_frame(&mut send, &rds_core::StreamHello::Ping { nonce: 41 })
+            .await
+            .unwrap();
+        let (reply, request) = conn.accept_bi().await.unwrap();
+        let task = tokio::spawn(crate::serve_stream(
+            conn.clone(),
+            reply,
+            request,
+            policy.clone(),
+            authz.clone(),
+            false,
+        ));
+        let ack = rds_core::read_frame::<_, HelloAck>(&mut recv);
+        tokio::pin!(ack);
+        let early = tokio::time::timeout(Duration::from_millis(50), &mut ack).await;
+        // Never authorize a service before commit, and never race a premature
+        // Pending rejection against the success reply already sent to the peer.
+        assert!(
+            early.is_err(),
+            "service replied before admission committed: {early:?}"
+        );
+        authz.commit(&policy, &conn).unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), ack)
+                .await
+                .unwrap()
+                .unwrap(),
+            HelloAck::Ok
+        ));
+        task.await.unwrap().unwrap();
+        drop(ConnectionLifetime { conn, authz });
+        client.close().await;
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn waiting_service_wakes_on_aborted_or_revoked_admission() {
+        for revoke in [false, true] {
+            let (server, client, conn, _peer) = connection_pair().await;
+            let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+            let authz = ConnAuthz::new(true);
+            assert!(matches!(
+                authz.service_scope(&policy).await,
+                Err(ScopeError::Pending)
+            ));
+            authz.begin().unwrap();
+            let grant = verified(&policy, conn.remote_id());
+            let id = grant.id;
+            authz.install(&conn, &policy, grant).unwrap();
+            let waiting = authz.service_scope(&policy);
+            tokio::pin!(waiting);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                    .await
+                    .is_err()
+            );
+            if revoke {
+                policy.revoke(id);
+                assert!(authz.commit(&policy, &conn).is_err());
+            } else {
+                authz.close();
+            }
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), waiting)
+                    .await
+                    .unwrap(),
+                Err(ScopeError::Closed)
+            ));
+            assert!(lock(&policy.active_grants).is_empty());
+            conn.close(0u32.into(), b"done");
+            client.close().await;
+            server.close().await;
+        }
+    }
+
+    #[tokio::test]
     async fn watchdog_checks_snapshot_before_waiting_for_changes() {
         let (server, client, conn, _peer) = connection_pair().await;
         let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
@@ -420,7 +543,7 @@ mod tests {
         let grant = verified(&policy, conn.remote_id());
         let id = grant.id;
         authz.install(&conn, &policy, grant).unwrap();
-        assert!(matches!(authz.scope(&policy), Err(ScopeError::Pending)));
+        assert!(matches!(authz.scope(&policy), Err(ScopeError::Authorizing)));
         authz.commit(&policy, &conn).unwrap();
         assert!(authz.scope(&policy).is_ok());
         // No await: the watchdog has not run; service admission itself

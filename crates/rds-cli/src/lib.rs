@@ -92,15 +92,9 @@ pub async fn open_tcp(
     host: &str,
     port: u16,
 ) -> anyhow::Result<(rds_net::SendStream, rds_net::RecvStream)> {
+    let (host, port) = rds_core::TcpTarget::new(host, port)?.into_parts();
     let (mut send, mut recv) = conn.open_bi().await?;
-    write_frame(
-        &mut send,
-        &StreamHello::TcpConnect {
-            host: host.to_string(),
-            port,
-        },
-    )
-    .await?;
+    write_frame(&mut send, &StreamHello::TcpConnect { host, port }).await?;
     match read_ack(&mut recv).await? {
         HelloAck::Ok => Ok((send, recv)),
         HelloAck::Error { message } => anyhow::bail!("forward rejected: {message}"),

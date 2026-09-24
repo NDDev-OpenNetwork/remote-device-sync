@@ -87,7 +87,7 @@ enum Command {
         bind: SocketAddr,
         /// Remote sshd address.
         #[arg(long, default_value = "127.0.0.1:22")]
-        remote: String,
+        remote: rds_core::TcpTarget,
     },
     /// Forward a local port to an arbitrary peer-side TCP target.
     Forward {
@@ -96,7 +96,7 @@ enum Command {
         bind: SocketAddr,
         /// Remote target host:port.
         #[arg(long)]
-        remote: String,
+        remote: rds_core::TcpTarget,
     },
     /// Open a remote desktop session (requires the `desktop` feature).
     Desktop {
@@ -266,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?,
             );
-            let (host, port) = parse_host_port(&remote)?;
+            let (host, port) = remote.into_parts();
             eprintln!(
                 "endpoint {} — run: ssh -p {} <user>@{}",
                 conn.remote_id(),
@@ -288,7 +288,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?,
             );
-            let (host, port) = parse_host_port(&remote)?;
+            let (host, port) = remote.into_parts();
             rds_cli::forward_listener(conn, bind, host, port).await?;
         }
         Command::Desktop {
@@ -356,13 +356,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_host_port(s: &str) -> anyhow::Result<(String, u16)> {
-    let (host, port) = s
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("expected host:port, got {s}"))?;
-    Ok((host.to_string(), port.parse()?))
-}
-
 async fn dial(
     endpoint: &rds_net::Endpoint,
     target: rds_net::EndpointAddr,
@@ -379,4 +372,22 @@ async fn resolve(
     target: &str,
 ) -> anyhow::Result<rds_net::EndpointAddr> {
     rds_net::resolve_target(directory.clone(), target).await
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn tcp_target_flags_reject_invalid_destinations() {
+        for command in ["ssh", "forward"] {
+            for target in [":22", "host:0", "host:nope", "::1:22", "[::1]22"] {
+                assert!(
+                    Cli::try_parse_from(["rds", command, "unused-peer", "--remote", target])
+                        .is_err(),
+                    "{command}: {target}"
+                );
+            }
+        }
+    }
 }

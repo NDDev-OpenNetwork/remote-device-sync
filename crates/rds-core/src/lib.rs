@@ -14,6 +14,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub mod grant;
 /// Owned relay protocol wire types (ALPN `rds-relay/0`).
 pub mod relay;
+mod tcp_target;
+pub use tcp_target::{TcpTarget, TcpTargetError};
 
 /// ALPN negotiated for all rds traffic.
 pub const ALPN: &[u8] = b"rds/0";
@@ -65,7 +67,8 @@ pub enum StreamHello {
     Audio(AudioHello),
     /// Present a capability [`grant::Grant`]. Must be the first stream
     /// on the connection when the agent runs in grant mode: every
-    /// service stream opened before the grant verifies is refused.
+    /// service received before authorization starts is refused. Services that
+    /// overlap its reply/commit transaction wait for completion with a deadline.
     Authz(grant::Grant),
 }
 

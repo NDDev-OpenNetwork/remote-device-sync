@@ -87,3 +87,27 @@ Roundtrip, feature isolation, malformed/oversized inputs, list replacement and
 binary preflight are regression-tested. See the
 [2026-09-25 receipt](reports/rds-endpoint-config-20260925.md) for exact scope and
 remaining qualification.
+
+## TCP service destinations
+
+`rds ssh --remote`, `rds forward --remote` and `rds-agent --ssh` share
+`rds_core::TcpTarget`. Accept `host:port` or `[IPv6]:port`, with ports 1–65535.
+The library client validates the same host/port pair before opening a QUIC
+stream; the agent validates wire input before policy and socket operations.
+Malformed command-line targets fail before identity creation or endpoint bind.
+
+IP literals normalize to canonical spelling, including IPv4-mapped IPv6.
+Unspecified, multicast and IPv4 broadcast destinations are rejected. ASCII
+hostnames are lowercased, limited to 253 bytes before an optional final DNS root
+dot, and split into nonempty labels of at most 63 bytes. Local underscore aliases
+are accepted. URL/userinfo syntax, ambiguous numeric IP shorthand and scoped
+IPv6 are rejected; IDNs must use punycode. The final DNS dot is preserved because
+it affects resolver search behavior.
+
+Agent allowlist comparison and actual dialing use the same normalized target.
+Equivalent IP spelling does not widen the permitted port or address; the
+development `allow_any_tcp` mode still requires a valid target. This is syntax
+and policy consistency, not DNS address pinning, SSH host-key verification or
+an implementation of the SSH protocol. Those remain separate workstreams.
+No wire tags or protocol version changed. See the
+[TCP destination receipt](reports/rds-tcp-target-20260925.md).
