@@ -141,6 +141,30 @@ Caveats:
 
 ## Runbook
 
+### Signed name lookup migration
+
+The name API returns a per-name signature proof. Upgrade the registry issuer,
+directory and name-using clients together: re-create snapshots with the updated
+`SignedRegistry::sign` or `publish` so they contain `bindings`, and distribute
+the registry **public** key independently through GDS/configuration. The issuer
+private key stays with the estate. Names use lowercase ASCII letters, digits
+and hyphens (1–63 bytes); snapshots have at most 256 names and must fit the
+256 KiB HTTP body limit. Each binding is valid for at most 24 hours; issuer and
+clients need synchronized clocks (`issued_at <= now < expires_at`).
+
+```sh
+rds --server 127.0.0.1:3341 --registry-key <base32-verifying-key> ping device-a
+```
+
+New clients refuse missing anchors and unsigned legacy responses. Existing
+tickets and pinned endpoint-key lookups retain their independent trust path.
+The directory refuses expired names even if no newer snapshot has arrived.
+Client clones share a 1024-name freshness cache; it refuses capacity overflow
+instead of evicting anti-rollback history. That cache is not persistent and does
+not prove current membership after a process restart; durable revisions and
+revocation outage policy remain W1.4. Directory HTTPS/DNS support remains open
+in W1.3; signatures provide integrity, not lookup confidentiality.
+
 ### Restart
 
 ```sh

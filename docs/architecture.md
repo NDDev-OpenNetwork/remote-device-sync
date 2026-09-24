@@ -163,10 +163,22 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   reservation exist before the reply write. Failure or cancellation closes
   the connection and releases the lease. Denylist values survive without
   watchers; service admission rechecks revocation and expiry directly.
-- GDS binding: a signed device record ties `device_id` ↔ `EndpointId`
-  and is distributed through the estate/device registry, so
-  `rds ssh nddev-amsterdam` resolves keys from GDS state instead of
-  pasted tickets.
+- GDS names: `GET /v1/names/{name}` returns one `SignedNameBinding`, signed
+  by the registry issuer over `rds/name-binding/v1\0` plus the postcard
+  payload `{version, name, key, issued_at, expires_at}`. The client requires
+  an independently provisioned trust anchor (`rds --registry-key <base32>`),
+  verifies the exact requested name and validity, then verifies the endpoint
+  record against that key. No unsigned-name fallback or HTTP redirect is
+  followed. The response contains no other inventory entries.
+- `SignedRegistry::sign/publish` includes individually signed bindings for
+  every entry; the directory validates their agreement with the snapshot and
+  rechecks snapshot lifetime on GET. Old snapshots need re-signing, and old
+  clients cannot use the new name response. Validity is at most 24 hours,
+  `issued_at <= now < expires_at`, with no future clock allowance. A bounded
+  client cache shared by clones rejects older or conflicting same-timestamp
+  bindings; it is volatile. Durable revisions, rollback across restart and
+  authority rotation remain W1.4; HTTPS/DNS remain part of W1.3. Tickets and
+  explicitly pinned endpoint keys do not depend on registry-name trust.
 
 ### Stream protocol (`ALPN = rds/0`)
 

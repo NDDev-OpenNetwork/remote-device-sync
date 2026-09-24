@@ -231,7 +231,7 @@ async fn registry_names_resolve() {
     )
     .await
     .unwrap();
-    let client = Client::new(dir.addr());
+    let client = Client::new(dir.addr()).with_registry_key(reg_key.verifying_key());
     let key = client.resolve_name("amsterdam").await.unwrap();
     assert_eq!(key.0, device_key.verifying_key().to_bytes());
     assert!(
@@ -293,7 +293,7 @@ async fn registry_put_requires_estate_signature() {
     )
     .await
     .unwrap();
-    let client = Client::new(dir.addr());
+    let client = Client::new(dir.addr()).with_registry_key(reg_key.verifying_key());
 
     // A snapshot signed by a non-estate key is refused.
     let forged = SignedRegistry::publish(
@@ -399,7 +399,7 @@ async fn concurrent_registry_puts_cannot_regress() {
     )
     .await
     .unwrap();
-    let client = Arc::new(Client::new(dir.addr()));
+    let client = Arc::new(Client::new(dir.addr()).with_registry_key(reg_key.verifying_key()));
 
     let now = now_unix().unwrap();
     let n = 8u64;
@@ -410,7 +410,7 @@ async fn concurrent_registry_puts_cannot_regress() {
         let snap = SignedRegistry::sign(
             &RegistryPayload {
                 entries: BTreeMap::from([("device".into(), EndpointKey([i as u8; 32]))]),
-                issued_at: now + 1000 + i,
+                issued_at: now - n + i,
                 expires_at: now + 3600,
             },
             &reg_key,

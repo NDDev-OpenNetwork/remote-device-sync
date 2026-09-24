@@ -4,14 +4,16 @@
 //! the directory is a control-plane dependency, and a hanging lookup
 //! must never wedge an announce loop or a CLI resolve.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use tokio::net::TcpStream;
 
 use crate::http::{self, Response};
-use crate::registry::SignedRegistry;
+use crate::registry::{NameBindingPayload, SignedNameBinding, SignedRegistry, valid_name};
 use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord};
 
 /// Client for one directory address.
@@ -19,6 +21,10 @@ use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord};
 pub struct Client {
     addr: SocketAddr,
     timeout: Duration,
+    registry_key: Option<VerifyingKey>,
+    // Shared by cloned clients. Durable anti-rollback state is W1.4;
+    // this bounded cache prevents regression within one client lifetime.
+    seen_names: Arc<Mutex<BTreeMap<String, NameBindingPayload>>>,
 }
 
 impl Client {
@@ -28,11 +34,33 @@ impl Client {
         Self {
             addr,
             timeout: Duration::from_secs(3),
+            registry_key: None,
+            seen_names: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
     pub fn with_timeout(addr: SocketAddr, timeout: Duration) -> Self {
-        Self { addr, timeout }
+        Self {
+            timeout,
+            ..Self::new(addr)
+        }
+    }
+
+    /// Trust anchor provisioned independently of the directory response.
+    /// Reconfiguration starts a separate authority/cache namespace.
+    pub fn with_registry_key(mut self, key: VerifyingKey) -> Self {
+        self.registry_key = Some(key);
+        self.seen_names = Arc::new(Mutex::new(BTreeMap::new()));
+        self
+    }
+
+    /// Base32 configuration form, shared by applications without duplicating
+    /// key parsing or accepting trust keys from network responses.
+    pub fn with_registry_key_base32(self, key: &str) -> Result<Self, DiscoveryError> {
+        let key: EndpointKey = key.parse()?;
+        let key = VerifyingKey::from_bytes(&key.0)
+            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
+        Ok(self.with_registry_key(key))
     }
 
     /// Directory address this client talks to.
@@ -48,8 +76,8 @@ impl Client {
         self.expect(resp, &[200]).map(|_| ())
     }
 
-    /// Fetch the stored record for `key` and verify its signature.
-    /// Expiry is left to the caller via `verify`/`verify_fresh`.
+    /// Fetch an untrusted record envelope. The caller must verify signature,
+    /// expected key and freshness before consuming its addresses.
     pub async fn fetch(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
         let resp = self
             .request("GET", &format!("/v1/records/{key}"), &[])
@@ -59,19 +87,38 @@ impl Client {
     }
 
     /// Resolve a device name to an [`EndpointKey`] via the estate
-    /// registry (`GET /v1/names/{name}`).
+    /// registry (`GET /v1/names/{name}`). Requires an independently configured
+    /// registry key; unsigned/legacy responses never select a peer identity.
     pub async fn resolve_name(&self, name: &str) -> Result<EndpointKey, DiscoveryError> {
+        if !valid_name(name) {
+            return Err(DiscoveryError::InvalidRecord("invalid device name".into()));
+        }
+        let key = self.registry_key.as_ref().ok_or_else(|| {
+            DiscoveryError::InvalidRecord("name resolution requires a trusted registry key".into())
+        })?;
         let resp = self
             .request("GET", &format!("/v1/names/{name}"), &[])
             .await?;
         let resp = self.expect(resp, &[200])?;
-        #[derive(serde::Deserialize)]
-        struct NameAnswer {
-            key: String,
-        }
-        let answer: NameAnswer = serde_json::from_slice(&resp.body)
+        let answer: SignedNameBinding = serde_json::from_slice(&resp.body)
             .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        answer.key.parse()
+        let binding = answer.verify(key, name, crate::now_unix()?)?;
+        let mut seen = self
+            .seen_names
+            .lock()
+            .map_err(|_| DiscoveryError::Store("name cache poisoned".into()))?;
+        if let Some(previous) = seen.get(name) {
+            if binding.issued_at < previous.issued_at
+                || (binding.issued_at == previous.issued_at && binding != *previous)
+            {
+                return Err(DiscoveryError::Stale);
+            }
+        } else if seen.len() >= 1024 {
+            return Err(DiscoveryError::Store("name freshness cache full".into()));
+        }
+        let endpoint = binding.key;
+        seen.insert(name.into(), binding);
+        Ok(endpoint)
     }
 
     /// Delete `key`'s record with a signed tombstone (`DELETE`).

@@ -24,6 +24,10 @@ struct Cli {
     /// device-name resolution; tickets still work without it.
     #[arg(long, global = true)]
     server: Option<SocketAddr>,
+    /// Trusted registry verifying key (base32), provisioned by GDS.
+    /// Required for device names; tickets and pinned keys are independent.
+    #[arg(long, global = true, requires = "server")]
+    registry_key: Option<String>,
     /// Capability grant file (JSON `Grant` as minted by the estate).
     /// Required when the target agent runs in grant mode.
     #[arg(long, global = true)]
@@ -129,8 +133,17 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     config = config.with_relays(&cli.relay)?;
+    let directory = cli
+        .server
+        .map(|addr| {
+            let client = rds_discovery::client::Client::new(addr);
+            match cli.registry_key.as_deref() {
+                Some(key) => client.with_registry_key_base32(key),
+                None => Ok(client),
+            }
+        })
+        .transpose()?;
     let endpoint = bind_endpoint(config).await?;
-    let directory = cli.server.map(rds_discovery::client::Client::new);
     let grant = cli
         .grant
         .as_deref()

@@ -59,10 +59,14 @@ rds --relay http://relay.host:3340 ...
 # (see docs/deployment.md for the systemd units and firewall rules):
 rds-server --relay-addr 0.0.0.0:3340 --http-addr 0.0.0.0:3341 \
     --directory /var/lib/rds/directory --allow <endpoint-id>...
+
+# Name lookup requires a registry key provisioned through GDS/configuration:
+rds --server 127.0.0.1:3341 --registry-key <base32-verifying-key> ping device-a
 ```
 
-Every hop is end-to-end encrypted between the two endpoints; the relay sees
-only ciphertext. The agent rejects any peer not on its `--allow` list before
+Remote-session traffic is end-to-end encrypted between the endpoints; the
+relay sees ciphertext. The directory currently uses HTTP and signed records;
+lookup confidentiality awaits W1.3 HTTPS support. The agent rejects any peer not on its `--allow` list before
 a service stream opens, and can additionally require estate-signed capability
 grants (`--issuer`, scope-checked per stream, revocable via the directory's
 `/v1/revocations` feed).

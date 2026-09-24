@@ -348,7 +348,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         },
     )
     .await?;
-    let directory = client::Client::new(dir.addr());
+    let directory = client::Client::new(dir.addr()).with_registry_key(reg_key.verifying_key());
 
     // Agent endpoint: announce into the directory, then serve.
     let agent_ep = bind_endpoint(

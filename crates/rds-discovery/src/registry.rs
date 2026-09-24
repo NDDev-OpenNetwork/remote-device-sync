@@ -16,6 +16,97 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DiscoveryError, EndpointKey, now_unix};
 
+const NAME_DOMAIN: &[u8] = b"rds/name-binding/v1\0";
+const MAX_BINDING_BYTES: usize = 256;
+/// Upper bound on one registry's verification work and memory.
+pub const MAX_REGISTRY_NAMES: usize = 256;
+/// Names must be refreshed at least daily. Durable revision/rotation policy
+/// is a separate concern from a signature's cryptographic validity.
+pub const MAX_NAME_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// Proof disclosed for exactly one requested name, without the rest of the
+/// inventory. The issuer creates it; the directory never has a signing key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedNameBinding {
+    pub payload: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameBindingPayload {
+    pub version: u16,
+    pub name: String,
+    pub key: EndpointKey,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+impl SignedNameBinding {
+    pub fn sign(payload: &NameBindingPayload, key: &SigningKey) -> Result<Self, DiscoveryError> {
+        if payload.version != 1 || !valid_name(&payload.name) {
+            return Err(invalid("invalid name binding version or name"));
+        }
+        let payload = postcard::to_stdvec(payload).map_err(|e| invalid(&e.to_string()))?;
+        if payload.len() > MAX_BINDING_BYTES {
+            return Err(invalid("name binding too large"));
+        }
+        let signature = key.sign(&domain_message(&payload)).to_bytes().to_vec();
+        Ok(Self { payload, signature })
+    }
+
+    pub fn verify(
+        &self,
+        key: &VerifyingKey,
+        name: &str,
+        now: u64,
+    ) -> Result<NameBindingPayload, DiscoveryError> {
+        if !valid_name(name) || self.payload.len() > MAX_BINDING_BYTES {
+            return Err(invalid("invalid name or binding size"));
+        }
+        let signature = signature(&self.signature)?;
+        key.verify_strict(&domain_message(&self.payload), &signature)
+            .map_err(|_| DiscoveryError::BadSignature)?;
+        let payload: NameBindingPayload =
+            postcard::from_bytes(&self.payload).map_err(|e| invalid(&e.to_string()))?;
+        if payload.version != 1 || payload.name != name {
+            return Err(invalid("name binding mismatch"));
+        }
+        check_lifetime(payload.issued_at, payload.expires_at, now)?;
+        Ok(payload)
+    }
+}
+
+pub(crate) fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+pub(crate) fn check_lifetime(issued: u64, expires: u64, now: u64) -> Result<(), DiscoveryError> {
+    if expires <= now {
+        return Err(DiscoveryError::Expired);
+    }
+    if issued > now || expires <= issued || expires - issued > MAX_NAME_TTL_SECS {
+        return Err(invalid("invalid name validity interval"));
+    }
+    Ok(())
+}
+
+fn invalid(message: &str) -> DiscoveryError {
+    DiscoveryError::InvalidRecord(message.into())
+}
+fn signature(bytes: &[u8]) -> Result<Signature, DiscoveryError> {
+    let bytes = bytes
+        .try_into()
+        .map_err(|_| invalid("signature is not 64 bytes"))?;
+    Ok(Signature::from_bytes(&bytes))
+}
+fn domain_message(payload: &[u8]) -> Vec<u8> {
+    [NAME_DOMAIN, payload].concat()
+}
+
 /// Estate-signed name→key snapshot served by the directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedRegistry {
@@ -23,6 +114,10 @@ pub struct SignedRegistry {
     pub payload: Vec<u8>,
     /// Ed25519 signature over `payload`, made by the registry key.
     pub signature: Vec<u8>,
+    /// Individually verifiable proofs; required for every entry. Legacy
+    /// snapshots deserialize but fail verification until re-signed.
+    #[serde(default)]
+    pub bindings: BTreeMap<String, SignedNameBinding>,
 }
 
 /// Signed portion of a [`SignedRegistry`].
@@ -49,7 +144,9 @@ impl SignedRegistry {
             &RegistryPayload {
                 entries,
                 issued_at,
-                expires_at: issued_at + ttl.as_secs(),
+                expires_at: issued_at
+                    .checked_add(ttl.as_secs())
+                    .ok_or_else(|| invalid("TTL overflow"))?,
             },
             key,
         )
@@ -57,26 +154,73 @@ impl SignedRegistry {
 
     /// Serialize and sign an already-built [`RegistryPayload`].
     pub fn sign(payload: &RegistryPayload, key: &SigningKey) -> Result<Self, DiscoveryError> {
+        if payload.entries.len() > MAX_REGISTRY_NAMES {
+            return Err(invalid("too many registry names"));
+        }
+        let bindings = payload
+            .entries
+            .iter()
+            .map(|(name, endpoint)| {
+                Ok((
+                    name.clone(),
+                    SignedNameBinding::sign(
+                        &NameBindingPayload {
+                            version: 1,
+                            name: name.clone(),
+                            key: *endpoint,
+                            issued_at: payload.issued_at,
+                            expires_at: payload.expires_at,
+                        },
+                        key,
+                    )?,
+                ))
+            })
+            .collect::<Result<_, DiscoveryError>>()?;
         let bytes = postcard::to_stdvec(payload)
             .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
         let signature = key.sign(&bytes);
-        Ok(Self {
+        let signed = Self {
             payload: bytes,
             signature: signature.to_bytes().to_vec(),
-        })
+            bindings,
+        };
+        if serde_json::to_vec(&signed)
+            .map_err(|e| invalid(&e.to_string()))?
+            .len()
+            > crate::http::MAX_BODY
+        {
+            return Err(invalid("registry exceeds wire body limit"));
+        }
+        Ok(signed)
     }
 
     /// Verify the signature against the configured registry `key`.
     pub fn verify(&self, key: &VerifyingKey) -> Result<RegistryPayload, DiscoveryError> {
+        if self.payload.len() > crate::http::MAX_BODY || self.bindings.len() > MAX_REGISTRY_NAMES {
+            return Err(invalid("registry too large"));
+        }
+        key.verify_strict(&self.payload, &signature(&self.signature)?)
+            .map_err(|_| DiscoveryError::BadSignature)?;
         let payload: RegistryPayload = postcard::from_bytes(&self.payload)
             .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let sig_bytes: [u8; 64] = self
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| DiscoveryError::InvalidRecord("signature is not 64 bytes".into()))?;
-        key.verify_strict(&self.payload, &Signature::from_bytes(&sig_bytes))
-            .map_err(|_| DiscoveryError::BadSignature)?;
+        if payload.entries.len() != self.bindings.len() {
+            return Err(invalid("missing name proofs: re-sign registry"));
+        }
+        for (name, endpoint) in &payload.entries {
+            let proof = self
+                .bindings
+                .get(name)
+                .ok_or_else(|| invalid("missing name proof"))?;
+            // Check the interval at issuance; wall-clock freshness is checked
+            // by verify_fresh and again on each GET, never only on PUT.
+            let binding = proof.verify(key, name, payload.issued_at)?;
+            if binding.key != *endpoint
+                || binding.issued_at != payload.issued_at
+                || binding.expires_at != payload.expires_at
+            {
+                return Err(invalid("registry and name proof disagree"));
+            }
+        }
         Ok(payload)
     }
 
@@ -88,9 +232,7 @@ impl SignedRegistry {
         current: Option<&RegistryPayload>,
     ) -> Result<RegistryPayload, DiscoveryError> {
         let payload = self.verify(key)?;
-        if payload.expires_at < now_unix()? {
-            return Err(DiscoveryError::Expired);
-        }
+        check_lifetime(payload.issued_at, payload.expires_at, now_unix()?)?;
         if let Some(cur) = current
             && payload.issued_at <= cur.issued_at
         {

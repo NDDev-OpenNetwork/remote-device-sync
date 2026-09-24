@@ -6,7 +6,7 @@
 //! PUT    /v1/records            publish a signed EndpointRecord
 //! GET    /v1/records/{key}      fetch the stored record JSON
 //! DELETE /v1/records/{key}      body: signed DeleteRequest
-//! GET    /v1/names/{name}       estate registry lookup → {"key": ...}
+//! GET    /v1/names/{name}       individually signed name binding
 //! PUT    /v1/registry           replace the registry snapshot
 //! GET    /v1/revocations        estate-signed grant denylist snapshot
 //! PUT    /v1/revocations        replace the denylist snapshot
@@ -32,7 +32,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 use crate::http::{self, Request, Response};
-use crate::registry::{RegistryPayload, SignedRegistry};
+use crate::registry::{RegistryPayload, SignedRegistry, check_lifetime, valid_name};
 use crate::revocations::{RevocationPayload, SignedRevocations};
 
 use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, RecordStore};
@@ -187,7 +187,7 @@ impl Drop for Directory {
 
 struct State {
     store: Arc<dyn RecordStore>,
-    registry: RwLock<Option<RegistryPayload>>,
+    registry: RwLock<Option<(SignedRegistry, RegistryPayload)>>,
     /// Latest verified denylist snapshot plus its decoded payload (the
     /// freshness anchor); `None` until the estate publishes one. The
     /// signed half is served verbatim so agents verify it themselves.
@@ -208,13 +208,15 @@ pub async fn serve(
 ) -> std::io::Result<Directory> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
-    let registry =
-        match (&config.registry, &config.registry_key) {
-            (Some(snap), Some(key)) => Some(snap.verify_fresh(key, None).map_err(|e| {
+    let registry = match (&config.registry, &config.registry_key) {
+        (Some(snap), Some(key)) => Some((
+            snap.clone(),
+            snap.verify_fresh(key, None).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-            })?),
-            _ => None,
-        };
+            })?,
+        )),
+        _ => None,
+    };
     let state = Arc::new(State {
         store,
         registry: RwLock::new(registry),
@@ -398,8 +400,16 @@ fn get_name(state: &State, name: &str) -> Response {
         );
     }
     let registry = read(&state.registry);
-    match registry.as_ref().and_then(|r| r.entries.get(name)) {
-        Some(key) => Response::json(200, serde_json::json!({ "key": key.to_string() })),
+    let Some((signed, payload)) = registry.as_ref() else {
+        return Response::error(404, &DiscoveryError::NotFound);
+    };
+    if let Err(e) =
+        crate::now_unix().and_then(|now| check_lifetime(payload.issued_at, payload.expires_at, now))
+    {
+        return Response::error(status_for(&e), &e);
+    }
+    match signed.bindings.get(name) {
+        Some(proof) => Response::json(200, proof),
         None => Response::error(404, &DiscoveryError::NotFound),
     }
 }
@@ -423,9 +433,9 @@ fn put_registry(state: &State, req: &Request) -> Response {
     // and a dropped read lock would let two valid PUTs race so the
     // older snapshot wins.
     let mut current = write(&state.registry);
-    match snap.verify_fresh(key, current.as_ref()) {
+    match snap.verify_fresh(key, current.as_ref().map(|(_, payload)| payload)) {
         Ok(payload) => {
-            *current = Some(payload);
+            *current = Some((snap, payload));
             state.metrics.registry_puts.fetch_add(1, Ordering::Relaxed);
             Response::json(200, serde_json::json!({ "stored": true }))
         }
@@ -508,14 +518,6 @@ fn metrics(state: &State) -> Response {
         ));
     }
     Response::text(200, body)
-}
-
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 63
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn status_for(e: &DiscoveryError) -> u16 {

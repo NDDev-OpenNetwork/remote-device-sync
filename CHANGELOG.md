@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Verify device names at the client using an independently configured registry
+  key and a per-name signature proof. Bind name, endpoint identity and validity;
+  reject unsigned replies, redirects, expired/future bindings and in-process
+  rollback. Directory name GETs now stop serving expired snapshots. Registry
+  snapshots require per-name proofs from the issuer; name clients require
+  `--registry-key`. This changes the pre-1.0 name API; re-sign old snapshots.
+
 - Persist verified destination chunks before advertising reuse, including
   edits and size changes. Assemble through uniquely owned staging files;
   preserve unrelated `.rds-part` siblings and clean only owned journal names.

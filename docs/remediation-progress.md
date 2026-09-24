@@ -7,15 +7,16 @@ this file records implementation progress rather than rewriting that evidence.
 
 ## Current state
 
-All waves remain open. W1.1/W1.2 and W1.6–W1.8 passed the local Linux check matrix; the
+All waves remain open. W1.1/W1.2, W1.3 name proofs and W1.6–W1.8 passed the local Linux check matrix; the
 other tasks remain planned unless listed below. No deployment or owned-backend
 promotion has occurred. Native macOS checks still require their platform lane.
 
 | Task | State | Evidence / remaining scope |
 |---|---|---|
-| W0.1 | Partial | R01/R10 are agent regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R02/R06–R09 and desktop body cancellation still need their owning fixes/tests. |
+| W0.1 | Partial | R01/R10 are agent regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R02/R08/R09 and desktop body cancellation still need their owning fixes/tests. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
+| W1.3 | Partial; name-proof Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback are implemented. Directory HTTPS/DNS and durable revision linkage remain open. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -125,9 +126,40 @@ configurations; and `cargo test --workspace` (135 tests in 36 targets). The
 sync crate contributes 5 unit, 13 journal and 14 end-to-end tests. Native macOS
 and power-loss qualification remain open; no entire wave is closed.
 
+## Name identity verification
+
+Regression `unsigned_directory_name_cannot_select_an_identity` failed before
+implementation: the client accepted the endpoint key in an unsigned JSON
+answer. The directory now serves a `SignedNameBinding`, created by the registry
+issuer for each name. The client requires an independently configured verifying
+key, checks the signature's domain/version/name/lifetime, and the resolver then
+binds the endpoint record to the verified key. No whole inventory or issuer
+secret is returned to a lookup client.
+
+The directory verifies all per-name proofs agree with the uploaded registry,
+refuses snapshots without them, and stops serving names at expiry. The old
+wire response is intentionally unsupported; the issuer must re-sign snapshots
+and clients must provision `--registry-key`. Migration is documented in
+`deployment.md`. Maximum binding lifetime is 24 hours with no future timestamp
+allowance; bounds are 256 names per snapshot, 256 KiB serialized snapshot,
+256-byte binding payload and 1024 remembered names per client. Cache overflow
+refuses new names instead of discarding freshness evidence.
+
+The timestamp cache is shared across client clones and rejects older or
+conflicting same-issued-at responses. It is not durable and cannot discover a
+withheld newer revocation or name removal. HTTPS/DNS is still W1.3;
+revision/epoch persistence, authority rotation and outage policy are W1.4.
+Pinned ticket/key paths remain independent of name resolution.
+
+Local validation: format, default/X11/all-feature workspace clippy and
+`cargo test --workspace` passed (141 tests in 38 targets). Six new name-trust
+tests exercise unsigned answers, wrong names/issuers/records, signature-domain
+confusion, malformed/oversized proofs, redirects, future/expired/excessive
+lifetimes, rollback/equivocation and server expiry. Native macOS remains open.
+
 ## Next sequence
 
-Proceed with W1.3 signed name trust and W1.4 durable
+Complete W1.3 HTTPS/DNS and W1.4 durable
 revocation freshness, followed by W1.5 directory transactions and W1.9 wire
 binding/accounting. Each change retains
 its own failing-before/passing-after evidence. No general CI or long soak is
