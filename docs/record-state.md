@@ -2,8 +2,45 @@
 
 Status: W1.5 transactions, versioned publication and expiry retention implemented,
 not a completed directory acceptance gate. Configured enrollment and write-budget
-fairness are implemented. Strict HTTP framing, file-capacity qualification and
-migration remain in [the remediation plan](remediation-plan.md).
+fairness and strict HTTP framing are implemented. File-capacity qualification
+and migration remain in [the remediation plan](remediation-plan.md).
+
+## Directory HTTP profile
+
+The owned codec implements a restricted private API: one exchange per connection,
+then close. It is not a general HTTP implementation. Both client and server
+parse the same bounded header grammar. Header names are ASCII tokens, values
+are ASCII printable bytes or space/tab; whitespace before a colon, folded fields,
+bare CR/LF, other control bytes and non-ASCII header values are refused. Bodies
+can contain arbitrary bytes, including UTF-8 JSON. Limits are 8192 bytes for the
+entire head including its final CRLF pair, and 256 KiB for the encoded body.
+Writers validate fields and limits before emitting any bytes.
+
+Requests accept exactly HTTP/1.0 or HTTP/1.1, an ASCII token method of at most
+16 bytes and an origin path of at most 512 bytes without query, fragment,
+backslash or whitespace. HTTP/1.1 requires one valid Host authority; HTTP/1.0
+without Host remains available for local diagnostic probes. A missing request
+Content-Length means zero bytes. A present length must be a single decimal
+value; duplicate fields are refused even when equal, as are comma lists.
+Transfer-Encoding, non-identity Content-Encoding and Expect are unsupported
+in both directions. No chunked or close-delimited response bodies are accepted.
+
+Responses require a three-digit status in 200–599 and explicit Content-Length,
+except bodyless 204/304. A 204 forbids Content-Length; a 304 may describe the
+representation length but never reads a body. Interim responses are refused.
+The directory does not implement HEAD and answers 405 without a body; overload
+and worker errors after a parsed HEAD also omit the body. Readers buffer at
+most 1 KiB ahead while parsing the head, preserve prefetched body bytes, and
+may discard trailing bytes when dropped. Callers must close the connection:
+there is no reuse, pipelining, second response or upgrade in this API.
+
+The strict ambiguity rejection follows the framing risks described in
+[RFC 9112 §§5–6](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3),
+with a narrower supported profile; full RFC HTTP interoperability is not claimed.
+DNS/TCP/TLS/HTTP share the client deadline; server header and body reads share
+the connection deadline. A proxy or tunnel must preserve this profile. Particular
+edge products and production latency have not been qualified. See the
+[HTTP regression receipt](reports/rds-http-20260924.md).
 
 ## Signed mutation contract
 

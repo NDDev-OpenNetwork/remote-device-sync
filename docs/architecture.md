@@ -195,7 +195,10 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   (at most 16), TLS and the HTTP exchange. Pending dials are owned and canceled
   with the request. Native OS resolver work may finish after the async timeout;
   it cannot extend the caller's deadline. HTTP/1.1 uses an explicit Host header
-  and the existing bounded Content-Length codec.
+  and the bounded Content-Length codec. Both directions reject duplicate lengths,
+  transfer encoding and malformed headers before consuming a body. This is a
+  private one-exchange profile, not a general HTTP implementation; see the
+  [exact wire bounds and compatibility limits](record-state.md#directory-http-profile).
 - `rds-server --directory-tls-cert/--directory-tls-key` enables a TLS-only
   listener on `--http-addr`; relay TLS is configured separately. The directory
   reserves its connection budget before spawning/handshaking. Its 10-second

@@ -203,26 +203,23 @@ async fn resolve_refuses_aged_out_record() {
     .unwrap();
     let client = Client::new(dir.addr());
 
-    // One hand-signed record with a 1s TTL — deterministic, no
-    // background task that could republish past the boundary.
+    // Check successful resolution with a lifetime independent of scheduling
+    // at a whole-second expiry boundary. No announcer can renew either record.
     let signing = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]);
     let ek = EndpointKey(signing.verifying_key().to_bytes());
     let now = rds_discovery::now_unix().unwrap();
-    let rec = rds_discovery::EndpointRecord::sign(
-        &rds_discovery::Payload {
-            version: rds_discovery::RECORD_VERSION,
-            revision: 1,
-            key: ek,
-            addrs: vec!["10.0.0.9:4200".parse().unwrap()],
-            relay_urls: vec![],
-            services: vec![Service::Ping],
-            issued_at: now,
-            expires_at: now + 1,
-        },
-        &signing,
-    )
-    .unwrap();
-    client.publish(&rec).await.unwrap();
+    let mut payload = rds_discovery::Payload {
+        version: rds_discovery::RECORD_VERSION,
+        revision: 1,
+        key: ek,
+        addrs: vec!["10.0.0.9:4200".parse().unwrap()],
+        relay_urls: vec![],
+        services: vec![Service::Ping],
+        issued_at: now,
+        expires_at: now + 300,
+    };
+    let fresh = rds_discovery::EndpointRecord::sign(&payload, &signing).unwrap();
+    client.publish(&fresh).await.unwrap();
 
     let id = rds_net::EndpointId::from_bytes(&ek.0).unwrap();
     let bare = format!("{id}");
@@ -230,9 +227,22 @@ async fn resolve_refuses_aged_out_record() {
         .await
         .expect("fresh record resolves");
 
-    // Past expiry the same stored record must be refused. issued_at
-    // and now are whole seconds; wait beyond the exact expiry boundary.
-    tokio::time::sleep(Duration::from_millis(2200)).await;
+    // Install a short-lived successor. Five seconds leaves at least four
+    // seconds from issuance, beyond the client's three-second PUT deadline.
+    // Do not require a second round trip to complete inside this short lease.
+    payload.revision = 2;
+    payload.issued_at = rds_discovery::now_unix().unwrap();
+    payload.expires_at = payload.issued_at + 5;
+    let rec = rds_discovery::EndpointRecord::sign(&payload, &signing).unwrap();
+    client.publish(&rec).await.unwrap();
+    // Wait for the signed boundary, not a guessed delay from an earlier step.
+    let expiry = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(payload.expires_at);
+    tokio::time::sleep(
+        expiry
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default(),
+    )
+    .await;
     let err = rds_net::resolve_target(Some(client.clone()), &bare)
         .await
         .unwrap_err();

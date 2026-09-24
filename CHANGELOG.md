@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Harden directory HTTP framing in both directions: reject duplicate lengths,
+  transfer encoding, malformed fields/start lines and unsupported encodings;
+  enforce exact head/body limits and validate outgoing fields before sending.
+  Buffer header reads while preserving the body, close after one exchange, and
+  omit bodies for parsed HEAD requests even on worker overload. No new dependency
+  or runtime helper. This is a restricted private HTTP profile; proxy/tunnel
+  compatibility remains unqualified. See [record-state.md](docs/record-state.md).
+
 - Default directory enrollment to deny; provision publishers separately with
   repeated `rds-server --directory-allow`. Unknown identities cannot publish,
   fetch or delete retained records. Admit only verified higher revisions under

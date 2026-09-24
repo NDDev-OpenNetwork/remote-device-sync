@@ -301,18 +301,26 @@ async fn serve_request(
     peer: SocketAddr,
 ) {
     let response = match http::read_request(stream).await {
-        Ok(Some(req)) => match state.workers.clone().try_acquire_owned() {
-            Ok(permit) => {
-                let state = state.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    route(&state, peer, &req)
-                })
-                .await
-                .unwrap_or_else(|e| Response::error(500, &DiscoveryError::Store(e.to_string())))
+        Ok(Some(req)) => {
+            let is_head = req.method == "HEAD";
+            let mut response = match state.workers.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    let state = state.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        route(&state, peer, &req)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Response::error(500, &DiscoveryError::Store(e.to_string())))
+                }
+                Err(_) => Response::error(429, &DiscoveryError::RateLimited),
+            };
+            // This also covers worker saturation/failure before routing HEAD.
+            if is_head {
+                response.body.clear();
             }
-            Err(_) => Response::error(429, &DiscoveryError::RateLimited),
-        },
+            response
+        }
         Ok(None) => return,
         Err(e) => {
             state.metrics.requests_bad.fetch_add(1, Ordering::Relaxed);
@@ -330,6 +338,8 @@ async fn serve_request(
 fn route(state: &State, peer: SocketAddr, req: &Request) -> Response {
     let segments: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
     match (req.method.as_str(), segments.as_slice()) {
+        // HEAD has no representation in this API and must never return a body.
+        ("HEAD", _) => Response::text(405, ""),
         ("PUT", ["v1", "records"]) => put_record(state, req),
         ("GET", ["v1", "records", key]) => get_record(state, key),
         ("DELETE", ["v1", "records", key]) => delete_record(state, key, req),

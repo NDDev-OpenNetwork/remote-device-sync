@@ -2,12 +2,14 @@
 use rds_discovery::{
     DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, RecordStore,
     client::Client,
+    http,
     service::{self, Limits, ServiceConfig},
 };
 use std::{
     sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
+use tokio::{io::AsyncReadExt, net::TcpStream};
 
 #[derive(Default)]
 struct BlockingStore {
@@ -100,6 +102,21 @@ async fn request_timeout_retains_worker_permit_until_disk_job_ends() {
         client.health().await,
         Err(DiscoveryError::RateLimited)
     ));
+    let mut stream = TcpStream::connect(directory.addr()).await.unwrap();
+    http::write_request(&mut stream, "HEAD", "/v1/health", &[])
+        .await
+        .unwrap();
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut wire))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(wire.ends_with(b"\r\n\r\n"), "HEAD overload returned a body");
+    let response = http::read_response(&mut std::io::Cursor::new(wire))
+        .await
+        .unwrap();
+    assert_eq!(response.status, 429);
+    assert!(response.body.is_empty());
     drop(release);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {

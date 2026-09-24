@@ -155,8 +155,12 @@ Client origins accept `https://host[:port]`, explicit `http://host[:port]`,
 or legacy `IP:port` (plaintext). Paths, credentials, queries and fragments are
 refused. DNS is resolved on each request with a bounded, staggered dial race;
 all work shares a default 3-second deadline. The directory uses HTTP/1.1 with
-Content-Length framing. Compatibility with particular edge proxies/tunnels
-has not been qualified by these loopback TLS tests.
+Content-Length framing and closes after each exchange. Duplicate lengths,
+Transfer-Encoding, compressed bodies, interim responses and Expect are refused;
+queries and upgrades are outside this private API. Configure any intermediary
+to preserve the [directory HTTP profile](record-state.md#directory-http-profile).
+Compatibility with particular edge proxies/tunnels has not been qualified by
+these loopback TLS tests.
 
 When directory TLS is enabled, `--http-addr` accepts only TLS. Health probes
 must also use HTTPS with normal certificate validation. The listener uses

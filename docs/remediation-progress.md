@@ -18,7 +18,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
 | W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
-| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment and fair write admission are implemented. Strict HTTP framing, explicit migration and file-capacity renewal qualification remain open; see validation below. |
+| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment, fair write admission and strict HTTP framing are implemented. Explicit migration and file-capacity renewal qualification remain open; see validation below. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -385,3 +385,29 @@ passed: formatting; default/X11/all-feature Clippy with warnings denied;
 tests across 18 targets**; and server build/`--help` with `--directory-allow`.
 No wave completion is claimed. Next: strict HTTP framing, explicit
 migration/file-capacity qualification, then W1.9 wire/accounting.
+
+## Unambiguous directory HTTP framing
+
+Seven regressions failed against admission commit `e46125f`, including a real
+signed PUT that modified storage despite conflicting Content-Length fields.
+Both directions now share strict header validation and reject ambiguous lengths,
+transfer encoding and malformed fields/start lines. Exact head/body bounds and
+outgoing validation apply before a body is consumed or bytes are emitted.
+Buffered head reads retain prefetched body data; the connection always closes
+after one exchange. Parsed HEAD responses omit bodies, including on overload.
+
+The expanded framing target passes eleven cases, including the real client,
+maximum binary bodies fragmented through a tiny stream, truncated messages,
+bodyless statuses and pipelined-request closure. The
+[HTTP receipt](reports/rds-http-20260924.md) preserves the before/after evidence
+and the [private API profile](record-state.md#directory-http-profile) describes
+compatibility limits. No helper program or dependency was added. Particular
+proxy/tunnel routes and native macOS execution remain unqualified.
+
+The Linux matrix passed: formatting; default/X11/all-feature Clippy with warnings
+denied; **245 workspace tests across 49 targets**; and **59 all-feature network/
+agent/relay tests across 18 targets**. The first extra feature run exposed a
+one-second expiry-fixture race; the receipt records its correction and the
+successful default and all-feature reruns, without changing production expiry
+semantics. Next: file-capacity qualification and explicit migration, then W1.9.
+All waves remain open.
