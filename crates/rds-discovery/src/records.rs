@@ -165,6 +165,13 @@ struct BoundedFile {
     #[cfg(test)]
     fault: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
+impl Drop for BoundedFile {
+    fn drop(&mut self) {
+        // Release owned locking even if another thread just forked and its
+        // pre-exec child temporarily inherited this open-file description.
+        let _ = self.file.unlock();
+    }
+}
 impl redb::StorageBackend for BoundedFile {
     fn len(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len())

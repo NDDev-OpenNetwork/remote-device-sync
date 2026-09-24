@@ -16,6 +16,15 @@ use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
 #[derive(Clone)]
 pub(crate) struct Directory(Arc<File>);
 
+pub(crate) struct ReceiveLock(File);
+impl Drop for ReceiveLock {
+    fn drop(&mut self) {
+        // Scope ownership must end even while a concurrent fork holds a
+        // temporary descriptor alias before exec closes its CLOEXEC files.
+        let _ = self.0.unlock();
+    }
+}
+
 impl Directory {
     /// Only the configured, trusted root is opened by an absolute path.
     pub(crate) fn open_root(path: &Path, create: bool) -> io::Result<Self> {
@@ -125,7 +134,7 @@ impl Directory {
 
     /// The lock inode is never removed: deleting a held lock would let a new
     /// opener create a second inode and bypass the existing owner's lock.
-    pub(crate) fn lock(&self, name: &OsStr) -> io::Result<File> {
+    pub(crate) fn lock(&self, name: &OsStr) -> io::Result<ReceiveLock> {
         component(name)?;
         let file = File::from(openat(
             &*self.0,
@@ -136,7 +145,7 @@ impl Directory {
         regular(&file)?;
         single_link(&file)?;
         file.try_lock().map_err(io::Error::from)?;
-        Ok(file)
+        Ok(ReceiveLock(file))
     }
 
     pub(crate) fn stage(&self) -> io::Result<StagedFile> {
@@ -245,6 +254,27 @@ fn component(name: &OsStr) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receive_owner_drop_unlocks_despite_a_fork_style_descriptor_alias() {
+        let path =
+            std::env::temp_dir().join(format!("rds-receive-lock-{:032x}", rand::random::<u128>()));
+        let dir = Directory::open_root(&path, true).unwrap();
+        let name = OsStr::new("receive.lock");
+        let owner = dir.lock(name).unwrap();
+        let inherited = owner.0.try_clone().unwrap();
+        assert!(dir.lock(name).is_err());
+        drop(owner);
+        let successor = dir.lock(name).unwrap();
+        drop(inherited);
+        assert!(dir.lock(name).is_err());
+        drop(successor);
+        assert!(
+            path.join(name).exists(),
+            "persistent lock inode must not be unlinked"
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn collision_and_drop_do_not_unlink_other_entries() {

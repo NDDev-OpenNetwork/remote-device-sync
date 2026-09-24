@@ -134,6 +134,24 @@ fn backend_bounds_reject_overflow_and_growth_before_writing() {
 }
 
 #[test]
+fn backend_drop_releases_its_lock_despite_an_inherited_descriptor_alias() {
+    let tmp = Temp::new();
+    let path = tmp.0.join("locked");
+    let file = File::create(&path).unwrap();
+    file.try_lock().unwrap();
+    let inherited = file.try_clone().unwrap();
+    let backend = BoundedFile {
+        file,
+        fault: Default::default(),
+    };
+    let successor = File::options().read(true).write(true).open(path).unwrap();
+    assert!(successor.try_lock().is_err());
+    drop(backend);
+    successor.try_lock().unwrap();
+    drop(inherited);
+}
+
+#[test]
 fn crash_writer() {
     let Some(path) = std::env::var_os("RDS_TEST_RECORD_CRASH_DIRECTORY") else {
         return;

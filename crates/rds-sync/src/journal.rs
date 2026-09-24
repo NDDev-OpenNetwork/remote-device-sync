@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::{
     AVG_CHUNK, ChunkHash, MAX_CHUNK, MIN_CHUNK, Manifest, SyncError,
-    confined::Directory,
+    confined::{Directory, ReceiveLock},
     proto::{check_manifest, check_rel_path},
 };
 
@@ -40,7 +40,7 @@ pub struct Journal {
     dest_parent: Directory,
     dest_name: OsString,
     dest_path: PathBuf,
-    _lock: File,
+    _lock: ReceiveLock,
     manifest: Manifest,
     have: HashSet<u32>,
     fetched: u64,

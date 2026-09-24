@@ -21,6 +21,15 @@ pub(crate) struct AtomicFile {
     pub(crate) fault: Option<(Phase, bool)>,
 }
 
+impl Drop for AtomicFile {
+    fn drop(&mut self) {
+        // This non-cloneable owner, not an incidental descriptor inherited by
+        // a concurrent fork before exec, defines the lock's lifetime. Closing
+        // alone leaves flock held until every such descriptor has closed.
+        let _ = self._lock.unlock();
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -190,5 +199,28 @@ impl AtomicFile {
         // Only the exclusively created name is ours; unknown orphans stay put.
         let _ = unlinkat(&self.directory, &name, AtFlags::empty());
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_drop_releases_lock_even_while_a_fork_style_descriptor_alias_exists() {
+        let path =
+            std::env::temp_dir().join(format!("rds-lock-alias-{:032x}", rand::random::<u128>()));
+        let owner = AtomicFile::open(&path).unwrap();
+        // dup and fork share the open-file description and its flock. CLOEXEC
+        // closes a child's copy only at exec, leaving a real pre-exec window.
+        let inherited = owner._lock.try_clone().unwrap();
+        assert!(matches!(AtomicFile::open(&path), Err(DiscoveryError::Busy)));
+        drop(owner);
+        let successor = AtomicFile::open(&path).expect("dropped owner still held by an alias");
+        // Closing the old alias must not unlock the successor's distinct owner.
+        drop(inherited);
+        assert!(matches!(AtomicFile::open(&path), Err(DiscoveryError::Busy)));
+        drop(successor);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }
