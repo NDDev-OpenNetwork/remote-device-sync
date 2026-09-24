@@ -16,7 +16,6 @@ impl Drivers {
     pub fn spawn(
         &self,
         conn: &noq::Connection,
-        seeds: Vec<noq::PathId>,
         metrics: crate::metrics::Registry,
         local_addrs: Vec<std::net::SocketAddr>,
     ) -> anyhow::Result<()> {
@@ -29,7 +28,6 @@ impl Drivers {
             conn.weak_handle(),
             conn.nat_traversal_updates(),
             conn.path_events(),
-            seeds,
             metrics,
             local_addrs,
         ));

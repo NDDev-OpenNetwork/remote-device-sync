@@ -7,8 +7,8 @@
 //!
 //! `connection_driver` is the per-connection control loop: it consumes
 //! QNT address advertisements (peer-learned candidates become paths) and
-//! path events, and keeps exactly one lowest-RTT path `Available` while
-//! the rest become `Backup`. noq's packet scheduler follows path
+//! path events, and prefers one lowest-RTT validated path among the observed
+//! set. Other application-opened paths stay `Backup`. noq's scheduler follows path
 //! statuses; it does not migrate on its own — the selection policy is
 //! ours, mirroring iroh's biased-RTT selector with stickiness.
 
@@ -84,14 +84,14 @@ pub(super) fn supports_candidate(local_addrs: &[SocketAddr], remote: SocketAddr)
 /// Open additional paths for the remaining candidates.
 ///
 /// `open_path_ensure` deduplicates against the path `connect` already
-/// opened — passing the primary again returns its `PathId` — so the
-/// returned list doubles as the seed set for `connection_driver`.
-/// Failures are logged, not fatal: any established path keeps the
-/// connection alive.
+/// opened — passing the primary again returns its `PathId`. Returned IDs
+/// include pending paths and must never be treated as validation evidence.
+/// Newly opened paths remain Backup until the driver's Established event.
+/// Failures are logged, not fatal: an established path keeps the connection alive.
 pub fn open_extra_paths(conn: &noq::Connection, candidates: &[SocketAddr]) -> Vec<noq::PathId> {
     let mut ids = Vec::new();
     for addr in candidates {
-        let open = conn.open_path_ensure(*addr, noq::PathStatus::Available);
+        let open = conn.open_path_ensure(*addr, noq::PathStatus::Backup);
         match open.path_id() {
             Some(id) => {
                 ids.push(id);
@@ -145,13 +145,13 @@ pub fn initiate_traversal_round(conn: &noq::Connection, metrics: &crate::metrics
 /// The weak `on_closed` notification ends the task even while closed handles
 /// remain alive. It also observes implicit closure after the last I/O handle
 /// drops. The interval cannot keep the task alive after either closure or both
-/// event streams ending. `seed_paths` carries the `PathId`s open at wiring time
-/// (their `Established` events fired before we subscribed).
+/// event streams ending. Only the completed handshake's PathId::ZERO is seeded;
+/// other paths become eligible on Established, never merely on path creation.
+/// The caller must subscribe before opening additional paths or starting QNT.
 pub async fn connection_driver(
     conn: noq::WeakConnectionHandle,
     mut qnt: noq::NatTraversalUpdates,
     mut path_events: noq::PathEvents,
-    seed_paths: Vec<noq::PathId>,
     metrics: crate::metrics::Registry,
     local_addrs: Vec<SocketAddr>,
 ) {
@@ -168,12 +168,10 @@ pub async fn connection_driver(
     // one of these is a QNT success.
     let mut qnt_paths: std::collections::HashSet<noq::PathId> = std::collections::HashSet::new();
     let mut selected: Option<noq::PathId> = None;
-    if let Some(conn) = conn.upgrade() {
-        for id in seed_paths {
-            if let Some(path) = conn.path(id) {
-                paths.insert(id, path.weak_handle());
-            }
-        }
+    if let Some(conn) = conn.upgrade()
+        && let Some(path) = conn.path(noq::PathId::ZERO)
+    {
+        paths.insert(noq::PathId::ZERO, path.weak_handle());
     }
 
     let mut qnt_open = true;
@@ -187,9 +185,11 @@ pub async fn connection_driver(
             event = qnt.next(), if qnt_open => match event {
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressAdded(addr))) => {
                     if supports_candidate(&local_addrs, addr)
-                        && let Some(id) = open_learned_path(&conn, &mut paths, addr) {
+                        && let Some(id) = open_learned_path(&conn, addr)
+                        && !paths.contains_key(&id)
+                        && qnt_paths.insert(id)
+                    {
                         metrics.qnt_attempt();
-                        qnt_paths.insert(id);
                     }
                 }
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressRemoved(addr))) => {
@@ -244,22 +244,15 @@ pub async fn connection_driver(
 /// Attempt a path to a peer-advertised address and track it. Returns
 /// the `PathId` when the open was accepted so the caller can count the
 /// attempt and match its Established event as a QNT success.
-fn open_learned_path(
-    conn: &noq::WeakConnectionHandle,
-    paths: &mut HashMap<noq::PathId, noq::WeakPathHandle>,
-    addr: SocketAddr,
-) -> Option<noq::PathId> {
+fn open_learned_path(conn: &noq::WeakConnectionHandle, addr: SocketAddr) -> Option<noq::PathId> {
     let conn = conn.upgrade()?;
-    let open = conn.open_path_ensure(addr, noq::PathStatus::Available);
+    let open = conn.open_path_ensure(addr, noq::PathStatus::Backup);
     let Some(id) = open.path_id() else {
         tracing::debug!(%addr, "QNT-learned candidate path rejected");
         return None;
     };
     // `open` is dropped without awaiting: dropping does not cancel the
     // attempt — the Established event arrives on the path stream.
-    if let Some(path) = conn.path(id) {
-        paths.insert(id, path.weak_handle());
-    }
     tracing::debug!(%addr, ?id, "opening path to QNT-learned candidate");
     Some(id)
 }

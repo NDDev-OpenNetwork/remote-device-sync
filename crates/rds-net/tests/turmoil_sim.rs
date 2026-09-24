@@ -270,3 +270,89 @@ fn noq_partition_then_repair_reconnects() -> turmoil::Result {
 
     sim.run()
 }
+
+/// A silent learned path has a lower default RTT than this real 400 ms path.
+/// Application policy must not prefer that unvalidated default RTT.
+#[test]
+fn slow_primary_remains_preferred_over_an_unvalidated_candidate() -> turmoil::Result {
+    let server_key = SecretKey::from_bytes(&[108; 32]);
+    let server_id = server_key.public();
+    let mut sim = turmoil::Builder::new()
+        .min_message_latency(Duration::from_millis(200))
+        .max_message_latency(Duration::from_millis(200))
+        .simulation_duration(Duration::from_secs(30))
+        .build();
+    sim.host("silent", || async {
+        let _socket = turmoil::net::UdpSocket::bind("0.0.0.0:4434").await?;
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+    sim.host("server", move || {
+        let key = server_key.clone();
+        async move {
+            let ep = sim_endpoint("0.0.0.0:4433".parse().unwrap(), "server", key).await?;
+            let conn = ep.accept().await.unwrap().await?;
+            while let Ok(payload) = conn.read_datagram().await {
+                if &payload[..] == b"advertise" {
+                    conn.inner().add_nat_traversal_address(SocketAddr::new(
+                        turmoil::lookup("silent"),
+                        4434,
+                    ))?;
+                }
+                conn.send_datagram(payload)?;
+            }
+            ep.close().await;
+            Ok(())
+        }
+    });
+    sim.client("client", async move {
+        let ep = sim_endpoint(
+            "0.0.0.0:0".parse().unwrap(),
+            "client",
+            SecretKey::from_bytes(&[109; 32]),
+        )
+        .await?;
+        let target = target_of(server_id, SocketAddr::new(turmoil::lookup("server"), 4433));
+        let conn = timeout(Duration::from_secs(10), ep.connect(target, rds_core::ALPN)).await??;
+        conn.send_datagram(b"baseline".to_vec().into())?;
+        assert_eq!(
+            &timeout(Duration::from_secs(3), conn.read_datagram()).await??[..],
+            b"baseline"
+        );
+        assert!(conn.inner().rtt(noq::PathId::ZERO).unwrap() > Duration::from_millis(350));
+        conn.send_datagram(b"advertise".to_vec().into())?;
+        assert_eq!(
+            &timeout(Duration::from_secs(3), conn.read_datagram()).await??[..],
+            b"advertise"
+        );
+        // There is exactly one extra candidate in this world; its first path
+        // ID follows ZERO. Assert the actual address as well as its status.
+        let pending = timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(path) = conn.inner().path(noq::PathId::from(1u32)) {
+                    break path;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            pending.remote_address()?,
+            SocketAddr::new(turmoil::lookup("silent"), 4434)
+        );
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(pending.status()?, noq::PathStatus::Backup);
+        assert_eq!(
+            conn.inner().path(noq::PathId::ZERO).unwrap().status()?,
+            noq::PathStatus::Available
+        );
+        conn.send_datagram(b"still live".to_vec().into())?;
+        assert_eq!(
+            &timeout(Duration::from_secs(3), conn.read_datagram()).await??[..],
+            b"still live"
+        );
+        ep.close().await;
+        Ok(())
+    });
+    sim.run()
+}

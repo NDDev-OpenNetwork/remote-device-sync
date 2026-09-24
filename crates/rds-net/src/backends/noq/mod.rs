@@ -329,14 +329,14 @@ impl Endpoint {
             .await
             .context("all connection candidates failed")?;
 
-        let mut seeds = policy::open_extra_paths(&conn, &candidates);
+        // Subscribe before any additional path can finish validation. Only
+        // the completed handshake is initially eligible for path selection.
+        self.wire_connection(&conn)?;
+        policy::open_extra_paths(&conn, &candidates);
         if let Some(syn) = relay_remote {
-            // When the synthetic address was the primary path this is a
-            // no-op dedupe that returns the existing PathId.
-            let open = conn.open_path_ensure(syn, noq::PathStatus::Available);
-            seeds.extend(open.path_id());
+            // Dedupe preserves an already established primary relay path.
+            let _open = conn.open_path_ensure(syn, noq::PathStatus::Backup);
         }
-        self.wire_connection(&conn, seeds)?;
 
         Ok(Connection {
             inner: conn,
@@ -392,21 +392,18 @@ impl Endpoint {
     /// peer can then upgrade to a relayed path in-band), kick a
     /// traversal round so it probes ours, and spawn the driver that
     /// opens paths to its in-band advertised candidates and keeps the
-    /// best path selected. `seed_paths` are the PathIds open at wiring
-    /// time (their Established events predate subscription).
-    fn wire_connection(
-        &self,
-        conn: &noq::Connection,
-        seed_paths: Vec<noq::PathId>,
-    ) -> anyhow::Result<()> {
+    /// best validated path selected. Subscribe before QNT or extra path opens;
+    /// only the authenticated handshake path is seeded.
+    fn wire_connection(&self, conn: &noq::Connection) -> anyhow::Result<()> {
         let mut ours = self.advertised_socket_addrs();
         if self.relay.is_some() {
             ours.push(relay::synthetic_for(&self.id));
         }
+        self.drivers
+            .spawn(conn, self.metrics.clone(), ours.clone())?;
         policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn, &self.metrics);
-        self.drivers
-            .spawn(conn, seed_paths, self.metrics.clone(), ours)
+        Ok(())
     }
 
     /// Close all connections and wait for this endpoint's policy tasks.
@@ -486,20 +483,17 @@ impl Future for Incoming {
                 return Poll::Ready(match res {
                     Err(e) => Err(e.into()),
                     Ok(inner) => match peer_endpoint_id(&inner) {
-                        Some(remote_id) => {
-                            if let Some(handle) = &self.relay {
-                                handle.register_peer(remote_id);
-                            }
-                            policy::advertise_addrs(&inner, &self.our_addrs);
-                            policy::initiate_traversal_round(&inner, &self.metrics);
-                            // The handshake path is always PathId::ZERO;
-                            // its Established event predates our
-                            // subscription, so seed it explicitly.
-                            let seeds = vec![noq::PathId::ZERO];
-                            self.drivers
-                                .spawn(&inner, seeds, self.metrics.clone(), self.our_addrs.clone())
-                                .map(|()| Connection { inner, remote_id })
-                        }
+                        Some(remote_id) => self
+                            .drivers
+                            .spawn(&inner, self.metrics.clone(), self.our_addrs.clone())
+                            .map(|()| {
+                                if let Some(handle) = &self.relay {
+                                    handle.register_peer(remote_id);
+                                }
+                                policy::advertise_addrs(&inner, &self.our_addrs);
+                                policy::initiate_traversal_round(&inner, &self.metrics);
+                                Connection { inner, remote_id }
+                            }),
                         None => Err(anyhow::anyhow!("peer presented no identity")),
                     },
                 });

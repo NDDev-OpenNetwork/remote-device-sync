@@ -37,7 +37,6 @@ async fn driver_terminates(drop_last_handle: bool) {
         raw.weak_handle(),
         raw.nat_traversal_updates(),
         raw.path_events(),
-        vec![::noq::PathId::ZERO],
         a.metrics(),
         a.local_addrs().to_vec(),
     ));

@@ -30,6 +30,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
 | W3.1 | Partial; initial candidate race | Eight supported direct candidates plus attached relay share a deadline and one authenticated winner. Dual-stack routing and cancellation are checked. Independent relay bootstrap, remote scope/interface discovery and real topology qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
+| W3.6 | Partial; validated application eligibility | Only the authenticated handshake is seeded; extra/learned paths become eligible on Established and preserve weak task ownership. Credit retry, event-loss resynchronization, complete metrics and transport-failure isolation remain open. |
 
 ## Authorization change
 
@@ -771,3 +772,22 @@ tests** passed. See [contract](protocol-negotiation.md) and
 [receipt](reports/rds-alpn-selection-20260925.md). No dependency or wire version
 changed. W2.2 remains partial for capability/limit/version negotiation and
 session/transfer IDs. Validated path selection is next. No wave is closed.
+
+## Validated application path eligibility
+
+The before-fix silent-path test observed premature Available status. The policy
+now seeds only the authenticated handshake, subscribes before explicit path/QNT
+work, and admits extra paths to selection on Established. A real validated
+secondary carries a datagram after logical primary close. A deterministic slow
+primary remains preferred over a silent candidate with a lower default RTT.
+The QUIC engine's existing prohibition on unvalidated payload is unchanged.
+
+Four focused real/simulated cases passed. Final formatting, three Clippy lanes,
+**344 workspace tests**, **135 all-feature network/agent/CLI/relay tests**
+and **25 isolated owned-network tests** passed. See [contract](path-selection.md)
+and [receipt](reports/rds-path-selection-20260925.md). No dependency or wire
+version changed.
+
+The next bounded correction is owned retry when extra-path connection IDs have
+not yet arrived. Event loss, complete metrics, physical failover, native macOS
+and service recovery remain open. No remediation wave is closed.

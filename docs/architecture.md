@@ -49,6 +49,11 @@ opening, request write and response completion. Pending streams reset on
 cancellation; incomplete authorization closes its connection. Local forwarding
 owns a bounded worker group with connection-close joins and cancellation cleanup.
 
+Owned path policy now uses [validated eligibility](path-selection.md): only the
+handshake path is seeded; application-opened candidates stay Backup until an
+Established event. Event-loss reconciliation and candidate-credit retry remain
+open, as do physical failover and complete path metrics.
+
 Owned requests also [pin the exact requested ALPN](protocol-negotiation.md) in
 an immutable per-protocol TLS configuration. A missing protocol fails before
 service use; concurrent requests cannot replace each other's offer.
