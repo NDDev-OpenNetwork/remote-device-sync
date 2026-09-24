@@ -1,0 +1,114 @@
+{
+  "source_base": "e3930e9",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "source_sha256": {
+    "crates/rds-core/src/lib.rs": "94b66c87398c79df2b4bc73b087a5934e8afd337196d57701ef551060aa285eb",
+    "crates/rds-sync/src/engine.rs": "eeed711ba94bebd314acf0e60fa256aae78a71be48e75f406850fd91a2490846",
+    "crates/rds-sync/src/proto.rs": "2fd460b7a39c974eaf6fae6b7db19eec9e0c9ecc42d0e456849c49cb423797ca",
+    "crates/rds-sync/tests/protocol_safety.rs": "bd8e232041e5bc505d684f6da263ff2d0c5c5557fa05eae8682d0663ed14634d"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.5651527130976319
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 7.674744031042792
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 7.088708490948193
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 6.690409461967647
+    },
+    {
+      "name": "workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 160.7764038819587
+    },
+    {
+      "name": "owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 61.2543502059998
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 267,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 50
+    },
+    "owned": {
+      "passed": 59,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 18
+    }
+  },
+  "limits": [
+    "Functional tests are not performance percentiles",
+    "Migration capacity was separately qualified; not repeated for sync-only changes",
+    "No native macOS, physical power-loss or deployed rollout qualification"
+  ]
+}

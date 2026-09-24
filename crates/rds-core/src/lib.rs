@@ -275,12 +275,37 @@ where
     }
     let mut body = vec![0u8; len as usize];
     reader.read_exact(&mut body).await?;
-    postcard::from_bytes(&body).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    let (message, remaining) = postcard::take_from_bytes(&body)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if !remaining.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "trailing frame payload",
+        ));
+    }
+    Ok(message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn frame_rejects_trailing_postcard_payload() {
+        let message = StreamHello::TcpConnect {
+            host: "127.0.0.1".into(),
+            port: 22,
+        };
+        let mut body = postcard::to_stdvec(&message).unwrap();
+        body.extend_from_slice(&[0, 1]);
+        let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&body);
+        assert!(
+            read_frame::<_, StreamHello>(&mut bytes.as_slice())
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn frame_roundtrip() {

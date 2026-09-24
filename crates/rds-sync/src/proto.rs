@@ -170,8 +170,17 @@ pub fn need_bits(total: usize, have: &std::collections::HashSet<u32>) -> Vec<u64
     bits
 }
 
-/// Decode a `Need` bitmap into missing indices.
-pub fn bits_to_indices(bits: &[u64], total: usize) -> Vec<u32> {
+/// Decode an exact, canonical `Need` bitmap. Missing words, surplus words and
+/// nonzero padding must not silently change the receiver's requested content.
+pub fn bits_to_indices(bits: &[u64], total: usize) -> Result<Vec<u32>, SyncError> {
+    if total > MAX_CHUNKS
+        || bits.len() != total.div_ceil(64)
+        || (!total.is_multiple_of(64) && bits.last().is_some_and(|word| *word >> (total % 64) != 0))
+    {
+        return Err(SyncError::Manifest(
+            "invalid Need bitmap bounds or padding".into(),
+        ));
+    }
     let mut out = Vec::new();
     for i in 0..total as u32 {
         if bits
@@ -181,5 +190,5 @@ pub fn bits_to_indices(bits: &[u64], total: usize) -> Vec<u32> {
             out.push(i);
         }
     }
-    out
+    Ok(out)
 }

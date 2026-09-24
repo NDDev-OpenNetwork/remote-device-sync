@@ -15,11 +15,10 @@ use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use rds_core::{read_frame, write_frame};
+use rds_core::{read_frame, write_frame as write_raw_frame};
 use rds_net::{Connection, RecvStream, SendStream};
 use tokio::sync::mpsc;
 
@@ -35,6 +34,9 @@ use crate::{confined::Directory, journal::Journal};
 /// reads gate on the peer's disk work (manifest scans, journal
 /// rescans); a dead connection ends them regardless.
 const READ_STALL: Duration = Duration::from_secs(300);
+/// Default absolute transfer budget, including local scans and all protocol I/O.
+/// Call the `*_with_timeout` entry points to select a shorter or longer budget.
+pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Progress/counters a completed (or interrupted) transfer reports.
 #[derive(Debug, Default, Clone)]
@@ -51,6 +53,28 @@ pub struct Stats {
 /// picks. `dir` is the agent's sync root — every path is validated
 /// under it.
 pub async fn serve(
+    conn: Connection,
+    send: SendStream,
+    recv: RecvStream,
+    dir: PathBuf,
+) -> anyhow::Result<()> {
+    serve_with_timeout(conn, send, recv, dir, TRANSFER_TIMEOUT).await
+}
+
+/// Serve with an explicit absolute budget. Cancellation cannot interrupt a
+/// filesystem syscall already running; a complete disk commit may be uncertain
+/// on timeout and must be reconciled before retrying or claiming rollback.
+pub async fn serve_with_timeout(
+    conn: Connection,
+    send: SendStream,
+    recv: RecvStream,
+    dir: PathBuf,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    session(timeout, serve_inner(conn, send, recv, dir)).await
+}
+
+async fn serve_inner(
     conn: Connection,
     mut send: SendStream,
     mut recv: RecvStream,
@@ -146,10 +170,10 @@ pub async fn serve(
             let SyncMsg::Need { bits } = read_timed::<_, SyncMsg>(&mut recv).await? else {
                 bail!("expected Need");
             };
-            let indices = bits_to_indices(&bits, manifest.chunks.len());
+            let indices = bits_to_indices(&bits, manifest.chunks.len())?;
             push_chunks(&conn, source, &manifest, &indices).await?;
             match read_timed::<_, SyncMsg>(&mut recv).await? {
-                SyncMsg::Done { .. } => {
+                SyncMsg::Done { root } if root == manifest.root => {
                     tracing::info!(sent = indices.len(), "sync pull complete");
                     Ok(())
                 }
@@ -165,13 +189,37 @@ pub async fn serve(
 pub async fn send_file(
     conn: &Connection,
     path: &Path,
+    send: SendStream,
+    recv: RecvStream,
+) -> anyhow::Result<Stats> {
+    send_file_with_timeout(conn, path, send, recv, TRANSFER_TIMEOUT).await
+}
+
+/// Push with an absolute budget; see [`serve_with_timeout`] for disk cancellation.
+pub async fn send_file_with_timeout(
+    conn: &Connection,
+    path: &Path,
+    send: SendStream,
+    recv: RecvStream,
+    timeout: Duration,
+) -> anyhow::Result<Stats> {
+    session(timeout, send_file_inner(conn, path, send, recv)).await
+}
+
+async fn send_file_inner(
+    conn: &Connection,
+    path: &Path,
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> anyhow::Result<Stats> {
     let rel = path
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .ok_or_else(|| anyhow::anyhow!("{path:?} has no file name"))?;
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("source requires a UTF-8 file name"))?
+        .to_owned();
+    if check_rel_path(&rel)? != Path::new(&rel) {
+        bail!("source file name has an ambiguous sync spelling");
+    }
     let source = Arc::new(tokio::fs::File::open(path).await?.into_std().await);
     let manifest = manifest_from_file(source.clone()).await?;
     tracing::info!(
@@ -183,7 +231,7 @@ pub async fn send_file(
     );
     send_manifest(&mut send, &rel, &manifest).await?;
     let indices = match read_timed::<_, SyncMsg>(&mut recv).await? {
-        SyncMsg::Need { bits } => bits_to_indices(&bits, manifest.chunks.len()),
+        SyncMsg::Need { bits } => bits_to_indices(&bits, manifest.chunks.len())?,
         SyncMsg::Refuse { reason } => bail!("offer refused: {reason}"),
         other => bail!("expected Need, got {other:?}"),
     };
@@ -197,7 +245,10 @@ pub async fn send_file(
     let stats = Stats {
         fetched: indices.len() as u64,
         total: manifest.chunks.len() as u64,
-        bytes: manifest.size,
+        bytes: indices
+            .iter()
+            .map(|i| u64::from(manifest.chunks[*i as usize].len))
+            .sum(),
     };
     tracing::info!(?stats, "sync push complete");
     Ok(stats)
@@ -209,10 +260,36 @@ pub async fn recv_file(
     conn: &Connection,
     rel_path: &str,
     dest_dir: &Path,
+    send: SendStream,
+    recv: RecvStream,
+) -> anyhow::Result<(PathBuf, Stats)> {
+    recv_file_with_timeout(conn, rel_path, dest_dir, send, recv, TRANSFER_TIMEOUT).await
+}
+
+/// Pull with an absolute budget; see [`serve_with_timeout`] for disk cancellation.
+pub async fn recv_file_with_timeout(
+    conn: &Connection,
+    rel_path: &str,
+    dest_dir: &Path,
+    send: SendStream,
+    recv: RecvStream,
+    timeout: Duration,
+) -> anyhow::Result<(PathBuf, Stats)> {
+    session(
+        timeout,
+        recv_file_inner(conn, rel_path, dest_dir, send, recv),
+    )
+    .await
+}
+
+async fn recv_file_inner(
+    conn: &Connection,
+    rel_path: &str,
+    dest_dir: &Path,
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> anyhow::Result<(PathBuf, Stats)> {
-    check_rel_path(rel_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let requested = check_rel_path(rel_path)?;
     write_frame(
         &mut send,
         &SyncMsg::Request {
@@ -235,6 +312,9 @@ pub async fn recv_file(
         SyncMsg::Refuse { reason } => bail!("request refused: {reason}"),
         other => bail!("expected Offer, got {other:?}"),
     };
+    if rel != requested {
+        bail!("offered path differs from requested path");
+    }
     let manifest = read_manifest(&mut recv, size, root, chunk_count).await?;
     let (dest, stats) =
         receive(conn, &mut send, dest_dir, &rel.to_string_lossy(), &manifest).await?;
@@ -255,6 +335,31 @@ where
     }
 }
 
+async fn session<T>(
+    timeout: Duration,
+    work: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .filter(|_| !timeout.is_zero())
+        .ok_or_else(|| anyhow::anyhow!("invalid transfer timeout"))?;
+    tokio::time::timeout_at(deadline, work)
+        .await
+        .context("sync transfer deadline exceeded; a started disk commit may still complete")?
+}
+
+async fn write_frame<S, M>(stream: &mut S, message: &M) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+    M: serde::Serialize,
+{
+    tokio::time::timeout(READ_STALL, write_raw_frame(stream, message))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "sync frame write stalled")
+        })?
+}
+
 /// Manifest of a pinned file on the blocking pool — chunking + hashing a
 /// large file must not park an async worker.
 async fn manifest_from_file(file: Arc<File>) -> anyhow::Result<Manifest> {
@@ -270,26 +375,24 @@ async fn manifest_from_file(file: Arc<File>) -> anyhow::Result<Manifest> {
 /// closing `jobs` ends it and hands the journal back for assembly.
 struct JournalSink {
     jobs: mpsc::Sender<(u32, Vec<u8>)>,
-    /// Verified chunks on disk — the receive loop's completion signal.
-    present: Arc<AtomicU64>,
     /// First store failure, for error reporting across the task split.
     error: Arc<std::sync::Mutex<Option<String>>>,
     task: tokio::task::JoinHandle<Result<Journal, crate::SyncError>>,
 }
 
 impl JournalSink {
-    fn start(mut journal: Journal) -> Self {
+    fn start(mut journal: Journal) -> (Self, tokio::sync::oneshot::Receiver<()>) {
         let (jobs, mut job_rx) = mpsc::channel::<(u32, Vec<u8>)>(FETCH_STREAMS * 4);
-        let present = Arc::new(AtomicU64::new(journal.have_set().len() as u64));
+        let (finished, stopped) = tokio::sync::oneshot::channel();
         let error = Arc::new(std::sync::Mutex::new(None));
-        let (present_w, error_w) = (present.clone(), error.clone());
+        let error_w = error.clone();
         let task = tokio::task::spawn_blocking(move || {
+            // Drop signals every exit, including panic, without depending on
+            // a reader already waiting. Normal exit requires closing jobs.
+            let _finished = finished;
             while let Some((index, data)) = job_rx.blocking_recv() {
                 match journal.store(index, &data) {
-                    Ok(true) => {
-                        present_w.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Ok(false) => {}
+                    Ok(_) => {}
                     Err(e) => {
                         *error_w.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
                         return Err(e);
@@ -298,19 +401,10 @@ impl JournalSink {
             }
             Ok(journal)
         });
-        Self {
-            jobs,
-            present,
-            error,
-            task,
-        }
+        (Self { jobs, error, task }, stopped)
     }
 
-    fn present(&self) -> u64 {
-        self.present.load(Ordering::Relaxed)
-    }
-
-    /// Queue one verified chunk for storage; backpressures when the
+    /// Queue one bounded chunk for verification and storage; backpressures when the
     /// disk side falls behind.
     async fn put(&self, index: u32, data: Vec<u8>) -> anyhow::Result<()> {
         self.jobs.send((index, data)).await.map_err(|_| {
@@ -360,11 +454,16 @@ async fn receive(
             return Err(e.into());
         }
     };
+    // Claim before sending Need: the peer may send immediately. This also
+    // refuses a second live receive on the same unversioned Sync route.
+    let uni = conn
+        .uni_streams(rds_core::UniHello::Sync)
+        .context("claim sync uni streams")?;
     let bits = need_bits(journal.total(), journal.have_set());
     write_frame(send, &SyncMsg::Need { bits }).await?;
 
     let result = tokio::select! {
-        result = receive_chunks(conn, journal, manifest) => result?,
+        result = receive_chunks(uni, journal, manifest) => result?,
         _ = send.stopped() => bail!("sync control stream closed during receive"),
     };
     write_frame(
@@ -378,7 +477,7 @@ async fn receive(
 }
 
 async fn receive_chunks(
-    conn: &Connection,
+    mut uni: rds_net::UniStreams,
     journal: Journal,
     manifest: &Manifest,
 ) -> anyhow::Result<(PathBuf, Stats)> {
@@ -387,67 +486,99 @@ async fn receive_chunks(
     // Chunk streams arrive tagged `UniHello::Sync` — routed by the
     // connection's demux so a concurrent desktop session on the same
     // connection can't consume them.
-    let mut uni = conn
-        .uni_streams(rds_core::UniHello::Sync)
-        .context("claim sync uni streams")?;
-    let sink = JournalSink::start(journal);
-    // The peer sends exactly the chunks `Need` asked for — count them
-    // on the wire, not via `sink.present()`, which the writer task
-    // advances asynchronously and would lag the final chunk (the loop
-    // would park in `recv` waiting for streams that never come).
-    let mut remaining = total - sink.present();
-    let mut fetched_bytes = 0u64;
-    while remaining > 0 {
-        // `recv` only parks once every routed stream is consumed — a
-        // stall here means the holder under-delivered.
-        let mut stream = match tokio::time::timeout(READ_STALL, uni.recv()).await {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                let _ = sink.finish().await;
-                bail!("chunk streams ended before transfer completed")
+    let mut requested: std::collections::HashSet<u32> = journal.need().into_iter().collect();
+    let (sink, stopped) = JournalSink::start(journal);
+    // Remove only requested unique indices from the bounded set. Disk stores
+    // remain asynchronous; after draining the sink, require complete verified
+    // journal state before assembly or a success response.
+    let collecting = async {
+        let mut streams = 0;
+        let mut fetched_bytes = 0u64;
+        while !requested.is_empty() {
+            streams += 1;
+            if streams > FETCH_STREAMS {
+                bail!("too many chunk streams");
             }
-            Err(_) => {
-                let _ = sink.finish().await;
-                bail!("chunk streams stalled")
-            }
-        };
-        loop {
-            match read_timed::<_, SyncMsg>(&mut stream).await? {
-                SyncMsg::ChunkSet { indices } => {
-                    for index in indices {
-                        let SyncMsg::ChunkHdr { index: i, len, .. } =
-                            read_timed::<_, SyncMsg>(&mut stream).await?
-                        else {
-                            bail!("expected ChunkHdr");
-                        };
-                        if i != index {
-                            bail!("chunk stream out of order: {i} != {index}");
-                        }
-                        // The wire len is untrusted: validate it against
-                        // the manifest before it sizes the receive
-                        // buffer (a forged u32 len would otherwise force
-                        // a multi-GiB allocation).
-                        match manifest.chunks.get(i as usize) {
-                            Some(c) if c.len == len => {}
-                            _ => bail!("chunk {i} header len {len} != manifest"),
-                        }
-                        let mut buf = vec![0u8; len as usize];
-                        match tokio::time::timeout(READ_STALL, stream.read_exact(&mut buf)).await {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => bail!("chunk body read: {e}"),
-                            Err(_) => bail!("chunk body stalled"),
-                        }
-                        sink.put(i, buf).await?;
-                        remaining = remaining.saturating_sub(1);
-                        fetched_bytes += u64::from(len);
-                    }
+            // `recv` only parks once every routed stream is consumed — a
+            // stall here means the holder under-delivered.
+            let mut stream = match tokio::time::timeout(READ_STALL, uni.recv()).await {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    bail!("chunk streams ended before transfer completed")
                 }
-                SyncMsg::SetDone => break,
-                other => bail!("unexpected chunk-stream message {other:?}"),
+                Err(_) => {
+                    bail!("chunk streams stalled")
+                }
+            };
+            let mut stream_chunks = 0;
+            loop {
+                match read_timed::<_, SyncMsg>(&mut stream).await? {
+                    SyncMsg::ChunkSet { indices } => {
+                        if indices.is_empty() || indices.len() > CHUNKSET_BATCH {
+                            bail!("invalid ChunkSet batch length");
+                        }
+                        for index in indices {
+                            if !requested.remove(&index) {
+                                bail!("duplicate or unrequested chunk {index}");
+                            }
+                            let SyncMsg::ChunkHdr {
+                                index: i,
+                                len,
+                                hash,
+                            } = read_timed::<_, SyncMsg>(&mut stream).await?
+                            else {
+                                bail!("expected ChunkHdr");
+                            };
+                            if i != index {
+                                bail!("chunk stream out of order: {i} != {index}");
+                            }
+                            // The wire len is untrusted: validate it against
+                            // the manifest before it sizes the receive
+                            // buffer (a forged u32 len would otherwise force
+                            // a multi-GiB allocation).
+                            match manifest.chunks.get(i as usize) {
+                                Some(c) if c.len == len && c.hash == hash => {}
+                                _ => bail!("chunk {i} header disagrees with manifest"),
+                            }
+                            let mut buf = vec![0u8; len as usize];
+                            match tokio::time::timeout(READ_STALL, stream.read_exact(&mut buf))
+                                .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => bail!("chunk body read: {e}"),
+                                Err(_) => bail!("chunk body stalled"),
+                            }
+                            sink.put(i, buf).await?;
+                            stream_chunks += 1;
+                            fetched_bytes += u64::from(len);
+                        }
+                    }
+                    SyncMsg::SetDone if stream_chunks > 0 => break,
+                    SyncMsg::SetDone => bail!("empty chunk stream"),
+                    other => bail!("unexpected chunk-stream message {other:?}"),
+                }
             }
         }
-    }
+        Ok::<_, anyhow::Error>(fetched_bytes)
+    };
+    let collected = tokio::select! {
+        result = collecting => Some(result),
+        _ = stopped => None,
+    };
+    let fetched_bytes = match collected {
+        Some(result) => result?,
+        None => {
+            // Retrieve the real storage/panic error, even when the peer stops
+            // sending immediately after the corrupt chunk. Do not wait for its
+            // next frame or the unrelated network stall deadline.
+            sink.finish().await?;
+            bail!("journal writer exited before collection completed");
+        }
+    };
     let journal = sink.finish().await?;
+    if !journal.complete() {
+        bail!("chunk writer did not verify every requested index");
+    }
     let fetched = journal.fetched();
     // Assembly concatenates and rehashes every part — blocking pool.
     let dest = {
@@ -490,7 +621,9 @@ async fn push_chunks(
             if mine.is_empty() {
                 return Ok::<(), anyhow::Error>(());
             }
-            let mut stream = conn.open_uni().await?;
+            let mut stream = tokio::time::timeout(READ_STALL, conn.open_uni())
+                .await
+                .context("opening sync chunk stream stalled")??;
             // First frame on every uni stream is its UniHello tag —
             // the receiver's demux routes on it.
             write_frame(&mut stream, &rds_core::UniHello::Sync).await?;
@@ -527,7 +660,9 @@ async fn push_chunks(
                         },
                     )
                     .await?;
-                    stream.write_all(&buf).await?;
+                    tokio::time::timeout(READ_STALL, stream.write_all(&buf))
+                        .await
+                        .context("sync chunk write stalled")??;
                 }
             }
             write_frame(&mut stream, &SyncMsg::SetDone).await?;
@@ -583,7 +718,15 @@ async fn read_manifest(
     let mut chunks = Vec::with_capacity(chunk_count as usize);
     while chunks.len() < chunk_count as usize {
         match read_timed::<_, SyncMsg>(recv).await? {
-            SyncMsg::ManifestPart { chunks: part } => chunks.extend(part),
+            SyncMsg::ManifestPart { chunks: part } => {
+                if part.is_empty()
+                    || part.len() > MANIFEST_BATCH
+                    || part.len() > chunk_count as usize - chunks.len()
+                {
+                    bail!("invalid ManifestPart batch length");
+                }
+                chunks.extend(part);
+            }
             SyncMsg::Refuse { reason } => bail!("refused: {reason}"),
             other => bail!("expected ManifestPart, got {other:?}"),
         }

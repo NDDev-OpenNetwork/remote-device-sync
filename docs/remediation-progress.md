@@ -22,6 +22,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
+| W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux checks passed | Persistent per-root receive lock covers processes and filesystem name aliases; parts and assembly use sync/rename/parent-sync ordering. Abrupt-process-exit regression added. Power-loss, every commit boundary, orphan collection and native macOS durability still need qualification. |
 
 ## Authorization change
@@ -466,3 +467,43 @@ W1.5 remains open for timestamp/per-key legacy cutover, external GDS anchoring,
 release load/startup, physical-failure and native macOS qualification. Next local
 implementation work is W1.9: bind sync requests and acknowledgments to their
 intended file and enforce unique chunk accounting and bounded protocol progress.
+
+## Sync request, completion and progress integrity
+
+W1.9 now binds a pull Offer to its requested normalized path before receive state
+is opened, and both sender roles verify the Done root. The shared frame decoder
+requires an exact postcard payload. Need bitmaps, manifest parts and chunk sets
+have enforced dimensions and padding; empty streams/batches and duplicate or
+unrequested indices fail. Headers agree with the manifest before allocation,
+and the journal must verify every requested index before assembly and Done.
+The receive route is registered before Need. Wire-byte statistics count actual
+requested payload, so identical reuse reports zero chunks and zero bytes.
+
+Every role has a one-hour default absolute session budget, with explicit library
+overrides and five-minute I/O stall bounds. Progress never extends that deadline.
+The blocking writer signals every exit through an owned one-shot channel, waking
+collection immediately on verification/storage failure or panic, including when
+the peer becomes silent. No detached network wait can hide that worker exit.
+Read [the exact contract](sync-protocol.md) and
+[regression evidence](reports/rds-sync-protocol-20260925.md).
+
+Four transport regressions and the shared-frame regression failed before their
+fixes. An additional corrupt-body/silent-peer case exposed the missing worker
+notification during validation; it now fails promptly while retaining prior
+destination contents and releasing journal ownership. The ten protocol scenarios
+cover both transports for path/root binding and owned transport for malformed
+input, timeout, reuse and cleanup cases.
+
+Final Linux validation after the worker-exit correction passed formatting,
+default/X11/all-feature workspace Clippy with warnings denied, **267 workspace
+tests across 50 targets**, and **59 all-feature network/agent/relay tests**. Existing
+impaired transfers, resume and concurrent desktop/sync behavior remain covered.
+The separate 4096-row migration qualification is unchanged. No dependency or
+runtime helper program was added; `cargo-deny` remains unavailable locally.
+
+W1.9 remains partial for explicit transfer IDs/negotiation and native macOS
+qualification. Blocking syscalls and a started complete file replacement can
+outlive async cancellation; stronger publication barriers remain W2.5/W8. Next
+local work is W1.10's remaining journal commit/failure/collection evidence, then
+W2's unified session configuration, negotiation and lifecycle ownership. No
+existing wave is closed by these changes.

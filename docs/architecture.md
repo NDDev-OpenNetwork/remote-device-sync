@@ -288,8 +288,8 @@ a custom UDP stack.
 
 File sync (`rds send`/`rds recv`, agent `--sync-dir`): the file is cut
 by FastCDC into BLAKE3-addressed chunks — streamed (`StreamCDC`), so
-content buffering stays at one max-size chunk (the bounded manifest itself
-still scales with chunk count) and
+manifest construction buffers one max-size chunk (the bounded manifest itself
+still scales with chunk count). Transfer queues have their own finite bounds, and
 disk-bound work (manifest scan, journal open/verify, assembly) runs on
 the blocking pool, never an async worker. The control stream carries
 `Offer`/`Request` then the manifest in ≤512-entry `ManifestPart`
@@ -300,7 +300,15 @@ destination into verified parts before advertising `have` (identical resend
 costs zero wire chunks), and answers
 with a `Need` bitmap (≤256K chunks). The sender pushes `ChunkSet`
 indices (≤4096/batch) then chunk payloads across 4 dedicated uni
-streams; `SetDone`/`Done` close the session. Assembly concatenates
+streams; `SetDone`/`Done` close the session. Assembly begins only after all requested
+unique indices have reached the verified journal.
+Pull Offer paths must match the requested normalized path, and both sender roles
+check Done against their offered root. Empty/oversized batches, noncanonical Need
+bitmaps and duplicate/unrequested chunks are refused. The default absolute session
+budget is one hour, with five-minute I/O stalls; library callers can select an
+explicit total budget. Already-running blocking disk work can finish after
+cancellation, so commit outcome may remain uncertain. See
+[the precise protocol contract](sync-protocol.md). Assembly concatenates
 verified parts, checks the BLAKE3 root, and installs an exclusively created,
 randomly named staging file by atomic rename. Parts, metadata, assembled
 data and their parent directories are synced before their successful return;
