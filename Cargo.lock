@@ -2979,10 +2979,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ed25519-dalek",
  "iroh",
  "iroh-relay",
  "postcard",
  "rds-core",
+ "rds-discovery",
  "rds-net",
  "rustls",
  "rustls-pki-types",

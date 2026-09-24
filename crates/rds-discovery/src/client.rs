@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use rustls_pki_types::ServerName;
 use tokio::net::TcpStream;
 use tokio::task::JoinSet;
@@ -245,20 +245,12 @@ impl Client {
         .map_err(|_| DiscoveryError::Unreachable("policy acceptance timed out".into()))?
     }
 
-    /// Delete `key`'s record with a signed tombstone (`DELETE`).
-    pub async fn remove(
-        &self,
-        key: &EndpointKey,
-        signing: &SigningKey,
-    ) -> Result<(), DiscoveryError> {
-        let tomb = DeleteRequest::new(signing)?;
-        debug_assert_eq!(
-            tomb.verify()?.key,
-            *key,
-            "tombstone key must match the delete path"
-        );
+    /// Send an already signed, revisioned deletion. Revision allocation belongs
+    /// to the publisher; retries must preserve the exact mutation.
+    pub async fn remove(&self, tomb: &DeleteRequest) -> Result<(), DiscoveryError> {
+        let key = tomb.verify_fresh()?.key;
         let body =
-            serde_json::to_vec(&tomb).map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
+            serde_json::to_vec(tomb).map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
         let resp = self
             .request("DELETE", &format!("/v1/records/{key}"), &body)
             .await?;

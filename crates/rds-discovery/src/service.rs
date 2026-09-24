@@ -416,9 +416,9 @@ fn delete_record(state: &State, key: &str, req: &Request) -> Response {
             return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
         }
     };
-    let del = match tomb.verify() {
+    let del = match tomb.verify_fresh() {
         Ok(d) => d,
-        Err(e) => return Response::error(401, &e),
+        Err(e) => return Response::error(status_for(&e), &e),
     };
     if del.key != key {
         return Response::error(401, &DiscoveryError::BadSignature);

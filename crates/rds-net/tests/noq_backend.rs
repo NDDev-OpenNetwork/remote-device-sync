@@ -24,6 +24,16 @@ fn addr_of(id: EndpointId, sock: SocketAddr) -> EndpointAddr {
     EndpointAddr { id, addrs }
 }
 
+#[test]
+fn owned_relay_advertisement_parser_roundtrips_ipv4_and_ipv6() {
+    let id = iroh::SecretKey::from_bytes(&[91; 32]).public();
+    for socket in ["127.0.0.1:3340", "[::1]:3340"] {
+        let socket = socket.parse().unwrap();
+        let url = noq::relay::relay_url_for(&addr_of(id, socket)).unwrap();
+        assert_eq!(noq::relay::parse_relay_url(&url), Some((id, socket)));
+    }
+}
+
 /// Echo every incoming bidi stream until the peer closes the connection.
 async fn serve_noq(conn: noq::Connection) {
     while let Ok((mut send, mut recv)) = conn.accept_bi().await {

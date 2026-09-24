@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- Give endpoint updates and deletions one explicit revision sequence, separate
+  signature domains, bounded fields and exact expiry checks. Exact signed retries
+  are idempotent; equal-revision conflicts are refused. Persist publisher counters
+  and pending bytes before announce, supervise fatal publication failures, and
+  require durable agent state (`--record-state`). This changes the pre-1.0 wire
+  and library APIs: `publish`/delete construction require a revision;
+  `Client::remove` takes a signed deletion; `AnnounceConfig` takes a `RecordIssuer`
+  and `announce` returns a result. Migration and directory admission/GC remain
+  pending; see [record-state.md](docs/record-state.md).
+  Preserve owned `rds-relay://` locators through shared typed identity/socket
+  parsing, including IPv6 brackets, and exercise announce-to-relay connectivity.
+
+- Release policy, database and sync receive locks when their Rust owner drops,
+  including when another thread's fork temporarily inherits a descriptor.
+  Persistent lock inodes are retained; successor ownership remains exclusive.
+
 - Keep signed delete tombstones in both record stores and serialize mutations.
   Replace per-key JSON writes with an embedded Rust redb transaction plus a
   durable generation anchor; refuse corrupt/missing state and database-only

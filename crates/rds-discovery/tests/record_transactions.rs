@@ -23,6 +23,7 @@ fn issuer() -> SigningKey {
 fn record() -> EndpointRecord {
     EndpointRecord::publish(
         &issuer(),
+        1,
         vec!["127.0.0.1:4000".parse().unwrap()],
         vec![],
         vec![Service::Ping],
@@ -37,7 +38,7 @@ fn memory_deletion_retains_replay_protection() {
     let record = record();
     store.put(&record).unwrap();
     store
-        .remove(&DeleteRequest::new(&issuer()).unwrap())
+        .remove(&DeleteRequest::new(&issuer(), 2).unwrap())
         .unwrap();
     assert!(
         store.put(&record).is_err(),
@@ -52,7 +53,7 @@ fn file_deletion_retains_replay_protection_after_restart() {
     let record = record();
     store.put(&record).unwrap();
     store
-        .remove(&DeleteRequest::new(&issuer()).unwrap())
+        .remove(&DeleteRequest::new(&issuer(), 2).unwrap())
         .unwrap();
     drop(store);
     let restarted = FileStore::new(&tmp.0).unwrap();
@@ -88,7 +89,7 @@ fn restoring_an_old_database_cannot_undo_an_acknowledged_delete() {
     let old_database = std::fs::read(tmp.0.join("records.redb")).unwrap();
     let store = FileStore::new(&tmp.0).unwrap();
     store
-        .remove(&DeleteRequest::new(&issuer()).unwrap())
+        .remove(&DeleteRequest::new(&issuer(), 2).unwrap())
         .unwrap();
     drop(store);
     std::fs::write(tmp.0.join("records.redb"), old_database).unwrap();
@@ -105,7 +106,7 @@ fn missing_anchor_or_database_never_initializes_empty_history() {
         let store = FileStore::new(&tmp.0).unwrap();
         store.put(&record()).unwrap();
         store
-            .remove(&DeleteRequest::new(&issuer()).unwrap())
+            .remove(&DeleteRequest::new(&issuer(), 2).unwrap())
             .unwrap();
         drop(store);
         std::fs::remove_file(tmp.0.join(file)).unwrap();
@@ -168,10 +169,10 @@ fn concurrent_puts_and_delete_have_one_monotonic_result() {
         let mut payload = initial.verify().unwrap();
         let key = payload.key;
         store.put(&initial).unwrap();
-        let tomb = DeleteRequest::new(&issuer()).unwrap();
+        let tomb = DeleteRequest::new(&issuer(), 2).unwrap();
         let mut versions = Vec::new();
         for revision in 1..=8 {
-            payload.issued_at = tomb.verify().unwrap().issued_at + revision;
+            payload.revision = 2 + revision;
             payload.expires_at = payload.issued_at + 300;
             versions.push(EndpointRecord::sign(&payload, &issuer()).unwrap());
         }

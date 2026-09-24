@@ -54,7 +54,41 @@ async fn relay_forwards_handshake_and_datagrams() {
     let b = endpoint(2, relay.endpoint_addr()).await;
     assert_eq!(relay.endpoints(), 2, "both endpoints attached");
 
-    let target = relay_only(b.addr());
+    // Exercise the directory boundary too: owned relay locators have their own
+    // scheme and public identity, and must survive signed announce/resolve.
+    let directory = rds_discovery::service::serve(
+        "127.0.0.1:0".parse().unwrap(),
+        std::sync::Arc::new(rds_discovery::MemoryStore::default()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let client = rds_discovery::client::Client::new(directory.addr());
+    let _announce = rds_net::announce(
+        b.clone(),
+        rds_net::AnnounceConfig {
+            issuer: rds_discovery::RecordIssuer::memory(ed25519_dalek::SigningKey::from_bytes(
+                &key(2).to_bytes(),
+            )),
+            directory: client.clone(),
+            services: vec![rds_discovery::Service::Ping],
+            ttl: std::time::Duration::from_secs(120),
+        },
+    )
+    .unwrap();
+    let resolved = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(target) =
+                rds_net::resolve_target(Some(client.clone()), &b.id().to_string()).await
+            {
+                break target;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("owned relay record must publish and resolve");
+    let target = relay_only(resolved);
     // Accept must be polled while connect is in flight: the server's
     // endpoint only drives the handshake once the incoming is taken.
     let accept_b = tokio::spawn({

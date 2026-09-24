@@ -32,12 +32,15 @@ async fn announce_publishes_and_keeps_record_live() {
     let _announce = announce(
         endpoint.clone(),
         AnnounceConfig {
-            key,
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+            ),
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
         },
-    );
+    )
+    .unwrap();
 
     // The announce task publishes asynchronously; poll until visible.
     let ek = EndpointKey(*endpoint.id().as_bytes());
@@ -100,12 +103,15 @@ async fn announce_republishes_when_addrs_change() {
     let _announce = announce(
         endpoint.clone(),
         AnnounceConfig {
-            key,
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+            ),
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
         },
-    );
+    )
+    .unwrap();
     let ek = EndpointKey(*endpoint.id().as_bytes());
 
     let mut first = None;
@@ -204,6 +210,8 @@ async fn resolve_refuses_aged_out_record() {
     let now = rds_discovery::now_unix().unwrap();
     let rec = rds_discovery::EndpointRecord::sign(
         &rds_discovery::Payload {
+            version: rds_discovery::RECORD_VERSION,
+            revision: 1,
             key: ek,
             addrs: vec!["10.0.0.9:4200".parse().unwrap()],
             relay_urls: vec![],
@@ -223,16 +231,47 @@ async fn resolve_refuses_aged_out_record() {
         .expect("fresh record resolves");
 
     // Past expiry the same stored record must be refused. issued_at
-    // and now are whole seconds, so a 1s TTL is fresh for up to ~2s
-    // real time — sleep past the worst-case boundary.
+    // and now are whole seconds; wait beyond the exact expiry boundary.
     tokio::time::sleep(Duration::from_millis(2200)).await;
     let err = rds_net::resolve_target(Some(client.clone()), &bare)
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("verification") || err.to_string().contains("expired"),
-        "aged record must fail verification, got {err}"
+        matches!(
+            err.downcast_ref::<rds_discovery::DiscoveryError>(),
+            Some(rds_discovery::DiscoveryError::Http { status: 410, .. })
+        ),
+        "directory must refuse aged record, got {err:#}"
     );
+
+    // A hostile directory can still replay expired signed bytes. The resolver
+    // must enforce validity independently, even when HTTP reports success.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hostile = Client::new(listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        rds_discovery::http::read_request(&mut stream)
+            .await
+            .unwrap()
+            .unwrap();
+        rds_discovery::http::write_response(
+            &mut stream,
+            &rds_discovery::http::Response::json(200, rec),
+        )
+        .await
+        .unwrap();
+    });
+    let err = rds_net::resolve_target(Some(hostile), &bare)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<rds_discovery::DiscoveryError>(),
+            Some(rds_discovery::DiscoveryError::Expired)
+        ),
+        "{err:#}"
+    );
+    server.await.unwrap();
 }
 
 /// Resolve path e2e: announce → resolve_target by bare key → connect.
@@ -277,12 +316,15 @@ async fn resolve_then_connect_by_bare_key() {
     let _announce = announce(
         agent.clone(),
         AnnounceConfig {
-            key,
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+            ),
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
         },
-    );
+    )
+    .unwrap();
 
     // "CLI" endpoint resolves the agent's bare key via the directory.
     let cli_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())

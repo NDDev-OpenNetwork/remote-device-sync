@@ -1,5 +1,5 @@
-//! Transactional record/tombstone storage. The wire ordering currently remains
-//! issued_at; explicit publisher revisions and quota/GC policy follow in W1.5.
+//! Transactional record/tombstone storage. Both mutation types share
+//! signed publisher revisions; expiry GC and admission quotas follow in W1.5.
 use crate::{
     DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, RecordStore,
     persist::{AtomicFile, regular},
@@ -16,8 +16,8 @@ use std::{
     sync::{Mutex, RwLock},
 };
 
-const RECORDS: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new("records-v1");
-const META: TableDefinition<'_, u8, &[u8]> = TableDefinition::new("metadata-v1");
+const RECORDS: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new("records-v2");
+const META: TableDefinition<'_, u8, &[u8]> = TableDefinition::new("metadata-v2");
 const MAX_CELL: usize = 256 * 1024;
 const MAX_DATABASE: u64 = 256 * 1024 * 1024;
 const MAX_IDENTITIES: usize = 4096;
@@ -36,31 +36,34 @@ fn error(e: impl std::fmt::Display) -> DiscoveryError {
     DiscoveryError::Store(e.to_string())
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Entry {
     Record(EndpointRecord),
     Deleted(DeleteRequest),
 }
 impl Entry {
     fn verify(&self, key: &EndpointKey) -> Result<u64, DiscoveryError> {
-        let (actual, issued) = match self {
+        let (actual, revision) = match self {
             Self::Record(record) => {
                 let p = record.verify()?;
-                (p.key, p.issued_at)
+                (p.key, p.revision)
             }
             Self::Deleted(tomb) => {
                 let p = tomb.verify()?;
-                (p.key, p.issued_at)
+                (p.key, p.revision)
             }
         };
         if actual != *key {
             return Err(DiscoveryError::BadSignature);
         }
-        Ok(issued)
+        Ok(revision)
     }
     fn record(&self) -> Result<EndpointRecord, DiscoveryError> {
         match self {
-            Self::Record(record) => Ok(record.clone()),
+            Self::Record(record) => {
+                record.verify_fresh()?;
+                Ok(record.clone())
+            }
             Self::Deleted(_) => Err(DiscoveryError::NotFound),
         }
     }
@@ -69,15 +72,18 @@ impl Entry {
     }
 }
 
-fn check(old: Option<&Entry>, new: &Entry, key: &EndpointKey) -> Result<(), DiscoveryError> {
-    let issued = new.verify(key)?;
+fn check(old: Option<&Entry>, new: &Entry, key: &EndpointKey) -> Result<bool, DiscoveryError> {
+    let revision = new.verify(key)?;
     if let Some(old) = old {
         let previous = old.verify(key)?;
-        if issued < previous || (issued == previous && new.live()) {
+        if revision == previous && old == new {
+            return Ok(false);
+        }
+        if revision <= previous {
             return Err(DiscoveryError::Stale);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn decode(bytes: &[u8], key: &EndpointKey) -> Result<Entry, DiscoveryError> {
@@ -97,14 +103,16 @@ pub struct MemoryStore {
 impl MemoryStore {
     fn apply(&self, key: EndpointKey, entry: Entry) -> Result<(), DiscoveryError> {
         let mut entries = self.entries.write().map_err(error)?;
-        check(entries.get(&key), &entry, &key)?;
+        if !check(entries.get(&key), &entry, &key)? {
+            return Ok(());
+        }
         entries.insert(key, entry);
         Ok(())
     }
 }
 impl RecordStore for MemoryStore {
     fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        self.apply(record.verify()?.key, Entry::Record(record.clone()))
+        self.apply(record.verify_fresh()?.key, Entry::Record(record.clone()))
     }
     fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
         self.entries
@@ -115,7 +123,7 @@ impl RecordStore for MemoryStore {
             .record()
     }
     fn remove(&self, tomb: &DeleteRequest) -> Result<(), DiscoveryError> {
-        self.apply(tomb.verify()?.key, Entry::Deleted(tomb.clone()))
+        self.apply(tomb.verify_fresh()?.key, Entry::Deleted(tomb.clone()))
     }
     fn len(&self) -> usize {
         self.entries
@@ -329,7 +337,7 @@ impl FileStore {
                     }
                     drop(read);
                     let metadata = Metadata {
-                        format: 1,
+                        format: 2,
                         database: rand::random(),
                         generation: 1,
                         live: 0,
@@ -348,7 +356,7 @@ impl FileStore {
                 Err(e) => return Err(error(e)),
             }
         };
-        if metadata.format != 1
+        if metadata.format != 2
             || metadata.generation == 0
             || metadata.identities > MAX_IDENTITIES as u64
         {
@@ -444,13 +452,12 @@ impl FileStore {
                     inner.failed = false;
                     return Err(DiscoveryError::Stale);
                 }
-                other => other?,
-            }
-            if let (Some(Entry::Deleted(old)), Entry::Deleted(new)) = (&old, &entry)
-                && old.payload == new.payload
-            {
-                inner.failed = false;
-                return Ok(());
+                Ok(false) => {
+                    inner.failed = false;
+                    return Ok(());
+                }
+                Ok(true) => {}
+                Err(e) => return Err(e),
             }
             if old.is_none() {
                 if next.identities >= MAX_IDENTITIES as u64 {
@@ -510,7 +517,7 @@ impl Inner {
 }
 impl RecordStore for FileStore {
     fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        self.apply(record.verify()?.key, Entry::Record(record.clone()))
+        self.apply(record.verify_fresh()?.key, Entry::Record(record.clone()))
     }
     fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
         let inner = self.inner.lock().map_err(error)?;
@@ -524,7 +531,7 @@ impl RecordStore for FileStore {
         decode(value.value(), key)?.record()
     }
     fn remove(&self, tomb: &DeleteRequest) -> Result<(), DiscoveryError> {
-        self.apply(tomb.verify()?.key, Entry::Deleted(tomb.clone()))
+        self.apply(tomb.verify_fresh()?.key, Entry::Deleted(tomb.clone()))
     }
     fn len(&self) -> usize {
         self.inner

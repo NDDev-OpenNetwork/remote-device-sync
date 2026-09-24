@@ -76,6 +76,12 @@ agent and name CLI persist their policy revisions and freshness state. See
 [policy configuration and migration](docs/policy-state.md) before upgrading
 the issuer or deploying managed access.
 
+Endpoint publication also persists its revision counter and exact retry bytes
+(`rds-agent --record-state`, default beside the identity key). Records and
+deletes use a new versioned signature contract; old directories require an
+explicit migration that is still being implemented. See
+[record state and migration limits](docs/record-state.md) before deployment.
+
 Observability: `rds-net` exposes a per-endpoint metrics registry (per-path
 RTT/loss/cwnd, datagrams and bytes split by `via="direct"`/`via="relay"`,
 QNT counters on the owned transport) with Prometheus text export behind the

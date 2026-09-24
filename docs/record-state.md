@@ -1,9 +1,69 @@
 # Directory record storage
 
-Status: W1.5 transactional foundation, not a completed directory acceptance
-gate. Signed record/delete ordering still uses `issued_at`; explicit publisher
-revisions, exact retry, bounded validity, expiry GC and admission fairness are
-the next steps in [the remediation plan](remediation-plan.md).
+Status: W1.5 transactions and versioned publication implemented, not a completed
+directory acceptance gate. Expiry GC, clock-floor retention, admission fairness,
+strict HTTP framing and migration remain in [the remediation plan](remediation-plan.md).
+
+## Signed mutation contract
+
+An endpoint identity owns one positive `u64` revision sequence shared by record
+updates and deletion. Revisions are independent of wall-clock timestamps.
+Both payloads contain version 1, endpoint key, revision and issuance/expiry.
+Record payloads also contain direct addresses, relay locators and services.
+Ed25519 signatures cover `rds/endpoint-record/v1\0` or
+`rds/endpoint-delete/v1\0` plus the exact postcard payload. The JSON envelope
+has an untrusted key hint; verify the bounded signature before decoding fields,
+then require agreement with the signed key. Unknown versions, trailing payload
+bytes, mismatched identity and invalid fields are refused.
+
+A higher revision replaces the previous mutation. An exact signed retry at the
+same revision succeeds without rewriting disk or extending validity. Different
+content at that revision and all lower revisions are stale, including a record
+after a newer delete. A legitimate later publication can supersede a delete.
+Tombstones prevent replay; GDS unenrollment is a separate authorization policy.
+
+Limits are 8192 payload bytes, 32 direct addresses, 8 relay locators of at most
+512 bytes each, and the six distinct service kinds. Sequence decoders reject
+oversized length hints before reserving their capacity. Direct addresses require
+a nonzero port and a specified, nonmulticast IP. HTTP(S) relay origins require
+a host and no credentials, query, fragment or non-root path. Owned transport
+locators use `rds-relay://<32-byte-hex-public-key>@<IP>:<port>`: the public key
+occupies URI user-info, passwords are forbidden, and the socket must be an IP
+literal with a nonzero port. IPv6 literals use brackets. `OwnedRelayRoute` is
+shared by record validation and the noq adapter; no independent URL parser can
+silently discard the identity or mishandle IPv6 brackets. Repeated fields are
+refused. A record lives at most 3600 seconds; a delete at most 300 seconds.
+Acceptance requires `issued_at <= now < expires_at`, including retries. Stores
+refuse expired records on reads; clients verify freshness independently.
+Server wall-clock rollback/expiry-history retention remains the next W1.5 step.
+
+## Publisher ownership
+
+`RecordIssuer` owns the signing key in memory and a protected state directory
+containing `publisher.json` and `publisher.lock`. It commits the next revision,
+signed pending mutation, checksum and issuance clock floor before returning
+bytes for publication. No secret key is written into that state. A restart
+reuses the exact pending bytes. Missing initialized state, corruption, changed
+identity, backward time below the persisted issuance floor or a failed commit
+never resets the counter. An uncertain commit closes the issuer until reopen.
+The observed wall clock also cannot regress within a running issuer.
+
+`rds-agent --record-state` defaults to the key path with its extension replaced
+by `publisher-state`. Open it before binding the endpoint; there is no volatile
+production fallback. Embedding tests and the synthetic benchmark explicitly
+choose `RecordIssuer::memory`. Restoring an entire old publisher directory needs
+an external GDS anchor; a server revision conflict is fatal, not a signal to
+guess a larger counter or trust unsigned server state.
+
+The announce loop serializes disk jobs off the async runtime, observes address
+changes at most one second apart, and renews unchanged data after one third of
+its lifetime. Network retries reuse the current signed operation until a renewal
+or actual data change. Dropping the owner prevents late publication from a
+local disk job that finishes afterward. An already-sent request can still
+commit remotely; revision ordering and exact retry handle that uncertainty.
+Fatal issuer failures and permanent
+HTTP 4xx protocol refusals reach `Announce::wait`; the CLI supervises that result
+and closes its endpoint. Network failures, timeouts, expiry and rate limits retry.
 
 ## Transaction and recovery contract
 
@@ -59,12 +119,16 @@ capacity are pending. `len()` counts stored nondeleted records, not fresh peers.
 
 ## Migration and operations
 
-The previous per-key JSON directory is not accepted or automatically imported.
+The previous per-key JSON directory and experimental format-1 database are not
+accepted or automatically imported. The revisioned database uses format 2.
 Unknown legacy files are preserved and startup refuses them. There is no
 migration command in this patch. Do not delete the legacy directory or start
 an empty replacement to bypass this refusal: that would discard replay history.
-Keep deployment on its existing version until the versioned-record issuer and
-explicit migration procedure land in W1.5. Synthetic tests use new isolated
+Keep deployment on its existing version until the explicit migration procedure
+lands in W1.5. Legacy record/delete signatures without a domain prefix are
+rejected by the new wire format; consumers and publishers must upgrade together. Never invent
+publisher revisions from wall time or copy one issuer state into multiple live
+agents. Synthetic tests use new isolated
 directories only.
 
 Back up the entire directory while the service is stopped; a live copy can

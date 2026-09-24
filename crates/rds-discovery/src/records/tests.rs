@@ -27,6 +27,7 @@ fn signer() -> SigningKey {
 fn record() -> EndpointRecord {
     EndpointRecord::publish(
         &signer(),
+        1,
         vec!["127.0.0.1:4000".parse().unwrap()],
         vec![],
         vec![crate::Service::Ping],
@@ -47,7 +48,7 @@ fn failed_commit_never_publishes_and_reopen_reconciles_one_unacknowledged_genera
         store.inner.lock().unwrap().fault = Some((phase, false));
         assert!(
             store
-                .remove(&DeleteRequest::new(&signer()).unwrap())
+                .remove(&DeleteRequest::new(&signer(), 2).unwrap())
                 .is_err()
         );
         assert!(matches!(store.get(&key()), Err(DiscoveryError::Store(_))));
@@ -77,7 +78,7 @@ fn every_anchor_failure_keeps_the_database_commit_unpublished_until_recovery() {
         store.inner.lock().unwrap().anchor.fault = Some((phase, false));
         assert!(
             store
-                .remove(&DeleteRequest::new(&signer()).unwrap())
+                .remove(&DeleteRequest::new(&signer(), 2).unwrap())
                 .is_err()
         );
         assert!(matches!(store.get(&key()), Err(DiscoveryError::Store(_))));
@@ -101,7 +102,7 @@ fn partial_database_write_and_sync_failure_do_not_reset_committed_history() {
         fault.store(mode, std::sync::atomic::Ordering::SeqCst);
         assert!(
             store
-                .remove(&DeleteRequest::new(&signer()).unwrap())
+                .remove(&DeleteRequest::new(&signer(), 2).unwrap())
                 .is_err()
         );
         assert_eq!(fault.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -163,7 +164,7 @@ fn crash_writer() {
     let store = FileStore::new(PathBuf::from(path)).unwrap();
     store.inner.lock().unwrap().fault = Some((PHASES[index], true));
     store
-        .remove(&DeleteRequest::new(&signer()).unwrap())
+        .remove(&DeleteRequest::new(&signer(), 2).unwrap())
         .unwrap();
     panic!("crash checkpoint did not stop child");
 }

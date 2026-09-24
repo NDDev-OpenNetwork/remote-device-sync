@@ -366,12 +366,14 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     let _announce = rds_net::announce(
         agent_ep.clone(),
         AnnounceConfig {
-            key: agent_key,
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&agent_key.to_bytes()),
+            ),
             directory: directory.clone(),
             services: vec![rds_discovery::Service::Ping],
             ttl: Duration::from_secs(120),
         },
-    );
+    )?;
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
     policy.allow.insert(client_key.public());
     let agent = Arc::new(Agent::new(agent_ep, policy));

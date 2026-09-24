@@ -65,6 +65,7 @@ async fn dns_https_preserves_the_signed_identity_chain() {
     client.health().await.unwrap();
     let record = EndpointRecord::publish(
         &device,
+        1,
         vec!["127.0.0.1:4321".parse().unwrap()],
         vec![],
         vec![Service::Ping],

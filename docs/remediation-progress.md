@@ -13,11 +13,12 @@ promotion has occurred. Native macOS checks still require their platform lane.
 
 | Task | State | Evidence / remaining scope |
 |---|---|---|
-| W0.1 | Partial | R01/R10 are agent regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R02/R08/R09 and desktop body cancellation still need their owning fixes/tests. |
+| W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08/R09 and desktop body cancellation still need their owning fixes/tests. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
 | W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
+| W1.5 | Partial | Transactional bounded disk store, tombstones, database generation anchor, signed publisher revisions, exact retries, wire/lifetime bounds and durable supervised announce are implemented. Expiry GC/clock floors, memory/enrollment quotas, fair renewal, strict HTTP framing and explicit migration remain open; see validation below. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -271,5 +272,57 @@ single isolated diagnostic rerun passed at 10/16 ms. The complete sequential
 test run passed **184 tests, 44 targets**. This does not erase the default-run
 failure or close W0/W6 performance evidence. No thresholds changed. See the
 [record transaction receipt](reports/rds-records-20260924.md) for exact scope.
-W1.5 remains open: explicit signed revisions and durable publisher allocation
-are next, followed by expiry/quotas, enrollment fairness and HTTP framing.
+That storage patch left signed revisions and durable publisher allocation for
+the following change, then expiry/quotas, enrollment fairness and HTTP framing.
+
+## Versioned endpoint publication
+
+The next W1.5 change replaces timestamp ordering with one positive revision
+sequence for record updates and deletion. New signature domains bind version,
+identity, revision and bounded validity. Verification precedes variable-field
+decoding; exact signed retries are idempotent, while equal-revision conflicting
+content and older mutations are refused. Both stores enforce current lifetime
+on writes and reads; resolver checks remain independent of the server.
+
+`RecordIssuer` persists the counter and pending signed bytes before publication.
+The CLI owns durable state, while fixtures explicitly select volatile issuers.
+Same-second address changes receive different revisions. Retries preserve signed
+bytes until actual renewal/change; restart resumes the pending operation. Fatal
+history/disk failures and permanent protocol refusals reach the agent supervisor
+instead of silently stopping the announce loop. Existing connections close on
+that fatal CLI path. A lost successful HTTP reply is exercised through a real
+directory and proxy, with an identical second request accepted successfully.
+
+Ten revision/issuer cases and three announce lifecycle cases cover retry,
+conflicts, delete ordering, expiry, wire bounds, restart, missing history and
+permanent rejection. Publisher fault tests cover five write/rename/sync phases,
+including abrupt child exits. Old fixtures that advanced `issued_at` into the
+future were updated to use revisions. The expiry test now checks both a 410
+from the real store and independent client rejection of an expired signed
+record returned by a hostile HTTP 200 response.
+
+Record validation and the owned transport share a typed `rds-relay://` locator
+parser, preserving relay identity and IPv4/IPv6 sockets. The real owned relay
+test now goes through announce, directory storage and resolution before forcing
+the handshake, datagrams and stream exchange onto the relay. This caught a
+compatibility gap in an HTTP-only validation rule; the previous IPv6 bracket
+parse failure is also corrected. No IPv6 network qualification is implied.
+
+The first workspace run exposed a state-lock lifetime issue: a descriptor alias
+can retain flock after its owner drops. A deterministic reproducer failed;
+explicit guard release now passes across atomic state, database and sync root
+locks. See the [separate lock receipt](reports/rds-locks-20260924.md), committed
+as `8a18064`. This correction does not add sleep/retry to hide a failed invariant.
+The final default `cargo test --workspace` run passed **204 tests across
+46 targets**, including the parallel desktop smoke test and crash/reopen cases.
+Formatting and default, X11 and all-feature workspace Clippy also passed with
+warnings denied. This does not qualify sustained production latency or erase
+the preceding failed-run evidence.
+
+`cargo test -p rds-net -p rds-agent -p rds-relay --all-features` passed
+**58 tests across 18 targets**, including the real owned-relay feature (not just
+the noq endpoint feature). The agent binary built and executed `--help` with
+`--record-state`. See the [publisher receipt](reports/rds-publisher-20260924.md).
+Native macOS, physical failures, migration and real estate deployment remain
+unqualified. Next: expiry/clock-floor retention, enrollment quotas and fair
+renewal, strict HTTP framing, then explicit migration; W1.9 is still pending.

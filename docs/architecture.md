@@ -208,7 +208,12 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   older root. Both commits finish before readers or HTTP success can observe
   the mutation; uncertain I/O closes the store until reopen. Storage uses a
   protected, single-owner directory and a bounded no-follow file backend.
-  Explicit publisher revisions, expiry GC and admission quotas remain W1.5;
+  Record updates and deletes share a positive publisher revision sequence and
+  separate versioned signature domains. The production announce issuer commits
+  its counter and exact signed bytes before sending; lost replies can retry
+  without a new revision, and local history failures reach the agent supervisor.
+  Stores check current lifetime on read/write, including exact retries. Expiry
+  GC, retained clock floors, admission quotas and migration remain W1.5;
   see [record-state.md](record-state.md) for migration and current limits. Directory
   certificate renewal is external provisioning plus restart for now; automatic
   renewal and hot reload are not implied by the relay's separate ACME support.

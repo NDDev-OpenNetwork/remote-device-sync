@@ -17,9 +17,11 @@ fn key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
-fn record(k: &SigningKey, issued_at: u64, ttl: u64) -> EndpointRecord {
+fn record_at(k: &SigningKey, revision: u64, issued_at: u64, ttl: u64) -> EndpointRecord {
     EndpointRecord::sign(
         &rds_discovery::Payload {
+            version: rds_discovery::RECORD_VERSION,
+            revision,
             key: EndpointKey(k.verifying_key().to_bytes()),
             addrs: vec![std::net::SocketAddr::from(([10, 0, 0, 1], 4200))],
             relay_urls: vec![],
@@ -30,6 +32,10 @@ fn record(k: &SigningKey, issued_at: u64, ttl: u64) -> EndpointRecord {
         k,
     )
     .unwrap()
+}
+
+fn record(k: &SigningKey, issued_at: u64, ttl: u64) -> EndpointRecord {
+    record_at(k, 1, issued_at, ttl)
 }
 
 async fn serve() -> (service::Directory, Client) {
@@ -101,7 +107,7 @@ async fn stale_replay_and_forgery_rejected() {
     let (_dir, client) = serve().await;
     let k = key(12);
     let now = now_unix().unwrap();
-    client.publish(&record(&k, now + 10, 300)).await.unwrap();
+    client.publish(&record_at(&k, 2, now, 300)).await.unwrap();
     // Replaying an older record must not roll the directory back.
     let err = client.publish(&record(&k, now, 300)).await.unwrap_err();
     assert!(
@@ -109,7 +115,7 @@ async fn stale_replay_and_forgery_rejected() {
         "stale replay -> 409, got {err:?}"
     );
     // Forged: valid shape, wrong signer.
-    let mut forged = record(&k, now + 20, 300);
+    let mut forged = record_at(&k, 3, now, 300);
     forged.signature[0] ^= 1;
     let err = client.publish(&forged).await.unwrap_err();
     assert!(matches!(err, DiscoveryError::Http { status: 401, .. }));
@@ -145,7 +151,10 @@ async fn put_rate_limit_enforced() {
     let now = now_unix().unwrap();
     client.publish(&record(&k, now, 300)).await.unwrap();
     // A newer, valid record inside the interval still 429s.
-    let err = client.publish(&record(&k, now + 5, 300)).await.unwrap_err();
+    let err = client
+        .publish(&record_at(&k, 2, now, 300))
+        .await
+        .unwrap_err();
     assert!(matches!(err, DiscoveryError::RateLimited));
 }
 
@@ -170,12 +179,14 @@ async fn global_write_limit_covers_delete_and_registry() {
     .unwrap();
     let client = Client::new(dir.addr());
     let k = key(16);
-    let ek = EndpointKey(k.verifying_key().to_bytes());
     client
         .publish(&record(&k, now_unix().unwrap(), 300))
         .await
         .unwrap();
-    let err = client.remove(&ek, &k).await.unwrap_err();
+    let err = client
+        .remove(&rds_discovery::DeleteRequest::new(&k, 2).unwrap())
+        .await
+        .unwrap_err();
     assert!(matches!(err, DiscoveryError::RateLimited));
 }
 
@@ -188,7 +199,10 @@ async fn signed_delete_removes_record() {
         .publish(&record(&k, now_unix().unwrap(), 300))
         .await
         .unwrap();
-    client.remove(&ek, &k).await.unwrap();
+    client
+        .remove(&rds_discovery::DeleteRequest::new(&k, 2).unwrap())
+        .await
+        .unwrap();
     let err = client.fetch(&ek).await.unwrap_err();
     assert!(matches!(err, DiscoveryError::Http { status: 404, .. }));
     // Unsigned/garbage delete body is a 400.
@@ -603,14 +617,14 @@ async fn refresh_keeps_record_live() {
     let (_dir, client) = serve().await;
     let k = key(16);
     let ek = EndpointKey(k.verifying_key().to_bytes());
-    // Simulate an announce loop republishing with fresh issued_at —
-    // the store accepts strictly-newer records.
-    for offset in [0u64, 2, 4] {
+    // New revisions can share a second; no fictitious future clock is needed.
+    for revision in 1..=3 {
         client
-            .publish(&record(&k, now_unix().unwrap() + offset, 300))
+            .publish(&record_at(&k, revision, now_unix().unwrap(), 300))
             .await
             .unwrap();
         let fetched = client.fetch(&ek).await.unwrap();
         assert!(fetched.verify_fresh().is_ok());
+        assert_eq!(fetched.verify().unwrap().revision, revision);
     }
 }

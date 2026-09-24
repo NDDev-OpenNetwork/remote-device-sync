@@ -34,6 +34,7 @@ async fn resolver_binds_the_verified_name_to_the_record_identity() {
             } else {
                 &expected
             },
+            1,
             vec!["127.0.0.1:9876".parse().unwrap()],
             vec![],
             vec![],

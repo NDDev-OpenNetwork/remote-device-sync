@@ -17,6 +17,15 @@ pub mod client;
 pub mod clock;
 pub mod http;
 mod persist;
+pub mod publisher;
+pub use publisher::{RecordDraft, RecordIssuer};
+mod record_wire;
+mod relay_route;
+pub use record_wire::{
+    DeletePayload, DeleteRequest, EndpointRecord, MAX_DIRECT_ADDRS, MAX_RECORD_BYTES,
+    MAX_RECORD_TTL, MAX_RELAY_URL_BYTES, MAX_RELAY_URLS, Payload, RECORD_VERSION,
+};
+pub use relay_route::OwnedRelayRoute;
 pub mod policy;
 mod records;
 pub use records::{FileStore, MemoryStore};
@@ -25,10 +34,8 @@ pub mod revocations;
 pub mod service;
 pub mod tls;
 
-use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -72,34 +79,6 @@ pub enum Service {
     Sync,
 }
 
-/// What the endpoint publishes about itself. The `signature` covers the
-/// postcard encoding of `Payload`; everything else is derived at load.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EndpointRecord {
-    /// Encoded [`Payload`] bytes.
-    pub payload: Vec<u8>,
-    /// Ed25519 signature over `payload`, made by the payload's key.
-    pub signature: Vec<u8>,
-}
-
-/// Signed portion of an [`EndpointRecord`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Payload {
-    pub key: EndpointKey,
-    /// Direct candidate addresses (IPv4/IPv6).
-    pub addrs: Vec<SocketAddr>,
-    /// Relay base URLs the endpoint is reachable through.
-    pub relay_urls: Vec<String>,
-    /// Services this endpoint serves.
-    pub services: Vec<Service>,
-    /// Unix seconds when the record was issued. Stores reject a record
-    /// whose `issued_at` is not newer than the stored one — replay of an
-    /// older record cannot roll the directory back.
-    pub issued_at: u64,
-    /// Unix seconds after which the record must be refreshed.
-    pub expires_at: u64,
-}
-
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
     #[error("policy state is owned by another process")]
@@ -126,66 +105,6 @@ pub enum DiscoveryError {
     Store(String),
 }
 
-impl EndpointRecord {
-    /// Sign a fresh record for `key` valid for `ttl`.
-    pub fn publish(
-        key: &SigningKey,
-        addrs: Vec<SocketAddr>,
-        relay_urls: Vec<String>,
-        services: Vec<Service>,
-        ttl: Duration,
-    ) -> Result<Self, DiscoveryError> {
-        let issued_at = now_unix()?;
-        let payload = Payload {
-            key: EndpointKey(key.verifying_key().to_bytes()),
-            addrs,
-            relay_urls,
-            services,
-            issued_at,
-            expires_at: issued_at + ttl.as_secs(),
-        };
-        Self::sign(&payload, key)
-    }
-
-    /// Serialize and sign an already-built [`Payload`].
-    pub fn sign(payload: &Payload, key: &SigningKey) -> Result<Self, DiscoveryError> {
-        let bytes = postcard::to_stdvec(payload)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let signature = key.sign(&bytes);
-        Ok(Self {
-            payload: bytes,
-            signature: signature.to_bytes().to_vec(),
-        })
-    }
-
-    /// Verify the signature and return the payload. Expiry is checked by
-    /// callers that care (a store may still return expired records for
-    /// diagnostics).
-    pub fn verify(&self) -> Result<Payload, DiscoveryError> {
-        let payload: Payload = postcard::from_bytes(&self.payload)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let key = VerifyingKey::from_bytes(&payload.key.0)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let sig_bytes: [u8; 64] = self
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| DiscoveryError::InvalidRecord("signature is not 64 bytes".into()))?;
-        key.verify_strict(&self.payload, &Signature::from_bytes(&sig_bytes))
-            .map_err(|_| DiscoveryError::BadSignature)?;
-        Ok(payload)
-    }
-
-    /// Verify and additionally require the record to be unexpired.
-    pub fn verify_fresh(&self) -> Result<Payload, DiscoveryError> {
-        let payload = self.verify()?;
-        if payload.expires_at < now_unix()? {
-            return Err(DiscoveryError::Expired);
-        }
-        Ok(payload)
-    }
-}
-
 /// Current unix time in seconds.
 pub fn now_unix() -> Result<u64, DiscoveryError> {
     Ok(SystemTime::now()
@@ -194,79 +113,13 @@ pub fn now_unix() -> Result<u64, DiscoveryError> {
         .as_secs())
 }
 
-/// Reject `new` when the stored `old` was issued at the same time or
-/// later — replay protection shared by every store and the HTTP layer.
-pub fn check_freshness(old: Option<&EndpointRecord>, new: &Payload) -> Result<(), DiscoveryError> {
-    match old {
-        Some(old) => {
-            let old_issued = old.verify()?.issued_at;
-            if new.issued_at <= old_issued {
-                return Err(DiscoveryError::Stale);
-            }
-            Ok(())
-        }
-        None => Ok(()),
-    }
-}
-
-/// A delete tombstone: signed by the record's key, authorizes removal.
-/// Replaying an older tombstone against a newer record is refused by
-/// the same `issued_at` ordering as record replacement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteRequest {
-    /// Encoded [`DeletePayload`] bytes.
-    pub payload: Vec<u8>,
-    /// Ed25519 signature over `payload`, made by the record's key.
-    pub signature: Vec<u8>,
-}
-
-/// Signed portion of a [`DeleteRequest`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeletePayload {
-    pub key: EndpointKey,
-    pub issued_at: u64,
-}
-
-impl DeleteRequest {
-    /// Sign a delete for `key` at the current time.
-    pub fn new(key: &SigningKey) -> Result<Self, DiscoveryError> {
-        let payload = DeletePayload {
-            key: EndpointKey(key.verifying_key().to_bytes()),
-            issued_at: now_unix()?,
-        };
-        let bytes = postcard::to_stdvec(&payload)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let signature = key.sign(&bytes);
-        Ok(Self {
-            payload: bytes,
-            signature: signature.to_bytes().to_vec(),
-        })
-    }
-
-    /// Verify signature and return the payload.
-    pub fn verify(&self) -> Result<DeletePayload, DiscoveryError> {
-        let payload: DeletePayload = postcard::from_bytes(&self.payload)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let key = VerifyingKey::from_bytes(&payload.key.0)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let sig_bytes: [u8; 64] = self
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| DiscoveryError::InvalidRecord("signature is not 64 bytes".into()))?;
-        key.verify_strict(&self.payload, &Signature::from_bytes(&sig_bytes))
-            .map_err(|_| DiscoveryError::BadSignature)?;
-        Ok(payload)
-    }
-}
-
 /// Storage for endpoint records. The GDS server implements this over
 /// its database; agents and tests use the in-memory version.
 pub trait RecordStore: Send + Sync {
     fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError>;
     fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError>;
-    /// Remove `key` when `tombstone` is authorized and not older than
-    /// the stored record's `issued_at`. `Ok` when already absent.
+    /// Commit an authorized, fresh delete at a higher revision. Exact signed
+    /// retries succeed without rewriting; deleted identities retain history.
     fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError>;
     /// Number of live records (metrics).
     fn len(&self) -> usize;
@@ -279,10 +132,13 @@ pub trait RecordStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use std::{net::SocketAddr, time::Duration};
 
     fn rec(key: &SigningKey) -> EndpointRecord {
         EndpointRecord::publish(
             key,
+            1,
             vec![SocketAddr::from(([10, 0, 0, 5], 4200))],
             vec!["https://relay.example.com".into()],
             vec![Service::Ping, Service::TcpForward],

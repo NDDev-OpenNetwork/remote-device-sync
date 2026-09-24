@@ -43,6 +43,9 @@ struct Cli {
     /// Record TTL when `--directory` is set.
     #[arg(long, default_value = "300")]
     record_ttl: u64,
+    /// Private durable publisher state; default is beside --key-file.
+    #[arg(long, requires = "directory")]
+    record_state: Option<std::path::PathBuf>,
     /// Trusted grant issuer (base32 verifying key). Repeatable. When
     /// set, every connection must present a valid estate-signed grant
     /// before any service stream opens.
@@ -170,14 +173,28 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let record_issuer = if directory.is_some() {
+        let path = cli
+            .record_state
+            .unwrap_or_else(|| key_path.with_extension("publisher-state"));
+        let key = ed25519_dalek::SigningKey::from_bytes(&secret_key.to_bytes());
+        Some(
+            tokio::task::spawn_blocking(move || {
+                rds_discovery::publisher::RecordIssuer::open(&path, key, rds_discovery::now_unix()?)
+            })
+            .await??,
+        )
+    } else {
+        None
+    };
     let endpoint = bind_endpoint(config).await?;
     endpoint.online().await;
 
-    let _announce = directory.clone().map(|client| {
-        rds_net::announce(
+    let mut announce = if let (Some(client), Some(issuer)) = (directory.clone(), record_issuer) {
+        Some(rds_net::announce(
             endpoint.clone(),
             rds_net::AnnounceConfig {
-                key: secret_key.clone(),
+                issuer,
                 directory: client,
                 services: vec![
                     rds_discovery::Service::Ping,
@@ -185,8 +202,10 @@ async fn main() -> anyhow::Result<()> {
                 ],
                 ttl: std::time::Duration::from_secs(cli.record_ttl),
             },
-        )
-    });
+        )?)
+    } else {
+        None
+    };
 
     let agent = Agent::new(endpoint, policy);
     println!("endpoint id: {}", agent.id());
@@ -194,14 +213,21 @@ async fn main() -> anyhow::Result<()> {
     if agent.policy.allow.is_empty() {
         eprintln!("warning: empty --allow list; every peer will be rejected");
     }
-    tokio::select! {
-        res = agent.run() => res?,
-        _ = shutdown_signal() => {}
-    }
+    let result = tokio::select! {
+        res = agent.run() => res,
+        res = async {
+            match &mut announce {
+                Some(task) => task.wait().await,
+                None => std::future::pending().await,
+            }
+        } => res.map_err(Into::into),
+        _ = shutdown_signal() => Ok(()),
+    };
+    drop(announce);
     // Close the endpoint so peers get CONNECTION_CLOSE instead of an
     // abrupt socket death (and iroh does not log an ungraceful drop).
     agent.endpoint.close().await;
-    Ok(())
+    result
 }
 
 /// SIGINT on every platform, SIGTERM on unix (systemd stop).

@@ -72,18 +72,19 @@ pub fn relay_url_for(relay: &EndpointAddr) -> Option<RelayUrl> {
         iroh::TransportAddr::Ip(s) => Some(*s),
         _ => None,
     })?;
-    format!("rds-relay://{}@{sock}", relay.id).parse().ok()
+    rds_discovery::OwnedRelayRoute {
+        key: rds_discovery::EndpointKey(*relay.id.as_bytes()),
+        addr: sock,
+    }
+    .to_string()
+    .parse()
+    .ok()
 }
 
 /// Parse an `rds-relay://` url back into `(relay_id, socket_addr)`.
 pub fn parse_relay_url(url: &RelayUrl) -> Option<(EndpointId, SocketAddr)> {
-    if url.scheme() != "rds-relay" {
-        return None;
-    }
-    let id: EndpointId = url.username().parse().ok()?;
-    let host = url.host_str()?.parse().ok()?;
-    let port = url.port()?;
-    Some((id, SocketAddr::new(host, port)))
+    let route: rds_discovery::OwnedRelayRoute = url.as_str().parse().ok()?;
+    Some((EndpointId::from_bytes(&route.key.0).ok()?, route.addr))
 }
 
 /// Shared handle the endpoint keeps to steer the relay socket inside
