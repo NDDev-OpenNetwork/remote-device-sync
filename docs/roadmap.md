@@ -1,5 +1,11 @@
 # Roadmap
 
+Current execution order and reopened gates are in the
+[2026-09-24 remediation plan](remediation-plan.md), backed by the
+[implementation/session audit](reports/rds-audit-20260924.md).
+The milestones below preserve the original direction; historical checkpoint
+completion does not establish that the audited defects or product gaps are closed.
+
 Each workstream ends at a named **checkpoint** — a reproducible
 verification bundle (functional, simulation, impairment, interop,
 fuzz, soak, security layers as applicable) whose report is committed

@@ -7,6 +7,11 @@ paths are hole-punched, and a self-hosted relay covers egress-only
 networks. See [docs/architecture.md](docs/architecture.md) for the research
 and protocol decisions.
 
+Current readiness: the [2026-09-24 audit](docs/reports/rds-audit-20260924.md)
+identifies authorization, discovery, sync and owned-transport blockers.
+The [remediation plan](docs/remediation-plan.md) defines their fixes and the
+remaining native SSH, interactive desktop and platform work.
+
 ## Layout
 
 ```text
@@ -43,10 +48,10 @@ ssh -p 2222 user@127.0.0.1     # reaches the remote sshd over QUIC
 rds forward <ticket> -L 127.0.0.1:8080 --remote 127.0.0.1:3000
 rds send <ticket> <file>       # resumable content-addressed push (agent --sync-dir)
 rds recv <ticket> <name>       # pull a file back out of the sync dir
-rds desktop <ticket>           # requires --features desktop on both ends
+rds desktop <ticket>           # headless decode/stats; --features desktop on both ends
 
 # Self-hosted relay instead of the public n0 relays:
-rds-relay --bind 0.0.0.0:3340
+rds-relay --addr 0.0.0.0:3340
 rds-agent --relay http://relay.host:3340 ...
 rds --relay http://relay.host:3340 ...
 
@@ -88,12 +93,12 @@ in the architecture doc.
 
 ## Status
 
-v0.1 foundation: SSH/TCP forwarding over direct and relayed QUIC,
-estate-signed capability grants with revocation, resumable
-content-addressed file sync (`rds send`/`rds recv`), an X11 desktop
-pipeline (capture → H.264 → paced newest-wins stream → decode) behind
-feature gates, a signed discovery directory, and transport metrics
-with Prometheus export. Public API and wire protocol are not stable.
+v0.1 foundation: SSH/TCP forwarding, a single-file transfer engine, a
+feature-gated X11 capture/H.264/headless-decode pipeline, discovery and grant
+primitives, and transport metrics. The desktop viewer and native macOS/Wayland
+backends remain incomplete. Known correctness and security blockers are
+tracked in the audit above; this is not a production-readiness claim.
+Public API and wire protocol are not stable.
 
 ## License
 

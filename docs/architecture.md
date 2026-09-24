@@ -1,5 +1,10 @@
 # remote-device-sync architecture
 
+Read this design together with the [2026-09-24 implementation audit](reports/rds-audit-20260924.md)
+and [remediation plan](remediation-plan.md). They distinguish implemented
+behavior, known defects and planned capabilities; design claims below are
+not a substitute for the current acceptance evidence.
+
 Remote access for GDS devices: SSH reachability and remote desktop sessions
 between any two enrolled devices, assisted by a GDS-operated server.
 Design goals, in order: **minimum interactive latency**, **maximum

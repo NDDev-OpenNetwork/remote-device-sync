@@ -1,5 +1,11 @@
 # Implementation plan — owned connectivity core (v0.2) and beyond
 
+Follow-up execution: [remediation plan](remediation-plan.md), based on the
+[2026-09-24 audit](reports/rds-audit-20260924.md). It identifies reopened
+acceptance criteria and remaining product work. This original WS0–WS8 plan
+and its dated reports are historical requirements/evidence, not a claim that
+all current behavior satisfies them.
+
 The detailed engineering plan. `docs/roadmap.md` holds milestones and
 gates; this file holds the workstreams: tasks, file-level scope, API
 sketches, tests, exit criteria. Every fact about external crates/drafts
