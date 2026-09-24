@@ -49,6 +49,11 @@ opening, request write and response completion. Pending streams reset on
 cancellation; incomplete authorization closes its connection. Local forwarding
 owns a bounded worker group with connection-close joins and cancellation cleanup.
 
+Owned initial handshakes use a [bounded candidate race](candidate-dialing.md):
+eight direct addresses plus an attached relay, one 15-second deadline, common
+identity pinning, and one retained winner. This removes first-address blocking;
+relay bootstrap, scoped advertisements and validated path selection remain open.
+
 Owned relay client/server share [bounded control framing](relay-control.md).
 Drain and PeerGone use the same exact codec as registration and liveness. Drain
 receipt preserves usable grace-period traffic, and stale attachment teardown

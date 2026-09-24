@@ -8,7 +8,7 @@
 
 use std::fmt;
 use std::io::{self, IoSliceMut};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -25,11 +25,14 @@ pub struct Mux {
     /// Round-robin receive cursor: starting the scan where the last
     /// datagram came from avoids starving later sockets.
     recv_cursor: usize,
+    /// noq uses the logical socket family for every connection. A mixed mux
+    /// behaves like a dual-stack IPv6 socket at the engine boundary.
+    ipv6: bool,
 }
 
 impl Mux {
-    /// A mux over `children`; the first child's local address is the
-    /// primary one reported by [`AsyncUdpSocket::local_addr`].
+    /// A mux over `children`. The logical address reports an IPv6 child when
+    /// available so noq permits both families, regardless of binding order.
     pub fn new(children: Vec<Box<dyn AsyncUdpSocket>>) -> io::Result<Self> {
         if children.is_empty() {
             return Err(io::Error::new(
@@ -37,9 +40,13 @@ impl Mux {
                 "mux needs at least one transport",
             ));
         }
+        let ipv6 = children
+            .iter()
+            .any(|c| c.local_addr().is_ok_and(|a| a.is_ipv6()));
         Ok(Self {
             children,
             recv_cursor: 0,
+            ipv6,
         })
     }
 
@@ -84,6 +91,22 @@ impl AsyncUdpSocket for Mux {
             match self.children[idx].poll_recv(cx, bufs, meta) {
                 Poll::Ready(out) => {
                     self.recv_cursor = (idx + 1) % n;
+                    if self.ipv6
+                        && let Ok(count) = out
+                    {
+                        // Match noq's outgoing IPv4-mapped representation;
+                        // otherwise one path acquires inconsistent four-tuples.
+                        for received in meta.iter_mut().take(count) {
+                            if let SocketAddr::V4(addr) = received.addr {
+                                received.addr =
+                                    SocketAddr::new(addr.ip().to_ipv6_mapped().into(), addr.port());
+                            }
+                            received.dst_ip = received.dst_ip.map(|ip| match ip {
+                                IpAddr::V4(ip) => ip.to_ipv6_mapped().into(),
+                                ip => ip,
+                            });
+                        }
+                    }
                     return Poll::Ready(out);
                 }
                 Poll::Pending => {}
@@ -93,6 +116,15 @@ impl AsyncUdpSocket for Mux {
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
+        if self.ipv6 {
+            for child in &self.children {
+                if let Ok(addr) = child.local_addr()
+                    && addr.is_ipv6()
+                {
+                    return Ok(addr);
+                }
+            }
+        }
         self.children[0].local_addr()
     }
 
@@ -139,21 +171,14 @@ impl MuxSender {
         {
             return Some(i);
         }
-        self.senders
-            .iter()
-            .position(|(addr, _)| {
-                // The relay child's synthetic local is IPv4 — exclude it
-                // from the family fallback or every v4 transmit could
-                // land in the tunnel.
-                addr.is_some_and(|a| {
-                    !relay::is_synthetic(a) && a.is_ipv4() == transmit.destination.is_ipv4()
-                })
+        self.senders.iter().position(|(addr, _)| {
+            // The relay child's synthetic local is IPv4 — exclude it
+            // from the family fallback or every v4 transmit could
+            // land in the tunnel.
+            addr.is_some_and(|a| {
+                !relay::is_synthetic(a) && a.is_ipv4() == transmit.destination.is_ipv4()
             })
-            .or(if self.senders.is_empty() {
-                None
-            } else {
-                Some(0)
-            })
+        })
     }
 }
 
@@ -163,12 +188,23 @@ impl UdpSender for MuxSender {
         transmit: &Transmit<'_>,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
+        // The logical dual-stack socket receives mapped IPv4 from noq, while
+        // real IPv4 sockets and the relay peer table require native IPv4.
+        let mut normalized = transmit.clone();
+        if let SocketAddr::V6(addr) = normalized.destination
+            && let Some(ip) = addr.ip().to_ipv4_mapped()
+        {
+            normalized.destination = SocketAddr::new(ip.into(), addr.port());
+        }
+        normalized.src_ip = normalized.src_ip.map(|ip| ip.to_canonical());
+        let transmit = &normalized;
         let Some(idx) = self.pick(transmit) else {
-            tracing::warn!(dst = %transmit.destination, "no mux transport can carry transmit");
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                "no mux transport can carry this transmit",
-            )));
+            // noq can emit QNT probes itself, before the application receives
+            // their candidates. Lack of a transport is packet loss on that
+            // candidate, not an I/O failure of every healthy connection/path.
+            // Returning Err here would tear down the QUIC driver.
+            tracing::debug!(dst = %transmit.destination, "discard datagram without a local transport");
+            return Poll::Ready(Ok(()));
         };
         tracing::trace!(dst = %transmit.destination, child = idx, "mux send");
         self.senders[idx].1.as_mut().poll_send(transmit, cx)

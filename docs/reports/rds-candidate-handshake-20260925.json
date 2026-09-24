@@ -1,0 +1,75 @@
+{
+  "tool": "rds-bench 0.1.0",
+  "unix_ts": 1790292050,
+  "git": "92f7218",
+  "reports": [
+    {
+      "meta": {
+        "scenario": "handshake",
+        "backend": "noq",
+        "path": "direct",
+        "impairment": null,
+        "unix_ts": 1790292050,
+        "git": "92f7218"
+      },
+      "rtt": {
+        "count": 20,
+        "min_ns": 19836345,
+        "p50_ns": 22161155,
+        "p95_ns": 26963377,
+        "p99_ns": 28322600,
+        "max_ns": 28322600,
+        "mean_ns": 22808121.45
+      },
+      "throughput_mib_s": null,
+      "attempts": [
+        20,
+        20
+      ],
+      "metrics": {
+        "agent_rds_net_active_connections": 0,
+        "agent_rds_net_bytes_received_total{via=\"direct\"}": 68794,
+        "agent_rds_net_bytes_received_total{via=\"relay\"}": 0,
+        "agent_rds_net_bytes_sent_total{via=\"direct\"}": 26186,
+        "agent_rds_net_bytes_sent_total{via=\"relay\"}": 0,
+        "agent_rds_net_congestion_events_total": 0,
+        "agent_rds_net_connections_accepted_total": 19,
+        "agent_rds_net_connections_opened_total": 0,
+        "agent_rds_net_cwnd_bytes": 12146,
+        "agent_rds_net_datagrams_lost_total{via=\"direct\"}": 0,
+        "agent_rds_net_datagrams_lost_total{via=\"relay\"}": 0,
+        "agent_rds_net_datagrams_sent_total{via=\"direct\"}": 57,
+        "agent_rds_net_datagrams_sent_total{via=\"relay\"}": 0,
+        "agent_rds_net_live_paths": 0,
+        "agent_rds_net_paths_seen_total{via=\"direct\"}": 19,
+        "agent_rds_net_paths_seen_total{via=\"relay\"}": 0,
+        "agent_rds_net_qnt_attempts_total": 0,
+        "agent_rds_net_qnt_success_total": 0,
+        "agent_rds_net_rtt_us": 17794,
+        "client_rds_net_active_connections": 0,
+        "client_rds_net_bytes_received_total{via=\"direct\"}": 26760,
+        "client_rds_net_bytes_received_total{via=\"relay\"}": 0,
+        "client_rds_net_bytes_sent_total{via=\"direct\"}": 92078,
+        "client_rds_net_bytes_sent_total{via=\"relay\"}": 0,
+        "client_rds_net_congestion_events_total": 0,
+        "client_rds_net_connections_accepted_total": 0,
+        "client_rds_net_connections_opened_total": 20,
+        "client_rds_net_cwnd_bytes": 13200,
+        "client_rds_net_datagrams_lost_total{via=\"direct\"}": 0,
+        "client_rds_net_datagrams_lost_total{via=\"relay\"}": 0,
+        "client_rds_net_datagrams_sent_total{via=\"direct\"}": 96,
+        "client_rds_net_datagrams_sent_total{via=\"relay\"}": 0,
+        "client_rds_net_live_paths": 0,
+        "client_rds_net_paths_seen_total{via=\"direct\"}": 20,
+        "client_rds_net_paths_seen_total{via=\"relay\"}": 0,
+        "client_rds_net_qnt_attempts_total": 0,
+        "client_rds_net_qnt_success_total": 0,
+        "client_rds_net_rtt_us": 4313
+      },
+      "notes": [
+        "Synthetic loopback debug-build smoke run on the candidate-dial working tree over 92f7218; source hashes in rds-candidate-dial-20260925-data.json. Not a candidate-fallback or WAN benchmark and not parity qualification.",
+        "The harness reuses endpoints and closes each connection immediately after client handshake success. Its final snapshot recorded 20 client completions and 19 server acceptances; it does not wait for server application readiness or prove 20 service roundtrips. Measurement reconciliation remains W0 work."
+      ]
+    }
+  ]
+}

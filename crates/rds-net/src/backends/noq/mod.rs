@@ -18,6 +18,7 @@
 //! Until this backend reaches parity (same-harness benchmarks vs the
 //! iroh backend), `iroh` remains the default selected at bind time.
 
+mod dial;
 mod drivers;
 mod hmac;
 pub mod policy;
@@ -290,23 +291,28 @@ impl Endpoint {
 
     /// Connect to a peer by advertised address.
     ///
-    /// The first direct candidate becomes the primary path; remaining
-    /// candidates are opened as additional QUIC paths after the handshake.
+    /// Race up to eight direct candidates plus the attached relay with a
+    /// handshake deadline. Only the first authenticated success is retained;
+    /// additional addresses then become paths on that same connection.
     /// `alpn` must be one of the protocol ids configured at bind time.
     pub async fn connect(&self, target: EndpointAddr, alpn: &[u8]) -> anyhow::Result<Connection> {
         if !self.alpns.iter().any(|a| a.as_slice() == alpn) {
             bail!("alpn {alpn:?} not configured on this endpoint");
         }
         let remote_id = target.id;
-        let candidates = policy::ip_candidates(&target);
+        let candidates = policy::dial_candidates(&target, &self.local_addrs);
         // A relayed path is usable when the peer's advertised relay is
         // the one we are attached to; it becomes the synthetic remote.
         let relay_remote = self.relay_remote(&target);
-        let primary = candidates
-            .first()
-            .copied()
-            .or(relay_remote)
-            .ok_or_else(|| anyhow::anyhow!("no reachable addresses for {remote_id}"))?;
+        let mut attempts = candidates.clone();
+        if let Some(relay) = relay_remote
+            && !attempts.contains(&relay)
+        {
+            attempts.push(relay);
+        }
+        if attempts.is_empty() {
+            bail!("no reachable addresses for {remote_id}");
+        }
         if relay_remote.is_some()
             && let Some(handle) = &self.relay
         {
@@ -314,11 +320,9 @@ impl Endpoint {
         }
 
         let server_name = tls::name::encode(remote_id);
-        let connecting = self
-            .inner
-            .connect(primary, &server_name)
-            .context("initiate connect")?;
-        let conn = connecting.await.context("handshake")?;
+        let conn = dial::race(&self.inner, &attempts, &server_name)
+            .await
+            .context("all connection candidates failed")?;
 
         let mut seeds = policy::open_extra_paths(&conn, &candidates);
         if let Some(syn) = relay_remote {
@@ -396,7 +400,8 @@ impl Endpoint {
         }
         policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn, &self.metrics);
-        self.drivers.spawn(conn, seed_paths, self.metrics.clone())
+        self.drivers
+            .spawn(conn, seed_paths, self.metrics.clone(), ours)
     }
 
     /// Close all connections and wait for this endpoint's policy tasks.
@@ -487,7 +492,7 @@ impl Future for Incoming {
                             // subscription, so seed it explicitly.
                             let seeds = vec![noq::PathId::ZERO];
                             self.drivers
-                                .spawn(&inner, seeds, self.metrics.clone())
+                                .spawn(&inner, seeds, self.metrics.clone(), self.our_addrs.clone())
                                 .map(|()| Connection { inner, remote_id })
                         }
                         None => Err(anyhow::anyhow!("peer presented no identity")),

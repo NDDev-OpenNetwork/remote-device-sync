@@ -43,7 +43,7 @@ const SYNTHETIC_PREFIX: [u8; 2] = [198, 19];
 
 /// Whether `ip` is a synthetic relay-mapped address.
 pub fn is_synthetic_ip(ip: IpAddr) -> bool {
-    matches!(ip, IpAddr::V4(v4) if v4.octets()[0..2] == SYNTHETIC_PREFIX)
+    matches!(ip.to_canonical(), IpAddr::V4(v4) if v4.octets()[0..2] == SYNTHETIC_PREFIX)
 }
 
 /// Whether `addr` is a synthetic relay-mapped address.

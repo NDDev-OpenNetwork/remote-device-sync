@@ -72,6 +72,83 @@ fn relay_only(mut addr: EndpointAddr) -> EndpointAddr {
 }
 
 #[tokio::test]
+async fn silent_direct_candidate_does_not_block_attached_relay() {
+    attached_relay_after_silent_direct(false).await;
+}
+
+#[tokio::test]
+async fn dual_stack_mux_preserves_attached_relay_routing() {
+    attached_relay_after_silent_direct(true).await;
+}
+
+async fn attached_relay_after_silent_direct(dual_stack: bool) {
+    use std::time::Duration;
+    let relay = rds_relay::server::serve(
+        EndpointConfig {
+            backend: Backend::Noq,
+            secret_key: Some(key(85)),
+            bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+            ..Default::default()
+        },
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let a = if dual_stack {
+        rds_net::bind_endpoint(EndpointConfig {
+            backend: Backend::Noq,
+            secret_key: Some(key(86)),
+            discovery: false,
+            bind_addrs: vec!["127.0.0.1:0".parse().unwrap(), "[::1]:0".parse().unwrap()],
+            relay_endpoint: Some(relay.endpoint_addr()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+    } else {
+        endpoint(86, relay.endpoint_addr()).await
+    };
+    let b = endpoint(87, relay.endpoint_addr()).await;
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut target = relay_only(b.addr());
+    target
+        .addrs
+        .insert(TransportAddr::Ip(silent.local_addr().unwrap()));
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        let (outgoing, incoming) = tokio::join!(a.connect(target, ALPN), async {
+            b.accept().await.unwrap().await
+        });
+        let outgoing = outgoing.unwrap();
+        let incoming = incoming.unwrap();
+        assert_eq!(outgoing.remote_id(), b.id());
+        outgoing
+            .send_datagram(b"relay fallback".to_vec().into())
+            .unwrap();
+        assert_eq!(
+            &incoming.read_datagram().await.unwrap()[..],
+            b"relay fallback"
+        );
+        incoming
+            .send_datagram(b"return route".to_vec().into())
+            .unwrap();
+        assert_eq!(
+            &outgoing.read_datagram().await.unwrap()[..],
+            b"return route"
+        );
+    })
+    .await;
+    let forwarded = relay.stats().0;
+    a.close().await;
+    b.close().await;
+    relay.close().await;
+    assert!(
+        result.is_ok(),
+        "silent direct candidate blocked the attached relay"
+    );
+    assert!(forwarded > 0);
+}
+
+#[tokio::test]
 async fn relay_forwards_handshake_and_datagrams() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

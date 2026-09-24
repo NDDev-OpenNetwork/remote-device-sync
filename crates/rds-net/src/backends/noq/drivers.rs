@@ -18,6 +18,7 @@ impl Drivers {
         conn: &noq::Connection,
         seeds: Vec<noq::PathId>,
         metrics: crate::metrics::Registry,
+        local_addrs: Vec<std::net::SocketAddr>,
     ) -> anyhow::Result<()> {
         let _guard = self.admission.lock().unwrap_or_else(|p| p.into_inner());
         if self.tasks.is_closed() {
@@ -30,6 +31,7 @@ impl Drivers {
             conn.path_events(),
             seeds,
             metrics,
+            local_addrs,
         ));
         Ok(())
     }

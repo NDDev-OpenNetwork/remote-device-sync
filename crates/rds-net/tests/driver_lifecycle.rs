@@ -39,6 +39,7 @@ async fn driver_terminates(drop_last_handle: bool) {
         raw.path_events(),
         vec![::noq::PathId::ZERO],
         a.metrics(),
+        a.local_addrs().to_vec(),
     ));
     tokio::task::yield_now().await;
     let held = if drop_last_handle {

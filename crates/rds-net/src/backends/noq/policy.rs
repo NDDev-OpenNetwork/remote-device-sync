@@ -1,9 +1,9 @@
 //! Path policy: candidate ordering, path opening, and path selection.
 //!
 //! The first cut is deliberately conservative: deduplicate, cap the
-//! candidate set at the multipath path limit, open the first candidate as
-//! the primary path, then offer the rest via `open_path_ensure`. Relay
-//! candidates are ignored until the relay transport lands (WS2).
+//! direct candidate set at the multipath path limit, race initial handshakes
+//! in `dial`, then offer additional paths via `open_path_ensure`. An attached
+//! relay contributes one additional initial candidate through the socket mux.
 //!
 //! `connection_driver` is the per-connection control loop: it consumes
 //! QNT address advertisements (peer-learned candidates become paths) and
@@ -39,18 +39,46 @@ const RESELECT_INTERVAL: Duration = Duration::from_secs(1);
 /// Extract direct IP candidates from an advertised address.
 ///
 /// Order is deterministic (sorted by addr) so benchmarks reproduce.
-/// Relay addresses are skipped here; they enter through the socket mux
-/// once `relay_link` lands.
+/// Relay addresses are skipped here; the endpoint separately adds its attached
+/// relay through the socket mux.
 pub fn ip_candidates(addr: &EndpointAddr) -> Vec<SocketAddr> {
+    matching_candidates(addr, |_| true)
+}
+
+pub(super) fn dial_candidates(addr: &EndpointAddr, local_addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    matching_candidates(addr, |remote| supports_candidate(local_addrs, remote))
+}
+
+fn matching_candidates(
+    addr: &EndpointAddr,
+    supported: impl Fn(SocketAddr) -> bool,
+) -> Vec<SocketAddr> {
     let set: BTreeSet<SocketAddr> = addr
         .addrs
         .iter()
         .filter_map(|a| match a {
-            TransportAddr::Ip(sock) => Some(*sock),
+            TransportAddr::Ip(sock) if !super::relay::is_synthetic(*sock) => Some(*sock),
             _ => None,
         })
+        .filter(|addr| supported(*addr))
         .collect();
     set.into_iter().take(MAX_CANDIDATES).collect()
+}
+
+/// A path needs a locally bound transport of the same family. Synthetic
+/// destinations additionally require an attached relay, not an ordinary IPv4
+/// socket. This also filters QNT advertisements before they can cause a fatal
+/// send on an unsupported socket family.
+pub(super) fn supports_candidate(local_addrs: &[SocketAddr], remote: SocketAddr) -> bool {
+    if super::relay::is_synthetic(remote) {
+        return local_addrs
+            .iter()
+            .any(|addr| super::relay::is_synthetic(*addr));
+    }
+    local_addrs.iter().any(|addr| {
+        !super::relay::is_synthetic(*addr)
+            && addr.ip().to_canonical().is_ipv4() == remote.ip().to_canonical().is_ipv4()
+    })
 }
 
 /// Open additional paths for the remaining candidates.
@@ -125,6 +153,7 @@ pub async fn connection_driver(
     mut path_events: noq::PathEvents,
     seed_paths: Vec<noq::PathId>,
     metrics: crate::metrics::Registry,
+    local_addrs: Vec<SocketAddr>,
 ) {
     use tokio_stream::StreamExt;
 
@@ -157,7 +186,8 @@ pub async fn connection_driver(
             _ = &mut closed => break,
             event = qnt.next(), if qnt_open => match event {
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressAdded(addr))) => {
-                    if let Some(id) = open_learned_path(&conn, &mut paths, addr) {
+                    if supports_candidate(&local_addrs, addr)
+                        && let Some(id) = open_learned_path(&conn, &mut paths, addr) {
                         metrics.qnt_attempt();
                         qnt_paths.insert(id);
                     }
