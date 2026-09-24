@@ -6,12 +6,17 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
 use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
+
+use crate::fault::{Point, hit};
+
+/// Reserved temporary name, used only below private state while locked.
+pub(crate) const PENDING: &str = "pending";
 
 #[derive(Clone)]
 pub(crate) struct Directory(Arc<File>);
@@ -60,7 +65,6 @@ impl Directory {
     pub(crate) fn parent(&self, rel: &Path, create: bool) -> io::Result<(Self, OsString)> {
         let mut parts = rel.components().peekable();
         let mut dir = self.clone();
-        let mut first = true;
         while let Some(part) = parts.next() {
             let Component::Normal(name) = part else {
                 return Err(io::Error::other(
@@ -71,11 +75,11 @@ impl Directory {
                 return Ok((dir, name.to_owned()));
             }
             let next = dir.child(name, create)?;
-            if first {
+            {
                 // Lexical ASCII checks cannot model every filesystem's case
                 // or Unicode equivalence rules. Compare opened inodes before
-                // traversing a root-level directory alias of private state.
-                match self.child(crate::journal::STATE_DIR.as_ref(), false) {
+                // traversing a directory alias of private state at any depth.
+                match dir.child(crate::journal::STATE_DIR.as_ref(), false) {
                     Ok(state) => {
                         let actual = rustix::fs::fstat(&*next.0)?;
                         let reserved = rustix::fs::fstat(&*state.0)?;
@@ -89,7 +93,6 @@ impl Directory {
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                     Err(e) => return Err(e),
                 }
-                first = false;
             }
             dir = next;
         }
@@ -123,6 +126,12 @@ impl Directory {
         self.sync()
     }
 
+    pub(crate) fn same_inode(&self, other: &Self) -> io::Result<bool> {
+        let a = rustix::fs::fstat(&*self.0)?;
+        let b = rustix::fs::fstat(&*other.0)?;
+        Ok(a.st_dev == b.st_dev && a.st_ino == b.st_ino)
+    }
+
     /// State files cannot alias another file via a hard link either.
     pub(crate) fn read_state(&self, name: &OsStr, limit: usize) -> io::Result<Vec<u8>> {
         let file = self.read_file(name)?;
@@ -148,18 +157,22 @@ impl Directory {
         Ok(ReceiveLock(file))
     }
 
-    pub(crate) fn stage(&self) -> io::Result<StagedFile> {
-        for _ in 0..16 {
-            let name = OsString::from(format!(".rds-stage-{:032x}", rand::random::<u128>()));
-            match self.stage_named(name) {
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-                result => return result,
+    /// Discard only a reserved private transaction name. Never sweep user
+    /// directories, unknown entries or legacy random staging names. The caller
+    /// must hold the receive lock that owns this directory.
+    pub(crate) fn discard_owned(&self, name: &OsStr) -> io::Result<()> {
+        match self.read_file(name) {
+            Ok(file) => {
+                single_link(&file)?;
+                self.unlink(name, false)?;
+                self.sync()
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
         }
-        Err(io::Error::other("could not allocate a unique staging file"))
     }
 
-    fn stage_named(&self, name: OsString) -> io::Result<StagedFile> {
+    pub(crate) fn stage_named(&self, name: OsString) -> io::Result<StagedFile> {
         component(&name)?;
         let file = File::from(openat(
             &*self.0,
@@ -167,17 +180,21 @@ impl Directory {
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )?);
-        Ok(StagedFile {
+        let stage = StagedFile {
             file,
             dir: self.clone(),
             name,
             installed: false,
-        })
+        };
+        hit(Point::Created)?;
+        Ok(stage)
     }
 
     pub(crate) fn write_state(&self, name: &OsStr, data: &[u8]) -> io::Result<()> {
-        let mut stage = self.stage()?;
-        stage.file.write_all(data)?;
+        self.discard_owned(PENDING.as_ref())?;
+        let mut stage = self.stage_named(PENDING.into())?;
+        crate::fault::write(&mut stage.file, data)?;
+        hit(Point::Written)?;
         stage.install(name)
     }
 
@@ -210,12 +227,25 @@ pub(crate) struct StagedFile {
 }
 
 impl StagedFile {
-    pub(crate) fn install(mut self, name: &OsStr) -> io::Result<()> {
+    pub(crate) fn install(self, name: &OsStr) -> io::Result<()> {
+        let dir = self.dir.clone();
+        self.install_in(&dir, name)
+    }
+
+    pub(crate) fn install_in(mut self, destination: &Directory, name: &OsStr) -> io::Result<()> {
         component(name)?;
         self.file.sync_all()?;
-        renameat(&*self.dir.0, &self.name, &*self.dir.0, name)?;
+        hit(Point::FileSynced)?;
+        renameat(&*self.dir.0, &self.name, &*destination.0, name)?;
         self.installed = true;
-        self.dir.sync()
+        hit(Point::Renamed)?;
+        destination.sync()?;
+        hit(Point::DestinationSynced)?;
+        if !self.dir.same_inode(destination)? {
+            self.dir.sync()?;
+            hit(Point::SourceSynced)?;
+        }
+        Ok(())
     }
 }
 
@@ -223,6 +253,7 @@ impl Drop for StagedFile {
     fn drop(&mut self) {
         if !self.installed {
             let _ = self.dir.unlink(&self.name, false);
+            let _ = self.dir.sync();
         }
     }
 }
@@ -287,7 +318,7 @@ mod tests {
             std::fs::read(path.join("occupied")).unwrap(),
             b"owned by user"
         );
-        let stage = dir.stage().unwrap();
+        let stage = dir.stage_named(PENDING.into()).unwrap();
         let own = path.join(&stage.name);
         assert!(own.is_file());
         drop(stage);

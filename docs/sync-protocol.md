@@ -11,13 +11,14 @@ A pull request's normalized relative path must equal the normalized Offer path
 before reading a manifest or opening receive state. A peer cannot substitute a
 different valid path inside the configured root. Existing confinement rules still
 apply independently: no traversal, absolute path, journal namespace or symlink
-escape. Local push basenames must be UTF-8 and must not normalize into another
+escape. The private `.rds-sync` namespace is reserved at every depth, including
+case variants. Local push basenames must be UTF-8 and must not normalize into another
 path. The source inode remains pinned through manifest and positioned chunk reads.
 
 Both push and pull senders require `Done.root` to equal the offered manifest root.
 The receiver sends Done only after draining successful chunk stores, checking
 complete journal state, assembling and verifying the root, and completing the
-existing durable replacement sequence. Transfer completion is scoped to the
+[durable replacement and journal recovery sequence](sync-journal.md). Transfer completion is scoped to the
 current control stream and manifest. There is no new wire version or transfer-ID
 field in this change; explicit cross-session IDs and negotiation remain W2.2.
 

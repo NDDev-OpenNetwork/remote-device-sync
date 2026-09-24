@@ -309,12 +309,14 @@ budget is one hour, with five-minute I/O stalls; library callers can select an
 explicit total budget. Already-running blocking disk work can finish after
 cancellation, so commit outcome may remain uncertain. See
 [the precise protocol contract](sync-protocol.md). Assembly concatenates
-verified parts, checks the BLAKE3 root, and installs an exclusively created,
-randomly named staging file by atomic rename. Parts, metadata, assembled
+verified parts, checks the BLAKE3 root, and installs an exclusively created
+`assembly` inode from the destination parent's private `.rds-sync` directory
+by atomic rename. This keeps assembly on the destination filesystem even for
+nested mount points. Parts, metadata, assembled
 data and their parent directories are synced before their successful return;
 an error after rename is reported as an uncertain commit, not success.
 A torn or corrupt part is refetched. `rel_path` is validated lexically
-(traversal, absolute, NUL, the `.rds-sync` journal namespace); every subsequent
+(traversal, absolute, NUL, the `.rds-sync` journal namespace at every depth); every subsequent
 read/write uses directory-relative no-follow operations through `rustix`.
 Journal descendants, destination parents and pull source inodes are held open,
 so changing a path to a symlink after admission cannot redirect I/O. The
@@ -324,24 +326,34 @@ against a local process moving already-open directories out of the tree.
 `Journal::assemble` consumes its journal and takes no new destination root.
 
 Each root has one persistent `receive.lock` inode, locked nonblockingly across
-processes for a receive's lifetime. Competing receives are refused; independent
-roots remain concurrent. Root-level serialization also covers case/Unicode
+processes for a receive's lifetime. A nested destination also holds its parent's
+private receive lock, so differently configured overlapping roots cannot write
+the same destination concurrently. Competing receives are refused; independent
+roots and destination parents remain concurrent. Root-level serialization also covers case/Unicode
 aliases on supported filesystems and keeps lock storage bounded. More granular
 parallel writes need a proven filesystem alias model first. Cleanup only removes
 known part/metadata names through held handles; it never traverses unknown
-entries. A canceled control stream ends its receive, and chunk sender tasks
+entries. Metadata and part writes use a reserved `pending` name below private
+state. Reopening while holding both locks discards only known regular, single-link
+temporary files, then re-verifies committed parts. Assembly syncs its file,
+renames across held directories, and syncs both destination and source parents.
+Once publication is durable, cleanup failures are logged without revoking a
+completed transfer. Historical random temporary files remain untouched; inactive
+journal quotas/GC remain W8. See [journal recovery](sync-journal.md).
+A canceled control stream ends its receive, and chunk sender tasks
 are owned by a `JoinSet`. Verified chunks are written by a dedicated
 blocking-pool sink behind a bounded queue, so disk latency never parks
 the wire pipeline; completion is counted on the wire (the peer sends
 exactly the `Need` set), not on the sink's lagging counter. Every
 protocol read and chunk body is bounded by a 300s stall — a peer alive
 but silent aborts rather than parking the session. One sync session per
-connection. Unique wire accounting and aggregate/deadline bounds are still
-tracked by remediation W1.9; process/power-loss qualification by W1.10/W8.
+connection. Explicit transfer IDs/negotiation remain W1.9/W2; physical power-loss,
+native macOS and large-file qualification remain W1.10/W8.
 
 The new direct `rustix` dependency is a thin safe OS API for `openat`, no-follow
 flags and relative rename/unlink on Linux/macOS; sync does not introduce local
-unsafe blocks or external commands. `rand` supplies staging-name entropy.
+unsafe blocks or external commands. Staging ownership comes from private
+reserved names, exclusive creation and held receive locks.
 Both versions were already present in the lockfile; no dependency versions
 changed with this filesystem adapter.
 

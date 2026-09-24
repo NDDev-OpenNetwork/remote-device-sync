@@ -9,19 +9,21 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::{
     AVG_CHUNK, ChunkHash, MAX_CHUNK, MIN_CHUNK, Manifest, SyncError,
-    confined::{Directory, ReceiveLock},
+    confined::{Directory, PENDING, ReceiveLock},
+    fault::{Point, hit},
     proto::{check_manifest, check_rel_path},
 };
 
 /// Directory name (under the sync root) holding in-flight state.
 pub const STATE_DIR: &str = ".rds-sync";
+const ASSEMBLY: &str = "assembly";
 
 #[derive(Serialize)]
 struct Meta {
@@ -38,9 +40,11 @@ pub struct Journal {
     dir: Directory,
     parts: Directory,
     dest_parent: Directory,
+    dest_state: Directory,
     dest_name: OsString,
     dest_path: PathBuf,
     _lock: ReceiveLock,
+    _parent_lock: Option<ReceiveLock>,
     manifest: Manifest,
     have: HashSet<u32>,
     fetched: u64,
@@ -63,6 +67,17 @@ impl Journal {
         let receive_lock = state.lock("receive.lock".as_ref())?;
         let content_id = hex(&manifest.root);
         let (dest_parent, dest_name) = root.parent(&rel, true)?;
+        // The destination's parent is the common ownership point even when
+        // different configured roots overlap. Keep its assembly inode on the
+        // same filesystem, including destinations below a mount point.
+        let dest_state = dest_parent.child(STATE_DIR.as_ref(), true)?;
+        dest_state.make_private()?;
+        let parent_lock = if state.same_inode(&dest_state)? {
+            None
+        } else {
+            Some(dest_state.lock("receive.lock".as_ref())?)
+        };
+        dest_state.discard_owned(ASSEMBLY.as_ref())?;
         // Refuse symlinks and special files even if they contain no reusable
         // bytes. NONBLOCK + fstat prevents a FIFO from blocking admission.
         let existing = match dest_parent.read_file(&dest_name) {
@@ -72,6 +87,7 @@ impl Journal {
         };
         let dir = state.child(content_id.as_ref(), true)?;
         let parts = dir.child("parts".as_ref(), true)?;
+        parts.discard_owned(PENDING.as_ref())?;
         write_meta(
             &dir,
             &Meta {
@@ -85,9 +101,11 @@ impl Journal {
             dir,
             parts,
             dest_parent,
+            dest_state,
             dest_name,
             dest_path: dest_dir.join(rel),
             _lock: receive_lock,
+            _parent_lock: parent_lock,
             manifest: manifest.clone(),
             have: HashSet::new(),
             fetched: 0,
@@ -207,7 +225,7 @@ impl Journal {
         if !self.complete() {
             return Err(SyncError::Manifest("assemble before complete".into()));
         }
-        let mut stage = self.dest_parent.stage()?;
+        let mut stage = self.dest_state.stage_named(ASSEMBLY.into())?;
         let mut root = blake3::Hasher::new();
         for c in &self.manifest.chunks {
             let data = self
@@ -217,23 +235,48 @@ impl Journal {
                 return Err(SyncError::Manifest("part changed before assembly".into()));
             }
             root.update(&data);
-            stage.file.write_all(&data)?;
+            crate::fault::write(&mut stage.file, &data)?;
         }
         if root.finalize().as_bytes() != &self.manifest.root {
             return Err(SyncError::Manifest(
                 "assembled file failed root hash".into(),
             ));
         }
-        stage.install(&self.dest_name)?;
+        hit(Point::Written)?;
+        stage.install_in(&self.dest_parent, &self.dest_name)?;
+        // Publication is durable now. A cleanup failure does not turn a
+        // committed file into a failed transfer; the next open re-verifies
+        // remaining state. Log only the error, never private filenames.
+        if let Err(error) = self.cleanup() {
+            tracing::warn!(%error, "sync committed; journal cleanup incomplete");
+        }
+        Ok(self.dest_path)
+    }
+
+    fn cleanup(&self) -> io::Result<()> {
         // Remove only names belonging to this manifest under held handles.
         // Never recursively traverse unknown entries or another transfer.
         for c in &self.manifest.chunks {
-            let _ = self.parts.unlink(hex(&c.hash).as_ref(), false);
+            remove_if_present(&self.parts, hex(&c.hash).as_ref(), false)?;
+            hit(Point::PartRemoved)?;
         }
-        let _ = self.dir.unlink("meta".as_ref(), false);
-        let _ = self.dir.unlink("parts".as_ref(), true);
-        let _ = self.state.unlink(hex(&self.manifest.root).as_ref(), true);
-        Ok(self.dest_path)
+        self.parts.sync()?;
+        remove_if_present(&self.dir, "meta".as_ref(), false)?;
+        hit(Point::MetaRemoved)?;
+        remove_if_present(&self.dir, "parts".as_ref(), true)?;
+        self.dir.sync()?;
+        hit(Point::PartsRemoved)?;
+        remove_if_present(&self.state, hex(&self.manifest.root).as_ref(), true)?;
+        self.state.sync()?;
+        hit(Point::JournalRemoved)?;
+        Ok(())
+    }
+}
+
+fn remove_if_present(dir: &Directory, name: &std::ffi::OsStr, directory: bool) -> io::Result<()> {
+    match dir.unlink(name, directory) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 
@@ -249,3 +292,6 @@ fn write_meta(dir: &Directory, meta: &Meta) -> Result<(), SyncError> {
 fn hex(hash: &ChunkHash) -> String {
     blake3::Hash::from(*hash).to_hex().to_string()
 }
+
+#[cfg(test)]
+mod tests;

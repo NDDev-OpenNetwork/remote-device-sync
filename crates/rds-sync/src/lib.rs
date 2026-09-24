@@ -17,6 +17,7 @@ pub mod journal;
 pub mod proto;
 
 mod confined;
+mod fault;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

@@ -20,10 +20,10 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
 | W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment, fair write admission, strict HTTP framing and explicit format-2 offline migration are implemented. A 4096-identity Linux capacity/churn/reopen run passed. Legacy cutover, release-load/startup profiling, physical failure and native macOS qualification remain open; see validation below. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
-| W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
+| W1.7 | Implemented; Linux checks passed | Exclusive staging and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. Current staging uses reserved names inside locked private state, allowing deterministic recovery. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
-| W1.10 | Partial; Linux checks passed | Persistent per-root receive lock covers processes and filesystem name aliases; parts and assembly use sync/rename/parent-sync ordering. Abrupt-process-exit regression added. Power-loss, every commit boundary, orphan collection and native macOS durability still need qualification. |
+| W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 
 ## Authorization change
 
@@ -507,3 +507,33 @@ outlive async cancellation; stronger publication barriers remain W2.5/W8. Next
 local work is W1.10's remaining journal commit/failure/collection evidence, then
 W2's unified session configuration, negotiation and lifecycle ownership. No
 existing wave is closed by these changes.
+
+## Journal commit recovery and overlapping receive roots
+
+W1.10 now holds a common destination-parent lock in addition to the configured
+root lock. A new regression failed before this fix: roots `root` and
+`root/nested` could concurrently receive the same destination. Nested private
+namespace access also failed its new regression; `.rds-sync` is now reserved at
+every depth, including handle-level alias checks.
+
+Assembly lives under its parent's locked private state and syncs both directory
+parents after rename. Metadata and part transactions use reserved private
+temporary names. Recovery removes only known regular single-link temporary
+files, verifies committed parts and preserves unknown data. Cleanup after
+durable publication is synced and best effort without changing a committed
+success into failure. Existing journal parts remain compatible.
+
+The [recovery contract](sync-journal.md) and
+[receipt](reports/rds-sync-journal-20260925.md) distinguish 23 process-exit cases,
+46 injected-error cases and 12 temporary-object cases from physical-failure
+qualification. Final formatting, three Clippy lanes, **273 workspace tests** and
+**59 all-feature network/agent/relay tests** passed. One historical test allowing
+nested private paths was updated to enforce the corrected namespace contract.
+
+W1.10 stays partial for physical power loss, native macOS, actual nested mounts,
+the large-file kill campaign and W8's inactive/legacy journal collection/quotas.
+Async disk cancellation and concurrent destination edits remain separate work.
+No new dependency, unsafe block, external runtime helper or deployment was added.
+Next local implementation is W2.1 endpoint configuration validation and explicit
+backend/relay selection, followed by negotiation and lifecycle ownership. No
+wave is closed by this local increment.

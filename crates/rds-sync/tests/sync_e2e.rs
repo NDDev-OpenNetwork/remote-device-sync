@@ -434,8 +434,8 @@ async fn path_traversal_rejected() {
         assert!(check_rel_path(bad).is_err(), "accepted {bad:?}");
     }
     assert!(check_rel_path("dir/sub/file.bin").is_ok());
-    // `.rds-sync` deeper in the tree is just a filename — allowed.
-    assert!(check_rel_path("a/.rds-sync/notes").is_ok());
+    // Nested roots also own private receive state; peers cannot address it.
+    assert!(check_rel_path("a/.rds-sync/notes").is_err());
 
     // And over the wire: a hostile Offer gets Refuse.
     let (_s, c_ep, target, _task, _server_dir) = pair().await;

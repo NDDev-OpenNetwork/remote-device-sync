@@ -293,6 +293,35 @@ fn root_lock_prevents_cleanup_of_another_transfer() {
 }
 
 #[test]
+fn overlapping_roots_share_destination_ownership() {
+    let dir = Scratch::new("overlapping-roots");
+    let nested = dir.0.join("nested");
+    let one = manifest_of(b"first transfer");
+    let two = manifest_of(b"second transfer");
+    let first = Journal::open(&dir.0, "nested/data.bin", &one).unwrap();
+    assert!(Journal::open(&nested, "data.bin", &two).is_err());
+    drop(first);
+    let second = Journal::open(&nested, "data.bin", &two).unwrap();
+    assert!(Journal::open(&dir.0, "nested/data.bin", &one).is_err());
+    drop(second);
+    assert!(Journal::open(&dir.0, "nested/data.bin", &one).is_ok());
+}
+
+#[test]
+fn nested_private_state_is_never_a_sync_destination() {
+    let dir = Scratch::new("nested-private-state");
+    let manifest = manifest_of(b"do not replace state");
+    for path in [
+        "nested/.rds-sync/receive.lock",
+        "nested/.RDS-SYNC/assembly",
+        "nested/.rDs-SyNc",
+    ] {
+        assert!(Journal::open(&dir.0, path, &manifest).is_err(), "{path}");
+    }
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+}
+
+#[test]
 fn locks_survive_process_boundary() {
     let manifest = manifest_of(b"locked bytes");
     if let Some(path) = std::env::var_os("RDS_TEST_JOURNAL_LOCK_ROOT") {

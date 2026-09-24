@@ -97,7 +97,6 @@ pub fn check_rel_path(rel: &str) -> Result<PathBuf, SyncError> {
         return Err(SyncError::Manifest(format!("absolute rel_path {rel:?}")));
     }
     let mut out = PathBuf::new();
-    let mut first = true;
     for part in rel.split(['/', '\\']) {
         match part {
             "" | "." => {}
@@ -106,15 +105,13 @@ pub fn check_rel_path(rel: &str) -> Result<PathBuf, SyncError> {
                     "traversal in rel_path {rel:?}"
                 )));
             }
-            // `.rds-sync` at the root is the journal namespace — a peer
-            // may not read or plant state files in it.
-            p if first && p.eq_ignore_ascii_case(crate::journal::STATE_DIR) => {
+            // Every destination parent may own private receive state.
+            p if p.eq_ignore_ascii_case(crate::journal::STATE_DIR) => {
                 return Err(SyncError::Manifest(format!(
                     "rel_path {rel:?} enters the sync journal"
                 )));
             }
             p => {
-                first = false;
                 out.push(p);
             }
         }
