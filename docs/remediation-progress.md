@@ -25,7 +25,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
-| W2.5 | Partial; owned path-driver lifecycle | Weak QUIC closure terminates policy tasks, completed tasks release storage, and endpoint close seals admission and waits for their cleanup. Agent/service task groups, resource budgets, relay queues and disk cancellation remain open. |
+| W2.5 | Partial; path-driver and uni-router lifecycle | Owned policy tasks terminate and endpoint close waits for them. Shared uni routing has acyclic ownership, 64 pending workers, bounded inboxes and cancel/join on closure. Agent/service task groups, global budgets, per-service fairness, relay queues and disk cancellation remain open. |
 
 ## Authorization change
 
@@ -629,3 +629,27 @@ selection and larger churn/load qualification remain W3.6. R08 concerns relay
 Drain framing and stays open, as does R09 candidate fallback. The next local
 lifecycle work is the uni-stream router's ownership and pending-task bounds.
 No wave or deployed release is closed by this increment.
+
+## Uni-stream router ownership and limits
+
+Two real-QUIC regressions failed on iroh and owned noq: dropping the facade and
+inbox left the connection retained by its own router task. The private router
+now uses weak owner references; live inboxes can still own I/O independently
+of facade handles. Its task group caps tag/queue handoff work at 64 workers.
+Closure cancels and joins them before registered producers are cleared; each
+inbox keeps at most 128 buffered streams for explicit draining.
+
+Tests cover last-owner teardown, facade clones, surviving inboxes, 80 partial
+tags, ready routing behind a stalled tag, reclaim and a full 128-slot inbox
+with 64 pending handoffs. Existing fixtures now retain the peer handle and
+actually send a partial tag instead of only opening a local stream. Final
+formatting, three Clippy lanes, **307 workspace tests**, **92 all-feature
+network/agent/CLI/relay tests** and **7 feature-isolated routing tests** passed.
+See [contract](uni-routing.md) and [receipt](reports/rds-uni-routing-20260925.md).
+No dependency, unsafe code, wire version or runtime helper changed.
+
+W2.5 remains partial for agent/service ownership, admission and other resource
+budgets, relay pumps and disk cancellation. Kind-based routing still needs
+session IDs, negotiated limits and per-service fairness; local task bounds are
+not RSS/FD or latency-percentile acceptance. The next local lifecycle work is
+owned agent connection/service tasks and bounded admission. No wave is closed.

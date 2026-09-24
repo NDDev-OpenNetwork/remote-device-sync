@@ -43,6 +43,8 @@ pub mod backends {
     pub mod noq;
 }
 pub mod metrics;
+mod uni;
+pub use uni::{UniRoutingStats, UniStreams};
 pub mod resolve;
 
 // Shared identity and address types — the same key material works on
@@ -352,7 +354,7 @@ pub struct Connection {
     inner: ConnectionInner,
     /// Routes inbound uni streams to the consumer that claimed their
     /// `UniHello` tag — see [`Connection::uni_streams`].
-    demux: std::sync::Arc<UniDemux>,
+    demux: std::sync::Arc<uni::Demux>,
 }
 
 #[derive(Clone)]
@@ -362,114 +364,33 @@ enum ConnectionInner {
     Noq(backends::noq::Connection),
 }
 
-/// Per-connection uni-stream router: one `accept_uni` owner that reads
-/// each stream's `UniHello` tag and hands the stream to the consumer
-/// that claimed the tag. Without it, independent consumers racing on
-/// `accept_uni` steal each other's streams.
-#[derive(Default)]
-struct UniDemux {
-    state: std::sync::Mutex<UniDemuxState>,
-}
-
-#[derive(Default)]
-struct UniDemuxState {
-    routes: std::collections::HashMap<rds_core::UniHello, tokio::sync::mpsc::Sender<RecvStream>>,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-/// Demux queue depth per kind. Desktop frame streams arrive one per
-/// frame and the consumer drains them into per-stream tasks
-/// immediately, so 128 covers bursts without letting a wedged consumer
-/// grow memory unboundedly.
-const UNI_DEMUX_DEPTH: usize = 128;
-
-/// Inbound uni streams of one [`rds_core::UniHello`] kind — see
-/// [`Connection::uni_streams`].
-pub struct UniStreams {
-    kind: rds_core::UniHello,
-    rx: tokio::sync::mpsc::Receiver<RecvStream>,
-}
-
-impl UniStreams {
-    /// The kind this inbox serves.
-    pub fn kind(&self) -> rds_core::UniHello {
-        self.kind
-    }
-
-    /// Next inbound stream of this kind; `None` once the connection
-    /// dies.
-    pub async fn recv(&mut self) -> Option<RecvStream> {
-        self.rx.recv().await
-    }
-}
-
-/// How long an inbound uni stream may sit before writing its `UniHello`
-/// tag. A peer that opens streams and never tags them would otherwise
-/// park a demux task per stream until the connection dies.
-const UNI_TAG_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The demux body: accept, then hand each stream its own tag-read task
-/// so a peer that stalls before writing the `UniHello` cannot block
-/// routing of the streams queued behind it (head-of-line). Runs until
-/// the connection dies; a route whose consumer dropped is removed so a
-/// later `uni_streams` can reclaim the kind. On exit every registered
-/// sender is dropped so parked [`UniStreams::recv`] callers observe
-/// `None` — a dead connection ends its inboxes, it does not leave them
-/// waiting forever.
-async fn uni_demux(conn: Connection, demux: std::sync::Arc<UniDemux>) {
-    loop {
-        let stream = match conn.accept_uni().await {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        let demux = std::sync::Arc::clone(&demux);
-        tokio::spawn(async move {
-            route_uni(stream, &demux).await;
-        });
-    }
-    let mut st = demux.state.lock().unwrap();
-    st.task = None;
-    st.routes.clear();
-}
-
-/// Read one stream's tag and hand it to the claimed inbox. Stream order
-/// within a kind is not the accept order under parallel tag reads;
-/// consumers order by their own wire sequencing (frame `seq`, chunk
-/// index).
-async fn route_uni(mut stream: RecvStream, demux: &UniDemux) {
-    let kind = match tokio::time::timeout(
-        UNI_TAG_TIMEOUT,
-        rds_core::read_frame::<_, rds_core::UniHello>(&mut stream),
-    )
-    .await
-    {
-        Ok(Ok(k)) => k,
-        Ok(Err(e)) => {
-            tracing::debug!("uni stream dropped, unreadable tag: {e}");
-            return;
+impl ConnectionInner {
+    fn accept_uni(&self) -> AcceptUni<'_> {
+        match self {
+            Self::Iroh(c) => c.accept_uni(),
+            #[cfg(feature = "transport-noq")]
+            Self::Noq(c) => c.accept_uni(),
         }
-        Err(_) => {
-            tracing::debug!("uni stream dropped: tag timeout");
-            return;
-        }
-    };
-    let tx = demux.state.lock().unwrap().routes.get(&kind).cloned();
-    match tx {
-        Some(tx) => {
-            // Backpressure, not loss: a full queue parks the router task
-            // until the consumer drains it (sync transfers must never
-            // silently lose a chunk stream). Other streams keep routing.
-            if tx.send(stream).await.is_err() {
-                // Only remove the route if the map still holds *this*
-                // channel — a re-claimed kind must not be clobbered by
-                // a stale sender's failure.
-                let mut st = demux.state.lock().unwrap();
-                if st.routes.get(&kind).is_some_and(|t| t.same_channel(&tx)) {
-                    st.routes.remove(&kind);
-                }
+    }
+
+    async fn closed(&self) {
+        match self {
+            Self::Iroh(c) => {
+                c.closed().await;
+            }
+            #[cfg(feature = "transport-noq")]
+            Self::Noq(c) => {
+                c.inner().closed().await;
             }
         }
-        None => tracing::debug!("uni {kind:?} stream dropped: no consumer"),
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Iroh(c) => c.close_reason().is_some(),
+            #[cfg(feature = "transport-noq")]
+            Self::Noq(c) => c.inner().close_reason().is_some(),
+        }
     }
 }
 
@@ -531,11 +452,7 @@ impl Connection {
     /// services use tagged streams, a direct `accept_uni` races the
     /// demux and can steal tagged streams from their consumers.
     pub fn accept_uni(&self) -> AcceptUni<'_> {
-        match &self.inner {
-            ConnectionInner::Iroh(c) => c.accept_uni(),
-            #[cfg(feature = "transport-noq")]
-            ConnectionInner::Noq(c) => c.accept_uni(),
-        }
+        self.inner.accept_uni()
     }
 
     /// Claim inbound uni streams tagged `kind` (the `UniHello` first
@@ -547,19 +464,13 @@ impl Connection {
     ///
     /// Must be called inside a tokio runtime.
     pub fn uni_streams(&self, kind: rds_core::UniHello) -> anyhow::Result<UniStreams> {
-        let (tx, rx) = tokio::sync::mpsc::channel(UNI_DEMUX_DEPTH);
-        let mut st = self.demux.state.lock().unwrap();
-        if st.routes.get(&kind).is_some_and(|s| !s.is_closed()) {
-            anyhow::bail!("uni stream kind {kind:?} already claimed");
-        }
-        st.routes.insert(kind, tx);
-        if st.task.is_none() {
-            st.task = Some(tokio::spawn(uni_demux(
-                self.clone(),
-                std::sync::Arc::clone(&self.demux),
-            )));
-        }
-        Ok(UniStreams { kind, rx })
+        self.demux.claim(&self.inner, kind)
+    }
+
+    /// Current uni-router work and local receive limits. These are resource
+    /// limits of this implementation, not negotiated protocol capabilities.
+    pub fn uni_routing_stats(&self) -> UniRoutingStats {
+        self.demux.stats()
     }
 
     /// Send an unreliable datagram.
@@ -592,11 +503,7 @@ impl Connection {
     /// Whether the connection has closed (either side). Samplers use
     /// this as their stop condition.
     pub fn is_closed(&self) -> bool {
-        match &self.inner {
-            ConnectionInner::Iroh(c) => c.close_reason().is_some(),
-            #[cfg(feature = "transport-noq")]
-            ConnectionInner::Noq(c) => c.inner().close_reason().is_some(),
-        }
+        self.inner.is_closed()
     }
 
     /// Snapshot of every live path's transport counters, normalized

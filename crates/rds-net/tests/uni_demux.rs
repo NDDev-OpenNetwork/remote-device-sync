@@ -9,8 +9,13 @@ use std::time::Duration;
 use rds_net::{EndpointAddr, EndpointConfig, TransportAddr, bind_endpoint};
 
 /// Connected pair over the default (iroh) backend, discovery off —
-/// returns the client-side connection plus both endpoints.
-async fn connected_pair() -> (rds_net::Connection, rds_net::Endpoint, rds_net::Endpoint) {
+/// returns both connections and both endpoints.
+async fn connected_pair() -> (
+    rds_net::Connection,
+    rds_net::Connection,
+    rds_net::Endpoint,
+    rds_net::Endpoint,
+) {
     let cfg = || EndpointConfig::default().without_discovery();
     let server = bind_endpoint(cfg()).await.unwrap();
     let client = bind_endpoint(cfg()).await.unwrap();
@@ -34,15 +39,15 @@ async fn connected_pair() -> (rds_net::Connection, rds_net::Endpoint, rds_net::E
         )
         .await
         .unwrap();
-    let _server_conn = accept.await.unwrap();
-    (conn, server, client)
+    let server_conn = accept.await.unwrap();
+    (conn, server_conn, server, client)
 }
 
 /// `recv` must yield `None` once the connection dies — the demux exits
 /// and its registered senders drop, ending the inbox.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn uni_recv_ends_when_connection_dies() {
-    let (conn, _server, _client) = connected_pair().await;
+    let (conn, _peer, _server, _client) = connected_pair().await;
     let mut uni = conn.uni_streams(rds_core::UniHello::Sync).unwrap();
 
     conn.close(0u32.into(), b"done");
@@ -59,7 +64,7 @@ async fn uni_recv_ends_when_connection_dies() {
 /// respawns, fails `accept_uni`, and drops the fresh sender.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn uni_streams_on_dead_connection_end() {
-    let (conn, _server, _client) = connected_pair().await;
+    let (conn, _peer, _server, _client) = connected_pair().await;
     conn.close(0u32.into(), b"done");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -104,7 +109,8 @@ async fn stalled_tag_does_not_block_routing() {
     let mut uni = conn.uni_streams(rds_core::UniHello::Desktop).unwrap();
 
     // Stream one: opened, held open, tag never written.
-    let _stalled = server_conn.open_uni().await.unwrap();
+    let mut stalled = server_conn.open_uni().await.unwrap();
+    stalled.write_all(&[0]).await.unwrap();
 
     // Stream two: tagged properly — must route despite the stalled
     // predecessor sitting at the head of the accept queue.

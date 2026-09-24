@@ -33,6 +33,11 @@ immediately, and `active_path_drivers()` exposes the owned endpoint's count.
 This boundary does not yet own every agent, relay or disk task; see the
 [lifecycle receipt](reports/rds-driver-lifecycle-20260925.md) for its tested scope.
 
+The shared [uni-stream router](uni-routing.md) is owned by facade connections
+and live inboxes, without a task/connection ownership cycle. A bounded task group
+handles tags and inbox handoff; QUIC closure cancels and joins its workers.
+Its local budgets do not yet supply negotiated session IDs or per-service QoS.
+
 ## Research summary
 
 ### Connectivity models surveyed
