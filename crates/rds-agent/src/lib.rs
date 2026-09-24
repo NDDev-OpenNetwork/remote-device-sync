@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rds_core::grant::{self, GrantId, VerifiedGrant};
+use rds_core::grant::{GrantId, VerifiedGrant};
 use rds_core::{
     AgentInfo, HelloAck, PROTOCOL_VERSION, ServiceKind, StreamHello, read_frame, write_frame,
 };
@@ -35,6 +35,9 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, info, info_span, warn};
+
+mod authz;
+use authz::{ConnAuthz, ConnectionLifetime, authorize};
 
 /// Monotonic session ids for structured tracing — every connection's
 /// `rds.conn` span carries one, so `session_id` filters a whole
@@ -129,11 +132,11 @@ impl AgentPolicy {
     }
 
     /// Revoke a grant id — pushes onto the denylist and notifies every
-    /// live connection watcher. Returns the receiver for tests.
+    /// live connection watcher. The value is retained without subscribers.
     pub fn revoke(&self, id: GrantId) {
-        let mut set = (**self.denylist.borrow()).clone();
-        set.insert(id);
-        let _ = self.denylist.send(Arc::new(set));
+        self.denylist.send_modify(|set| {
+            Arc::make_mut(set).insert(id);
+        });
     }
 
     /// Read the current denylist snapshot.
@@ -144,7 +147,7 @@ impl AgentPolicy {
     /// Replace the whole denylist — what a fresh estate revocation
     /// snapshot means. Live connections re-check on the notification.
     pub fn replace_denylist(&self, ids: HashSet<GrantId>) {
-        let _ = self.denylist.send(Arc::new(ids));
+        self.denylist.send_replace(Arc::new(ids));
     }
 }
 
@@ -153,9 +156,9 @@ impl AgentPolicy {
 /// snapshot clears nothing (denylist stays as last seen). Returns the
 /// task handle — abort it to stop polling.
 ///
-/// The pull model replaces the plan's server-push: bounded staleness is
-/// the `interval`, and the signed snapshot keeps integrity on an
-/// untrusted directory.
+/// The interval controls refresh while the directory is reachable; it is
+/// not an outage staleness bound. Durable freshness and offline policy are
+/// tracked by remediation W1.4. Signatures protect snapshot integrity.
 pub fn watch_revocations(
     client: rds_discovery::client::Client,
     registry_key: ed25519_dalek::VerifyingKey,
@@ -250,70 +253,6 @@ impl Agent {
     }
 }
 
-/// Per-connection authorization state.
-///
-/// `Pending` — grant mode on, nothing verified yet: every service
-/// stream is refused until an `Authz` stream lands a valid grant.
-/// `Granted` — a verified grant; service streams are scope-checked.
-/// `Open` — legacy mode (`issuers` empty): allowlist alone authorizes.
-enum AuthzState {
-    Open,
-    Pending,
-    Granted(Arc<VerifiedGrant>),
-}
-
-/// Shared per-connection authz cell plus its lifecycle hooks.
-struct ConnAuthz {
-    state: Mutex<AuthzState>,
-    /// Set when the first grant verifies — watchers that close the
-    /// connection on expiry/revocation. Aborted when the conn ends.
-    watcher: Mutex<Option<JoinHandle<()>>>,
-    /// The active grant id, released back into `active_grants` on
-    /// connection teardown so the slot frees for a future session.
-    grant_id: Mutex<Option<GrantId>>,
-    /// One sync session per connection: the journal is per-destination
-    /// and the uni demux serves a single `Sync` claim at a time, so a
-    /// concurrent session gets a clean refusal instead of a race.
-    sync_busy: std::sync::atomic::AtomicBool,
-}
-
-impl ConnAuthz {
-    fn new(required: bool) -> Self {
-        Self {
-            state: Mutex::new(if required {
-                AuthzState::Pending
-            } else {
-                AuthzState::Open
-            }),
-            watcher: Mutex::new(None),
-            grant_id: Mutex::new(None),
-            sync_busy: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    /// Take the per-connection sync slot, or `false` if a session is
-    /// already running.
-    fn try_sync_slot(&self) -> bool {
-        !self
-            .sync_busy
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-    }
-
-    fn release_sync_slot(&self) {
-        self.sync_busy
-            .store(false, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Scope the connection currently has for service streams.
-    fn scope(&self) -> Result<Option<Arc<VerifiedGrant>>, &'static str> {
-        match &*lock(&self.state) {
-            AuthzState::Open => Ok(None),
-            AuthzState::Pending => Err("grant required: send Authz first"),
-            AuthzState::Granted(g) => Ok(Some(g.clone())),
-        }
-    }
-}
-
 async fn serve_connection(
     conn: Connection,
     policy: Arc<AgentPolicy>,
@@ -331,12 +270,15 @@ async fn serve_connection(
     // endpoint registry for the connection's lifetime.
     tokio::spawn(metrics.sampler(conn.clone()).run(Duration::from_secs(1)));
     let authz = Arc::new(ConnAuthz::new(policy.grants_required()));
+    let _lifetime = ConnectionLifetime {
+        conn: conn.clone(),
+        authz: authz.clone(),
+    };
     loop {
         let (send, recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
             Err(e) => {
                 debug!(%peer, "connection closed: {e}");
-                teardown(&conn, &policy, &authz);
                 return Ok(());
             }
         };
@@ -355,22 +297,6 @@ async fn serve_connection(
     }
 }
 
-/// Connection teardown: stop the expiry/revocation watcher and release
-/// the grant slot so the same grant may authorize a future session.
-fn teardown(_conn: &Connection, policy: &AgentPolicy, authz: &ConnAuthz) {
-    if let Some(w) = lock(&authz.watcher).take() {
-        w.abort();
-    }
-    if let Some(id) = lock(&authz.grant_id).take() {
-        lock(&policy.active_grants).remove(&id);
-    }
-}
-
-/// Close the connection hard when the presented grant is unusable.
-fn deny(conn: &Connection, why: &'static str) {
-    conn.close(2u32.into(), why.as_bytes());
-}
-
 async fn serve_stream(
     conn: Connection,
     mut send: rds_net::SendStream,
@@ -385,11 +311,15 @@ async fn serve_stream(
         Err(_) => anyhow::bail!("stream hello timed out"),
     };
     if let StreamHello::Authz(grant) = hello {
-        return authorize(&conn, send, recv, grant, &policy, &authz).await;
+        return authorize(&conn, send, grant, &policy, &authz).await;
     }
-    let grant = match authz.scope() {
+    let grant = match authz.scope(&policy) {
         Ok(g) => g,
         Err(why) => {
+            if why.terminal() {
+                conn.close(2u32.into(), why.message().as_bytes());
+            }
+            let why = why.message();
             write_frame(
                 &mut send,
                 &HelloAck::Error {
@@ -571,133 +501,6 @@ async fn serve_stream(
     }
     .instrument(span)
     .await
-}
-
-/// Verify an `Authz` stream's grant and bind it to this connection.
-///
-/// On success the connection flips to `Granted`, the replay guard holds
-/// the grant id, and a watcher closes the connection the moment the
-/// grant expires or lands on the denylist.
-async fn authorize(
-    conn: &Connection,
-    mut send: rds_net::SendStream,
-    _recv: rds_net::RecvStream,
-    grant: grant::Grant,
-    policy: &AgentPolicy,
-    authz: &ConnAuthz,
-) -> anyhow::Result<()> {
-    if !policy.grants_required() {
-        write_frame(
-            &mut send,
-            &HelloAck::Error {
-                message: "agent does not require grants".into(),
-            },
-        )
-        .await?;
-        anyhow::bail!("Authz on a grant-free agent");
-    }
-    {
-        // A second Authz stream is never valid — either still pending
-        // (fine, this is the first) or already granted (refuse).
-        if matches!(*lock(&authz.state), AuthzState::Granted(_)) {
-            write_frame(
-                &mut send,
-                &HelloAck::Error {
-                    message: "already authorized".into(),
-                },
-            )
-            .await?;
-            anyhow::bail!("duplicate Authz stream");
-        }
-    }
-    let peer = conn.remote_id();
-    let verified = match grant.verify(
-        &policy.issuers,
-        peer.as_bytes(),
-        policy.grant_max_ttl,
-        grant::now_unix(),
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(%peer, "grant rejected: {e}");
-            write_frame(
-                &mut send,
-                &HelloAck::Error {
-                    message: format!("grant rejected: {e}"),
-                },
-            )
-            .await?;
-            deny(conn, "grant rejected");
-            anyhow::bail!("grant rejected: {e}");
-        }
-    };
-    // Denylist first, then the replay guard — both under one lock-free
-    // read + one mutex so admission is atomic.
-    if policy.denied().contains(&verified.id) {
-        write_frame(
-            &mut send,
-            &HelloAck::Error {
-                message: "grant revoked".into(),
-            },
-        )
-        .await?;
-        deny(conn, "grant revoked");
-        anyhow::bail!("grant revoked");
-    }
-    let admitted = lock(&policy.active_grants).insert(verified.id);
-    if !admitted {
-        write_frame(
-            &mut send,
-            &HelloAck::Error {
-                message: "grant already in use".into(),
-            },
-        )
-        .await?;
-        deny(conn, "grant replay");
-        anyhow::bail!("grant replay on concurrent connection");
-    }
-    let grant = Arc::new(verified);
-    *lock(&authz.state) = AuthzState::Granted(grant.clone());
-    *lock(&authz.grant_id) = Some(grant.id);
-    write_frame(&mut send, &HelloAck::Ok).await?;
-    send.finish()?;
-    info!(%peer, grant = %blake3::Hash::from(grant.id), "grant authorized");
-    *lock(&authz.watcher) = Some(tokio::spawn(watch_grant(
-        conn.clone(),
-        grant,
-        policy.denylist.subscribe(),
-    )));
-    Ok(())
-}
-
-/// Live-grant watchdog: closes the connection at `expires_at` or when
-/// the grant id appears on the denylist — whichever comes first.
-async fn watch_grant(
-    conn: Connection,
-    grant: Arc<VerifiedGrant>,
-    mut denylist: watch::Receiver<Arc<HashSet<GrantId>>>,
-) {
-    let expiry = tokio::time::sleep(Duration::from_secs(
-        grant.payload.expires_at.saturating_sub(grant::now_unix()),
-    ));
-    tokio::pin!(expiry);
-    loop {
-        tokio::select! {
-            _ = &mut expiry => {
-                conn.close(3u32.into(), b"grant expired");
-                return;
-            }
-            changed = denylist.changed() => {
-                if changed.is_err() {
-                    return; // sender dropped — policy gone
-                }
-                if denylist.borrow().contains(&grant.id) {
-                    conn.close(4u32.into(), b"grant revoked");
-                    return;
-                }
-            }
-        }
-    }
 }
 
 /// The service a `StreamHello` selects; `None` for `Authz`, which is

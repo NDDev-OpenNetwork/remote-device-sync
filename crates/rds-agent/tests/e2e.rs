@@ -447,6 +447,82 @@ async fn grant_replay_on_concurrent_connection_rejected() {
 
 // ---- WS6: sync service ------------------------------------------------
 
+#[test]
+fn revocations_survive_without_watchers() {
+    let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.replace_denylist(std::collections::HashSet::from([[1; 32]]));
+    assert!(policy.denied().contains(&[1; 32]));
+    policy.revoke([2; 32]);
+    assert_eq!(policy.denied().len(), 2);
+
+    let receiver = policy.denylist.subscribe();
+    drop(receiver);
+    policy.revoke([3; 32]);
+    assert_eq!(policy.denied().len(), 3);
+}
+
+#[test]
+fn concurrent_revocations_are_not_lost() {
+    let policy = Arc::new(AgentPolicy::ssh_only(("127.0.0.1".into(), 9)));
+    let _receiver = policy.denylist.subscribe();
+    let barrier = Arc::new(std::sync::Barrier::new(16));
+    std::thread::scope(|scope| {
+        for i in 0..16 {
+            let policy = policy.clone();
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                policy.revoke([i; 32]);
+            });
+        }
+    });
+    assert_eq!(policy.denied().len(), 16);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_authz_reply_closes_connection_and_releases_grant() {
+    let (_relay, relay_url) = test_relay().await;
+    let client = client_ep(&relay_url).await;
+    let (ep, mut policy, iss, ticket) = grant_agent(&relay_url).await;
+    policy.allow.insert(client.id());
+    let agent = Agent::new(ep.clone(), policy);
+    let policy = agent.policy.clone();
+    let task = serve(agent);
+    let conn = rds_cli::connect(&client, rds_net::parse_target(&ticket.to_string()).unwrap())
+        .await
+        .unwrap();
+    let grant = grant_for(
+        &iss,
+        client.id(),
+        vec![ServiceKind::Ping],
+        Duration::from_secs(60),
+    );
+    let grant_id = grant.id();
+    let mut encoded = Vec::new();
+    write_frame(&mut encoded, &StreamHello::Authz(grant))
+        .await
+        .unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    // Let the agent accept the stream, but withhold the Authz body
+    // until STOP_SENDING has reached its reply half.
+    send.write_all(&encoded[..5]).await.unwrap();
+    recv.stop(0u32.into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    send.write_all(&encoded[5..]).await.unwrap();
+    send.finish().unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !conn.is_closed() || policy.active_grants.lock().unwrap().contains(&grant_id) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("failed Authz ACK retained access or leaked its reservation");
+    assert!(rds_cli::ping(&conn, 1).await.is_err());
+    client.close().await;
+    ep.close().await;
+    task.abort();
+}
+
 /// One sync session per connection: a second `Sync` stream while the
 /// first is open is refused, and the slot frees when the first ends.
 /// Also proves `Info` advertises `Sync` only when `sync_dir` is set.

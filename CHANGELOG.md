@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Preserve revocations without subscribers and during concurrent updates.
+  Make grant admission atomic: failed/canceled Authz responses close the
+  connection, release replay reservations and stop watchdogs. Recheck expiry
+  and revocation at service admission; observe the initial denylist snapshot.
+
 - Idle-desktop suppression: the X11 capturer subscribes a DAMAGE object
   on the root window (`NON_EMPTY` report level, re-armed via
   `DamageSubtract`); while the screen is still, the producer skips the

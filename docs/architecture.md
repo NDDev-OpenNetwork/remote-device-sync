@@ -158,6 +158,11 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   revocable: the directory serves an estate-signed `SignedRevocations`
   snapshot at `GET /v1/revocations`, agents poll it into their denylist,
   and a revoked or expired grant closes its live connection.
+- Grant admission uses one connection-owned state machine. Pending service
+  requests remain refused during the Authz reply; its watchdog and replay
+  reservation exist before the reply write. Failure or cancellation closes
+  the connection and releases the lease. Denylist values survive without
+  watchers; service admission rechecks revocation and expiry directly.
 - GDS binding: a signed device record ties `device_id` ↔ `EndpointId`
   and is distributed through the estate/device registry, so
   `rds ssh nddev-amsterdam` resolves keys from GDS state instead of
