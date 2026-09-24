@@ -1,8 +1,9 @@
 # Directory record storage
 
 Status: W1.5 transactions, versioned publication and expiry retention implemented,
-not a completed directory acceptance gate. Enrollment quotas, admission fairness,
-strict HTTP framing and migration remain in [the remediation plan](remediation-plan.md).
+not a completed directory acceptance gate. Configured enrollment and write-budget
+fairness are implemented. Strict HTTP framing, file-capacity qualification and
+migration remain in [the remediation plan](remediation-plan.md).
 
 ## Signed mutation contract
 
@@ -163,10 +164,67 @@ and retired floors); `MemoryStore::with_capacity` may lower that limit.
 Disk limits are 256 KiB per serialized cell, a 256 MiB database file and a
 16 MiB database cache.
 The backend checks growth and offset arithmetic before writing. These are
-storage safety bounds, not completed enrollment quotas or total process-memory
-bounds. Identity-capacity refusal does not block an existing identity's higher
-revision. Global write-budget fairness and capacity reservation at the database
-file limit are still pending. Expiry does not free identity slots.
+storage safety bounds, not total process-memory bounds. Identity-capacity
+refusal does not block an existing identity's higher revision. Capacity
+reservation at the database file limit is still unqualified. Expiry does not
+free identity slots.
+
+## Enrollment and write admission
+
+`ServiceConfig` defaults to an empty publisher allowlist. Production
+`rds-server --directory-allow <base32-device-key>` provisions it explicitly,
+independently of relay membership, agent permissions and registry names.
+At most 4096 distinct nonweak Ed25519 keys are accepted. Unknown keys cannot
+publish, fetch or delete endpoint records (HTTP 403). Removing a key and
+restarting hides its stored record while retaining replay history. It does not
+close existing endpoint sessions; those use grant revocation. Static membership
+is a provisioning boundary until the W4 GDS reconciler supplies live policy.
+There is no production open-enrollment flag. Synthetic tests/benchmarks explicitly
+choose `ServiceConfig::open_ephemeral`; raw stores remain storage primitives,
+with the enrollment boundary in the directory service.
+
+The envelope's key hint can cheaply reject unknown publishers but never
+authorizes a write. Both stores verify signatures, key agreement, lifetime and
+revision before invoking an admission callback under the same owner lock used
+for compare/commit. The callback sees whether any identity history already
+exists, including a deletion/expiry floor. Only a valid higher revision invokes
+it. Exact signed retries, stale/conflicting revisions and forged operations do
+not spend the owner's quota. Concurrent copies of a new operation charge once.
+A refused callback leaves the mutation unapplied and does not poison storage.
+Callbacks must be bounded and must not reenter the store. The ordinary `put` and
+`remove` embedding APIs use an accepting callback; custom `RecordStore`
+implementations must uphold the `put_admitted`/`remove_admitted` contract.
+
+Accounting uses fixed 60-second monotonic windows, bounded to 4096 writer slots.
+Defaults are 120 admitted mutations per identity, 600 new identity admissions,
+and 600 shared extra writes per window. Check the identity's limit and optional
+minimum spacing **before** charging shared capacity; a quota refusal debits
+neither budget. Each remembered identity additionally gets one protected new
+mutation per window, independent of new admission and shared extra traffic.
+At 4096 identities these protected slots exceed the old single 600-write budget.
+Counters reset with the directory process, not with HTTP connections or record
+expiry. These are fixed windows, not strict sliding-window or byte-rate quotas.
+
+TTL/3 renewal with TTL at least 180 seconds fits the protected cadence; the
+default 300-second publisher uses it. Shorter TTLs and extra address changes
+depend on burst capacity. PUT and DELETE share the identity limit. Deleted and
+collected identities retain known-device classification. Successfully admitted
+operations spend capacity before commit; an I/O failure does not refund that
+attempt. An exact retry after a successful but lost reply does not debit again.
+
+Registry and revocation updates each have a separate 60-new-revision budget.
+Their admission callback runs after signature/freshness/order validation under
+the policy lock and before persistence. Captured duplicates and invalid/stale
+snapshots do not consume it. Endpoint traffic cannot spend policy-role capacity.
+
+Connection counts, bounded bodies, absolute request deadlines and owned worker
+permits bound pre-authentication resource use. The old unauthenticated global
+write counter is removed: it let a small replay/refusal flood deny everyone
+for a minute. This change protects write admission against one enrolled abusive
+publisher; it is not isolation from arbitrary network floods, shared CPU,
+filesystem saturation or OS failure. Production throughput and file-capacity
+renewal reserve still require measurement. Membership removal alone does not
+recycle stored identity slots; authenticated retirement remains W4/migration.
 
 ## Migration and operations
 

@@ -199,3 +199,112 @@ fn concurrent_puts_and_delete_have_one_monotonic_result() {
         assert_eq!(store.len(), 1);
     }
 }
+
+#[test]
+fn admission_is_atomic_and_retries_never_spend_another_budget() {
+    use rds_discovery::DiscoveryError;
+    let tmp = Temp::new();
+    for store in [
+        Box::new(MemoryStore::default()) as Box<dyn RecordStore>,
+        Box::new(FileStore::new(&tmp.0).unwrap()),
+    ] {
+        let initial = record();
+        let key = initial.key;
+        assert!(matches!(
+            store.put_admitted(&initial, &mut |known| {
+                assert!(!known);
+                Err(DiscoveryError::RateLimited)
+            }),
+            Err(DiscoveryError::RateLimited)
+        ));
+        assert!(matches!(store.get(&key), Err(DiscoveryError::NotFound)));
+        store
+            .put_admitted(&initial, &mut |known| {
+                assert!(!known);
+                Ok(())
+            })
+            .unwrap();
+        store
+            .put_admitted(&initial, &mut |_| panic!("exact retry was charged"))
+            .unwrap();
+        let mut payload = initial.verify().unwrap();
+        payload.revision = 2;
+        let next = EndpointRecord::sign(&payload, &issuer()).unwrap();
+        assert!(matches!(
+            store.put_admitted(&next, &mut |known| {
+                assert!(known);
+                Err(DiscoveryError::RateLimited)
+            }),
+            Err(DiscoveryError::RateLimited)
+        ));
+        assert_eq!(store.get(&key).unwrap(), initial);
+        store
+            .put_admitted(&next, &mut |known| {
+                assert!(known);
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            store.put_admitted(&initial, &mut |_| panic!("stale record was charged")),
+            Err(DiscoveryError::Stale)
+        ));
+        let tomb = DeleteRequest::new(&issuer(), 3).unwrap();
+        assert!(matches!(
+            store.remove_admitted(&tomb, &mut |known| {
+                assert!(known);
+                Err(DiscoveryError::RateLimited)
+            }),
+            Err(DiscoveryError::RateLimited)
+        ));
+        assert_eq!(store.get(&key).unwrap(), next);
+        store
+            .remove_admitted(&tomb, &mut |known| {
+                assert!(known);
+                Ok(())
+            })
+            .unwrap();
+        store
+            .remove_admitted(&tomb, &mut |_| panic!("exact deletion retry was charged"))
+            .unwrap();
+        payload.revision = 4;
+        let next = EndpointRecord::sign(&payload, &issuer()).unwrap();
+        store
+            .put_admitted(&next, &mut |known| {
+                assert!(known, "deletion lost known identity status");
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn concurrent_exact_mutations_charge_once_in_both_stores() {
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let tmp = Temp::new();
+    for store in [
+        Arc::new(MemoryStore::default()) as Arc<dyn RecordStore>,
+        Arc::new(FileStore::new(&tmp.0).unwrap()),
+    ] {
+        let record = record();
+        let calls = AtomicUsize::new(0);
+        let barrier = Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    store
+                        .put_admitted(&record, &mut |known| {
+                            assert!(!known);
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}

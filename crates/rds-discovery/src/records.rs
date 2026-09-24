@@ -14,7 +14,7 @@ const RECORDS: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new("records
 const META: TableDefinition<'_, u8, &[u8]> = TableDefinition::new("metadata-v3");
 const MAX_CELL: usize = 256 * 1024;
 const MAX_DATABASE: u64 = 256 * 1024 * 1024;
-const MAX_IDENTITIES: usize = 4096;
+pub(crate) const MAX_IDENTITIES: usize = 4096;
 const GC_BATCH: usize = 64;
 mod entry;
 mod memory;
@@ -336,6 +336,15 @@ impl FileStore {
         entry: Option<Entry>,
         now: Option<Reading>,
     ) -> Result<Option<EndpointRecord>, DiscoveryError> {
+        self.access_admitted(key, entry, now, &mut |_| Ok(()))
+    }
+    fn access_admitted(
+        &self,
+        key: EndpointKey,
+        entry: Option<Entry>,
+        now: Option<Reading>,
+        admit: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<Option<EndpointRecord>, DiscoveryError> {
         let mut inner = self.inner.lock().map_err(error)?;
         inner.healthy()?;
         let now = now.map(Ok).unwrap_or_else(Reading::now)?;
@@ -356,6 +365,9 @@ impl FileStore {
         if let Some(replacement) = decision.replacement {
             if old.is_none() && inner.metadata.identities >= MAX_IDENTITIES as u64 {
                 return Err(error("record identity capacity exceeded"));
+            }
+            if matches!(replacement, Stored::Active { .. }) {
+                admit(old.is_some())?;
             }
             inner.commit(&[(key, replacement)], now)?;
         }
@@ -496,11 +508,16 @@ impl Inner {
     }
 }
 impl RecordStore for FileStore {
-    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        self.access(
+    fn put_admitted(
+        &self,
+        record: &EndpointRecord,
+        admit: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError> {
+        self.access_admitted(
             record.verify()?.key,
             Some(Entry::Record(record.clone())),
             None,
+            admit,
         )
         .map(|_| ())
     }
@@ -508,9 +525,18 @@ impl RecordStore for FileStore {
         self.access(*key, None, None)?
             .ok_or(DiscoveryError::NotFound)
     }
-    fn remove(&self, tomb: &DeleteRequest) -> Result<(), DiscoveryError> {
-        self.access(tomb.verify()?.key, Some(Entry::Deleted(tomb.clone())), None)
-            .map(|_| ())
+    fn remove_admitted(
+        &self,
+        tomb: &DeleteRequest,
+        admit: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError> {
+        self.access_admitted(
+            tomb.verify()?.key,
+            Some(Entry::Deleted(tomb.clone())),
+            None,
+            admit,
+        )
+        .map(|_| ())
     }
     fn collect_expired(&self) -> Result<usize, DiscoveryError> {
         self.collect_at(None)

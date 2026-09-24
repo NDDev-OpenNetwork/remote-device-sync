@@ -29,6 +29,8 @@ pub use relay_route::OwnedRelayRoute;
 pub mod policy;
 mod records;
 pub use records::{FileStore, MemoryStore};
+mod admission;
+pub use admission::Enrollment;
 pub mod registry;
 pub mod revocations;
 pub mod service;
@@ -101,6 +103,8 @@ pub enum DiscoveryError {
     Http { status: u16, message: String },
     #[error("rate limited")]
     RateLimited,
+    #[error("publisher is not enrolled")]
+    NotEnrolled,
     #[error("store error: {0}")]
     Store(String),
 }
@@ -116,11 +120,32 @@ pub fn now_unix() -> Result<u64, DiscoveryError> {
 /// Storage for endpoint records. The GDS server implements this over
 /// its database; agents and tests use the in-memory version.
 pub trait RecordStore: Send + Sync {
-    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError>;
+    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
+        self.put_admitted(record, &mut |_| Ok(()))
+    }
+    /// Invoke `admit(known_identity)` exactly once for a valid higher revision,
+    /// after verifying the signature, signed key agreement and current lifetime,
+    /// under the same ownership as compare/commit and before changing state.
+    /// Duplicate/stale/invalid operations never call it. Its error refuses the
+    /// mutation. `known_identity` includes deletion and expiry floors.
+    /// The callback must be bounded and must not reenter the store.
+    fn put_admitted(
+        &self,
+        record: &EndpointRecord,
+        admit: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError>;
     fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError>;
     /// Commit an authorized, fresh delete at a higher revision. Exact signed
     /// retries succeed without rewriting; deleted identities retain history.
-    fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError>;
+    fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError> {
+        self.remove_admitted(tombstone, &mut |_| Ok(()))
+    }
+    /// Deletion shares the same admission contract and publisher budget as PUT.
+    fn remove_admitted(
+        &self,
+        tombstone: &DeleteRequest,
+        admit: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError>;
     /// Inspect at most 64 identities and reclaim expired signed content. Keep
     /// all replay floors. Repeated calls rotate over the bounded catalog.
     fn collect_expired(&self) -> Result<usize, DiscoveryError>;

@@ -58,11 +58,16 @@ rds --relay http://relay.host:3340 ...
 # rds-server composes relay + signed discovery directory on one host
 # (see docs/deployment.md for the systemd units and firewall rules):
 rds-server --relay-addr 0.0.0.0:3340 --http-addr 0.0.0.0:3341 \
-    --directory /var/lib/rds/directory --allow <endpoint-id>...
+    --directory /var/lib/rds/directory --allow <endpoint-id> \
+    --directory-allow <base32-device-key>
 
 # Name lookup requires a registry key provisioned through GDS/configuration:
 rds --server https://directory.example.com:3341 --registry-key <base32-verifying-key> ping device-a
 ```
+
+The directory requires configured publishers (`--directory-allow`,
+repeat per device). An empty list denies record publish/fetch/delete. A signed
+reachability record or name binding does not enroll a device.
 
 Remote-session traffic is end-to-end encrypted between the endpoints; the
 relay sees ciphertext. Directory HTTPS runs in-process with certificate and

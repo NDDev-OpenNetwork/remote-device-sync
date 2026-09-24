@@ -22,6 +22,20 @@ impl BlockingStore {
     }
 }
 impl RecordStore for BlockingStore {
+    fn put_admitted(
+        &self,
+        _: &EndpointRecord,
+        _: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError> {
+        unreachable!()
+    }
+    fn remove_admitted(
+        &self,
+        _: &DeleteRequest,
+        _: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError> {
+        unreachable!()
+    }
     fn collect_expired(&self) -> Result<usize, DiscoveryError> {
         Ok(0)
     }
@@ -68,7 +82,7 @@ async fn request_timeout_retains_worker_permit_until_disk_job_ends() {
                 conn_timeout: Duration::from_millis(150),
                 ..Default::default()
             },
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await

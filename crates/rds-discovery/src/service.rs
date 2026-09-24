@@ -14,18 +14,18 @@
 //! GET    /v1/metrics            prometheus text counters (loopback only)
 //! ```
 //!
-//! Security posture: every write is signature-verified before it
-//! touches the store; every signature-verifying write (`PUT` records,
-//! `PUT` registry, `DELETE` records) is globally rate-limited before
-//! verification, and `PUT` records are additionally paced per key;
-//! records are self-certifying so a compromised directory can at worst
-//! withhold updates, never forge reachability.
+//! Security posture: membership is configured separately from reachability.
+//! Signatures and revision ordering are checked before a write spends its
+//! identity budget. Known identities retain one protected renewal per minute;
+//! new admissions, extra writes and policy updates have separate budgets.
+//! Connection/body/worker bounds limit pre-authentication work; availability
+//! under arbitrary network flooding is not promised.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
 use tokio::net::TcpListener;
@@ -35,23 +35,25 @@ use crate::registry::{SignedRegistry, valid_name};
 use crate::revocations::SignedRevocations;
 use crate::{authority::Authority, clock::Reading, policy::PolicyStore};
 
-use crate::{DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, RecordStore};
+use crate::{
+    DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, Enrollment, RecordStore,
+    admission::Limiter,
+};
 
 /// Tunables for [`serve`].
 #[derive(Debug, Clone)]
 pub struct Limits {
-    /// Minimum spacing between accepted PUTs for one endpoint key.
-    /// Default 0 disables it: a publisher can only ever write its own
-    /// slot (the signature binds the key), so per-key pacing mostly
-    /// obstructs legitimate announce republishes. Deployments that
-    /// want it anyway can set a non-zero interval.
+    /// Minimum spacing between new admitted mutations for one identity.
+    /// Exact retries and rejected revisions do not spend this budget.
     pub put_min_interval: Duration,
-    /// Maximum signature-verifying write requests globally per minute
-    /// — this is the real abuse bound: it caps JSON parse +
-    /// signature-verification CPU an unauthenticated peer can burn.
-    /// Applies to `PUT /v1/records`, `PUT /v1/registry` and
-    /// `DELETE /v1/records/{key}`, checked before any parsing.
+    /// Shared extra writes per minute, after known-device protected renewal.
     pub put_per_minute: u32,
+    /// New identity admissions per minute, separate from remembered renewals.
+    pub admissions_per_minute: u32,
+    /// Maximum new mutations by one verified identity per minute, charged first.
+    pub writer_per_minute: u32,
+    /// Each policy role has its own verified-new-revision write budget.
+    pub policy_per_minute: u32,
     /// Absolute per-connection timeout, including TLS handshake and response.
     pub conn_timeout: Duration,
     /// Maximum concurrently held connections. Without a bound a SYN
@@ -68,6 +70,9 @@ impl Default for Limits {
         Self {
             put_min_interval: Duration::ZERO,
             put_per_minute: 600,
+            admissions_per_minute: 600,
+            writer_per_minute: 120,
+            policy_per_minute: 60,
             conn_timeout: Duration::from_secs(10),
             max_conns: 1024,
             max_workers: 16,
@@ -78,6 +83,8 @@ impl Default for Limits {
 /// Runtime configuration for [`serve`].
 #[derive(Default)]
 pub struct ServiceConfig {
+    /// Independent publisher allowlist. Empty by default: no endpoint access.
+    pub enrollment: Enrollment,
     /// When set, this listener accepts only TLS; there is no plaintext fallback.
     pub tls: Option<Arc<rustls::ServerConfig>>,
     /// Verifying key the estate signs registry snapshots with. Without
@@ -88,6 +95,16 @@ pub struct ServiceConfig {
     /// Pre-opened durable authority state. Omitting it explicitly uses memory.
     pub policy: Option<PolicyStore>,
     pub limits: Limits,
+}
+
+impl ServiceConfig {
+    /// Explicit open enrollment for isolated synthetic fixtures only.
+    pub fn open_ephemeral() -> Self {
+        Self {
+            enrollment: Enrollment::unrestricted_for_tests(),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -132,41 +149,6 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// — the scrape stays bounded under a writer flood.
 const MAX_WRITER_LABELS: usize = 4096;
 
-/// Per-key PUT pacing + a global per-minute window over verifying writes.
-struct RateLimiter {
-    last_put: Mutex<HashMap<EndpointKey, Instant>>,
-    window_start: Mutex<Instant>,
-    window_count: AtomicU64,
-}
-
-impl RateLimiter {
-    /// Global window over all PUT requests. Runs before parsing so it
-    /// bounds the verification CPU an unauthenticated peer can burn.
-    fn check_global(&self, limits: &Limits) -> bool {
-        {
-            let mut start = lock(&self.window_start);
-            if start.elapsed() >= Duration::from_secs(60) {
-                *start = Instant::now();
-                self.window_count.store(0, Ordering::Relaxed);
-            }
-        }
-        self.window_count.fetch_add(1, Ordering::Relaxed) < u64::from(limits.put_per_minute)
-    }
-
-    /// Per-key interval between accepted PUTs.
-    fn check_key(&self, key: &EndpointKey, limits: &Limits) -> bool {
-        let mut last = lock(&self.last_put);
-        if let Some(t) = last.get(key)
-            && t.elapsed() < limits.put_min_interval
-        {
-            return false;
-        }
-        last.retain(|_, t| t.elapsed() < limits.put_min_interval);
-        last.insert(*key, Instant::now());
-        true
-    }
-}
-
 /// A running directory service. `Drop` aborts its listener and owned requests.
 pub struct Directory {
     addr: SocketAddr,
@@ -191,7 +173,8 @@ struct State {
     policy: Mutex<Option<PolicyStore>>,
     workers: Arc<tokio::sync::Semaphore>,
     limits: Limits,
-    limiter: RateLimiter,
+    limiter: Limiter,
+    enrollment: Enrollment,
     metrics: Metrics,
 }
 
@@ -202,6 +185,17 @@ pub async fn serve(
     store: Arc<dyn RecordStore>,
     config: ServiceConfig,
 ) -> std::io::Result<Directory> {
+    if config.limits.max_workers == 0
+        || config.limits.max_conns == 0
+        || config.limits.conn_timeout.is_zero()
+        || config.limits.writer_per_minute == 0
+        || config.limits.put_min_interval > Duration::from_secs(60)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid directory capacity or timing limits",
+        ));
+    }
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     let policy = tokio::task::spawn_blocking(move || -> Result<_, DiscoveryError> {
@@ -238,11 +232,8 @@ pub async fn serve(
         policy: Mutex::new(policy),
         workers: Arc::new(tokio::sync::Semaphore::new(config.limits.max_workers)),
         limits: config.limits,
-        limiter: RateLimiter {
-            last_put: Mutex::new(HashMap::new()),
-            window_start: Mutex::new(Instant::now()),
-            window_count: AtomicU64::new(0),
-        },
+        limiter: Limiter::default(),
+        enrollment: config.enrollment,
         metrics: Metrics::default(),
     });
     let task = tokio::spawn({
@@ -356,21 +347,18 @@ fn route(state: &State, peer: SocketAddr, req: &Request) -> Response {
     }
 }
 
-/// Global-window rejection shared by every verifying write route.
-fn rate_limited(state: &State) -> Response {
-    state
-        .metrics
-        .writes_rate_limited
-        .fetch_add(1, Ordering::Relaxed);
-    Response::error(429, &DiscoveryError::RateLimited)
+/// Count quota refusals after signature and revision validation.
+fn charge(state: &State, result: Result<(), DiscoveryError>) -> Result<(), DiscoveryError> {
+    if matches!(result, Err(DiscoveryError::RateLimited)) {
+        state
+            .metrics
+            .writes_rate_limited
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    result
 }
 
 fn put_record(state: &State, req: &Request) -> Response {
-    // Global window first — bounds parse and signature-verification
-    // CPU for unauthenticated peers, before any per-request work.
-    if !state.limiter.check_global(&state.limits) {
-        return rate_limited(state);
-    }
     let record: EndpointRecord = match serde_json::from_slice(&req.body) {
         Ok(r) => r,
         Err(e) => {
@@ -378,25 +366,25 @@ fn put_record(state: &State, req: &Request) -> Response {
             return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
         }
     };
-    let payload = match record.verify_fresh() {
-        Ok(p) => p,
-        Err(e) => {
-            state.metrics.puts_rejected.fetch_add(1, Ordering::Relaxed);
-            return Response::error(status_for(&e), &e);
-        }
-    };
-    if !state.limiter.check_key(&payload.key, &state.limits) {
+    if !state.enrollment.allows(&record.key) {
         state.metrics.puts_rejected.fetch_add(1, Ordering::Relaxed);
-        return Response::error(429, &DiscoveryError::RateLimited);
+        return Response::error(403, &DiscoveryError::NotEnrolled);
     }
-    match state.store.put(&record) {
+    // The hint only filters unknown enrollment here. RecordStore must verify
+    // signature, signed key agreement, lifetime and revision before admission.
+    match state.store.put_admitted(&record, &mut |known| {
+        charge(
+            state,
+            state.limiter.record(record.key, known, &state.limits),
+        )
+    }) {
         Ok(()) => {
             state.metrics.puts_ok.fetch_add(1, Ordering::Relaxed);
             let mut per = lock(&state.metrics.endpoint_puts);
             let label = if per.len() >= MAX_WRITER_LABELS {
                 "other".to_string()
             } else {
-                writer_label(&payload.key)
+                writer_label(&record.key)
             };
             *per.entry(label).or_insert(0) += 1;
             Response::json(200, serde_json::json!({ "stored": true }))
@@ -414,6 +402,9 @@ fn get_record(state: &State, key: &str) -> Response {
         Ok(k) => k,
         Err(e) => return Response::error(400, &e),
     };
+    if !state.enrollment.allows(&key) {
+        return Response::error(403, &DiscoveryError::NotEnrolled);
+    }
     match state.store.get(&key) {
         Ok(record) => Response::json(200, record),
         Err(e) => Response::error(status_for(&e), &e),
@@ -421,30 +412,26 @@ fn get_record(state: &State, key: &str) -> Response {
 }
 
 fn delete_record(state: &State, key: &str, req: &Request) -> Response {
-    // Same global bound as PUTs: the tombstone verify below is ed25519
-    // work an unauthenticated peer could otherwise burn unbounded.
-    if !state.limiter.check_global(&state.limits) {
-        return rate_limited(state);
-    }
     let key = match key.parse::<EndpointKey>() {
         Ok(k) => k,
         Err(e) => return Response::error(400, &e),
     };
+    if !state.enrollment.allows(&key) {
+        return Response::error(403, &DiscoveryError::NotEnrolled);
+    }
     let tomb: DeleteRequest = match serde_json::from_slice(&req.body) {
         Ok(t) => t,
         Err(e) => {
             return Response::error(400, &DiscoveryError::InvalidRecord(e.to_string()));
         }
     };
-    let del = match tomb.verify_fresh() {
-        Ok(d) => d,
-        Err(e) => return Response::error(status_for(&e), &e),
-    };
-    if del.key != key {
+    if tomb.key != key {
         return Response::error(401, &DiscoveryError::BadSignature);
     }
     state.metrics.deletes.fetch_add(1, Ordering::Relaxed);
-    match state.store.remove(&tomb) {
+    match state.store.remove_admitted(&tomb, &mut |known| {
+        charge(state, state.limiter.record(key, known, &state.limits))
+    }) {
         Ok(()) => Response::json(200, serde_json::json!({ "deleted": true })),
         Err(e) => Response::error(status_for(&e), &e),
     }
@@ -477,13 +464,12 @@ fn with_policy<T>(
 }
 
 fn put_registry(state: &State, req: &Request) -> Response {
-    if !state.limiter.check_global(&state.limits) {
-        return rate_limited(state);
-    }
     let result = with_policy(state, |policy| {
         let snap: SignedRegistry = serde_json::from_slice(&req.body)
             .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        policy.accept_registry(&snap, Reading::now()?)
+        policy.accept_registry_admitted(&snap, Reading::now()?, || {
+            charge(state, state.limiter.policy(false, &state.limits))
+        })
     });
     match result {
         Ok(changed) => {
@@ -509,13 +495,12 @@ fn get_revocations(state: &State) -> Response {
 }
 
 fn put_revocations(state: &State, req: &Request) -> Response {
-    if !state.limiter.check_global(&state.limits) {
-        return rate_limited(state);
-    }
     let result = with_policy(state, |policy| {
         let snap: SignedRevocations = serde_json::from_slice(&req.body)
             .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        policy.accept_revocations(&snap, Reading::now()?)
+        policy.accept_revocations_admitted(&snap, Reading::now()?, || {
+            charge(state, state.limiter.policy(true, &state.limits))
+        })
     });
     match result {
         Ok(changed) => {
@@ -582,6 +567,7 @@ fn status_for(e: &DiscoveryError) -> u16 {
         DiscoveryError::Stale => 409,
         DiscoveryError::Expired => 410,
         DiscoveryError::RateLimited => 429,
+        DiscoveryError::NotEnrolled => 403,
         DiscoveryError::InvalidRecord(_) => 400,
         _ => 500,
     }

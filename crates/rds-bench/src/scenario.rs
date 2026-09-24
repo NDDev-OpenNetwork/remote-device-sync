@@ -346,7 +346,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         service::ServiceConfig {
             registry_key: Some(reg_key.verifying_key()),
             registry: Some(snap),
-            ..Default::default()
+            ..service::ServiceConfig::open_ephemeral()
         },
     )
     .await?;

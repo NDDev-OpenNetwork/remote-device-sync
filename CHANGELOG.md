@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Default directory enrollment to deny; provision publishers separately with
+  repeated `rds-server --directory-allow`. Unknown identities cannot publish,
+  fetch or delete retained records. Admit only verified higher revisions under
+  the store's compare/commit lock; duplicate, stale and forged requests spend
+  no write quota. Separate new identity, known renewal, extra-write and policy
+  budgets so one writer cannot exhaust every admitted device's renewal quota.
+  Custom stores implement `put_admitted`/`remove_admitted`; synthetic fixtures
+  explicitly opt into open enrollment. See [record-state.md](docs/record-state.md)
+  for limits and the remaining GDS/migration/throughput qualification.
+
 - Persist suspend-inclusive record leases and clock floors; refuse rollback,
   require a successor after OS reboot, and collect expired content in bounded
   owned jobs while retaining revision/digest history. Bound memory-store

@@ -18,7 +18,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
 | W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
-| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained clock/revision floors, bounded collection and memory identity capacity are implemented. Enrollment quotas, fair renewal, strict HTTP framing and explicit migration remain open; see validation below. |
+| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment and fair write admission are implemented. Strict HTTP framing, explicit migration and file-capacity renewal qualification remain open; see validation below. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -355,5 +355,33 @@ also passed: 38 discovery unit tests, two service-collection tests and four
 real-HTTP publisher lifecycle tests. See the
 [expiry receipt](reports/rds-expiry-20260924.md). No wave gate is closed.
 
-Next: configured enrollment and fair renewal, strict HTTP framing, explicit
-migration, then W1.9 wire/accounting. All waves remain open.
+This receipt precedes the admission change below.
+
+## Publisher enrollment and write fairness
+
+Default directory configuration now denies record access. Production explicitly
+lists publishers with `--directory-allow`, independent of relay/agent permissions
+and registry names. The static list is bounded to 4096 distinct nonweak keys;
+removal hides records while preserving floors. GDS live reconciliation remains W4.
+
+The before-fix regressions failed: unconfigured publication succeeded, and one
+writer's refused requests spent the shared counter and blocked another device's
+renewal. Both now pass. Stores verify and compare before invoking quota admission
+under the same compare/commit owner. Exact retries, stale operations and bad
+signatures do not spend the owner's quota; concurrent identical copies charge
+once. Callback refusal does not change the record or poison storage.
+
+Known identities have one protected mutation in each fixed 60-second window.
+New admissions and extra writes have separate shared budgets, with per-identity
+limits checked first. Each policy role has its own budget after signature and
+revision validation. TTL/3 renewal with TTL >= 180 fits the reserved cadence;
+faster renewals need burst capacity. The guarantee concerns write quotas, not
+isolation from arbitrary network, CPU or disk saturation.
+
+Validation and limits are recorded in the
+[admission receipt](reports/rds-admission-20260924.md). The full Linux matrix
+passed: formatting; default/X11/all-feature Clippy with warnings denied;
+**234 workspace tests across 48 targets**; **59 all-feature network/agent/relay
+tests across 18 targets**; and server build/`--help` with `--directory-allow`.
+No wave completion is claimed. Next: strict HTTP framing, explicit
+migration/file-capacity qualification, then W1.9 wire/accounting.

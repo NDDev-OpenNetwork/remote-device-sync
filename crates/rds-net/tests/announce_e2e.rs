@@ -15,7 +15,7 @@ async fn announce_publishes_and_keeps_record_live() {
     let dir = service::serve(
         "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         store.clone(),
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();
@@ -72,7 +72,7 @@ async fn announce_republishes_when_addrs_change() {
     let dir = service::serve(
         "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         store,
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();
@@ -197,7 +197,7 @@ async fn resolve_refuses_aged_out_record() {
     let dir = service::serve(
         "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         store,
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();
@@ -281,7 +281,7 @@ async fn resolve_then_connect_by_bare_key() {
     let dir = service::serve(
         "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         store,
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();

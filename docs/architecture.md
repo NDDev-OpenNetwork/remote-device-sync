@@ -217,7 +217,12 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   signed publication. Bounded collection retires content while preserving its
   revision/digest floor, and observed expiry commits before a read returns.
   HTTP 410 prompts one durable local successor; network retry does not allocate
-  another revision. Enrollment quotas, write fairness and migration remain W1.5;
+  another revision. Directory publisher enrollment defaults to deny and is
+  configured independently with `--directory-allow`. Stores invoke write-budget
+  admission only for verified higher revisions under the compare/commit owner;
+  exact retries and stale mutations never debit the publisher's quota. Known identities
+  have protected renewal capacity; new identities, extra writes and each policy
+  role use separate budgets. Migration and file-capacity qualification remain W1.5;
   see [record-state.md](record-state.md) for migration and current limits. Directory
   certificate renewal is external provisioning plus restart for now; automatic
   renewal and hot reload are not implied by the relay's separate ACME support.

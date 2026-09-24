@@ -118,6 +118,7 @@ proxy/helper process required. It is separate from relay TLS: supplying
 
 ```sh
 rds-server --http-addr 0.0.0.0:3341 \
+  --directory-allow <base32-device-key> \
   --directory-tls-cert /etc/rds/directory-chain.pem \
   --directory-tls-key /etc/rds/directory-key.pem
 rds --server https://directory.example.com:3341 \
@@ -132,6 +133,23 @@ Clients use public WebPKI roots by default. For a private CA, supply
 endpoint are errors. There is no skip-verification option, redirect following
 or HTTP fallback. The registry verifying key remains separately provisioned;
 a TLS certificate cannot authorize a name binding.
+
+Directory membership is separately provisioned with repeated
+`--directory-allow <base32-device-key>` arguments (maximum 4096 distinct,
+nonweak Ed25519 keys). An empty list denies record PUT, GET and DELETE, while
+health and configured policy routes remain available. This is independent of
+relay `--allow` and agent peer permissions. Removing a key and restarting denies
+its record access while preserving its replay floor; it does not revoke an
+already running endpoint session. Use grant revocation for that. Name registry
+updates cannot silently enroll publishers. GDS reconciliation/hot membership
+updates remain W4. The shipped systemd template is closed until customized.
+
+Each known device has one protected new mutation in a fixed 60-second accounting
+window, independent of shared extra-write and new-admission budgets. Use TTL
+at least 180 seconds for the TTL/3 announcer to fit that reserved cadence (the
+default 300 does). Faster renewals and additional route changes need the shared
+burst budget. This is admission fairness, not a measured throughput or arbitrary
+network-flooding guarantee; see [record-state.md](record-state.md).
 
 Client origins accept `https://host[:port]`, explicit `http://host[:port]`,
 or legacy `IP:port` (plaintext). Paths, credentials, queries and fragments are

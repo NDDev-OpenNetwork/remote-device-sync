@@ -30,7 +30,7 @@ async fn directory(cert: &str, key: &str, limits: Limits) -> Directory {
         ServiceConfig {
             tls: Some(server_config_from_pem(cert.as_bytes(), key.as_bytes()).unwrap()),
             limits,
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -56,7 +56,7 @@ async fn dns_https_preserves_the_signed_identity_chain() {
         ServiceConfig {
             tls: Some(server_config_from_pem(cert.as_bytes(), key.as_bytes()).unwrap()),
             registry_key: Some(issuer.verifying_key()),
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -286,7 +286,7 @@ async fn handshake_timeout_releases_capacity_and_drop_closes_pending_requests() 
     let plain = service::serve(
         "127.0.0.1:0".parse().unwrap(),
         Arc::new(MemoryStore::default()),
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();

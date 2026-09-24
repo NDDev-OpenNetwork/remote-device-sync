@@ -42,6 +42,10 @@ struct Cli {
     /// Directory holding signed endpoint records.
     #[arg(long, default_value = "/var/lib/rds/directory")]
     directory: PathBuf,
+    /// Enrolled directory publisher (base32 endpoint key); repeat per device.
+    /// Empty denies record publish/fetch/delete. Independent of relay --allow.
+    #[arg(long = "directory-allow")]
+    directory_allow: Vec<rds_discovery::EndpointKey>,
     /// Restrict relay use to these endpoint ids. Empty = open relay.
     #[arg(long = "allow")]
     allow: Vec<String>,
@@ -94,6 +98,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
+
+    let enrolled_publishers = cli.directory_allow.len();
+    let enrollment = rds_discovery::Enrollment::new(cli.directory_allow)?;
 
     let store: Arc<dyn RecordStore> = Arc::new(FileStore::new(&cli.directory)?);
     info!(dir = %cli.directory.display(), "endpoint record directory ready");
@@ -157,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         cli.http_addr,
         store,
         ServiceConfig {
+            enrollment,
             tls: directory_tls,
             policy,
             registry_key,
@@ -165,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
         },
     )
     .await?;
-    info!(addr = %dir.addr(), https, "discovery directory listening");
+    info!(addr = %dir.addr(), https, enrolled_publishers, "discovery directory listening");
     let _dir = dir; // serves until process exit
 
     let allow: Vec<iroh::EndpointId> = cli

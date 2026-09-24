@@ -59,7 +59,7 @@ async fn relay_forwards_handshake_and_datagrams() {
     let directory = rds_discovery::service::serve(
         "127.0.0.1:0".parse().unwrap(),
         std::sync::Arc::new(rds_discovery::MemoryStore::default()),
-        Default::default(),
+        rds_discovery::service::ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();

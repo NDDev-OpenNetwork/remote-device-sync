@@ -49,7 +49,7 @@ async fn lost_success_reply_retries_identical_signed_bytes_through_real_director
     let dir = service::serve(
         "127.0.0.1:0".parse().unwrap(),
         Arc::new(MemoryStore::default()),
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();

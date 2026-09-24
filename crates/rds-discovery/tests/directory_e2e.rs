@@ -43,7 +43,7 @@ async fn serve() -> (service::Directory, Client) {
     let dir = service::serve(
         "127.0.0.1:0".parse().unwrap(),
         store,
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();
@@ -141,7 +141,7 @@ async fn put_rate_limit_enforced() {
                 put_min_interval: Duration::from_secs(60),
                 ..Default::default()
             },
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -159,20 +159,17 @@ async fn put_rate_limit_enforced() {
 }
 
 #[tokio::test]
-async fn global_write_limit_covers_delete_and_registry() {
-    // put_per_minute = 1: the first verifying write consumes the
-    // window; a write on a different route hits the same bound before
-    // any parse or signature work.
+async fn put_and_delete_share_the_authenticated_writer_limit() {
     let store = Arc::new(MemoryStore::default());
     let dir = service::serve(
         "127.0.0.1:0".parse().unwrap(),
         store,
         ServiceConfig {
             limits: Limits {
-                put_per_minute: 1,
+                writer_per_minute: 1,
                 ..Default::default()
             },
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -240,7 +237,7 @@ async fn registry_names_resolve() {
         ServiceConfig {
             registry_key: Some(reg_key.verifying_key()),
             registry: Some(snap),
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -302,7 +299,7 @@ async fn registry_put_requires_estate_signature() {
         store,
         ServiceConfig {
             registry_key: Some(reg_key.verifying_key()),
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -356,7 +353,7 @@ async fn revocations_roundtrip_and_authz() {
         store,
         ServiceConfig {
             registry_key: Some(reg_key.verifying_key()),
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -435,7 +432,7 @@ async fn policy_survives_directory_restart_and_expiry_is_checked_on_get() {
         ServiceConfig {
             registry: Some(old.clone()),
             policy: Some(policy),
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -473,7 +470,7 @@ async fn policy_survives_directory_restart_and_expiry_is_checked_on_get() {
         ServiceConfig {
             registry: Some(old),
             policy: Some(policy),
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await
@@ -516,7 +513,7 @@ async fn concurrent_registry_puts_cannot_regress() {
         store,
         ServiceConfig {
             registry_key: Some(reg_key.verifying_key()),
-            ..Default::default()
+            ..ServiceConfig::open_ephemeral()
         },
     )
     .await

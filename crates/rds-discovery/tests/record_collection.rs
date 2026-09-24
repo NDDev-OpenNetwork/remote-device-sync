@@ -66,6 +66,20 @@ struct SlowCollection {
     finished: tokio::sync::Notify,
 }
 impl RecordStore for SlowCollection {
+    fn put_admitted(
+        &self,
+        _: &EndpointRecord,
+        _: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError> {
+        unreachable!()
+    }
+    fn remove_admitted(
+        &self,
+        _: &DeleteRequest,
+        _: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError> {
+        unreachable!()
+    }
     fn put(&self, _: &EndpointRecord) -> Result<(), DiscoveryError> {
         unreachable!()
     }

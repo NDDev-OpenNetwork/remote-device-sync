@@ -283,6 +283,14 @@ impl PolicyStore {
         snap: &SignedRevocations,
         now: Reading,
     ) -> Result<bool, DiscoveryError> {
+        self.accept_revocations_admitted(snap, now, || Ok(()))
+    }
+    pub(crate) fn accept_revocations_admitted(
+        &mut self,
+        snap: &SignedRevocations,
+        now: Reading,
+        admit: impl FnOnce() -> Result<(), DiscoveryError>,
+    ) -> Result<bool, DiscoveryError> {
         self.check_clock(now)?;
         let key = self.state.authority.verifying_key()?;
         let payload = snap.verify_at(&key, now.wall.as_secs())?;
@@ -295,6 +303,7 @@ impl PolicyStore {
             payload.stamp.newer_than(&old.stamp)?;
         }
         let lease = Lease::new(payload.issued_at, payload.expires_at, now)?;
+        admit()?;
         let mut next = self.state.clone();
         next.revocations = Some(snap.clone());
         next.wall_floor = now.wall.as_secs();
@@ -328,6 +337,14 @@ impl PolicyStore {
         snap: &SignedRegistry,
         now: Reading,
     ) -> Result<bool, DiscoveryError> {
+        self.accept_registry_admitted(snap, now, || Ok(()))
+    }
+    pub(crate) fn accept_registry_admitted(
+        &mut self,
+        snap: &SignedRegistry,
+        now: Reading,
+        admit: impl FnOnce() -> Result<(), DiscoveryError>,
+    ) -> Result<bool, DiscoveryError> {
         self.check_clock(now)?;
         let key = self.state.authority.verifying_key()?;
         let payload = snap.verify(&key)?;
@@ -341,6 +358,7 @@ impl PolicyStore {
             payload.stamp.newer_than(&old.stamp)?;
         }
         let lease = Lease::new(payload.issued_at, payload.expires_at, now)?;
+        admit()?;
         let mut next = self.state.clone();
         next.registry = Some(snap.clone());
         next.wall_floor = now.wall.as_secs();

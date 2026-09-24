@@ -19,6 +19,8 @@ ExecStart=/usr/local/bin/rds-server \
     --http-addr 0.0.0.0:3341 \
     --directory /var/lib/rds/directory
 # Estate deployments add:
+#   --directory-allow <base32-device-key>   (repeat per enrolled publisher;
+#   empty denies directory record publish/fetch/delete)
 #   --registry-key <base32 verifying key> --registry /var/lib/rds/registry.json
 #   --allow <endpoint-id>…   (empty = open relay — do NOT expose open
 #   relays on a public IP beyond short-lived bring-up)
