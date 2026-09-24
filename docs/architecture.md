@@ -49,6 +49,11 @@ opening, request write and response completion. Pending streams reset on
 cancellation; incomplete authorization closes its connection. Local forwarding
 owns a bounded worker group with connection-close joins and cancellation cleanup.
 
+Owned relay client/server share [bounded control framing](relay-control.md).
+Drain and PeerGone use the same exact codec as registration and liveness. Drain
+receipt preserves usable grace-period traffic, and stale attachment teardown
+cannot invalidate a replacement. Warm relay migration remains unqualified.
+
 ## Research summary
 
 ### Connectivity models surveyed
@@ -375,7 +380,10 @@ completed transfer. Historical random temporary files remain untouched; inactive
 journal quotas/GC remain W8. See [journal recovery](sync-journal.md).
 A canceled control stream ends its receive, and chunk sender tasks
 are owned by a `JoinSet`. Verified chunks are written by a dedicated
-blocking-pool sink behind a bounded queue, so disk latency never parks
+blocking-pool sink behind a bounded queue. Cancellation aborts an unstarted
+writer and stops a running writer between stores; normal finish drains it.
+Executing syscalls retain the journal lock, so immediate retry may still be
+refused while cleanup completes. Disk latency never parks
 the wire pipeline; completion is counted on the wire (the peer sends
 exactly the `Need` set), not on the sink's lagging counter. Every
 protocol read and chunk body is bounded by a 300s stall — a peer alive

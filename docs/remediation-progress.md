@@ -13,7 +13,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 
 | Task | State | Evidence / remaining scope |
 |---|---|---|
-| W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08/R09 and desktop body cancellation still need their owning fixes/tests. |
+| W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08 has failing-before actual-client Drain/drop regressions and passing framing/grace checks. R09 and desktop body cancellation still need their owning fixes/tests. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
@@ -27,6 +27,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, relay queues and disk cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
+| W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
 
 ## Authorization change
 
@@ -710,3 +711,25 @@ guarantee remote cleanup. Executing syscalls and commits remain protected by
 their journal lock. Open/scan and assembly cancellation barriers stay open.
 No dependency, wire type or wave status changed. The final relay-control matrix
 will revalidate this correction together with its pending network changes.
+
+## Shared relay control framing and grace
+
+Before-fix tests reproduced the missing Drain notice and socket-drop attachment
+leak. One bounded exact codec now covers both ends and every control variant.
+Notices use owned bounded groups and lock/write deadlines; partial failure
+closes its stream's connection. Control reading shares the server connection
+future. Socket destruction cancels pumps, while explicit close joins them.
+
+Actual Drain receipt preserves grace-period datagrams. Replacement ownership
+protects flow history and subsequent PeerGone/Pong framing. The first full run
+exposed the independently corrected queued-sync-store issue above; its failure
+is retained in evidence. The final rerun passed formatting, three Clippy lanes,
+**329 workspace tests**, **118 all-feature network/agent/CLI/relay tests**
+and **3 isolated codec tests**. See [contract](relay-control.md) and
+[receipt](reports/rds-relay-control-20260925.md). Only existing noq was added as a
+test dependency; no new package or runtime helper was introduced.
+
+R08 notice receipt is corrected; W3.3 remains partial for warm failover and
+SSH/video/sync interruption acceptance. Global relay admission/queues and
+server task ownership remain W2.5. R09 initial candidate racing is next; native
+macOS and real network qualification stay open. No remediation wave is closed.

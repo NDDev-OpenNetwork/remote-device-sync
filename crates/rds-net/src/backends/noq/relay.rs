@@ -26,11 +26,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use crate::relay_control::{read_control, write_control};
 use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use noq::udp::{RecvMeta, Transmit};
 use noq::{AsyncUdpSocket, Runtime, UdpSender};
 use rds_core::relay::{self, RelayControl};
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -101,7 +102,7 @@ pub struct RelayHandle {
     /// synthetic → EndpointId, filled on connect/accept/receive so
     /// `poll_send` can decode transmit destinations.
     peers: Arc<Mutex<HashMap<SocketAddr, EndpointId>>>,
-    /// Set when the relay announces drain — sends fail, recv stalls.
+    /// Set when drain is observed; the existing tunnel stays usable through grace.
     drained: Arc<AtomicBool>,
 }
 
@@ -124,9 +125,8 @@ pub struct RelaySocket {
     conn: Connection,
     local: SocketAddr,
     peers: Arc<Mutex<HashMap<SocketAddr, EndpointId>>>,
-    drained: Arc<AtomicBool>,
     rx: mpsc::UnboundedReceiver<(Vec<u8>, SocketAddr)>,
-    _tasks: (JoinHandle<()>, JoinHandle<()>),
+    tasks: Option<(JoinHandle<()>, JoinHandle<()>)>,
 }
 
 impl RelaySocket {
@@ -170,25 +170,19 @@ impl RelaySocket {
             None,
         )
         .await?;
-        let conn = endpoint.connect(relay.clone(), relay::RELAY_ALPN).await?;
-
-        // Registration handshake on the first bidi stream.
-        let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await?;
-        let body = postcard::to_stdvec(&RelayControl::Register)?;
-        ctrl_send
-            .write_all(&(body.len() as u32).to_be_bytes())
-            .await?;
-        ctrl_send.write_all(&body).await?;
-        ctrl_send.flush().await?;
-        let mut len = [0u8; 4];
-        ctrl_recv.read_exact(&mut len).await?;
-        let n = u32::from_be_bytes(len) as usize;
-        let mut buf = vec![0u8; n.min(4096)];
-        ctrl_recv.read_exact(&mut buf).await?;
-        match postcard::from_bytes::<RelayControl>(&buf) {
-            Ok(RelayControl::Registered) => {}
-            other => anyhow::bail!("relay registration rejected: {other:?}"),
-        }
+        // One deadline covers dial, stream credit, register write and reply.
+        let (conn, ctrl_send, mut ctrl_recv) =
+            tokio::time::timeout(Duration::from_secs(15), async {
+                let conn = endpoint.connect(relay.clone(), relay::RELAY_ALPN).await?;
+                let (mut send, mut recv) = conn.open_bi().await?;
+                write_control(&mut send, &RelayControl::Register).await?;
+                if !matches!(read_control(&mut recv).await?, RelayControl::Registered) {
+                    anyhow::bail!("relay registration rejected");
+                }
+                Ok::<_, anyhow::Error>((conn, send, recv))
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("relay registration timed out"))??;
 
         let peers: Arc<Mutex<HashMap<SocketAddr, EndpointId>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -225,41 +219,36 @@ impl RelaySocket {
         // Control reader: Drain/PeerGone/liveness replies.
         let ctrl_pump = tokio::spawn({
             let drained = drained.clone();
-            let ctrl_send = tokio::sync::Mutex::new(ctrl_send);
+            let conn = conn.clone();
             async move {
+                let mut ctrl_send = ctrl_send;
                 loop {
-                    let mut len = [0u8; 4];
-                    if ctrl_recv.read_exact(&mut len).await.is_err() {
-                        return;
-                    }
-                    let n = u32::from_be_bytes(len) as usize;
-                    if n > 4096 {
-                        return;
-                    }
-                    let mut buf = vec![0u8; n];
-                    if ctrl_recv.read_exact(&mut buf).await.is_err() {
-                        return;
-                    }
-                    match postcard::from_bytes::<RelayControl>(&buf) {
+                    match read_control(&mut ctrl_recv).await {
                         Ok(RelayControl::Drain) => {
-                            warn!("relay draining — relayed paths go dark");
+                            debug!("relay draining; existing tunnel remains usable during grace");
                             drained.store(true, Ordering::SeqCst);
                         }
                         Ok(RelayControl::PeerGone { peer }) => {
                             debug!(peer = %data_encoding::HEXLOWER.encode(&peer[..8]), "relay peer gone");
                         }
                         Ok(RelayControl::Ping { seq }) => {
-                            let pong = postcard::to_stdvec(&RelayControl::Pong { seq })
-                                .unwrap_or_default();
-                            let mut frame = (pong.len() as u32).to_be_bytes().to_vec();
-                            frame.extend_from_slice(&pong);
-                            let w = ctrl_send.lock().await;
-                            let mut w = w;
-                            let _ = w.write_all(&frame).await;
+                            if !matches!(
+                                tokio::time::timeout(
+                                    Duration::from_secs(1),
+                                    write_control(&mut ctrl_send, &RelayControl::Pong { seq })
+                                )
+                                .await,
+                                Ok(Ok(()))
+                            ) {
+                                break;
+                            }
                         }
-                        _ => {}
+                        Ok(RelayControl::Pong { .. } | RelayControl::Health { .. }) => {}
+                        _ => break,
                     }
                 }
+                // Losing/malforming the control stream invalidates this tunnel.
+                conn.close(0u32.into(), b"relay control ended");
             }
         });
 
@@ -280,12 +269,35 @@ impl RelaySocket {
                 conn,
                 local,
                 peers,
-                drained,
                 rx,
-                _tasks: (dgram_pump, ctrl_pump),
+                tasks: Some((dgram_pump, ctrl_pump)),
             },
             handle,
         ))
+    }
+}
+
+impl RelaySocket {
+    /// Close the tunnel and join its pumps. Socket destruction is the fallback:
+    /// it closes transport and requests abort, but cannot join from Drop.
+    pub async fn close(&mut self) {
+        self.conn.close(0u32.into(), b"relay socket closed");
+        if let Some((datagrams, control)) = self.tasks.take() {
+            datagrams.abort();
+            control.abort();
+            let _ = tokio::join!(datagrams, control);
+        }
+        self._endpoint.close().await;
+    }
+}
+
+impl Drop for RelaySocket {
+    fn drop(&mut self) {
+        self.conn.close(0u32.into(), b"relay socket dropped");
+        if let Some((datagrams, control)) = &self.tasks {
+            datagrams.abort();
+            control.abort();
+        }
     }
 }
 
@@ -302,7 +314,6 @@ impl AsyncUdpSocket for RelaySocket {
         Box::pin(RelaySender {
             conn: self.conn.clone(),
             peers: self.peers.clone(),
-            drained: self.drained.clone(),
         })
     }
 
@@ -312,11 +323,6 @@ impl AsyncUdpSocket for RelaySocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        if self.drained.load(Ordering::SeqCst) {
-            // Drain semantics: stop surfacing packets so the path dies
-            // and the driver migrates traffic off the relay.
-            return Poll::Pending;
-        }
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some((data, src))) => {
                 let n = data.len().min(bufs[0].len());
@@ -350,7 +356,6 @@ impl AsyncUdpSocket for RelaySocket {
 struct RelaySender {
     conn: Connection,
     peers: Arc<Mutex<HashMap<SocketAddr, EndpointId>>>,
-    drained: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for RelaySender {
@@ -365,12 +370,6 @@ impl UdpSender for RelaySender {
         transmit: &Transmit<'_>,
         _cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
-        if self.drained.load(Ordering::SeqCst) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                "relay draining",
-            )));
-        }
         let dst = transmit.destination;
         tracing::trace!(%dst, len = transmit.contents.len(), "relay socket send");
         if !is_synthetic(dst) {

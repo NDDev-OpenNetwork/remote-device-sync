@@ -2987,6 +2987,7 @@ dependencies = [
  "ed25519-dalek",
  "iroh",
  "iroh-relay",
+ "noq",
  "postcard",
  "rds-core",
  "rds-discovery",

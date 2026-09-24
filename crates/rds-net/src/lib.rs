@@ -43,6 +43,7 @@ pub mod backends {
     pub mod noq;
 }
 pub mod metrics;
+pub mod relay_control;
 mod uni;
 pub use uni::{UniRoutingStats, UniStreams};
 pub mod resolve;

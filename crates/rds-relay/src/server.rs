@@ -10,9 +10,10 @@
 //! connection. Unknown destinations and malformed frames are dropped;
 //! per-source token buckets bound flood cost.
 //!
-//! [`Relay::drain`] asks clients to migrate: `Drain` is sent on every
-//! control stream and new registrations are refused, so a replacement
-//! relay can take over without dropping live paths abruptly.
+//! [`Relay::drain`] broadcasts bounded, framed notices and refuses new
+//! registrations. Existing tunnels stay usable through the grace period.
+//! Automatic warm replacement and interruption-free migration remain separate
+//! work; a notice alone cannot keep a relay-only session alive after shutdown.
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -23,9 +24,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail};
 use iroh::EndpointId;
 use rds_net::backends::noq as rds_noq;
+use rds_net::relay_control::{read_control, write_control};
 use rds_net::{EndpointConfig, SendStream};
-use tokio::io::AsyncWriteExt;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::debug;
 
 use crate::proto::{self, RelayControl};
@@ -42,6 +43,8 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// A connection that never opens its control stream and registers
 /// parks a task otherwise — bounded, like the agent's stream hello.
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_NOTICE_TASKS: usize = 16;
 
 /// A running owned relay. Dropping it leaves tasks detached; call
 /// [`Relay::close`] for a clean stop or [`Relay::drain`] for a graceful
@@ -146,17 +149,11 @@ impl Relay {
         if self.state.draining.swap(true, Ordering::SeqCst) {
             return;
         }
-        let msg = postcard::to_stdvec(&RelayControl::Drain).unwrap_or_default();
+        let deadline = tokio::time::Instant::now() + DRAIN_GRACE;
         let conns: Vec<std::sync::Arc<ConnSlot>> =
             self.state.conns.lock().unwrap().values().cloned().collect();
-        for slot in conns {
-            let msg = msg.clone();
-            tokio::spawn(async move {
-                let mut ctrl = slot.ctrl.lock().await;
-                let _ = ctrl.write_all(&msg).await;
-            });
-        }
-        tokio::time::sleep(DRAIN_GRACE).await;
+        let _ = tokio::time::timeout_at(deadline, notify_all(conns, RelayControl::Drain)).await;
+        tokio::time::sleep_until(deadline).await;
         self.close().await;
     }
 
@@ -227,19 +224,18 @@ async fn serve_conn(conn: rds_noq::Connection, state: std::sync::Arc<State>) -> 
         bail!("refused {id}: not on allowlist");
     }
 
-    // Control stream: first bidi the client opens — bounded so a
-    // connection that never registers costs seconds, not a parked task.
-    let (mut ctrl_send, mut ctrl_recv) = tokio::time::timeout(REGISTER_TIMEOUT, conn.accept_bi())
-        .await
-        .context("control stream never opened")??;
-    let hello = tokio::time::timeout(REGISTER_TIMEOUT, read_control(&mut ctrl_recv))
-        .await
-        .context("register read timed out")??;
-    if !matches!(hello, RelayControl::Register) {
-        conn.close(0u32.into(), b"expected register");
-        bail!("{id} did not register");
-    }
-    write_control(&mut ctrl_send, &RelayControl::Registered).await?;
+    let _lifetime = CloseConnection(Some(&conn));
+    // One registration budget includes stream credit, read and ACK write.
+    let (ctrl_send, mut ctrl_recv) = tokio::time::timeout(REGISTER_TIMEOUT, async {
+        let (mut send, mut recv) = conn.accept_bi().await?;
+        if !matches!(read_control(&mut recv).await?, RelayControl::Register) {
+            bail!("expected relay registration");
+        }
+        write_control(&mut send, &RelayControl::Registered).await?;
+        Ok::<_, anyhow::Error>((send, recv))
+    })
+    .await
+    .context("relay registration timed out")??;
 
     let slot = std::sync::Arc::new(ConnSlot {
         conn: conn.clone(),
@@ -248,36 +244,38 @@ async fn serve_conn(conn: rds_noq::Connection, state: std::sync::Arc<State>) -> 
     });
     // A second attachment for the same id replaces the first — a client
     // that re-registers invalidates its stale connection.
-    if let Some(old) = state.conns.lock().unwrap().insert(id, slot.clone()) {
-        old.conn.close(0u32.into(), b"replaced");
+    {
+        let mut conns = state.conns.lock().unwrap();
+        // Serialize registration with the drain snapshot. An in-flight ACK
+        // must not attach a new slot after the draining snapshot was taken.
+        if state.draining.load(Ordering::SeqCst) {
+            bail!("relay draining");
+        }
+        if let Some(old) = conns.insert(id, slot.clone()) {
+            old.conn.close(0u32.into(), b"replaced");
+        }
     }
     debug!(%id, "endpoint attached");
 
-    // Control-reader: liveness and protocol errors only; forwarding
-    // happens on datagrams below.
-    let ctrl_slot = slot.clone();
-    let ctrl_task = tokio::spawn(async move {
-        loop {
-            match read_control(&mut ctrl_recv).await {
-                Ok(RelayControl::Ping { seq }) => {
-                    let mut w = ctrl_slot.ctrl.lock().await;
-                    if write_control(&mut w, &RelayControl::Pong { seq })
-                        .await
-                        .is_err()
-                    {
-                        return;
+    // Control and forwarding share this connection future. Neither survives
+    // the other or leaves a detached reader retaining the control writer.
+    let res = tokio::select! {
+        result = forward_loop(&conn, &state) => result,
+        result = async {
+            loop {
+                match read_control(&mut ctrl_recv).await? {
+                    RelayControl::Ping { seq } => {
+                        if !write_notice(&slot, &RelayControl::Pong { seq }).await {
+                            bail!("relay control reply failed");
+                        }
                     }
+                    RelayControl::Pong { .. } => {}
+                    _ => bail!("unexpected client relay control"),
                 }
-                Ok(_) => {}
-                Err(_) => return,
             }
-        }
-    });
-
-    // Datagram forward loop — ends when the connection does.
-    let res = forward_loop(&conn, &state).await;
-
-    ctrl_task.abort();
+        } => result,
+    };
+    conn.close(0u32.into(), b"relay session ended");
     detach(id, &slot, &state).await;
     res
 }
@@ -301,21 +299,23 @@ async fn forward_loop(conn: &rds_noq::Connection, state: &State) -> anyhow::Resu
             continue;
         }
 
-        let dst_slot = state.conns.lock().unwrap().get(&dst).cloned();
+        let dst_slot = {
+            let conns = state.conns.lock().unwrap();
+            conns.get(&dst).cloned().inspect(|_| {
+                // Use the same lock order as detach: a departed destination
+                // cannot have its recent-flow entry recreated by a late send.
+                let mut recent = state.recent.lock().unwrap();
+                let peers = recent.entry(dst).or_default();
+                if peers.len() < MAX_RECENT_PEERS {
+                    peers.insert(src);
+                }
+            })
+        };
         let Some(slot) = dst_slot else {
             debug!(%src, %dst, "relay drop: unknown destination");
             state.stats.dropped.fetch_add(1, Ordering::Relaxed);
             continue;
         };
-
-        // Record the flow so `PeerGone` reaches the right senders.
-        {
-            let mut recent = state.recent.lock().unwrap();
-            let peers = recent.entry(dst).or_default();
-            if peers.len() < MAX_RECENT_PEERS {
-                peers.insert(src);
-            }
-        }
 
         tracing::trace!(%src, %dst, len = payload.len(), "relay forward");
         let out = proto::encode_forward(src.as_bytes(), payload);
@@ -347,58 +347,127 @@ fn rate_ok(state: &State, src: &EndpointId, bytes: usize) -> bool {
 /// re-registered replacement must not be evicted by the stale conn's
 /// cleanup.
 async fn detach(id: EndpointId, slot: &std::sync::Arc<ConnSlot>, state: &State) {
-    {
+    let recipients = {
         let mut conns = state.conns.lock().unwrap();
-        if conns
+        if !conns
             .get(&id)
-            .is_some_and(|s| std::sync::Arc::ptr_eq(s, slot))
+            .is_some_and(|stored| std::sync::Arc::ptr_eq(stored, slot))
         {
-            conns.remove(&id);
+            // A stale owner cannot erase successor history or emit PeerGone.
+            return;
         }
-    }
-    let peers = state.recent.lock().unwrap().remove(&id).unwrap_or_default();
-    let msg = postcard::to_stdvec(&RelayControl::PeerGone {
-        peer: *id.as_bytes(),
-    })
-    .unwrap_or_default();
-    for peer in peers {
-        let Some(slot) = state.conns.lock().unwrap().get(&peer).cloned() else {
-            continue;
-        };
-        let msg = msg.clone();
-        tokio::spawn(async move {
-            let mut ctrl = slot.ctrl.lock().await;
-            let _ = ctrl.write_all(&msg).await;
-        });
-    }
+        conns.remove(&id);
+        let peers = state.recent.lock().unwrap().remove(&id).unwrap_or_default();
+        peers
+            .into_iter()
+            .filter_map(|peer| conns.get(&peer).cloned())
+            .collect()
+    };
+    notify_all(
+        recipients,
+        RelayControl::PeerGone {
+            peer: *id.as_bytes(),
+        },
+    )
+    .await;
     debug!(%id, "endpoint detached");
 }
 
-/// Read one length-prefixed control frame (`u32 len` + postcard body).
-async fn read_control(recv: &mut rds_net::RecvStream) -> anyhow::Result<RelayControl> {
-    let mut len = [0u8; 4];
-    recv.read_exact(&mut len).await?;
-    let n = u32::from_be_bytes(len) as usize;
-    if n > 4096 {
-        bail!("control frame too large: {n}");
+/// Close on cancellation/error so a partial control frame is never followed by
+/// another writer's frame. A successful complete write disarms this guard.
+struct CloseConnection<'a>(Option<&'a rds_noq::Connection>);
+impl Drop for CloseConnection<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0 {
+            conn.close(0u32.into(), b"relay control ended");
+        }
     }
-    let mut buf = vec![0u8; n];
-    recv.read_exact(&mut buf).await?;
-    Ok(postcard::from_bytes(&buf)?)
 }
 
-/// Write one length-prefixed control frame.
-async fn write_control(send: &mut SendStream, msg: &RelayControl) -> anyhow::Result<()> {
-    let body = postcard::to_stdvec(msg).context("encode control")?;
-    send.write_all(&(body.len() as u32).to_be_bytes()).await?;
-    send.write_all(&body).await?;
-    send.flush().await?;
-    Ok(())
+async fn write_notice(slot: &ConnSlot, message: &RelayControl) -> bool {
+    let mut pending = CloseConnection(Some(&slot.conn));
+    let result = tokio::time::timeout(CONTROL_WRITE_TIMEOUT, async {
+        let mut writer = slot.ctrl.lock().await;
+        write_control(&mut *writer, message).await
+    })
+    .await;
+    if matches!(result, Ok(Ok(()))) {
+        pending.0 = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// Bound concurrent notices and own their cancellation; no detached writes.
+async fn notify_all(slots: Vec<std::sync::Arc<ConnSlot>>, message: RelayControl) {
+    let mut remaining = slots.into_iter();
+    let mut writes = JoinSet::new();
+    loop {
+        while writes.len() < MAX_NOTICE_TASKS {
+            let Some(slot) = remaining.next() else {
+                break;
+            };
+            let message = message.clone();
+            writes.spawn(async move { write_notice(&slot, &message).await });
+        }
+        if writes.is_empty() {
+            break;
+        }
+        if let Some(Err(error)) = writes.join_next().await {
+            debug!(%error, "relay notice task ended");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn interrupted_control_write_closes_connection_even_while_waiting_for_lock() {
+        for cancel_early in [false, true] {
+            let config = || EndpointConfig {
+                backend: rds_net::Backend::Noq,
+                discovery: false,
+                bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                ..Default::default()
+            };
+            let server = rds_noq::bind_endpoint(config()).await.unwrap();
+            let client = rds_noq::bind_endpoint(config()).await.unwrap();
+            let (outgoing, incoming) =
+                tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
+                    server.accept().await.unwrap().await
+                });
+            let peer = outgoing.unwrap();
+            let conn = incoming.unwrap();
+            let (send, _recv) = conn.open_bi().await.unwrap();
+            let slot = ConnSlot {
+                conn,
+                ctrl: tokio::sync::Mutex::new(send),
+                bucket: Mutex::new(Bucket::new()),
+            };
+            let held = slot.ctrl.lock().await;
+            let budget = if cancel_early {
+                Duration::from_millis(20)
+            } else {
+                Duration::from_secs(2)
+            };
+            let result =
+                tokio::time::timeout(budget, write_notice(&slot, &RelayControl::Drain)).await;
+            if cancel_early {
+                assert!(result.is_err());
+            } else {
+                assert!(!result.unwrap());
+            }
+            tokio::time::timeout(Duration::from_secs(2), peer.inner().closed())
+                .await
+                .unwrap();
+            drop(held);
+            client.close().await;
+            server.close().await;
+        }
+    }
 
     #[test]
     fn bucket_allows_burst_then_limits() {
