@@ -2,8 +2,9 @@
 
 Status: W1.5 transactions, versioned publication and expiry retention implemented,
 not a completed directory acceptance gate. Configured enrollment and write-budget
-fairness and strict HTTP framing are implemented. File-capacity qualification
-and migration remain in [the remediation plan](remediation-plan.md).
+fairness and strict HTTP framing are implemented. A bounded 4096-identity Linux
+capacity/churn/reopen run passed. Migration, longer load/physical-failure tests
+and native macOS qualification remain in [the remediation plan](remediation-plan.md).
 
 ## Directory HTTP profile
 
@@ -115,6 +116,32 @@ Reads always enforce expiry independently. No unknown filesystem orphan is
 removed. Database pages are reusable; physical file shrinking is not promised.
 Metrics count retired entries and collection failures; `len()` counts retained
 record content awaiting collection, not currently reachable peers.
+
+## File-capacity harness
+
+`rds-bench directory-capacity --state-dir <new-directory> --rounds 2
+--json <report.json> --md <report.md>` fills the file store with 4096 synthetic
+publishers. It uses the public storage bounds `MAX_RECORD_IDENTITIES` and
+`MAX_RECORD_DATABASE_BYTES`, not copied benchmark-only limits. Production values
+remain unchanged. The command refuses an existing state directory, never cleans
+up history, and leaves its synthetic database for inspection on success or error.
+
+Each even-numbered round count (2–64) exercises alternating small/large records,
+then deletes and reactivates half the identities. Large fixtures fill all address,
+raw relay-locator and service-count bounds; their actual signed payload size is
+reported. Every round reopens and compares the complete catalog against expected
+signed bytes. New admission at full identity capacity must fail without charging
+a callback or poisoning later renewals, including after deletion and a collection
+pass. This does not collect or modify production state.
+
+Reports include per-operation latency, sampled logical/allocated database bytes
+and reopen latency. Signing and post-call file statistics are excluded from timed
+mutations; signature verification and both durability commits are included.
+Reopen includes whole-catalog validation. A failed invariant stops the command
+without manufacturing a successful report. These are storage measurements, not
+connection RTT, physical power-loss tests, filesystem-exhaustion injection or a
+production service-level guarantee. The [capacity receipt](reports/rds-capacity-20260924.md)
+records the run configuration and remaining qualification.
 
 ## Publisher ownership
 

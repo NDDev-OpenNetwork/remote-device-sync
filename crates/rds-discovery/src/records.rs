@@ -13,8 +13,10 @@ use std::{fs::File, io, os::unix::fs::FileExt, path::Path, sync::Mutex, time::Du
 const RECORDS: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new("records-v3");
 const META: TableDefinition<'_, u8, &[u8]> = TableDefinition::new("metadata-v3");
 const MAX_CELL: usize = 256 * 1024;
-const MAX_DATABASE: u64 = 256 * 1024 * 1024;
-pub(crate) const MAX_IDENTITIES: usize = 4096;
+/// Hard file length/offset bound, including database bookkeeping.
+pub const MAX_DATABASE: u64 = 256 * 1024 * 1024;
+/// Maximum retained identities, including tombstones and expiry floors.
+pub const MAX_IDENTITIES: usize = 4096;
 const GC_BATCH: usize = 64;
 mod entry;
 mod memory;

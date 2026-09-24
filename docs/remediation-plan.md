@@ -189,6 +189,9 @@ W1.5 implementation order (the bounded blocking-worker part lands with W1.4):
    and owned staging, sync before acknowledgment, and refuse corrupt/ambiguous
    state. Reads verify identity/file agreement and current lifetime. Define
    migration from old record files explicitly rather than trusting them by shape.
+   The [migration implementation checklist](record-migration-plan.md) separates
+   format-2 revision preservation from the authenticated legacy cutover and
+   defines source-preservation, interrupted-conversion and rollout evidence.
 4. Bound identities, per-record bytes and total storage. Preserve required replay
    evidence while collecting expired content; define the retention floor and
    clock-rollback behavior before deleting history. Unknown staging orphans must
@@ -202,6 +205,13 @@ W1.5 implementation order (the bounded blocking-worker part lands with W1.4):
    transfer encoding and malformed start/header lines against both directions.
    Prove delete/update replay, restart/crash behavior, bounded saturation and
    continued admitted-device renewal before closing the directory task.
+
+The [bounded Linux capacity run](reports/rds-capacity-20260924.md) passed 4096
+identities and two shrink/expand passes. It also measured full-catalog open at
+up to 15.98 seconds in a mixed dev/optimized-crypto build. Keep release startup,
+sustained renewal load and reconnect/readiness qualification in the remaining
+W1.5/W10.5/W10.7 work; do not remove verification to meet a timing target or
+interpret this capacity result as production latency acceptance.
 
 Exit: all P0 trust/data failures corrected and demonstrated on both supported
 OSes where applicable. Remaining P1 capability work stays visibly open.

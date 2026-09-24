@@ -28,7 +28,10 @@ pub use record_wire::{
 pub use relay_route::OwnedRelayRoute;
 pub mod policy;
 mod records;
-pub use records::{FileStore, MemoryStore};
+pub use records::{
+    FileStore, MAX_DATABASE as MAX_RECORD_DATABASE_BYTES, MAX_IDENTITIES as MAX_RECORD_IDENTITIES,
+    MemoryStore,
+};
 mod admission;
 pub use admission::Enrollment;
 pub mod registry;

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Add a Rust directory-capacity scenario to `rds-bench`, using shared production
+  bounds and fresh synthetic state. Measure full-catalog renewal, deletion,
+  reactivation and reopen; retain machine-readable evidence for 4096 identities.
+  Production limits and storage behavior are unchanged. Document the pending
+  offline migration procedure and measured startup-validation cost. See the
+  [capacity receipt](docs/reports/rds-capacity-20260924.md).
+
 - Harden directory HTTP framing in both directions: reject duplicate lengths,
   transfer encoding, malformed fields/start lines and unsupported encodings;
   enforce exact head/body limits and validate outgoing fields before sending.

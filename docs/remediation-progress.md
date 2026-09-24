@@ -18,7 +18,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
 | W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
-| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment, fair write admission and strict HTTP framing are implemented. Explicit migration and file-capacity renewal qualification remain open; see validation below. |
+| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment, fair write admission and strict HTTP framing are implemented. A 4096-identity Linux capacity/churn/reopen run passed. Explicit migration, release-load/startup profiling, physical failure and native macOS qualification remain open; see validation below. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -411,3 +411,33 @@ one-second expiry-fixture race; the receipt records its correction and the
 successful default and all-feature reruns, without changing production expiry
 semantics. Next: file-capacity qualification and explicit migration, then W1.9.
 All waves remain open.
+
+## Full directory capacity measurement
+
+The Rust `rds-bench directory-capacity` scenario uses shared production bounds,
+fresh synthetic state and 32 IPv6 addresses/eight maximum raw relay origins per
+large record. It passed **16,384 signed mutations and four full reopens** at
+4096 retained identities. The extra identity was refused without charging an
+admission callback; existing records continued to renew and deleted identities
+reactivated at higher revisions. Maximum sampled database length was **35.004
+MiB** under the unchanged 256 MiB cap. See the
+[capacity receipt and raw artifacts](reports/rds-capacity-20260924.md).
+
+This is one bounded Linux run in a dev build with optimized cryptographic
+dependencies, not release throughput or physical-failure qualification. Complete
+catalog validation during reopen took **1.54–15.98 seconds** across four samples;
+startup/recovery profiling remains open alongside sustained renewal load. The
+first unoptimized attempt was deliberately stopped after filling the catalog
+to replace its undersized overall harness deadline; it is retained as partial
+evidence, not counted as a pass.
+
+The next implementation step is the
+[offline migration checklist](record-migration-plan.md): preserve format-2 signed
+revision floors without inventing new leases; treat timestamp/legacy formats as
+a separate authenticated cutover. There is no migration command or deployment
+approval implied by this plan. W1.9 follows the remaining directory work.
+
+Final Linux checks passed: formatting; default/X11/all-feature workspace Clippy
+with warnings denied; **245 workspace tests across 49 targets**; both harness
+build profiles and the CLI state-preservation guards. No dependency or external
+runtime helper was added. All waves remain open.
