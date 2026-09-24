@@ -212,8 +212,12 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   separate versioned signature domains. The production announce issuer commits
   its counter and exact signed bytes before sending; lost replies can retry
   without a new revision, and local history failures reach the agent supervisor.
-  Stores check current lifetime on read/write, including exact retries. Expiry
-  GC, retained clock floors, admission quotas and migration remain W1.5;
+  Stores check current lifetime on read/write, including exact retries. A stored
+  suspend-inclusive lease survives process restart; OS reboot requires a newer
+  signed publication. Bounded collection retires content while preserving its
+  revision/digest floor, and observed expiry commits before a read returns.
+  HTTP 410 prompts one durable local successor; network retry does not allocate
+  another revision. Enrollment quotas, write fairness and migration remain W1.5;
   see [record-state.md](record-state.md) for migration and current limits. Directory
   certificate renewal is external provisioning plus restart for now; automatic
   renewal and hot reload are not implied by the relay's separate ACME support.

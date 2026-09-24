@@ -183,12 +183,30 @@ impl RecordIssuer {
         draft: RecordDraft,
         now: u64,
     ) -> Result<EndpointRecord, DiscoveryError> {
+        self.issue_record(draft, now, false)
+    }
+    /// Commit one locally allocated successor after the directory refuses an
+    /// expired lease (for example after its OS reboot). Never import a remote
+    /// counter. Network failures should retry `record` with the committed bytes.
+    pub fn renew_record(
+        &mut self,
+        draft: RecordDraft,
+        now: u64,
+    ) -> Result<EndpointRecord, DiscoveryError> {
+        self.issue_record(draft, now, true)
+    }
+    fn issue_record(
+        &mut self,
+        draft: RecordDraft,
+        now: u64,
+        renew: bool,
+    ) -> Result<EndpointRecord, DiscoveryError> {
         self.check_clock(now)?;
         let ttl = draft.ttl.as_secs();
         if ttl == 0 || ttl > MAX_RECORD_TTL || draft.ttl.subsec_nanos() != 0 {
             return Err(invalid("record TTL must be 1..=3600 whole seconds"));
         }
-        if let Some(Mutation::Record(record)) = &self.state.pending {
+        if !renew && let Some(Mutation::Record(record)) = &self.state.pending {
             let payload = record.verify()?;
             if payload.addrs == draft.addrs
                 && payload.relay_urls == draft.relay_urls

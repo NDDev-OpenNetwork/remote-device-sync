@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Persist suspend-inclusive record leases and clock floors; refuse rollback,
+  require a successor after OS reboot, and collect expired content in bounded
+  owned jobs while retaining revision/digest history. Bound memory-store
+  identities and preserve renewal at identity saturation. Add collection metrics
+  and exact successor retry after HTTP 410. The database becomes format 3;
+  earlier formats require the still-pending migration procedure. No production
+  dependency or external helper is added. See [record-state.md](docs/record-state.md).
+  Custom `RecordStore` implementations must provide bounded `collect_expired`.
+
 - Give endpoint updates and deletions one explicit revision sequence, separate
   signature domains, bounded fields and exact expiry checks. Exact signed retries
   are idempotent; equal-revision conflicts are refused. Persist publisher counters
@@ -9,7 +18,7 @@
   require durable agent state (`--record-state`). This changes the pre-1.0 wire
   and library APIs: `publish`/delete construction require a revision;
   `Client::remove` takes a signed deletion; `AnnounceConfig` takes a `RecordIssuer`
-  and `announce` returns a result. Migration and directory admission/GC remain
+  and `announce` returns a result. Migration and directory admission remain
   pending; see [record-state.md](docs/record-state.md).
   Preserve owned `rds-relay://` locators through shared typed identity/socket
   parsing, including IPv6 brackets, and exercise announce-to-relay connectivity.
@@ -23,7 +32,7 @@
   durable generation anchor; refuse corrupt/missing state and database-only
   rollback. Bound and exclusively own the protected database file. Legacy
   directories require explicit migration, which remains pending along with
-  publisher revisions and quota/GC work; see [record-state.md](docs/record-state.md).
+  enrollment quota/fairness work; see [record-state.md](docs/record-state.md).
 
 - Persist signed policy revisions, authority rotations and absolute freshness
   leases across restart. Managed grant mode now requires a configured revocation

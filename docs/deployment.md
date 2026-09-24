@@ -244,8 +244,15 @@ sessions.
 
 The W1.5 record-store format is changing. Legacy per-key JSON directories now
 refuse startup instead of discarding replay history. Deployment migration is
-pending the versioned publisher work; see [record-state.md](record-state.md).
+pending the explicit format-3 migration procedure; see [record-state.md](record-state.md).
 Preserve the complete directory, and never remove an anchor to force startup.
+The experimental format-1/format-2 databases are also refused. After a server
+OS reboot, stored endpoint leases require newer publisher revisions; active
+publishers recover on their next announce, normally within TTL/3. A 410 response
+then requests one locally allocated successor. Collection preserves identity
+history, so a full identity budget requires authenticated lifecycle maintenance,
+not deletion of database files. Watch `rds_directory_gc_failures_total` for
+clock/storage refusal and preserve evidence before repair.
 
 | Symptom | Likely cause | Check | Fix |
 | --- | --- | --- | --- |

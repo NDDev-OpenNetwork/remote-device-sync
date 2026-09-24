@@ -18,7 +18,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
 | W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
-| W1.5 | Partial | Transactional bounded disk store, tombstones, database generation anchor, signed publisher revisions, exact retries, wire/lifetime bounds and durable supervised announce are implemented. Expiry GC/clock floors, memory/enrollment quotas, fair renewal, strict HTTP framing and explicit migration remain open; see validation below. |
+| W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained clock/revision floors, bounded collection and memory identity capacity are implemented. Enrollment quotas, fair renewal, strict HTTP framing and explicit migration remain open; see validation below. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive random staging names and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
@@ -324,5 +324,36 @@ the preceding failed-run evidence.
 the noq endpoint feature). The agent binary built and executed `--help` with
 `--record-state`. See the [publisher receipt](reports/rds-publisher-20260924.md).
 Native macOS, physical failures, migration and real estate deployment remain
-unqualified. Next: expiry/clock-floor retention, enrollment quotas and fair
-renewal, strict HTTP framing, then explicit migration; W1.9 is still pending.
+unqualified. This receipt precedes the expiry-retention change below.
+
+## Record expiry and retention
+
+W1.5 now persists each record/delete acceptance lease, using the same boot and
+suspend-inclusive clock adapter as policy state. Exact retries cannot rearm it.
+Expiry observed by a read commits retirement and a clock floor before returning;
+expired addresses/signatures are reclaimed while revision/digest/kind history
+remains. OS reboot requires a newer signed revision. Backward wall time refuses
+operations until it catches up. Whole-state rollback still needs a GDS anchor.
+
+Both stores share expiry/order decisions and retain at most 4096 identities;
+memory deployments can choose a lower capacity. Collection keeps those identity
+slots. A higher revision for an existing identity remains possible at identity
+saturation. One owned maintenance worker visits at most 64 rows per pass,
+separately from request-worker capacity, with retirement/failure metrics.
+Concurrent renewal and collection serialize through the store transaction.
+
+An HTTP 410 triggers a durable local successor; losing its reply retries the
+same new bytes. HTTP 409 remains fatal. An already acknowledged publisher checks
+the server again on its normal renewal, so immediate recovery after server reboot
+is not claimed. Native platform, physical-failure and latency qualification
+remain open. The database is format 3; deployment migration is still on hold.
+
+The Linux matrix passed: formatting; default/X11/all-feature workspace Clippy
+with warnings denied; **221 workspace tests across 47 targets**; and **59 tests
+across 18 targets** for the network/agent/relay all-feature lane. Targeted checks
+also passed: 38 discovery unit tests, two service-collection tests and four
+real-HTTP publisher lifecycle tests. See the
+[expiry receipt](reports/rds-expiry-20260924.md). No wave gate is closed.
+
+Next: configured enrollment and fair renewal, strict HTTP framing, explicit
+migration, then W1.9 wire/accounting. All waves remain open.

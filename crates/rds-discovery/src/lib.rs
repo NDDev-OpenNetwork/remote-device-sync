@@ -121,7 +121,10 @@ pub trait RecordStore: Send + Sync {
     /// Commit an authorized, fresh delete at a higher revision. Exact signed
     /// retries succeed without rewriting; deleted identities retain history.
     fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError>;
-    /// Number of live records (metrics).
+    /// Inspect at most 64 identities and reclaim expired signed content. Keep
+    /// all replay floors. Repeated calls rotate over the bounded catalog.
+    fn collect_expired(&self) -> Result<usize, DiscoveryError>;
+    /// Number of stored records awaiting expiry collection (metrics).
     fn len(&self) -> usize;
     /// Whether the store holds no live records.
     fn is_empty(&self) -> bool {

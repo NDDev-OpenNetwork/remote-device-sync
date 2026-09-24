@@ -101,6 +101,8 @@ struct Metrics {
     revocations_puts: AtomicU64,
     requests_bad: AtomicU64,
     writes_rate_limited: AtomicU64,
+    gc_retired: AtomicU64,
+    gc_failures: AtomicU64,
     /// Per-writer PUT counts keyed by an anonymized id —
     /// `blake3(endpoint_key)[..8]` hex — so the scrape shows
     /// per-endpoint accounting without disclosing public keys.
@@ -248,10 +250,28 @@ pub async fn serve(
         let tls = config.tls.map(tokio_rustls::TlsAcceptor::from);
         async move {
             let mut connections = tokio::task::JoinSet::new();
+            // Separate single-job maintenance capacity: request saturation must
+            // not indefinitely starve expiry. A started blocking job can finish
+            // after drop, but no successor is scheduled without this owner.
+            let mut maintenance = tokio::task::JoinSet::new();
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 let accepted = tokio::select! {
                     result = listener.accept() => result,
                     _ = connections.join_next(), if !connections.is_empty() => continue,
+                    _ = tick.tick(), if maintenance.is_empty() => {
+                        let store = state.store.clone();
+                        maintenance.spawn_blocking(move || store.collect_expired());
+                        continue;
+                    },
+                    result = maintenance.join_next(), if !maintenance.is_empty() => {
+                        match result {
+                            Some(Ok(Ok(count))) => { state.metrics.gc_retired.fetch_add(count as u64, Ordering::Relaxed); }
+                            _ => { state.metrics.gc_failures.fetch_add(1, Ordering::Relaxed); }
+                        }
+                        continue;
+                    },
                 };
                 let Ok((mut sock, peer)) = accepted else {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -527,7 +547,9 @@ fn metrics(state: &State) -> Response {
          rds_directory_registry_puts {}\n\
          rds_directory_revocations_puts {}\n\
          rds_directory_requests_bad {}\n\
-         rds_directory_writes_rate_limited {}\n",
+         rds_directory_writes_rate_limited {}\n\
+         rds_directory_gc_retired_total {}\n\
+         rds_directory_gc_failures_total {}\n",
         state.store.len(),
         m.puts_ok.load(Ordering::Relaxed),
         m.puts_rejected.load(Ordering::Relaxed),
@@ -538,6 +560,8 @@ fn metrics(state: &State) -> Response {
         m.revocations_puts.load(Ordering::Relaxed),
         m.requests_bad.load(Ordering::Relaxed),
         m.writes_rate_limited.load(Ordering::Relaxed),
+        m.gc_retired.load(Ordering::Relaxed),
+        m.gc_failures.load(Ordering::Relaxed),
     );
     // Per-endpoint accounting: PUT counts by anonymized writer label
     // (blake3(key)[..8] — never the key itself; C7 security).

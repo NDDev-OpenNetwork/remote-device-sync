@@ -166,3 +166,90 @@ async fn stale_publisher_history_is_fatal_instead_of_guessing_server_revision() 
     drop(task);
     ep.close().await;
 }
+
+#[tokio::test]
+async fn expired_server_lease_allocates_one_durable_successor_then_retries_exactly() {
+    let tmp = Temp::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::new(listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut first_revision = None;
+        let mut renewed = None;
+        for attempt in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = http::read_request(&mut stream).await.unwrap().unwrap();
+            let record: rds_discovery::EndpointRecord =
+                serde_json::from_slice(&request.body).unwrap();
+            let payload = record.verify_fresh().unwrap();
+            match attempt {
+                0 => {
+                    first_revision = Some(payload.revision);
+                    http::write_response(
+                        &mut stream,
+                        &http::Response::error(410, &DiscoveryError::Expired),
+                    )
+                    .await
+                    .unwrap();
+                }
+                1 => {
+                    assert_eq!(payload.revision, first_revision.unwrap() + 1);
+                    renewed = Some(record); // Deliberately lose the successor's ACK.
+                }
+                _ => {
+                    assert_eq!(renewed.as_ref().unwrap(), &record);
+                    http::write_response(
+                        &mut stream,
+                        &http::Response::json(200, serde_json::json!({"stored":true})),
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        }
+        renewed.unwrap()
+    });
+    let key = SecretKey::from_bytes(&[104; 32]);
+    let ep = endpoint(&key).await;
+    let issuer =
+        RecordIssuer::open(&tmp.0, signing(&key), rds_discovery::now_unix().unwrap()).unwrap();
+    let mut task = announce(
+        ep.clone(),
+        AnnounceConfig {
+            issuer,
+            directory: client,
+            services: vec![Service::Ping],
+            ttl: Duration::from_secs(120),
+        },
+    )
+    .unwrap();
+    let renewed = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(8), server) => result.unwrap().unwrap(),
+        result = task.wait() => panic!("renewal loop stopped: {result:?}"),
+    };
+    drop(task);
+    ep.close().await;
+    let payload = renewed.verify().unwrap();
+    let mut issuer = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match RecordIssuer::open(&tmp.0, signing(&key), rds_discovery::now_unix().unwrap()) {
+                Ok(issuer) => break issuer,
+                Err(DiscoveryError::Busy) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("reopen failed: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let draft = rds_discovery::RecordDraft {
+        addrs: payload.addrs,
+        relay_urls: payload.relay_urls,
+        services: payload.services,
+        ttl: Duration::from_secs(120),
+    };
+    assert_eq!(
+        issuer
+            .record(draft, rds_discovery::now_unix().unwrap())
+            .unwrap(),
+        renewed
+    );
+}

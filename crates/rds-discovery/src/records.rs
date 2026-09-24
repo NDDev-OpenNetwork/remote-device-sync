@@ -1,27 +1,28 @@
 //! Transactional record/tombstone storage. Both mutation types share
-//! signed publisher revisions; expiry GC and admission quotas follow in W1.5.
+//! signed publisher revisions and durable expiry floors.
 use crate::{
     DeleteRequest, DiscoveryError, EndpointKey, EndpointRecord, RecordStore,
+    clock::Reading,
     persist::{AtomicFile, regular},
 };
 use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use rustix::fs::{Mode, OFlags, openat};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    fs::File,
-    io,
-    os::unix::fs::FileExt,
-    path::Path,
-    sync::{Mutex, RwLock},
-};
+use std::{fs::File, io, os::unix::fs::FileExt, path::Path, sync::Mutex, time::Duration};
 
-const RECORDS: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new("records-v2");
-const META: TableDefinition<'_, u8, &[u8]> = TableDefinition::new("metadata-v2");
+const RECORDS: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new("records-v3");
+const META: TableDefinition<'_, u8, &[u8]> = TableDefinition::new("metadata-v3");
 const MAX_CELL: usize = 256 * 1024;
 const MAX_DATABASE: u64 = 256 * 1024 * 1024;
 const MAX_IDENTITIES: usize = 4096;
+const GC_BATCH: usize = 64;
+mod entry;
+mod memory;
+use entry::{Entry, Stored, decide, decode, exact, observe};
+pub use memory::MemoryStore;
 
+#[cfg(test)]
+mod expiry_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -36,103 +37,6 @@ fn error(e: impl std::fmt::Display) -> DiscoveryError {
     DiscoveryError::Store(e.to_string())
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum Entry {
-    Record(EndpointRecord),
-    Deleted(DeleteRequest),
-}
-impl Entry {
-    fn verify(&self, key: &EndpointKey) -> Result<u64, DiscoveryError> {
-        let (actual, revision) = match self {
-            Self::Record(record) => {
-                let p = record.verify()?;
-                (p.key, p.revision)
-            }
-            Self::Deleted(tomb) => {
-                let p = tomb.verify()?;
-                (p.key, p.revision)
-            }
-        };
-        if actual != *key {
-            return Err(DiscoveryError::BadSignature);
-        }
-        Ok(revision)
-    }
-    fn record(&self) -> Result<EndpointRecord, DiscoveryError> {
-        match self {
-            Self::Record(record) => {
-                record.verify_fresh()?;
-                Ok(record.clone())
-            }
-            Self::Deleted(_) => Err(DiscoveryError::NotFound),
-        }
-    }
-    fn live(&self) -> bool {
-        matches!(self, Self::Record(_))
-    }
-}
-
-fn check(old: Option<&Entry>, new: &Entry, key: &EndpointKey) -> Result<bool, DiscoveryError> {
-    let revision = new.verify(key)?;
-    if let Some(old) = old {
-        let previous = old.verify(key)?;
-        if revision == previous && old == new {
-            return Ok(false);
-        }
-        if revision <= previous {
-            return Err(DiscoveryError::Stale);
-        }
-    }
-    Ok(true)
-}
-
-fn decode(bytes: &[u8], key: &EndpointKey) -> Result<Entry, DiscoveryError> {
-    if bytes.len() > MAX_CELL {
-        return Err(error("stored record exceeds limit"));
-    }
-    let entry: Entry = postcard::from_bytes(bytes).map_err(error)?;
-    entry.verify(key)?;
-    Ok(entry)
-}
-
-/// Ephemeral record/tombstone store for tests and embedded deployments.
-#[derive(Default)]
-pub struct MemoryStore {
-    entries: RwLock<HashMap<EndpointKey, Entry>>,
-}
-impl MemoryStore {
-    fn apply(&self, key: EndpointKey, entry: Entry) -> Result<(), DiscoveryError> {
-        let mut entries = self.entries.write().map_err(error)?;
-        if !check(entries.get(&key), &entry, &key)? {
-            return Ok(());
-        }
-        entries.insert(key, entry);
-        Ok(())
-    }
-}
-impl RecordStore for MemoryStore {
-    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        self.apply(record.verify_fresh()?.key, Entry::Record(record.clone()))
-    }
-    fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
-        self.entries
-            .read()
-            .map_err(error)?
-            .get(key)
-            .ok_or(DiscoveryError::NotFound)?
-            .record()
-    }
-    fn remove(&self, tomb: &DeleteRequest) -> Result<(), DiscoveryError> {
-        self.apply(tomb.verify_fresh()?.key, Entry::Deleted(tomb.clone()))
-    }
-    fn len(&self) -> usize {
-        self.entries
-            .read()
-            .map(|entries| entries.values().filter(|entry| entry.live()).count())
-            .unwrap_or(0)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Metadata {
     format: u16,
@@ -140,6 +44,7 @@ struct Metadata {
     generation: u64,
     live: u64,
     identities: u64,
+    wall_floor: Duration,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -251,6 +156,8 @@ struct Inner {
     anchor: AtomicFile,
     metadata: Metadata,
     failed: bool,
+    observed_wall: Duration,
+    cursor: Option<[u8; 32]>,
     #[cfg(test)]
     fault: Option<(Phase, bool)>,
     #[cfg(test)]
@@ -329,7 +236,7 @@ impl FileStore {
                         .get(0)
                         .map_err(error)?
                         .ok_or_else(|| error("record metadata missing"))?;
-                    postcard::from_bytes::<Metadata>(value.value()).map_err(error)?
+                    exact::<Metadata>(value.value())?
                 }
                 Err(redb::TableError::TableDoesNotExist(_)) if stored_anchor.is_none() => {
                     if read.list_tables().map_err(error)?.next().is_some() {
@@ -337,11 +244,12 @@ impl FileStore {
                     }
                     drop(read);
                     let metadata = Metadata {
-                        format: 2,
+                        format: 3,
                         database: rand::random(),
                         generation: 1,
                         live: 0,
                         identities: 0,
+                        wall_floor: Duration::ZERO,
                     };
                     let mut txn = db.begin_write().map_err(error)?;
                     txn.set_durability(Durability::Immediate).map_err(error)?;
@@ -356,14 +264,16 @@ impl FileStore {
                 Err(e) => return Err(error(e)),
             }
         };
-        if metadata.format != 2
+        if metadata.format != 3
             || metadata.generation == 0
             || metadata.identities > MAX_IDENTITIES as u64
         {
             return Err(error("invalid record metadata"));
         }
         if let Some(previous) = &stored_anchor {
-            if previous.database != metadata.database
+            if previous.format != metadata.format
+                || previous.wall_floor > metadata.wall_floor
+                || previous.database != metadata.database
                 || metadata.generation < previous.generation
                 || metadata.generation > previous.generation.saturating_add(1)
                 || (metadata.generation == previous.generation && *previous != metadata)
@@ -389,7 +299,11 @@ impl FileStore {
                     return Err(error("record identity capacity exceeded"));
                 }
                 let key = EndpointKey(key.value().try_into().map_err(error)?);
-                live += u64::from(decode(value.value(), &key)?.live());
+                let stored = decode(value.value(), &key)?;
+                if stored.accepted_wall() > metadata.wall_floor {
+                    return Err(error("record lease exceeds catalog clock floor"));
+                }
+                live += u64::from(stored.live());
             }
         }
         if identities != metadata.identities || live != metadata.live {
@@ -407,6 +321,8 @@ impl FileStore {
                 anchor,
                 metadata,
                 failed: false,
+                observed_wall: Duration::ZERO,
+                cursor: None,
                 #[cfg(test)]
                 fault: None,
                 #[cfg(test)]
@@ -414,87 +330,151 @@ impl FileStore {
             }),
         })
     }
-    fn apply(&self, key: EndpointKey, entry: Entry) -> Result<(), DiscoveryError> {
-        let bytes = postcard::to_stdvec(&entry).map_err(error)?;
-        if bytes.len() > MAX_CELL {
-            return Err(error("record exceeds storage limit"));
-        }
+    fn access(
+        &self,
+        key: EndpointKey,
+        entry: Option<Entry>,
+        now: Option<Reading>,
+    ) -> Result<Option<EndpointRecord>, DiscoveryError> {
         let mut inner = self.inner.lock().map_err(error)?;
         inner.healthy()?;
-        // Leave the instance closed on any unexpected storage/validation error,
-        // including a failure before commit or after the database commit.
+        let now = now.map(Ok).unwrap_or_else(Reading::now)?;
+        let floor = inner.metadata.wall_floor;
+        observe(floor, &mut inner.observed_wall, now)?;
         inner.failed = true;
-        let anchored = inner
+        let old = {
+            let txn = inner.db.begin_read().map_err(error)?;
+            let table = txn.open_table(RECORDS).map_err(error)?;
+            table
+                .get(key.0.as_slice())
+                .map_err(error)?
+                .map(|value| decode(value.value(), &key))
+                .transpose()?
+        };
+        inner.failed = false;
+        let decision = decide(old.as_ref(), entry, &key, now)?;
+        if let Some(replacement) = decision.replacement {
+            if old.is_none() && inner.metadata.identities >= MAX_IDENTITIES as u64 {
+                return Err(error("record identity capacity exceeded"));
+            }
+            inner.commit(&[(key, replacement)], now)?;
+        }
+        decision.result
+    }
+    fn collect_at(&self, now: Option<Reading>) -> Result<usize, DiscoveryError> {
+        let mut inner = self.inner.lock().map_err(error)?;
+        inner.healthy()?;
+        let now = now.map(Ok).unwrap_or_else(Reading::now)?;
+        let floor = inner.metadata.wall_floor;
+        observe(floor, &mut inner.observed_wall, now)?;
+        inner.failed = true;
+        let mut changes = Vec::new();
+        let mut scanned = 0;
+        let mut last = None;
+        {
+            let txn = inner.db.begin_read().map_err(error)?;
+            let table = txn.open_table(RECORDS).map_err(error)?;
+            let start = inner
+                .cursor
+                .as_ref()
+                .map_or(std::ops::Bound::Unbounded, |key| {
+                    std::ops::Bound::Excluded(key.as_slice())
+                });
+            for item in table
+                .range::<&[u8]>((start, std::ops::Bound::Unbounded))
+                .map_err(error)?
+                .take(GC_BATCH)
+            {
+                let (key, value) = item.map_err(error)?;
+                let key = EndpointKey(key.value().try_into().map_err(error)?);
+                if let Some(retired) = decode(value.value(), &key)?.retire(&key, now)? {
+                    changes.push((key, retired));
+                }
+                scanned += 1;
+                last = Some(key.0);
+            }
+        }
+        inner.failed = false;
+        if !changes.is_empty() {
+            inner.commit(&changes, now)?;
+        }
+        inner.cursor = if scanned == GC_BATCH { last } else { None };
+        Ok(changes.len())
+    }
+}
+
+impl Inner {
+    /// Called under the owner mutex. Both commits complete before any result,
+    /// including an expiry refusal that caused content to be reclaimed.
+    fn commit(
+        &mut self,
+        changes: &[(EndpointKey, Stored)],
+        now: Reading,
+    ) -> Result<(), DiscoveryError> {
+        self.failed = true;
+        let anchored = self
             .anchor
             .read()?
             .ok_or_else(|| error("record commit anchor disappeared"))?;
-        if decode_anchor(&anchored)? != inner.metadata {
+        if decode_anchor(&anchored)? != self.metadata {
             return Err(error(
                 "record commit anchor changed during service lifetime",
             ));
         }
-        let mut txn = inner.db.begin_write().map_err(error)?;
-        txn.set_durability(Durability::Immediate).map_err(error)?;
-        let mut next = inner.metadata.clone();
+        let mut next = self.metadata.clone();
         next.generation = next
             .generation
             .checked_add(1)
             .ok_or_else(|| error("record commit generation exhausted"))?;
+        next.wall_floor = next.wall_floor.max(now.wall);
+        let mut txn = self.db.begin_write().map_err(error)?;
+        txn.set_durability(Durability::Immediate).map_err(error)?;
         {
             let mut table = txn.open_table(RECORDS).map_err(error)?;
-            let old = table
-                .get(key.0.as_slice())
-                .map_err(error)?
-                .map(|old| decode(old.value(), &key))
-                .transpose()?;
-            match check(old.as_ref(), &entry, &key) {
-                Err(DiscoveryError::Stale) => {
-                    inner.failed = false;
-                    return Err(DiscoveryError::Stale);
+            for (key, replacement) in changes {
+                let bytes = postcard::to_stdvec(replacement).map_err(error)?;
+                if bytes.len() > MAX_CELL {
+                    return Err(error("record exceeds storage limit"));
                 }
-                Ok(false) => {
-                    inner.failed = false;
-                    return Ok(());
+                let old = table
+                    .get(key.0.as_slice())
+                    .map_err(error)?
+                    .map(|value| decode(value.value(), key))
+                    .transpose()?;
+                if old.is_none() {
+                    next.identities = next
+                        .identities
+                        .checked_add(1)
+                        .filter(|n| *n <= MAX_IDENTITIES as u64)
+                        .ok_or_else(|| error("record identity capacity exceeded"))?;
                 }
-                Ok(true) => {}
-                Err(e) => return Err(e),
+                next.live = next
+                    .live
+                    .checked_sub(u64::from(old.as_ref().is_some_and(Stored::live)))
+                    .and_then(|n| n.checked_add(u64::from(replacement.live())))
+                    .ok_or_else(|| error("record count inconsistent"))?;
+                table
+                    .insert(key.0.as_slice(), bytes.as_slice())
+                    .map_err(error)?;
             }
-            if old.is_none() {
-                if next.identities >= MAX_IDENTITIES as u64 {
-                    inner.failed = false;
-                    return Err(error("record identity capacity exceeded"));
-                }
-                next.identities += 1;
-            }
-            next.live = next
-                .live
-                .checked_sub(u64::from(old.as_ref().is_some_and(Entry::live)))
-                .and_then(|count| count.checked_add(u64::from(entry.live())))
-                .ok_or_else(|| error("record count inconsistent"))?;
-            table
-                .insert(key.0.as_slice(), bytes.as_slice())
-                .map_err(error)?;
         }
         txn.open_table(META)
             .map_err(error)?
             .insert(0, postcard::to_stdvec(&next).map_err(error)?.as_slice())
             .map_err(error)?;
-        // Keep the outer mutex through BOTH commits. Readers and subsequent
-        // writers cannot observe/publish a generation before its anchor lands.
         #[cfg(test)]
-        inner.checkpoint(Phase::BeforeDatabase)?;
+        self.checkpoint(Phase::BeforeDatabase)?;
         txn.commit().map_err(error)?;
         #[cfg(test)]
-        inner.checkpoint(Phase::AfterDatabase)?;
-        inner.anchor.write(&encode_anchor(&next)?)?;
+        self.checkpoint(Phase::AfterDatabase)?;
+        self.anchor.write(&encode_anchor(&next)?)?;
         #[cfg(test)]
-        inner.checkpoint(Phase::AfterAnchor)?;
-        inner.metadata = next;
-        inner.failed = false;
+        self.checkpoint(Phase::AfterAnchor)?;
+        self.metadata = next;
+        self.failed = false;
         Ok(())
     }
-}
-impl Inner {
+
     #[cfg(test)]
     fn checkpoint(&self, phase: Phase) -> Result<(), DiscoveryError> {
         if let Some((selected, terminate)) = self.fault
@@ -517,21 +497,23 @@ impl Inner {
 }
 impl RecordStore for FileStore {
     fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        self.apply(record.verify_fresh()?.key, Entry::Record(record.clone()))
+        self.access(
+            record.verify()?.key,
+            Some(Entry::Record(record.clone())),
+            None,
+        )
+        .map(|_| ())
     }
     fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
-        let inner = self.inner.lock().map_err(error)?;
-        inner.healthy()?;
-        let txn = inner.db.begin_read().map_err(error)?;
-        let table = txn.open_table(RECORDS).map_err(error)?;
-        let value = table
-            .get(key.0.as_slice())
-            .map_err(error)?
-            .ok_or(DiscoveryError::NotFound)?;
-        decode(value.value(), key)?.record()
+        self.access(*key, None, None)?
+            .ok_or(DiscoveryError::NotFound)
     }
     fn remove(&self, tomb: &DeleteRequest) -> Result<(), DiscoveryError> {
-        self.apply(tomb.verify_fresh()?.key, Entry::Deleted(tomb.clone()))
+        self.access(tomb.verify()?.key, Some(Entry::Deleted(tomb.clone())), None)
+            .map(|_| ())
+    }
+    fn collect_expired(&self) -> Result<usize, DiscoveryError> {
+        self.collect_at(None)
     }
     fn len(&self) -> usize {
         self.inner

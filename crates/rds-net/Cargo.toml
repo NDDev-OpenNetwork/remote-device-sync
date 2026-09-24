@@ -28,6 +28,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 iroh-relay = { workspace = true, features = ["server"] }
+serde_json.workspace = true
 turmoil = "0.7.2"
 
 [features]

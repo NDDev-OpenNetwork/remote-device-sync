@@ -1,4 +1,4 @@
-//! Policy leases use a wall clock and an OS monotonic clock that includes sleep.
+//! Signed-data leases use wall time and an OS monotonic clock including sleep.
 
 use crate::{DiscoveryError, authority::invalid};
 use serde::{Deserialize, Serialize};
@@ -55,9 +55,12 @@ pub struct Lease {
 }
 
 impl Lease {
+    pub(crate) fn accepted_wall(&self) -> Duration {
+        self.accepted_wall
+    }
     pub fn new(issued_at: u64, expires_at: u64, now: Reading) -> Result<Self, DiscoveryError> {
         if issued_at > now.wall.as_secs() {
-            return Err(invalid("policy is from the future"));
+            return Err(invalid("signed data is from the future"));
         }
         let remaining = Duration::from_secs(expires_at)
             .checked_sub(now.wall)
@@ -66,7 +69,7 @@ impl Lease {
         let deadline = now
             .continuous
             .checked_add(remaining)
-            .ok_or_else(|| invalid("policy deadline overflow"))?;
+            .ok_or_else(|| invalid("signed-data deadline overflow"))?;
         Ok(Self {
             boot: now.boot,
             issued_at,

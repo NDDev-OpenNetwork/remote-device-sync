@@ -1,7 +1,7 @@
 # Directory record storage
 
-Status: W1.5 transactions and versioned publication implemented, not a completed
-directory acceptance gate. Expiry GC, clock-floor retention, admission fairness,
+Status: W1.5 transactions, versioned publication and expiry retention implemented,
+not a completed directory acceptance gate. Enrollment quotas, admission fairness,
 strict HTTP framing and migration remain in [the remediation plan](remediation-plan.md).
 
 ## Signed mutation contract
@@ -35,7 +35,48 @@ silently discard the identity or mishandle IPv6 brackets. Repeated fields are
 refused. A record lives at most 3600 seconds; a delete at most 300 seconds.
 Acceptance requires `issued_at <= now < expires_at`, including retries. Stores
 refuse expired records on reads; clients verify freshness independently.
-Server wall-clock rollback/expiry-history retention remains the next W1.5 step.
+Server expiry also obeys the retained lease and clock rules below.
+
+## Expiry, clock rollback and collection
+
+Acceptance persists the signed operation with its original boot identifier,
+wall-clock acceptance time and suspend-inclusive continuous-clock deadline.
+The existing OS clock adapter is shared with policy leases. A process restart
+in the same OS boot retains that deadline. An OS reboot invalidates previously
+accepted leases; a newer signed revision is required, even when wall time still
+falls inside the original validity interval. Exact retries never rearm a lease.
+
+Every storage operation samples time inside its owner lock. Backward wall time
+below the last runtime observation or the last committed clock floor refuses
+access until time catches up; this refusal alone does not poison storage.
+Each mutation/retirement transaction raises the durable wall floor. Reads do
+not write that floor while the record remains valid: the original continuous
+deadline still bounds its lifetime across a same-boot process restart. An
+unobserved clock excursion cannot be reconstructed; there is no promise to
+detect rollback of the whole state directory without the external GDS anchor.
+
+When a read observes an invalid lease, it commits retirement before returning
+expiry. Deletes continue to read as not found. Retirement keeps the endpoint's
+revision, a BLAKE3 digest of the exact signed mutation (including its kind), and
+whether it was a deletion; it removes the addresses, services and signature.
+The floor is trusted, integrity-protected local database state, **not** a
+transferable publisher-signed proof. Never import a bare floor from a peer or
+use it as independent enrollment evidence. Conflicting equal revisions and
+lower revisions remain stale; an exact retired retry returns expiry. A valid
+higher revision can replace the floor. Identity history has no TTL: only a
+future authenticated retirement/migration procedure may release its slot.
+
+`RecordStore::collect_expired` inspects at most 64 identities per call, rotating
+over the catalog. `Directory` schedules a pass every second, with one owned
+blocking maintenance job separate from request-worker capacity. It skips
+missed ticks, never overlaps passes and stops scheduling on drop. A started
+blocking transaction may finish after drop. Storage mutex/transaction ordering
+prevents collection from deleting a concurrent successor. With 4096 identities,
+a sweep takes up to 65 scheduled passes; slow storage can delay it further.
+Reads always enforce expiry independently. No unknown filesystem orphan is
+removed. Database pages are reusable; physical file shrinking is not promised.
+Metrics count retired entries and collection failures; `len()` counts retained
+record content awaiting collection, not currently reachable peers.
 
 ## Publisher ownership
 
@@ -63,7 +104,13 @@ local disk job that finishes afterward. An already-sent request can still
 commit remotely; revision ordering and exact retry handle that uncertainty.
 Fatal issuer failures and permanent
 HTTP 4xx protocol refusals reach `Announce::wait`; the CLI supervises that result
-and closes its endpoint. Network failures, timeouts, expiry and rate limits retry.
+and closes its endpoint. Network failures, timeouts and rate limits retry.
+An HTTP 410 allocates and commits one local successor on the next poll; its
+subsequent network retries reuse the new exact bytes. No remote revision is
+imported. This allows an active publisher to recover after server reboot on its
+next publication (normally within TTL/3), without waiting for its pending bytes
+to age out. A server restart does not yet push an immediate refresh request to
+already acknowledged publishers.
 
 ## Transaction and recovery contract
 
@@ -79,8 +126,9 @@ both commits can readers observe the update or a successful mutation return.
 Unexpected storage/validation errors poison that instance, requiring reopen;
 semantic stale writes and capacity refusal do not poison it.
 
-On open, validate every bounded row's signature/key, metadata counts, database
-identity and anchor. Missing initialized files, corruption, rollback or unknown
+On open, validate every bounded row's signed content/lease or retained floor,
+key, metadata counts, database identity and anchor. Missing initialized files,
+corruption, rollback or unknown
 files cause an error, never an empty-store fallback. A database exactly one
 generation ahead of its anchor represents an interrupted, unacknowledged
 mutation: validate it and finish its anchor. A database behind the anchor is
@@ -110,17 +158,21 @@ primitive; unknown orphans are left untouched. More than 129 directory entries
 requires maintenance. Never remove locks, anchors or apparent leftovers while
 a service is running.
 
-Initial fixed limits are 4096 remembered identities (including tombstones),
-256 KiB per serialized cell, 256 MiB database file and a 16 MiB database cache.
+Both stores permit at most 4096 remembered identities (including tombstones
+and retired floors); `MemoryStore::with_capacity` may lower that limit.
+Disk limits are 256 KiB per serialized cell, a 256 MiB database file and a
+16 MiB database cache.
 The backend checks growth and offset arithmetic before writing. These are
 storage safety bounds, not completed enrollment quotas or total process-memory
-bounds. Exhaustion can deny new identities; expiry GC and protected renewal
-capacity are pending. `len()` counts stored nondeleted records, not fresh peers.
+bounds. Identity-capacity refusal does not block an existing identity's higher
+revision. Global write-budget fairness and capacity reservation at the database
+file limit are still pending. Expiry does not free identity slots.
 
 ## Migration and operations
 
-The previous per-key JSON directory and experimental format-1 database are not
-accepted or automatically imported. The revisioned database uses format 2.
+The previous per-key JSON directory and experimental format-1/format-2 databases
+are not accepted or automatically imported. The leased database uses format 3
+(`records-v3` and `metadata-v3`). Stored postcard values reject trailing bytes.
 Unknown legacy files are preserved and startup refuses them. There is no
 migration command in this patch. Do not delete the legacy directory or start
 an empty replacement to bypass this refusal: that would discard replay history.

@@ -2,14 +2,14 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use std::{path::PathBuf, time::Duration};
 
-const PHASES: [Phase; 3] = [
+pub(super) const PHASES: [Phase; 3] = [
     Phase::BeforeDatabase,
     Phase::AfterDatabase,
     Phase::AfterAnchor,
 ];
-struct Temp(PathBuf);
+pub(super) struct Temp(pub(super) PathBuf);
 impl Temp {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path =
             std::env::temp_dir().join(format!("rds-record-crash-{:032x}", rand::random::<u128>()));
         std::fs::create_dir(&path).unwrap();

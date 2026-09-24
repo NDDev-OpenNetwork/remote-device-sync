@@ -77,6 +77,7 @@ pub fn announce(endpoint: Endpoint, config: AnnounceConfig) -> Result<Announce, 
         } = config;
         let poll = (ttl / 6).clamp(Duration::from_millis(250), Duration::from_secs(1));
         let mut last: Option<EndpointRecord> = None;
+        let mut renew = false;
         loop {
             let current = split_addrs(&endpoint.addr());
             let draft = RecordDraft {
@@ -88,18 +89,29 @@ pub fn announce(endpoint: Endpoint, config: AnnounceConfig) -> Result<Announce, 
             // At most one disk job. Cancellation can let that job finish a
             // local commit, but the canceled task cannot publish its result.
             let (returned, result) = tokio::task::spawn_blocking(move || {
-                let result = rds_discovery::now_unix().and_then(|now| issuer.record(draft, now));
+                let result = rds_discovery::now_unix().and_then(|now| {
+                    if renew {
+                        issuer.renew_record(draft, now)
+                    } else {
+                        issuer.record(draft, now)
+                    }
+                });
                 (issuer, result)
             })
             .await
             .map_err(|e| DiscoveryError::Store(e.to_string()))?;
             issuer = returned;
+            renew = false;
             let record = result?;
             if last.as_ref() != Some(&record) {
                 match directory.publish(&record).await {
                     Ok(()) => {
                         last = Some(record);
                         tracing::debug!("endpoint record published");
+                    }
+                    Err(DiscoveryError::Http { status: 410, .. }) => {
+                        renew = true;
+                        tracing::debug!("directory lease expired; allocating a local successor");
                     }
                     Err(
                         e @ DiscoveryError::Http {

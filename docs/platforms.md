@@ -54,7 +54,7 @@ negotiate only after both endpoints probe them.
 
 ## cfg conventions
 
-Policy leases use safe `rustix::time::clock_gettime`: `CLOCK_BOOTTIME` on Linux
+Policy and endpoint-record leases use safe `rustix::time::clock_gettime`: `CLOCK_BOOTTIME` on Linux
 and `CLOCK_MONOTONIC` on Darwin, both including suspend. These clocks have
 different semantics across platforms; do not substitute Rust `Instant` for the
 persisted lease deadline. References: [Linux clock documentation](https://man7.org/linux/man-pages/man2/clock_gettime.2.html),

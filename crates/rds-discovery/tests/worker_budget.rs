@@ -22,6 +22,9 @@ impl BlockingStore {
     }
 }
 impl RecordStore for BlockingStore {
+    fn collect_expired(&self) -> Result<usize, DiscoveryError> {
+        Ok(0)
+    }
     fn put(&self, _: &EndpointRecord) -> Result<(), DiscoveryError> {
         unreachable!()
     }
