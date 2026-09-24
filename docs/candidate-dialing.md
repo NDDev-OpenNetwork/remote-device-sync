@@ -55,6 +55,7 @@ still waits for its configured relay attachment. Interface enumeration, remote
 address scope and advertisement filtering, different LANs/NATs, TCP/443 fallback,
 relay replacement and validated multipath selection remain open. Limits are per
 connect, not global across all callers. Candidate errors currently report the
-last failed attempt; per-candidate structured diagnostics remain W2.8. Requested
-ALPN narrowing for endpoints configured with multiple ALPNs remains W2.2 work.
+last failed attempt; per-candidate structured diagnostics remain W2.8. The
+[exact ALPN boundary](protocol-negotiation.md) is now checked separately; full
+capability/version negotiation remains W2.2 work.
 The default backend remains iroh until the parity gate is qualified.

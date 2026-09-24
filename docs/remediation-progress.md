@@ -25,6 +25,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
+| W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, relay queues and disk cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
 | W3.1 | Partial; initial candidate race | Eight supported direct candidates plus attached relay share a deadline and one authenticated winner. Dual-stack routing and cancellation are checked. Independent relay bootstrap, remote scope/interface discovery and real topology qualification remain open. |
@@ -754,3 +755,19 @@ helper changed.
 W3.1/W3.6 remain partial for relay bootstrap, scoped interface discovery, validated
 path selection and transport-failure isolation. Requested ALPN narrowing is the
 next bounded protocol correction. No remediation wave or deployment is closed.
+
+## Exact requested transport protocol
+
+Three before-fix real-QUIC failures confirmed that the owned backend could ignore
+the requested ALPN. Immutable exact-protocol configurations now serve each dial
+and its candidate attempts, while preserving the endpoint-wide TLS cache bound.
+Repeated alternating and concurrent protocol requests, refusal of unsupported
+protocols and an immediately invalid first address are tested.
+
+Focused validation passed 16 tests, including existing backend interoperability.
+Final formatting, three Clippy lanes, **341 workspace tests**, **132
+all-feature network/agent/CLI/relay tests** and **26 isolated owned-network
+tests** passed. See [contract](protocol-negotiation.md) and
+[receipt](reports/rds-alpn-selection-20260925.md). No dependency or wire version
+changed. W2.2 remains partial for capability/limit/version negotiation and
+session/transfer IDs. Validated path selection is next. No wave is closed.

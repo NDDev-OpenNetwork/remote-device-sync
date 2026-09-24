@@ -49,6 +49,10 @@ opening, request write and response completion. Pending streams reset on
 cancellation; incomplete authorization closes its connection. Local forwarding
 owns a bounded worker group with connection-close joins and cancellation cleanup.
 
+Owned requests also [pin the exact requested ALPN](protocol-negotiation.md) in
+an immutable per-protocol TLS configuration. A missing protocol fails before
+service use; concurrent requests cannot replace each other's offer.
+
 Owned initial handshakes use a [bounded candidate race](candidate-dialing.md):
 eight direct addresses plus an attached relay, one 15-second deadline, common
 identity pinning, and one retained winner. This removes first-address blocking;

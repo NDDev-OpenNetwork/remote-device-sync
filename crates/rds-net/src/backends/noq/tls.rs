@@ -66,6 +66,9 @@ pub struct TlsConfig {
     server_verifier: Arc<ServerCertificateVerifier>,
     client_verifier: Arc<ClientCertificateVerifier>,
     crypto_provider: Arc<rustls::crypto::CryptoProvider>,
+    // All exact-ALPN configs share this endpoint-wide bound and the same
+    // verifier/certificate resolver. Rustls checks ALPN on each handshake.
+    client_sessions: Arc<rustls::client::ClientSessionMemoryCache>,
 }
 
 /// Maximum TLS session tickets cached per endpoint for 0-RTT resumption.
@@ -78,6 +81,9 @@ impl TlsConfig {
             server_verifier: Arc::new(ServerCertificateVerifier),
             client_verifier: Arc::new(ClientCertificateVerifier),
             crypto_provider: Arc::new(rustls::crypto::ring::default_provider()),
+            client_sessions: Arc::new(rustls::client::ClientSessionMemoryCache::new(
+                MAX_TLS_TICKETS,
+            )),
         }
     }
 
@@ -91,9 +97,7 @@ impl TlsConfig {
             .with_custom_certificate_verifier(self.server_verifier.clone())
             .with_client_cert_resolver(self.cert_resolver.clone());
 
-        crypto.resumption = rustls::client::Resumption::store(Arc::new(
-            rustls::client::ClientSessionMemoryCache::new(MAX_TLS_TICKETS),
-        ));
+        crypto.resumption = rustls::client::Resumption::store(self.client_sessions.clone());
         crypto.enable_early_data = true;
         // The server name is used locally only; do not disclose the
         // peer id in ClientHello SNI.

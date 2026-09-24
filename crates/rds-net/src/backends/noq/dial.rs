@@ -24,6 +24,7 @@ pub(super) enum DialError {
 /// cancel other candidates; only a completed authenticated handshake wins.
 pub(super) async fn race(
     endpoint: &noq::Endpoint,
+    client_config: &noq::ClientConfig,
     candidates: &[SocketAddr],
     server_name: &str,
 ) -> Result<noq::Connection, DialError> {
@@ -31,7 +32,7 @@ pub(super) async fn race(
     let mut last_error = None;
     let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     for &address in candidates {
-        match endpoint.connect(address, server_name) {
+        match endpoint.connect_with(client_config.clone(), address, server_name) {
             Ok(connecting) => {
                 attempts.spawn(async move {
                     tokio::time::timeout_at(deadline, connecting)

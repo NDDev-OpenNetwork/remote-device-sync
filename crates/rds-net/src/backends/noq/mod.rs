@@ -141,7 +141,6 @@ pub async fn bind_with_socket(
     let secret_key = config.secret_key.unwrap_or_else(SecretKey::generate);
     let tls = tls::TlsConfig::new(secret_key.clone());
 
-    let client_crypto = tls.client_config(config.alpns.clone())?;
     let server_crypto = tls.server_config(config.alpns.clone())?;
 
     let endpoint_config =
@@ -150,8 +149,15 @@ pub async fn bind_with_socket(
     let transport = transport_config(config.max_multipath_paths);
     let mut server_config = noq::ServerConfig::with_crypto(Arc::new(server_crypto));
     server_config.transport = transport.clone();
-    let mut client_config = noq::ClientConfig::new(Arc::new(client_crypto));
-    client_config.transport_config(transport);
+    // An immutable per-protocol offer avoids both silent ALPN fallback and
+    // races caused by changing the endpoint's default config before dialing.
+    let mut client_configs = std::collections::BTreeMap::new();
+    for alpn in &config.alpns {
+        let crypto = tls.client_config(vec![alpn.clone()])?;
+        let mut client = noq::ClientConfig::new(Arc::new(crypto));
+        client.transport_config(transport.clone());
+        client_configs.insert(alpn.clone(), client);
+    }
 
     let endpoint = noq::Endpoint::new_with_abstract_socket(
         endpoint_config,
@@ -160,7 +166,6 @@ pub async fn bind_with_socket(
         runtime,
     )
     .context("create noq endpoint")?;
-    endpoint.set_default_client_config(client_config);
 
     let local_addr = local_addrs
         .first()
@@ -173,7 +178,7 @@ pub async fn bind_with_socket(
         id: secret_key.public(),
         local_addr,
         local_addrs,
-        alpns: config.alpns,
+        client_configs: Arc::new(client_configs),
         relay,
         metrics: crate::metrics::Registry::default(),
         drivers: Arc::new(drivers::Drivers::default()),
@@ -227,7 +232,7 @@ pub struct Endpoint {
     id: EndpointId,
     local_addr: SocketAddr,
     local_addrs: Vec<SocketAddr>,
-    alpns: Vec<Vec<u8>>,
+    client_configs: Arc<std::collections::BTreeMap<Vec<u8>, noq::ClientConfig>>,
     /// Relay tunnel handle when `relay_endpoint` was configured —
     /// steers synthetic-address sends and advertises the relay url.
     relay: Option<relay::RelayHandle>,
@@ -296,9 +301,9 @@ impl Endpoint {
     /// additional addresses then become paths on that same connection.
     /// `alpn` must be one of the protocol ids configured at bind time.
     pub async fn connect(&self, target: EndpointAddr, alpn: &[u8]) -> anyhow::Result<Connection> {
-        if !self.alpns.iter().any(|a| a.as_slice() == alpn) {
+        let Some(client_config) = self.client_configs.get(alpn) else {
             bail!("alpn {alpn:?} not configured on this endpoint");
-        }
+        };
         let remote_id = target.id;
         let candidates = policy::dial_candidates(&target, &self.local_addrs);
         // A relayed path is usable when the peer's advertised relay is
@@ -320,7 +325,7 @@ impl Endpoint {
         }
 
         let server_name = tls::name::encode(remote_id);
-        let conn = dial::race(&self.inner, &attempts, &server_name)
+        let conn = dial::race(&self.inner, client_config, &attempts, &server_name)
             .await
             .context("all connection candidates failed")?;
 
