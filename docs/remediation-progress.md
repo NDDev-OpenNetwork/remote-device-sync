@@ -1448,3 +1448,14 @@ holds the actual selected sibling for the final-socket fault. Selection, stream
 continuity, advertisement withdrawal and shutdown assertions retain their
 deadlines. The source archive now includes root `tests/` and `examples/`, required
 by the crates' compile-time fixture includes; the archive contract checks this.
+
+PR integration exposed a separate release-gate issue: CodeQL workflow success
+can coexist with unresolved scanner findings. The reviewed PR findings were
+synthetic test grants, non-cryptographic Ping echo values, test-only diagnostics
+and variable uses inside assertion macros; each disposition is recorded in
+GitHub without disabling a query. Publication now additionally requires the
+latest Rust/Actions analyses on main to bind the exact source revision, have no
+extraction warnings/errors, and leave no unresolved code-scanning alerts. API
+pagination is exhaustive. Negative tests reject green workflows with open alerts,
+foreign/stale/duplicate/incomplete scans, later-main evidence and a late-page
+alert. This strengthens release qualification without changing Rust runtime code.

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Negative release-contract tests: all repositories/artifacts are synthetic."""
 import contextlib
+import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -193,6 +195,71 @@ class ReleaseContract(unittest.TestCase):
         (incoming / "source-sbom.spdx.json").write_text('{"spdxVersion":"SPDX-2.3","packages":[]}')
         with self.assertRaisesRegex(ValueError, "empty source SBOM"):
             release.finalize(VERSION, incoming, self.root / "dist")
+
+
+class CIEvidence(unittest.TestCase):
+    def setUp(self):
+        self.commit = "a" * 40
+        self.runs = [dict(path=".github/workflows/" + name, head_sha=self.commit,
+                          event="push", head_branch="main", status="completed", conclusion="success")
+                     for name in ("ci.yml", "supply-chain.yml", "codeql.yml")]
+        self.analyses = [dict(ref="refs/heads/main", category="/language:" + language,
+                             analysis_key=".github/workflows/codeql.yml:codeql", tool={"name": "CodeQL"},
+                             commit_sha=self.commit, error="", warning="")
+                        for language in ("rust", "actions")]
+
+    def test_green_workflows_with_open_alerts_are_refused(self):
+        release.verify_ci_evidence(self.commit, self.runs, self.analyses, [])
+        with self.assertRaisesRegex(ValueError, "unresolved code-scanning"):
+            release.verify_ci_evidence(self.commit, self.runs, self.analyses, [{"number": 1}])
+
+    def test_exact_successful_unambiguous_main_workflows_required(self):
+        for field, value in (("head_sha", "b" * 40), ("event", "pull_request"),
+                             ("head_branch", "topic"), ("status", "in_progress"),
+                             ("conclusion", "failure")):
+            runs = copy.deepcopy(self.runs)
+            runs[0][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "exact-commit workflow"):
+                release.verify_ci_evidence(self.commit, runs, self.analyses, [])
+        for runs in (self.runs[:-1], self.runs + [self.runs[0]]):
+            with self.assertRaisesRegex(ValueError, "exact-commit workflow"):
+                release.verify_ci_evidence(self.commit, runs, self.analyses, [])
+
+    def test_missing_foreign_incomplete_and_duplicate_scans_are_refused(self):
+        for field, value in (("commit_sha", "b" * 40), ("ref", "refs/pull/1/merge"),
+                             ("category", "/language:other"), ("analysis_key", "foreign"),
+                             ("tool", {"name": "other"}), ("error", "incomplete extraction"),
+                             ("warning", "partial results")):
+            analyses = copy.deepcopy(self.analyses)
+            analyses[0][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "CodeQL analysis"):
+                release.verify_ci_evidence(self.commit, self.runs, analyses, [])
+        for analyses in (self.analyses[:-1], self.analyses + [self.analyses[0]]):
+            with self.assertRaisesRegex(ValueError, "CodeQL analysis"):
+                release.verify_ci_evidence(self.commit, self.runs, analyses, [])
+
+    def test_later_main_scan_cannot_supply_an_older_releases_alert_state(self):
+        other = dict(self.analyses[0], commit_sha="b" * 40)
+        release.verify_ci_evidence(self.commit, self.runs, self.analyses + [other], [])
+        with self.assertRaisesRegex(ValueError, "CodeQL analysis"):
+            release.verify_ci_evidence(self.commit, self.runs, [other] + self.analyses, [])
+
+    def test_evidence_command_checks_alerts_on_later_pages(self):
+        with tempfile.TemporaryDirectory(prefix="rds-ci-evidence-") as directory:
+            paths = [Path(directory) / name for name in ("checks", "analyses", "alerts")]
+            paths[0].write_text(json.dumps([{"workflow_runs": self.runs[:1]},
+                                           {"workflow_runs": self.runs[1:]}]))
+            paths[1].write_text(json.dumps([self.analyses[:1], self.analyses[1:]]))
+            paths[2].write_text("[[], []]")
+            argv = ["release.py", "evidence", "--version", VERSION,
+                    "--checks", str(paths[0]), "--analyses", str(paths[1]), "--alerts", str(paths[2])]
+            with patch.object(sys, "argv", argv), \
+                    patch.object(release, "contract", return_value=(self.commit, "1.98.1")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                release.main()
+                paths[2].write_text('[[], [{"number": 101}]]')
+                with self.assertRaisesRegex(ValueError, "unresolved code-scanning"):
+                    release.main()
 
 
 if __name__ == "__main__":
