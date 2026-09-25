@@ -109,6 +109,7 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
         let observer = policy::Observer {
             events,
             telemetry: delayed.clone(),
+            transport: None,
         };
         let policy = policy::connection_driver_observed(
             a.inner().weak_handle(),

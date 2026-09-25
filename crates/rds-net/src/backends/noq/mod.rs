@@ -125,7 +125,7 @@ pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<
 
     let mux = socket::Mux::new(sockets)?;
     let local_addrs = mux.local_addrs();
-    bind_with_socket(config, Box::new(mux), local_addrs, runtime, relay_handle).await
+    bind_with_mux(config, mux, local_addrs, runtime, relay_handle).await
 }
 
 /// Bind an endpoint on a caller-provided transport.
@@ -142,7 +142,49 @@ pub async fn bind_with_socket(
     runtime: Arc<dyn Runtime>,
     relay: Option<relay::RelayHandle>,
 ) -> anyhow::Result<Endpoint> {
+    bind_socket(config, socket, local_addrs, runtime, relay, None).await
+}
+
+/// Bind a mux with shared failure state wired into endpoint advertisements and
+/// connection policy. Generic `bind_with_socket` cannot introspect a trait object.
+pub async fn bind_with_mux(
+    config: crate::EndpointConfig,
+    mux: socket::Mux,
+    local_addrs: Vec<SocketAddr>,
+    runtime: Arc<dyn Runtime>,
+    relay: Option<relay::RelayHandle>,
+) -> anyhow::Result<Endpoint> {
+    let health = mux.health();
+    anyhow::ensure!(
+        local_addrs
+            .iter()
+            .all(|address| health.bound_available(*address)),
+        "mux advertisements must name active bound transports"
+    );
+    bind_socket(
+        config,
+        Box::new(mux),
+        local_addrs,
+        runtime,
+        relay,
+        Some(health),
+    )
+    .await
+}
+
+async fn bind_socket(
+    config: crate::EndpointConfig,
+    socket: Box<dyn noq::AsyncUdpSocket>,
+    local_addrs: Vec<SocketAddr>,
+    runtime: Arc<dyn Runtime>,
+    relay: Option<relay::RelayHandle>,
+    transport_health: Option<socket::Health>,
+) -> anyhow::Result<Endpoint> {
     config.validate_for(crate::Backend::Noq)?;
+    let local_addr = local_addrs
+        .first()
+        .copied()
+        .context("endpoint has no local address")?;
     anyhow::ensure!(
         config.relay_endpoint.is_some() == relay.is_some(),
         "injected transport relay configuration does not match its attached relay"
@@ -176,10 +218,6 @@ pub async fn bind_with_socket(
     )
     .context("create noq endpoint")?;
 
-    let local_addr = local_addrs
-        .first()
-        .copied()
-        .context("endpoint has no local address")?;
     debug!(?local_addrs, id = %secret_key.public(), "noq endpoint bound");
 
     Ok(Endpoint {
@@ -190,7 +228,8 @@ pub async fn bind_with_socket(
         client_configs: Arc::new(client_configs),
         relay,
         metrics: crate::metrics::Registry::default(),
-        drivers: Arc::new(drivers::Drivers::default()),
+        drivers: Arc::new(drivers::Drivers::new(transport_health.clone())),
+        transport_health,
     })
 }
 
@@ -249,6 +288,7 @@ pub struct Endpoint {
     /// here; the facade surfaces it via `Endpoint::metrics`.
     metrics: crate::metrics::Registry,
     drivers: Arc<drivers::Drivers>,
+    transport_health: Option<socket::Health>,
 }
 
 impl fmt::Debug for Endpoint {
@@ -288,6 +328,12 @@ impl Endpoint {
         &self.local_addrs
     }
 
+    /// Local child I/O failures for mux-backed endpoints. None for an opaque
+    /// injected socket; this metadata does not establish remote reachability.
+    pub fn transport_health(&self) -> Option<Vec<socket::ChildHealth>> {
+        self.transport_health.as_ref().map(socket::Health::snapshot)
+    }
+
     /// Advertised address: our identity plus the direct IP candidates we
     /// know about, plus the home relay when one is attached. Observed
     /// external addresses join this set once the candidate pipeline
@@ -295,12 +341,21 @@ impl Endpoint {
     pub fn addr(&self) -> EndpointAddr {
         let mut addrs = std::collections::BTreeSet::new();
         for local in &self.local_addrs {
-            if !relay::is_synthetic(*local) {
+            if !relay::is_synthetic(*local)
+                && self
+                    .transport_health
+                    .as_ref()
+                    .is_none_or(|health| health.bound_available(*local))
+            {
                 addrs.extend(advertised_addrs(*local));
             }
         }
         if let Some(handle) = &self.relay
             && handle.is_available()
+            && self
+                .transport_health
+                .as_ref()
+                .is_none_or(|health| health.path_available(relay::synthetic_for(&self.id), None))
         {
             addrs.insert(TransportAddr::Relay(handle.url.clone()));
         }
@@ -318,7 +373,18 @@ impl Endpoint {
             bail!("alpn {alpn:?} not configured on this endpoint");
         };
         let remote_id = target.id;
-        let candidates = policy::dial_candidates(&target, &self.local_addrs);
+        anyhow::ensure!(
+            self.transport_health
+                .as_ref()
+                .is_none_or(|health| !health.all_failed()),
+            "all endpoint transports failed"
+        );
+        let local = self
+            .transport_health
+            .as_ref()
+            .map(socket::Health::live_addrs)
+            .unwrap_or_else(|| self.local_addrs.clone());
+        let candidates = policy::dial_candidates(&target, &local);
         // A relayed path is usable when the peer's advertised relay is
         // the one we are attached to; it becomes the synthetic remote.
         // Reserve before dialing; cancellation releases to bounded grace.
@@ -390,7 +456,11 @@ impl Endpoint {
     /// we are attached to.
     fn relay_remote(&self, target: &EndpointAddr) -> Option<SocketAddr> {
         let handle = self.relay.as_ref()?;
-        if !handle.is_available() {
+        if !handle.is_available()
+            || self.transport_health.as_ref().is_some_and(|health| {
+                !health.path_available(relay::synthetic_for(&target.id), None)
+            })
+        {
             return None;
         }
         target.addrs.iter().find_map(|a| match a {
@@ -406,7 +476,13 @@ impl Endpoint {
     fn advertised_socket_addrs(&self) -> Vec<SocketAddr> {
         self.local_addrs
             .iter()
-            .filter(|l| !relay::is_synthetic(**l))
+            .filter(|l| {
+                !relay::is_synthetic(**l)
+                    && self
+                        .transport_health
+                        .as_ref()
+                        .is_none_or(|health| health.bound_available(**l))
+            })
             .flat_map(|l| advertised_addrs(*l))
             .filter_map(|a| match a {
                 TransportAddr::Ip(sock) => Some(sock),

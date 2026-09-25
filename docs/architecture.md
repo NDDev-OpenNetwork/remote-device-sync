@@ -66,6 +66,14 @@ Established event. An owned bounded queue retries temporary path-credit
 exhaustion and reconciles candidate advertisements. Path-event reconciliation,
 physical failover and complete path metrics remain open.
 
+The owned mux now [isolates local child failures](socket-failure-isolation.md).
+Terminal child errors wake shared health observers without stopping healthy
+siblings; packet-scoped UDP errors do not retire a socket. Policy withdraws
+failed advertisements and excludes failed observed paths, including a last
+path the engine refuses to close. Loss of every child explicitly closes held
+connections. Socket recreation, complete path reconciliation and physical
+interface/failover qualification remain open.
+
 Owned requests also [pin the exact requested ALPN](protocol-negotiation.md) in
 an immutable per-protocol TLS configuration. A missing protocol fails before
 service use; concurrent requests cannot replace each other's offer.

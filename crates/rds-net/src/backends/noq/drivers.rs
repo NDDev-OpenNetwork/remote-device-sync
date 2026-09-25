@@ -11,9 +11,17 @@ pub(super) struct Drivers {
     // Serialize task admission with shutdown: TaskTracker::close alone does
     // not prohibit new tasks, so it cannot provide this lifecycle boundary.
     admission: Mutex<()>,
+    transport: Option<super::socket::Health>,
 }
 
 impl Drivers {
+    pub fn new(transport: Option<super::socket::Health>) -> Self {
+        Self {
+            transport,
+            ..Self::default()
+        }
+    }
+
     pub fn spawn(
         &self,
         conn: &noq::Connection,
@@ -28,6 +36,14 @@ impl Drivers {
             conn.close(0u32.into(), b"endpoint closed");
             anyhow::bail!("endpoint closed before policy admission");
         }
+        if self
+            .transport
+            .as_ref()
+            .is_some_and(super::socket::Health::all_failed)
+        {
+            conn.close(0u32.into(), b"all local transports failed");
+            anyhow::bail!("all local transports failed before policy admission");
+        }
         let weak = conn.weak_handle();
         let shutdown = self.shutdown.clone();
         // Subscribe before spawning, preserving the validation-event boundary.
@@ -36,6 +52,7 @@ impl Drivers {
         let observer = super::policy::Observer {
             events,
             telemetry: telemetry.clone(),
+            transport: self.transport.clone(),
         };
         let guard = telemetry.guard();
         let policy = super::policy::connection_driver_observed(

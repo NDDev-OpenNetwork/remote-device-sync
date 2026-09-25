@@ -189,6 +189,7 @@ pub async fn connection_driver(
         Observer {
             events: path_events,
             telemetry,
+            transport: None,
         },
         metrics,
         local_addrs,
@@ -201,6 +202,7 @@ pub async fn connection_driver(
 pub(super) struct Observer {
     pub events: noq::PathEvents,
     pub telemetry: std::sync::Arc<super::telemetry::Telemetry>,
+    pub transport: Option<super::socket::Health>,
 }
 
 pub(super) async fn connection_driver_observed(
@@ -216,7 +218,10 @@ pub(super) async fn connection_driver_observed(
     let Observer {
         events: mut path_events,
         telemetry,
+        transport,
     } = observer;
+    let mut transport_changes = transport.as_ref().map(super::socket::Health::changes);
+    let mut local_addrs = local_addrs;
 
     // Register without retaining a strong Connection across any await.
     let Some(closed) = conn.upgrade().map(|owner| owner.on_closed()) else {
@@ -259,6 +264,10 @@ pub(super) async fn connection_driver_observed(
         let wake = pending.next_wake();
         tokio::select! {
             _ = &mut closed => break,
+            _ = std::future::poll_fn(|cx| match &mut transport_changes {
+                Some(changes) => changes.poll_changed(cx),
+                None => std::task::Poll::Pending,
+            }) => {},
             _ = &mut relay_unavailable, if !relay_down => { relay_down = true; },
             _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {},
             event = qnt.next(), if qnt_open => match event {
@@ -312,6 +321,31 @@ pub(super) async fn connection_driver_observed(
         let Some(owner) = conn.upgrade() else {
             break;
         };
+        if let Some(health) = &transport {
+            if health.all_failed() {
+                // Fatal I/O can stop the engine before it closes held handles.
+                // Policy owns an explicit close, independent of engine polling.
+                owner.close(0u32.into(), b"all local transports failed");
+                break;
+            }
+            local_addrs.retain(|address| {
+                if health.advertisement_available(*address) {
+                    return true;
+                }
+                let _ = owner.remove_nat_traversal_address(*address);
+                false
+            });
+            pending.retain(|remote| health.path_available(remote, None));
+            for weak in paths.values() {
+                if let Some(path) = weak.upgrade()
+                    && let Ok(network) = path.network_path()
+                    && !health.path_available(network.remote(), network.local_ip())
+                {
+                    let _ = path.set_status(noq::PathStatus::Backup);
+                    let _ = path.close();
+                }
+            }
+        }
         if relay_down {
             pending.retain(|address| !super::relay::is_synthetic(address));
             if !relay_withdrawn {
@@ -331,7 +365,13 @@ pub(super) async fn connection_driver_observed(
         // Lost/lagged path events cannot accumulate stale QNT history.
         qnt_paths.retain(|id| owner.path(*id).is_some());
         drop(owner);
-        reselect(&conn, &mut paths, &mut selected, relay_down);
+        reselect(
+            &conn,
+            &mut paths,
+            &mut selected,
+            relay_down,
+            transport.as_ref(),
+        );
         telemetry.publish(&paths, selected);
     }
 }
@@ -363,6 +403,7 @@ fn reselect(
     paths: &mut HashMap<noq::PathId, noq::WeakPathHandle>,
     selected: &mut Option<noq::PathId>,
     relay_down: bool,
+    transport: Option<&super::socket::Health>,
 ) {
     if !conn.is_alive() {
         return;
@@ -393,6 +434,14 @@ fn reselect(
         .iter()
         .filter_map(|(id, weak)| {
             let path = weak.upgrade()?;
+            // Noq may refuse to close its last path. A retained path handle
+            // must not turn a terminal local transport back into a selection.
+            if let Some(health) = transport {
+                let network = path.network_path().ok()?;
+                if !health.path_available(network.remote(), network.local_ip()) {
+                    return None;
+                }
+            }
             if relay_down && path.remote_address().is_ok_and(super::relay::is_synthetic) {
                 return None;
             }

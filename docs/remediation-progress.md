@@ -1031,3 +1031,22 @@ and [receipt](reports/rds-path-telemetry-20260925.md). Full validated inventory
 reconciliation, lossless retirement metrics, weak sampler ownership, generic
 socket failure isolation and platform/network qualification remain open. No
 wave closes and no throughput/latency improvement is claimed.
+
+## Local mux child failure isolation
+
+Real QUIC regressions reproduced shared-driver failure after one child socket
+error. Shared monotonic child health now isolates that failure, wakes independent
+send/receive/policy waiters, withdraws failed advertisements and excludes failed
+observed paths. Packet-scoped UDP errors preserve the socket; bounded retry
+prevents receive spinning. A further failing test fixed reselection of a failed
+last path that the engine refused to close. All-child loss closes held
+connections and releases policy tasks without requiring explicit endpoint close.
+
+Five poll-level tests and three real transport cases cover ownership, source
+routing, open-stream continuity, datagrams, QNT withdrawal, fresh connection
+admission and terminal cleanup. The transport cases passed 30 repetitions.
+Formatting, three Clippy lanes, **427 workspace** and **234 expanded
+all-feature tests** passed. See [contract](socket-failure-isolation.md) and
+[receipt](reports/rds-mux-isolation-20260925.md). Full validated inventory,
+socket/interface recreation, relay bootstrap/replacement, native macOS and
+physical-network qualification remain open. No wave closes.

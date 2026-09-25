@@ -6,12 +6,19 @@
 //! plain UDP sockets today; the WS2 relay transport plugs in as another
 //! child — to QUIC it is just another way to move datagrams.
 
+mod health;
+#[cfg(test)]
+mod tests;
+pub use health::{ChildHealth, Health};
+
 use std::fmt;
+use std::future::Future;
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use noq::AsyncUdpSocket;
 use noq::UdpSender;
@@ -28,6 +35,10 @@ pub struct Mux {
     /// noq uses the logical socket family for every connection. A mixed mux
     /// behaves like a dual-stack IPv6 socket at the engine boundary.
     ipv6: bool,
+    address: SocketAddr,
+    health: Health,
+    changes: health::Changes,
+    receive_retry: Vec<Option<Pin<Box<tokio::time::Sleep>>>>,
 }
 
 impl Mux {
@@ -40,23 +51,40 @@ impl Mux {
                 "mux needs at least one transport",
             ));
         }
-        let ipv6 = children
+        let addresses = children
             .iter()
-            .any(|c| c.local_addr().is_ok_and(|a| a.is_ipv6()));
+            .map(|child| child.local_addr())
+            .collect::<io::Result<Vec<_>>>()?;
+        let address = addresses
+            .iter()
+            .find(|address| address.is_ipv6())
+            .copied()
+            .unwrap_or(addresses[0]);
+        let health = Health::new(addresses);
         Ok(Self {
+            receive_retry: (0..children.len()).map(|_| None).collect(),
             children,
             recv_cursor: 0,
-            ipv6,
+            ipv6: address.is_ipv6(),
+            address,
+            changes: health.changes(),
+            health,
         })
     }
 
     /// Local addresses of all children — the endpoint's direct
     /// candidates across interfaces and families.
     pub fn local_addrs(&self) -> Vec<SocketAddr> {
-        self.children
-            .iter()
-            .filter_map(|c| c.local_addr().ok())
+        self.health
+            .snapshot()
+            .into_iter()
+            .map(|child| child.address)
             .collect()
+    }
+
+    /// Metadata-only child state; retaining it cannot keep transport I/O alive.
+    pub fn health(&self) -> Health {
+        self.health.clone()
     }
 }
 
@@ -71,11 +99,10 @@ impl fmt::Debug for Mux {
 impl AsyncUdpSocket for Mux {
     fn create_sender(&self) -> Pin<Box<dyn UdpSender>> {
         Box::pin(MuxSender {
-            senders: self
-                .children
-                .iter()
-                .map(|c| (c.local_addr().ok(), c.create_sender()))
-                .collect(),
+            senders: self.children.iter().map(|c| c.create_sender()).collect(),
+            health: self.health.clone(),
+            changes: self.health.changes(),
+            retry: None,
         })
     }
 
@@ -85,15 +112,31 @@ impl AsyncUdpSocket for Mux {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        if bufs.is_empty() || meta.is_empty() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mux receive needs buffers and metadata",
+            )));
+        }
+        let _ = self.changes.poll_changed(cx);
         let n = self.children.len();
+        let start = self.recv_cursor;
         for i in 0..n {
-            let idx = (self.recv_cursor + i) % n;
+            let idx = (start + i) % n;
+            if !self.health.alive(idx) {
+                continue;
+            }
+            if self.receive_retry[idx]
+                .as_mut()
+                .is_some_and(|delay| delay.as_mut().poll(cx).is_pending())
+            {
+                continue;
+            }
+            self.receive_retry[idx] = None;
             match self.children[idx].poll_recv(cx, bufs, meta) {
-                Poll::Ready(out) => {
+                Poll::Ready(Ok(count)) => {
                     self.recv_cursor = (idx + 1) % n;
-                    if self.ipv6
-                        && let Ok(count) = out
-                    {
+                    if self.ipv6 {
                         // Match noq's outgoing IPv4-mapped representation;
                         // otherwise one path acquires inconsistent four-tuples.
                         for received in meta.iter_mut().take(count) {
@@ -107,25 +150,32 @@ impl AsyncUdpSocket for Mux {
                             });
                         }
                     }
-                    return Poll::Ready(out);
+                    return Poll::Ready(Ok(count));
+                }
+                Poll::Ready(Err(error)) => {
+                    self.health.error(idx, &error, true);
+                    if self.health.alive(idx) {
+                        // Repeated ICMP/Interrupted/pressure errors must not
+                        // spin the receiver or starve the other transports.
+                        let mut delay = Box::pin(tokio::time::sleep(Duration::from_millis(10)));
+                        let _ = delay.as_mut().poll(cx);
+                        self.receive_retry[idx] = Some(delay);
+                    }
                 }
                 Poll::Pending => {}
             }
         }
-        Poll::Pending
+        if self.health.all_failed() {
+            Poll::Ready(Err(health::exhausted()))
+        } else {
+            Poll::Pending
+        }
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        if self.ipv6 {
-            for child in &self.children {
-                if let Ok(addr) = child.local_addr()
-                    && addr.is_ipv6()
-                {
-                    return Ok(addr);
-                }
-            }
-        }
-        self.children[0].local_addr()
+        // QUIC's logical socket identity is immutable after bind, even when
+        // the transport that supplied it is retired.
+        Ok(self.address)
     }
 
     fn max_receive_segments(&self) -> NonZeroUsize {
@@ -141,45 +191,13 @@ impl AsyncUdpSocket for Mux {
     }
 }
 
-type ChildSender = (Option<SocketAddr>, Pin<Box<dyn UdpSender>>);
-
-/// One [`UdpSender`] per child; `poll_send` picks the child that can
-/// legally source this transmit.
+/// One sender per child and one health subscription per logical sender.
 #[derive(Debug)]
 struct MuxSender {
-    senders: Vec<ChildSender>,
-}
-
-impl MuxSender {
-    /// Child index able to carry `transmit`: synthetic destinations go
-    /// to the relay child, an explicit `src_ip` wins, else the child
-    /// whose family matches the destination.
-    fn pick(&self, transmit: &Transmit<'_>) -> Option<usize> {
-        // Synthetic relay-mapped destinations only resolve through the
-        // tunnel socket — the one whose own local address is synthetic.
-        if relay::is_synthetic(transmit.destination) {
-            return self
-                .senders
-                .iter()
-                .position(|(addr, _)| addr.is_some_and(relay::is_synthetic));
-        }
-        if let Some(src) = transmit.src_ip
-            && let Some(i) = self
-                .senders
-                .iter()
-                .position(|(addr, _)| addr.is_some_and(|a| a.ip() == src))
-        {
-            return Some(i);
-        }
-        self.senders.iter().position(|(addr, _)| {
-            // The relay child's synthetic local is IPv4 — exclude it
-            // from the family fallback or every v4 transmit could
-            // land in the tunnel.
-            addr.is_some_and(|a| {
-                !relay::is_synthetic(a) && a.is_ipv4() == transmit.destination.is_ipv4()
-            })
-        })
-    }
+    senders: Vec<Pin<Box<dyn UdpSender>>>,
+    health: Health,
+    changes: health::Changes,
+    retry: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl UdpSender for MuxSender {
@@ -198,7 +216,11 @@ impl UdpSender for MuxSender {
         }
         normalized.src_ip = normalized.src_ip.map(|ip| ip.to_canonical());
         let transmit = &normalized;
-        let Some(idx) = self.pick(transmit) else {
+        let _ = self.changes.poll_changed(cx);
+        if self.health.all_failed() {
+            return Poll::Ready(Err(health::exhausted()));
+        }
+        let Some(idx) = self.health.route(transmit.destination, transmit.src_ip) else {
             // noq can emit QNT probes itself, before the application receives
             // their candidates. Lack of a transport is packet loss on that
             // candidate, not an I/O failure of every healthy connection/path.
@@ -206,14 +228,48 @@ impl UdpSender for MuxSender {
             tracing::debug!(dst = %transmit.destination, "discard datagram without a local transport");
             return Poll::Ready(Ok(()));
         };
+        if !self.health.alive(idx) {
+            self.retry = None;
+            return Poll::Ready(Ok(())); // dead route: QUIC handles packet loss
+        }
+        if self
+            .retry
+            .as_mut()
+            .is_some_and(|delay| delay.as_mut().poll(cx).is_pending())
+        {
+            return Poll::Pending;
+        }
+        self.retry = None;
         tracing::trace!(dst = %transmit.destination, child = idx, "mux send");
-        self.senders[idx].1.as_mut().poll_send(transmit, cx)
+        match self.senders[idx].as_mut().poll_send(transmit, cx) {
+            Poll::Ready(Err(error)) => {
+                self.health.error(idx, &error, false);
+                if self.health.all_failed() {
+                    return Poll::Ready(Err(health::exhausted()));
+                }
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                ) {
+                    // Preserve the caller's packet and register a bounded
+                    // retry even if a custom child returns WouldBlock without
+                    // providing the trait's required readiness notification.
+                    let mut delay = Box::pin(tokio::time::sleep(Duration::from_millis(1)));
+                    let _ = delay.as_mut().poll(cx);
+                    self.retry = Some(delay);
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+            result => result,
+        }
     }
 
     fn max_transmit_segments(&self) -> NonZeroUsize {
         self.senders
             .iter()
-            .map(|(_, s)| s.max_transmit_segments())
+            .map(|s| s.max_transmit_segments())
             .min()
             .unwrap_or(NonZeroUsize::MIN)
     }
