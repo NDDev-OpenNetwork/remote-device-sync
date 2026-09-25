@@ -12,7 +12,7 @@ service changes automatically when a release is published.
 |---|---|
 | `remote-device-sync-0.1.0-x86_64-unknown-linux-gnu.tar.gz` | Native `rds`, `rds-agent`, `rds-relay`, `rds-server`; Ubuntu 24.04 x86_64 |
 | `remote-device-sync-0.1.0-aarch64-apple-darwin.tar.gz` | Same four native programs; macOS 15 arm64 |
-| `remote-device-sync-0.1.0-source.tar.gz` | Tracked source, lockfile, docs, deployment and `ops/observability` configuration |
+| `remote-device-sync-0.1.0-source.tar.gz` | Tracked source and shared test fixtures, lockfile, docs, deployment and `ops/observability` configuration |
 | `source-sbom.spdx.json` | Syft SPDX inventory of the **source archive**; not an OS/runtime or complete binary SBOM |
 | `release-notes.md` | Compatibility and readiness notes |
 | `release-manifest.json` | Source commit/tag object, target list, asset sizes and SHA-256 digests |

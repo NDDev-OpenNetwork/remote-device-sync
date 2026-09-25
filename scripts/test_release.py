@@ -119,13 +119,15 @@ class ReleaseContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tag/source mismatch"):
             release.contract(VERSION, tagged=True)
 
-    def test_source_includes_ops_and_excludes_untracked_files(self):
+    def test_source_includes_ops_and_shared_tests_but_no_untracked_files(self):
         Path("ops/untracked-secret").write_text("not a real secret")
         out = self.root / "source"
         release.source_bundle(VERSION, out, tagged=True)
         with tarfile.open(next(out.glob("*.tar.gz"))) as archive:
             names = archive.getnames()
         self.assertIn(f"remote-device-sync-{VERSION}/ops/fixture", names)
+        self.assertIn(f"remote-device-sync-{VERSION}/tests/fixture", names)
+        self.assertIn(f"remote-device-sync-{VERSION}/examples/fixture", names)
         self.assertFalse(any("untracked-secret" in n for n in names))
 
     def test_source_symlink_refused(self):

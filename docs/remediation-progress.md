@@ -1438,3 +1438,13 @@ sends another request after response EOF, requiring bounded slot release and
 exactly one source invocation. No extra request is parsed and header/body
 admission limits are unchanged. Final native CI remains required after this
 runtime change.
+
+The subsequent macOS run passed the HTTP teardown checks, but exposed another
+shared CLI scratch factory without a sequence and an over-specific mux fixture
+assumption. The shared CLI factory now uses an atomic sequence too. The mux
+fixture waits for both policies to observe a validated sibling between the
+actual IPv6 socket addresses, allowing QNT's concurrent path creation; it also
+holds the actual selected sibling for the final-socket fault. Selection, stream
+continuity, advertisement withdrawal and shutdown assertions retain their
+deadlines. The source archive now includes root `tests/` and `examples/`, required
+by the crates' compile-time fixture includes; the archive contract checks this.

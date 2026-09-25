@@ -212,6 +212,15 @@ async fn exercise(receive: bool) {
             .await
             .unwrap();
         let client = owned::bind_endpoint(config()).await.unwrap();
+        let client_secondary_addr = client
+            .addr()
+            .addrs
+            .into_iter()
+            .find_map(|address| match address {
+                rds_net::TransportAddr::Ip(address) if address.is_ipv6() => Some(address),
+                _ => None,
+            })
+            .expect("fixture requires the client's IPv6 socket");
         let (a, b) = tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
             server.accept().await.unwrap().await
         });
@@ -233,19 +242,25 @@ async fn exercise(receive: bool) {
         })
         .await
         .unwrap();
-        // Wait for the receiving policy to observe the validated sibling too.
+        // QNT can concurrently open the same network route under another
+        // PathId. Both policies must observe a validated IPv6 sibling, not
+        // necessarily the particular path returned by our explicit open.
         let facade = rds_net::Connection::from(b.clone());
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !facade
-                .path_stats()
-                .iter()
-                .any(|path| path.path_id == extra.id().to_string().parse::<u64>().unwrap())
+            while observed_path_to(&a, secondary_addr, false).is_none()
+                || observed_path_to(&b, client_secondary_addr, false).is_none()
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .unwrap();
+        .unwrap_or_else(|_| {
+            panic!(
+                "fixture did not validate the sibling: client={:?}; server={:?}",
+                path_details(&a),
+                path_details(&b)
+            )
+        });
         b.send_datagram(b"before fault".to_vec().into()).unwrap();
         assert_eq!(&a.read_datagram().await.unwrap()[..], b"before fault");
         let (mut stream_send, mut stream_recv) = a.open_bi().await.unwrap();
@@ -284,10 +299,8 @@ async fn exercise(receive: bool) {
             // QNT can concurrently establish another path to the same healthy
             // socket. Selection may legitimately differ between the peers;
             // require a live selected route, not this particular PathId.
-            while !selected_remote_is(&a, secondary_addr)
-                || facade
-                    .current_path_stats()
-                    .is_none_or(|path| path.path_id == 0)
+            while observed_path_to(&a, secondary_addr, true).is_none()
+                || observed_path_to(&b, client_secondary_addr, true).is_none()
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -323,11 +336,7 @@ async fn exercise(receive: bool) {
         );
         assert_eq!(health.snapshot()[0].failed, Some(io::ErrorKind::BrokenPipe));
         assert!(health.snapshot()[1].failed.is_none());
-        assert!(
-            facade
-                .current_path_stats()
-                .is_some_and(|path| path.path_id != 0)
-        );
+        assert!(observed_path_to(&b, client_secondary_addr, true).is_some());
         tokio::time::timeout(Duration::from_secs(2), async {
             while a
                 .inner()
@@ -357,7 +366,7 @@ async fn exercise(receive: bool) {
         );
         // Loss of the last socket must close held Connection/Path/Stream I/O
         // without waiting for an explicit endpoint.close or application drop.
-        let held_path = b.inner().path(extra.id()).unwrap();
+        let held_path = observed_path_to(&b, client_secondary_addr, true).unwrap();
         secondary_fault.enable();
         held_path.ping().unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -385,15 +394,22 @@ async fn exercise(receive: bool) {
     .expect("child-failure fixture stalled");
 }
 
-fn selected_remote_is(conn: &owned::Connection, remote: SocketAddr) -> bool {
+fn observed_path_to(
+    conn: &owned::Connection,
+    remote: SocketAddr,
+    selected_only: bool,
+) -> Option<noq::Path> {
     rds_net::Connection::from(conn.clone())
-        .current_path_stats()
-        .and_then(|stats| {
+        .path_stats()
+        .into_iter()
+        .filter(|stats| !selected_only || stats.selected)
+        .filter_map(|stats| {
             conn.inner()
                 .path(noq::PathId::from(u32::try_from(stats.path_id).unwrap()))
         })
-        .is_some_and(|path| {
-            path.status().ok() == Some(noq::PathStatus::Available)
+        .find(|path| {
+            path.status()
+                .is_ok_and(|status| !selected_only || status == noq::PathStatus::Available)
                 && path.remote_address().ok() == Some(remote)
         })
 }

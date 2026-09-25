@@ -23,7 +23,7 @@ BINARIES = ("rds", "rds-agent", "rds-relay", "rds-server")
 FEATURES = "rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay"
 SOURCE_PATHS = ("README.md", "LICENSE", "VERSION", "CHANGELOG.md", "AGENTS.md",
                 "deny.toml", "rust-toolchain.toml", "Cargo.toml", "Cargo.lock",
-                "crates", "deploy", "docs", "scripts", ".github", "ops")
+                "crates", "tests", "examples", "deploy", "docs", "scripts", ".github", "ops")
 
 
 def run(*args):
