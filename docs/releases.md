@@ -98,7 +98,11 @@ qualified fallback in this release.
 1. An annotated numeric tag matching `VERSION`, workspace/lockfile versions,
    changelog and clean checked-out source; sign the tag when creating it.
 2. That exact source commit on `main`, with successful default-branch `ci`,
-   `supply-chain` and `codeql` runs. No inherited evidence from a predecessor.
+   `supply-chain` and `codeql` runs, completed Rust/Actions CodeQL analyses for
+   that same revision, and no unresolved code-scanning alerts. All API pages
+   are checked. A successful scanner workflow alone does not qualify its
+   findings; individually reviewed test-only/false-positive dispositions remain
+   recorded in GitHub. No inherited evidence from a predecessor or later fix.
 3. Successful native builds on both hosts, executable version smoke checks,
    exact archive membership, source reconstruction, digests and SPDX validation.
 4. The `release` environment's configured protections, official artifact
