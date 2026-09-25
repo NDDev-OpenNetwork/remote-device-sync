@@ -62,3 +62,36 @@ server shutdown remain W2.5 work. The notice group limit is per broadcast, not a
 global limit across every concurrent detach. The two registration deadlines are
 not a separate long-stall campaign. Native macOS and deployed service acceptance
 remain open. See the [receipt](reports/rds-relay-control-20260925.md).
+
+## Relay-link failure boundary
+
+Relay sends treat a closed tunnel, unavailable datagram support, an oversized
+packet or an unknown synthetic destination as loss on that relay route. They
+consume/drop that packet without returning a logical-socket I/O error to the
+QUIC connection driver. Other direct paths on the connection remain usable;
+QUIC retains responsibility for loss detection and expiry of the failed path.
+Non-relay destinations passed directly to RelaySender remain programming errors.
+Generic UDP child I/O errors have not been reclassified by this change.
+
+`RelayHandle::is_available()` reports an open authenticated local tunnel with
+negotiated datagram support. It uses only a weak connection handle and holds no
+strong I/O reference across awaits. Drain grace can be both draining and available;
+actual tunnel closure or socket destruction makes it unavailable. This is local
+link state, not proof that a remote peer is attached or reachable.
+
+A real multipath regression first validates an explicitly opened relay path,
+closes the relay and observes both tunnel handles become unavailable. It then
+pings the failed path while exchanging 25 datagram requests and replies on the
+existing direct connection, followed by bounded endpoint shutdown. Before the
+fix, traffic and cleanup both exceeded their deadlines. Another regression
+proves an unknown relay mapping does not break direct I/O and that adding the
+mapping later allows the pending path to validate. The unknown-mapping branch
+also failed with its original error-return behavior.
+
+This does not implement warm relay replacement, relay-only session continuity,
+generic socket failure isolation or all-path failure recovery. A QUIC connection
+that has no working route still depends on transport timeout; dropped unreliable
+datagrams are not replayed by the application. Peer table size/collision handling,
+receive-queue bounds, automatic mapping lifecycle and full server task ownership
+remain open. These loopback tests do not establish physical network or service
+interruption budgets.

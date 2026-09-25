@@ -104,12 +104,23 @@ pub struct RelayHandle {
     peers: Arc<Mutex<HashMap<SocketAddr, EndpointId>>>,
     /// Set when drain is observed; the existing tunnel stays usable through grace.
     drained: Arc<AtomicBool>,
+    /// Observability must not keep the socket's helper connection alive.
+    connection: noq::WeakConnectionHandle,
 }
 
 impl RelayHandle {
     /// Teach the socket that `id` is reachable as its synthetic addr.
     pub fn register_peer(&self, id: EndpointId) {
         self.peers.lock().unwrap().insert(synthetic_for(&id), id);
+    }
+
+    /// Whether the local authenticated tunnel is open and supports datagrams.
+    /// This does not promise that any particular peer is attached or reachable.
+    /// Drain remains available during its usable grace period.
+    pub fn is_available(&self) -> bool {
+        self.connection
+            .upgrade()
+            .is_some_and(|conn| conn.close_reason().is_none() && conn.max_datagram_size().is_some())
     }
 
     /// Whether the relay announced it is draining.
@@ -262,6 +273,7 @@ impl RelaySocket {
                 .ok_or_else(|| anyhow::anyhow!("relay addr has no IP candidate"))?,
             peers: peers.clone(),
             drained: drained.clone(),
+            connection: conn.inner().weak_handle(),
         };
         Ok((
             Self {
@@ -380,11 +392,10 @@ impl UdpSender for RelaySender {
             )));
         }
         let Some(id) = self.peers.lock().unwrap().get(&dst).copied() else {
-            warn!(%dst, "no endpoint registered for synthetic address");
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                format!("no endpoint registered for {dst}"),
-            )));
+            // An unknown destination is loss on this candidate. It must not
+            // terminate the QUIC connection driver serving healthy direct paths.
+            tracing::debug!(%dst, "relay drop: peer mapping unavailable");
+            return Poll::Ready(Ok(()));
         };
         let frame = relay::encode_forward(id.as_bytes(), transmit.contents);
         match self.conn.send_datagram(frame) {
@@ -397,12 +408,15 @@ impl UdpSender for RelaySender {
                 tracing::trace!(%dst, len = transmit.contents.len(), "relay drop: exceeds tunnel MTU");
                 Poll::Ready(Ok(()))
             }
-            Err(e) => {
-                warn!(error = %e, "relay datagram send failed");
-                Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    format!("relay datagram send failed: {e}"),
-                )))
+            Err(noq::SendDatagramError::ConnectionLost(error)) => {
+                // This child link is down; the logical socket and other paths
+                // remain usable. QUIC observes loss and times out this path.
+                tracing::debug!(%dst, %error, "relay drop: tunnel closed");
+                Poll::Ready(Ok(()))
+            }
+            Err(noq::SendDatagramError::UnsupportedByPeer | noq::SendDatagramError::Disabled) => {
+                tracing::debug!(%dst, "relay drop: tunnel datagrams unavailable");
+                Poll::Ready(Ok(()))
             }
         }
     }

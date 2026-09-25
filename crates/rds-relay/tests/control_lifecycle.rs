@@ -56,7 +56,7 @@ async fn dropping_socket_releases_its_relay_attachment() {
     )
     .await
     .unwrap();
-    let (socket, _handle) = RelaySocket::connect(
+    let (socket, handle) = RelaySocket::connect(
         relay.endpoint_addr(),
         SecretKey::from_bytes(&[78; 32]),
         "127.0.0.1:0".parse().unwrap(),
@@ -70,7 +70,9 @@ async fn dropping_socket_releases_its_relay_attachment() {
     })
     .await
     .unwrap();
+    assert!(handle.is_available());
     drop(socket);
+    assert!(!handle.is_available());
     let detached = tokio::time::timeout(Duration::from_secs(1), async {
         while relay.endpoints() != 0 {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -208,6 +210,10 @@ async fn drain_grace_keeps_actual_socket_datagrams_flowing() {
             while !ah.drained() || !bh.drained() {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
+            assert!(
+                ah.is_available() && bh.is_available(),
+                "Drain grace must stay available"
+            );
             let mut sender = a.create_sender();
             let transmit = Transmit {
                 destination: synthetic_for(&bid),

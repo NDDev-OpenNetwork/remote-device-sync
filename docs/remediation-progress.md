@@ -30,7 +30,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
-| W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Path-event resynchronization, complete metrics and transport-failure isolation remain open. |
+| W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link send failure and unknown mapping are now route loss; path-event resynchronization, complete metrics and generic child failure isolation remain open. |
 
 ## Authorization change
 
@@ -824,3 +824,21 @@ tests** passed. See [contract](candidate-dialing.md) and
 changed. Relay failure isolation is next; global/progressive dialing, lost path
 events, complete metrics and physical/native-platform qualification stay open.
 No remediation wave is closed.
+
+## Relay route loss preserves direct traffic
+
+Two failing-before real cases showed that a closed relay tunnel or unknown relay
+peer mapping could disrupt a connection with a healthy direct path. RelaySender
+now treats these conditions as loss on the relay route; a weak diagnostic handle
+reports local tunnel availability. The failure regression checks 25 direct
+roundtrips and bounded shutdown after actual relay closure. A second test adds
+a missing mapping later and validates that same pending path. The focused relay
+suite passed 16 tests.
+
+Final formatting, three Clippy lanes, **356 workspace tests**, **149
+all-feature network/agent/CLI/relay tests** and **35 isolated network/relay
+tests** passed. See [contract](relay-control.md) and
+[receipt](reports/rds-relay-failure-20260925.md). No dependency or wire version
+changed. Generic child I/O failure/shutdown, peer-table and queue bounds, warm
+replacement, complete metrics and physical/native-platform qualification remain
+open. No remediation wave is closed.

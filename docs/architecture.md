@@ -68,7 +68,9 @@ relay bootstrap, scoped advertisements and complete path-event recovery remain o
 Owned relay client/server share [bounded control framing](relay-control.md).
 Drain and PeerGone use the same exact codec as registration and liveness. Drain
 receipt preserves usable grace-period traffic, and stale attachment teardown
-cannot invalidate a replacement. Warm relay migration remains unqualified.
+cannot invalidate a replacement. Relay-link send failures and missing peer mappings
+are route loss rather than fatal I/O for the shared QUIC connection; a weak handle
+reports local tunnel availability. Warm relay migration remains unqualified.
 
 ## Research summary
 

@@ -43,8 +43,9 @@ path opens. Synthetic addresses are not accepted
 as public direct candidates. The QUIC engine can also emit QNT probes internally,
 before policy sees an address. When no child can carry one of those datagrams,
 the mux drops it as an unroutable candidate instead of returning an I/O error
-that kills healthy paths. Actual child I/O failures retain their error behavior;
-complete failure isolation between transports remains W3.6 work.
+that kills healthy paths. Owned-relay link failures and unknown relay destinations
+now have the same [route-loss boundary](relay-control.md). Ordinary UDP child I/O
+errors retain their behavior; complete failure isolation remains W3.6 work.
 
 ## Qualification
 
