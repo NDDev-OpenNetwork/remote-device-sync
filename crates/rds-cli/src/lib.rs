@@ -17,10 +17,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Open a connection to `target` and return it.
 pub async fn connect(endpoint: &Endpoint, target: EndpointAddr) -> anyhow::Result<Connection> {
-    tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(target, rds_core::ALPN))
-        .await
-        .context("connect timed out")?
-        .context("connect to peer")
+    rds_observe::observe(rds_observe::Operation::Connect, async {
+        tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(target, rds_core::ALPN))
+            .await
+            .context("connect timed out")?
+            .context("connect to peer")
+    })
+    .await
 }
 
 /// Connect and present `grant` on the connection's first stream —

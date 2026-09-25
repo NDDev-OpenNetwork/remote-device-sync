@@ -6,6 +6,11 @@ acceptance criteria and remaining product work. This original WS0–WS8 plan
 and its dated reports are historical requirements/evidence, not a claim that
 all current behavior satisfies them.
 
+The owner's 2026-09-25 observability addition is tracked in the
+[observability contract and O1–O6 execution sequence](observability.md), under
+remediation W10.1/W10.2. It uses shared Rust process telemetry with replaceable
+Vector/OpenObserve infrastructure and does not close historical C7 by itself.
+
 The detailed engineering plan. `docs/roadmap.md` holds milestones and
 gates; this file holds the workstreams: tasks, file-level scope, API
 sketches, tests, exit criteria. Every fact about external crates/drafts

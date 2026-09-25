@@ -209,6 +209,11 @@ Encoding is the latency budget line item that matters: hardware encoders
 Dependencies point strictly downward; no cycles, no sideways deps at the
 same layer. `docs/conventions.md` holds the enforceable rules.
 
+`rds-observe` is a separate infrastructure leaf with no product-crate
+dependencies. Agent/client instrumentation and all executable entrypoints
+depend on it; `rds-core` remains free of I/O/runtime dependencies. The logging
+adapter never owns a connection or calls Vector/OpenObserve directly.
+
 ```text
                      rds-core           types, framing, tokens — leaf
                        │  │
@@ -491,6 +496,14 @@ changed with this filesystem adapter.
   explicitly instead of `unreachable!`.
 
 ### Observability
+
+All executable entrypoints now share [bounded process telemetry](observability.md)
+through `rds-observe`: stderr text for private local debugging or an allowlisted
+schema-1 JSON export. Random process IDs and numeric agent connection IDs
+correlate events without raw peer keys. Vector/OpenObserve configuration,
+log-derived metrics and disabled alert definitions accompany an opt-in real
+pipeline regression. This does not replace source counters or establish a
+secured admin surface, distributed traces, support bundles or estate rollout.
 
 `rds-net::metrics` gives every endpoint a [`Registry`] of atomic
 counters; a per-connection `ConnSampler` diffs cumulative

@@ -1,0 +1,48 @@
+# Development qualification only; production belongs to private estate config.
+# Supply images.env plus a private --env-file. No fixed container names/ports.
+services:
+  openobserve:
+    image: ${RDS_OPENOBSERVE_IMAGE:?use images.env}
+    environment:
+      ZO_ROOT_USER_EMAIL: ${RDS_OO_USER:?required}
+      ZO_ROOT_USER_PASSWORD: ${RDS_OO_PASSWORD:?required}
+      ZO_TELEMETRY: "false"
+      ZO_LOCAL_MODE: "true"
+      ZO_DATA_DIR: /data
+      ZO_HTTP_WORKER_NUM: "2"
+      ZO_COMPACT_DATA_RETENTION_DAYS: "7"
+    ports:
+      - "127.0.0.1::5080"
+    volumes:
+      - observe-data:/data
+    mem_limit: 2g
+    cpus: 2
+    networks: [telemetry, management]
+  vector:
+    image: ${RDS_VECTOR_IMAGE:?use images.env}
+    command: ["--config", "/etc/vector/vector.toml", "--dangerously-allow-env-var-interpolation"]
+    environment:
+      RDS_VECTOR_STATE: /var/lib/vector
+      RDS_VECTOR_SECRETS: /run/secrets/rds
+      RDS_LOG_GLOB: /logs/*.jsonl
+      RDS_OBSERVE_NODE: fixture
+      RDS_OO_URL: http://openobserve:5080
+      RDS_OO_ORG: default
+    volumes:
+      - ./vector.toml:/etc/vector/vector.toml:ro
+      - ${RDS_OBSERVE_LOG_DIR:?private fixture log directory}:/logs:ro
+      - ${RDS_VECTOR_SECRET_DIR:?private credential directory}:/run/secrets/rds:ro
+      - vector-data:/var/lib/vector
+    depends_on: [openobserve]
+    mem_limit: 512m
+    cpus: 1
+    networks: [telemetry]
+networks:
+  telemetry:
+    internal: true
+  # Docker does not publish ports on an internal-only network. Only the backend
+  # joins this management bridge; its published port is bound to host loopback.
+  management: {}
+volumes:
+  observe-data:
+  vector-data:

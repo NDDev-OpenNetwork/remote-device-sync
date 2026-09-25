@@ -31,6 +31,10 @@ Rules every change follows. CI enforces what it can; the rest is review.
   impossible-invariant paths (commented).
 - Tokio is the only runtime. No `std::thread` for core loops;
   `spawn_blocking` for sync FFI (capture backends, codecs).
+  `rds-observe` isolates synchronous stderr in one bounded output adapter
+  thread, outside service/transport loops; a stuck OS write must not hold
+  Tokio runtime shutdown. See [observability](observability.md) for the
+  bounded wait and explicit possible record loss.
 - No unbounded queues on latency paths: bounded `mpsc`, drop-stale
   policy at the producer, never let backlog accumulate.
 

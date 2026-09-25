@@ -1,0 +1,25 @@
+[package]
+name = "rds-observe"
+description = "Bounded, privacy-preserving process telemetry for RDS"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# Existing lockfile dependency; used only by the opt-in localhost integration.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+data-encoding.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+# Only the ignored pipeline regression loads this fixture receiver. It has no
+# host port and receives synthetic alert notifications on an internal network.
+services:
+  openobserve:
+    environment:
+      # Official narrow opt-in for our owned loopback-only test receiver.
+      # General private/cloud-metadata SSRF protection stays enabled.
+      ZO_SSRF_ALLOW_LOOPBACK: "true"
+  receiver:
+    image: ${RDS_VECTOR_IMAGE:?use images.env}
+    command: ["--config", "/etc/vector/smoke.toml"]
+    network_mode: "service:openobserve"
+    volumes:
+      - ./vector-smoke.toml:/etc/vector/smoke.toml:ro
+    mem_limit: 256m
+    cpus: 1

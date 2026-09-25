@@ -1,0 +1,500 @@
+//! Shared process logging. JSON is an allowlisted export schema; text is local
+//! debugging output and may contain private diagnostics. Neither output is an
+//! audit journal. See `docs/observability.md` for loss and shutdown semantics.
+
+use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id};
+use tracing::{Event as TraceEvent, Subscriber};
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{EnvFilter, Layer};
+
+mod output;
+use output::{Buffer, Output};
+pub use output::{Health, Shutdown};
+
+const TARGET: &str = "rds_telemetry";
+/// Each queued record, including its newline, is at most this size.
+pub const MAX_RECORD_BYTES: usize = 4096;
+/// At most 4 MiB of record payload plus channel/allocator overhead.
+pub const QUEUE_RECORDS: usize = 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    /// Private, local debugging; free-form fields are retained.
+    Text,
+    /// Export-safe metadata and typed events. No free-form fields or messages.
+    Json,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Service {
+    Agent,
+    Cli,
+    Server,
+    Relay,
+    Bench,
+}
+
+impl Service {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Agent => "rds-agent",
+            Self::Cli => "rds-cli",
+            Self::Server => "rds-server",
+            Self::Relay => "rds-relay",
+            Self::Bench => "rds-bench",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {
+    #[error("RDS_LOG_FORMAT must be text or json")]
+    Format,
+    #[error("RUST_LOG must be valid Unicode and a valid tracing filter")]
+    Filter,
+    #[error("could not start the logging output worker")]
+    Worker(#[source] std::io::Error),
+    #[error("a global tracing subscriber is already installed")]
+    Subscriber,
+}
+
+/// Explicit configuration is also usable by embedders without environment
+/// mutation. Invalid filters fail before product initialization.
+pub struct Config {
+    format: Format,
+    filter: EnvFilter,
+}
+
+impl Config {
+    pub fn new(format: Format, filter: &str) -> Result<Self, InitError> {
+        Ok(Self {
+            format,
+            filter: EnvFilter::builder()
+                .with_regex(false)
+                .parse(filter)
+                .map_err(|_| InitError::Filter)?,
+        })
+    }
+
+    pub fn from_env(default_filter: &str) -> Result<Self, InitError> {
+        let format = match std::env::var("RDS_LOG_FORMAT") {
+            Ok(s) if s == "json" => Format::Json,
+            Ok(s) if s == "text" => Format::Text,
+            Err(std::env::VarError::NotPresent) => Format::Text,
+            _ => return Err(InitError::Format),
+        };
+        let filter = match std::env::var("RUST_LOG") {
+            Ok(s) => s,
+            Err(std::env::VarError::NotPresent) => default_filter.to_owned(),
+            _ => return Err(InitError::Filter),
+        };
+        Self::new(format, &filter)
+    }
+}
+
+/// Own this in main until product tasks have stopped. Explicit `shutdown`
+/// reports whether stderr drained; Drop performs the same bounded wait.
+pub struct Telemetry {
+    output: Output,
+    format: Format,
+}
+
+pub fn init(service: Service, default_filter: &str) -> Result<Telemetry, InitError> {
+    install(service, Config::from_env(default_filter)?)
+}
+
+/// Common binary entrypoint after CLI parsing. An initialized process never
+/// hands its error back to Rust's synchronous stderr Termination renderer.
+pub async fn run_main<E: std::fmt::Display>(
+    service: Service,
+    default_filter: &str,
+    future: impl Future<Output = Result<(), E>>,
+) -> std::process::ExitCode {
+    let telemetry = match init(service, default_filter) {
+        Ok(telemetry) => telemetry,
+        Err(error) => {
+            // Pre-initialization failure; no product work has been polled.
+            eprintln!("could not initialize RDS logging: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let result = telemetry.run(future).await;
+    telemetry.finish(result)
+}
+
+pub fn install(service: Service, config: Config) -> Result<Telemetry, InitError> {
+    let (subscriber, telemetry) = subscriber(service, config, std::io::stderr())?;
+    tracing::subscriber::set_global_default(subscriber).map_err(|_| InitError::Subscriber)?;
+    Ok(telemetry)
+}
+
+fn subscriber<W: std::io::Write + Send + 'static>(
+    service: Service,
+    config: Config,
+    writer: W,
+) -> Result<(impl Subscriber + Send + Sync, Telemetry), InitError> {
+    let output = Output::new(writer, QUEUE_RECORDS).map_err(InitError::Worker)?;
+    let layer = RecordLayer {
+        shared: Arc::new(Shared {
+            service: service.name(),
+            run_id: format!("{:032x}", rand::random::<u128>()),
+            sequence: AtomicU64::new(0),
+            started: Instant::now(),
+            sink: output.sink(),
+            format: config.format,
+        }),
+    };
+    // Operational events and the numeric connection context remain available
+    // even under RUST_LOG=off. Legacy diagnostics obey the requested filter.
+    let telemetry_layer = layer.clone().with_filter(filter_fn(|meta| {
+        meta.target() == TARGET || (meta.is_span() && meta.name() == "rds.conn")
+    }));
+    let diagnostics = layer
+        .with_filter(config.filter)
+        .with_filter(filter_fn(|meta| meta.target() != TARGET));
+    Ok((
+        tracing_subscriber::registry()
+            .with(telemetry_layer)
+            .with(diagnostics),
+        Telemetry {
+            output,
+            format: config.format,
+        },
+    ))
+}
+
+impl Telemetry {
+    pub fn health(&self) -> Health {
+        self.output.health()
+    }
+
+    /// This heartbeat means the main future is being polled, not readiness or
+    /// proof that a remote device is usable. The product owns readiness events.
+    pub async fn run<T, E>(&self, future: impl Future<Output = Result<T, E>>) -> Result<T, E> {
+        emit(Event::ProcessStarted);
+        let mut tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            Duration::from_secs(15),
+        );
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tokio::pin!(future);
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut future => break result,
+                _ = tick.tick() => emit(Event::Heartbeat),
+            }
+        };
+        emit(if result.is_ok() {
+            Event::ProcessCompleted
+        } else {
+            Event::ProcessFailed
+        });
+        result
+    }
+
+    pub fn shutdown(self) -> Shutdown {
+        self.output.shutdown()
+    }
+
+    /// Finish a binary entrypoint, preserving its result/exit status while
+    /// enforcing output privacy. Best-effort output loss does not fail product
+    /// work; callers needing the local drain receipt can use `shutdown` instead.
+    pub fn finish<E: std::fmt::Display>(self, result: Result<(), E>) -> std::process::ExitCode {
+        let status = if let Err(error) = result {
+            if self.format == Format::Text {
+                // Same bounded adapter, including the final cause chain. JSON
+                // never formats it: process_failed already records the outcome.
+                tracing::error!(target: "rds_telemetry", event = "terminal_failure",
+                    error = %format_args!("{error:#}"));
+            }
+            std::process::ExitCode::FAILURE
+        } else {
+            std::process::ExitCode::SUCCESS
+        };
+        self.shutdown();
+        status
+    }
+}
+
+/// Stable, low-cardinality events. Never accept caller-supplied text here.
+#[derive(Clone, Copy, Debug)]
+pub enum Event {
+    ProcessStarted,
+    ProcessCompleted,
+    ProcessFailed,
+    Heartbeat,
+    ListenerReady,
+    PeerAccepted,
+    PeerRejected,
+    HandshakeFailed,
+    HandshakeTimedOut,
+    ConnectionBudgetExhausted,
+}
+
+impl Event {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ProcessStarted => "process_started",
+            Self::ProcessCompleted => "process_completed",
+            Self::ProcessFailed => "process_failed",
+            Self::Heartbeat => "heartbeat",
+            Self::ListenerReady => "listener_ready",
+            Self::PeerAccepted => "peer_accepted",
+            Self::PeerRejected => "peer_rejected",
+            Self::HandshakeFailed => "handshake_failed",
+            Self::HandshakeTimedOut => "handshake_timed_out",
+            Self::ConnectionBudgetExhausted => "connection_budget_exhausted",
+        }
+    }
+}
+
+pub fn emit(event: Event) {
+    let name = event.name();
+    match event {
+        Event::ProcessFailed => tracing::error!(target: "rds_telemetry", event = name),
+        Event::PeerRejected
+        | Event::HandshakeFailed
+        | Event::HandshakeTimedOut
+        | Event::ConnectionBudgetExhausted => {
+            tracing::warn!(target: "rds_telemetry", event = name)
+        }
+        _ => tracing::info!(target: "rds_telemetry", event = name),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Operation {
+    Connect,
+    ServiceStream,
+}
+
+impl Operation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::ServiceStream => "service_stream",
+        }
+    }
+}
+
+/// Measures completion of the local operation, not remote presentation or
+/// durable receipt. Dropping the future emits cancelled, never success.
+pub async fn observe<T, E>(
+    operation: Operation,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let mut guard = OperationGuard {
+        operation,
+        started: Instant::now(),
+        outcome: "cancelled",
+    };
+    let result = future.await;
+    guard.outcome = if result.is_ok() { "ok" } else { "error" };
+    result
+}
+
+struct OperationGuard {
+    operation: Operation,
+    started: Instant,
+    outcome: &'static str,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        tracing::info!(target: "rds_telemetry", event = "operation_completed",
+            operation = self.operation.name(), outcome = self.outcome,
+            elapsed_us = micros(self.started.elapsed()));
+    }
+}
+
+fn micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
+}
+
+struct Shared {
+    service: &'static str,
+    run_id: String,
+    sequence: AtomicU64,
+    started: Instant,
+    sink: output::Sink,
+    format: Format,
+}
+
+#[derive(Clone)]
+struct RecordLayer {
+    shared: Arc<Shared>,
+}
+
+#[derive(Default)]
+struct Session(Option<u64>);
+
+impl Visit for Session {
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() == "session_id" {
+            self.0 = Some(value);
+        }
+    }
+    fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+}
+
+#[derive(Default, Serialize)]
+struct SafeFields {
+    event: Option<&'static str>,
+    operation: Option<&'static str>,
+    outcome: Option<&'static str>,
+    elapsed_us: Option<u64>,
+}
+
+impl Visit for SafeFields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        // Map to constants instead of copying arbitrary data under an accepted
+        // field name. Even a third-party event using our target is constrained.
+        match (field.name(), value) {
+            ("event", "process_started") => self.event = Some("process_started"),
+            ("event", "process_completed") => self.event = Some("process_completed"),
+            ("event", "process_failed") => self.event = Some("process_failed"),
+            ("event", "heartbeat") => self.event = Some("heartbeat"),
+            ("event", "listener_ready") => self.event = Some("listener_ready"),
+            ("event", "peer_accepted") => self.event = Some("peer_accepted"),
+            ("event", "peer_rejected") => self.event = Some("peer_rejected"),
+            ("event", "handshake_failed") => self.event = Some("handshake_failed"),
+            ("event", "handshake_timed_out") => self.event = Some("handshake_timed_out"),
+            ("event", "connection_budget_exhausted") => {
+                self.event = Some("connection_budget_exhausted")
+            }
+            ("event", "operation_completed") => self.event = Some("operation_completed"),
+            ("operation", "connect") => self.operation = Some("connect"),
+            ("operation", "service_stream") => self.operation = Some("service_stream"),
+            ("outcome", "ok") => self.outcome = Some("ok"),
+            ("outcome", "error") => self.outcome = Some("error"),
+            ("outcome", "cancelled") => self.outcome = Some("cancelled"),
+            _ => {}
+        }
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() == "elapsed_us" {
+            self.elapsed_us = Some(value);
+        }
+    }
+    // Do not even format Debug/Display: these can allocate, expose secrets or
+    // run arbitrary formatting code. JSON uses only typed allowlisted fields.
+    fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+}
+
+#[derive(Serialize)]
+struct Record<'a> {
+    schema_version: u8,
+    timestamp_unix_us: u64,
+    uptime_us: u64,
+    service: &'static str,
+    version: &'static str,
+    run_id: &'a str,
+    sequence: u64,
+    level: &'a str,
+    target: &'a str,
+    line: Option<u32>,
+    session_id: Option<u64>,
+    #[serde(flatten)]
+    fields: SafeFields,
+    #[serde(flatten)]
+    health: Health,
+}
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for RecordLayer {
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if attrs.metadata().name() == "rds.conn"
+            && let Some(span) = ctx.span(id)
+        {
+            let mut session = Session::default();
+            attrs.record(&mut session);
+            span.extensions_mut().replace(session);
+        }
+    }
+
+    fn on_event(&self, event: &TraceEvent<'_>, ctx: Context<'_, S>) {
+        let shared = &self.shared;
+        let meta = event.metadata();
+        let session_id = ctx.event_scope(event).and_then(|scope| {
+            scope
+                .filter_map(|span| span.extensions().get::<Session>().and_then(|s| s.0))
+                .next()
+        });
+        let mut fields = SafeFields::default();
+        if meta.target() == TARGET {
+            event.record(&mut fields);
+        } else {
+            fields.event = Some("diagnostic");
+        }
+        let record = Record {
+            schema_version: 1,
+            timestamp_unix_us: micros(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default(),
+            ),
+            uptime_us: micros(shared.started.elapsed()),
+            service: shared.service,
+            version: env!("CARGO_PKG_VERSION"),
+            run_id: &shared.run_id,
+            sequence: shared.sequence.fetch_add(1, Ordering::Relaxed),
+            level: meta.level().as_str(),
+            target: meta.target(),
+            line: meta.line(),
+            session_id,
+            fields,
+            health: shared.sink.health(),
+        };
+        let mut buffer = Buffer::default();
+        let formatted = match shared.format {
+            Format::Json => serde_json::to_writer(&mut buffer, &record).is_ok(),
+            Format::Text => {
+                use std::fmt::Write as _;
+                let mut ok = write!(
+                    &mut buffer,
+                    "{} {} {} session={:?} ",
+                    record.timestamp_unix_us, record.level, record.target, record.session_id
+                )
+                .is_ok();
+                let mut visitor = TextFields {
+                    buffer: &mut buffer,
+                    ok: true,
+                };
+                event.record(&mut visitor);
+                ok &= visitor.ok;
+                ok
+            }
+        };
+        if !formatted || std::io::Write::write_all(&mut buffer, b"\n").is_err() {
+            shared.sink.oversize();
+            return;
+        }
+        shared.sink.send(buffer);
+    }
+}
+
+struct TextFields<'a> {
+    buffer: &'a mut Buffer,
+    ok: bool,
+}
+
+impl Visit for TextFields<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        if self.ok {
+            self.ok = write!(self.buffer, "{}={:?} ", field.name(), value).is_ok();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

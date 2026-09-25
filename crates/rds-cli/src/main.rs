@@ -130,14 +130,12 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    rds_observe::run_main(rds_observe::Service::Cli, "warn", run(cli)).await
+}
 
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let mut config = cli
         .endpoint_config
         .as_deref()

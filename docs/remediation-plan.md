@@ -345,6 +345,13 @@ shippable; optional extensions must not delay closing security defects.
 Proposed gate: `r10-release`. Build operational pieces incrementally; this is
 the final system acceptance, not permission to postpone observability.
 
+Owner addition (2026-09-25): use Vector collection and OpenObserve for development
+diagnosis, telemetry and alerting while retaining a Rust-owned product. Execute
+the [O1–O6 observability sequence](observability.md#remaining-sequence-and-exit-criteria)
+alongside correctness work. O1 provides bounded common process logging and a
+real local pipeline; O2–O6 still require secured source metrics, protocol-level
+correlation, diagnostic bundles, private deployment and platform qualification.
+
 | Task | Work | Acceptance/evidence |
 |---|---|---|
 | W10.1 | Export agent/relay/directory/session metrics on a dedicated secured admin surface: phase latency, path migration, lease freshness, decode/present/drop, transfer progress, resource counts and reason-coded failures. | Metrics match controlled known traffic and include closed/short paths; local reverse proxy cannot expose admin routes inadvertently. |

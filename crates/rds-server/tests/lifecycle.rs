@@ -35,6 +35,7 @@ impl Scratch {
             .arg("--directory")
             .arg(self.0.join("records"))
             .env("RUST_LOG", "rds_server=info")
+            .env("RDS_LOG_FORMAT", "text")
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -63,7 +64,7 @@ async fn signal_joins_both_services_and_same_catalog_reopens() {
     let scratch = Scratch::new();
     for _ in 0..2 {
         let mut child = scratch.command("127.0.0.1:0").spawn().unwrap();
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
         let (directory, relay) = tokio::time::timeout(Duration::from_secs(15), async {
             let mut directory = None;
             while let Some(line) = lines.next_line().await.unwrap() {
@@ -118,8 +119,8 @@ async fn relay_startup_failure_closes_the_partially_started_host() {
     .unwrap()
     .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("discovery directory listening"));
-    assert!(!output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("discovery directory listening"));
+    assert!(output.stdout.is_empty(), "diagnostics belong on stderr");
 }
 
 #[tokio::test]

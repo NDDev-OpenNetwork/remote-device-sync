@@ -3,6 +3,70 @@ const TAIL: &[&str] = &["id"];
 include!("../../../tests/support/endpoint_cli.rs");
 
 #[test]
+fn json_logging_preserves_stdout_and_rejects_invalid_configuration_before_identity() {
+    let dir = Scratch::new();
+    let key = dir.0.join("endpoint.key");
+    let output = Command::new(BINARY)
+        .args(["--no-relay", "--key-file"])
+        .arg(&key)
+        .arg("id")
+        .env("RDS_LOG_FORMAT", "json")
+        .env("RUST_LOG", "off")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = std::str::from_utf8(&output.stdout).unwrap().trim();
+    let _: rds_net::EndpointId = stdout.parse().unwrap();
+    let logs: Vec<serde_json::Value> = std::str::from_utf8(&output.stderr)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert_eq!(logs.len(), 2);
+    assert_eq!(logs[0]["event"], "process_started");
+    assert_eq!(logs[1]["event"], "process_completed");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(stdout));
+    let private_path = dir.0.join("PRIVATE_MISSING_CONFIG");
+    let failure = Command::new(BINARY)
+        .args(["--endpoint-config"])
+        .arg(&private_path)
+        .arg("id")
+        .env("RDS_LOG_FORMAT", "json")
+        .env("RUST_LOG", "off")
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    assert!(failure.stdout.is_empty());
+    let stderr = std::str::from_utf8(&failure.stderr).unwrap();
+    assert!(!stderr.contains("PRIVATE_MISSING_CONFIG"));
+    let records: Vec<serde_json::Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1]["event"], "process_failed");
+    for (variable, value) in [
+        ("RDS_LOG_FORMAT", "invalid"),
+        ("RUST_LOG", "target=invalid"),
+    ] {
+        let fresh = Scratch::new();
+        let key = fresh.0.join("endpoint.key");
+        let output = Command::new(BINARY)
+            .args(["--no-relay", "--key-file"])
+            .arg(&key)
+            .arg("id")
+            .env("RDS_LOG_FORMAT", "json")
+            .env("RUST_LOG", "info")
+            .env(variable, value)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!key.exists());
+    }
+}
+
+#[test]
 fn invalid_tcp_destination_fails_before_identity_or_dial() {
     for command in ["ssh", "forward"] {
         for target in [":22", "host:0", "host:nope", "::1:22", "[::1]22"] {

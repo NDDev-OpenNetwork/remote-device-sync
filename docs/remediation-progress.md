@@ -17,10 +17,13 @@ user to run an external SSH client. Frame presentation returns unavailable;
 ScreenCaptureKit, image-copy and PipeWire capture probes remain placeholders.
 The throughput scenario stops timing after sender finish without checking a
 receiver byte/digest acknowledgment. These implementation gaps remain in
-W5, W6/W7 and W0.2, alongside the other open plan tasks. The latest Linux
+W5, W6/W7 and W0.2, alongside the other open plan tasks. That Linux
 receipt records 431 workspace, 238 expanded and 2 isolated iroh tests passing;
 those results do not establish missing functionality or native platform/network
-qualification.
+qualification. The observability change below adds a shared process/collector
+foundation; its latest Linux matrix records 444 workspace and 239 expanded
+tests plus the opt-in infrastructure pipeline. It does not close these product
+gaps or any wave.
 
 | Task | State | Evidence / remaining scope |
 |---|---|---|
@@ -43,6 +46,7 @@ qualification.
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
 | W3.6 | Partial; validated selection and local child failure isolation | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link route loss and known tunnel closure retire stale relay selection. Mux child send/receive failures are isolated; policy withdraws failed advertisements, excludes failed routes even when last-path close is refused, and closes held connections after all-child loss. Real loopback fixtures preserve open-stream traffic and accept new connections on the surviving child. Policy-observed telemetry exposes sticky event loss and unknown selection. Full path-event resynchronization, lossless retirement metrics, interface/socket recreation, per-service scheduling and physical-network qualification remain open. |
+| W10.1/W10.2 | Partial; O1 Linux foundation checked | Shared bounded Rust stderr logging, allowlisted JSON, process/session context, local operation outcomes, Vector/OpenObserve logs and remote-write metrics, disabled alert definitions and a real isolated pipeline regression. Secured source metrics, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
 
 ## Authorization change
 
@@ -1079,3 +1083,44 @@ passed. See [contract](path-telemetry.md) and
 [receipt](reports/rds-sampler-lifecycle-20260925.md). Full path reconciliation,
 lossless metrics, receiver-confirmed throughput measurement, native macOS and
 physical-network qualification remain open. No wave closes.
+
+
+## Shared process telemetry and real collector qualification
+
+The Rust `rds-observe` leaf owns all five binary entrypoints: bounded stderr,
+text/private or schema-1/allowlisted JSON, process IDs, numeric session context,
+heartbeat, readiness and typed connect/handler outcomes. Arbitrary diagnostic
+fields and terminal errors are never formatted in JSON mode. Invalid logging
+configuration fails before product initialization. Stdout remains command data.
+
+Producers never wait for queue capacity or network delivery. The output adapter
+bounds records to 4096 bytes and its queue to 1024 entries; shutdown seals and
+drains admission with a 500 ms wait. Tests cover saturation, write/flush errors,
+blocked output/destruction, concurrent shutdown admission and secret canaries.
+Loss is observable but delivery is best effort, including final shutdown.
+
+Vector independently projects the schema and forwards JSON plus low-cardinality
+Prometheus metrics to OpenObserve. Exact image digests, bounded buffers, private
+secret files and three disabled alert definitions accompany a disposable Compose
+fixture. Its real test checks projection/rejection, queried logs, controlled
+counter/histogram values, alert predicates, local webhook delivery and recovery
+after a collector restart during backend downtime. A password with quotes and
+backslashes exposed Vector's raw substitution hazard; the checked configuration
+uses a pre-encoded Basic header from the secret backend. No credentials or human
+notification destinations are committed or contacted by the fixture.
+
+Formatting, default/X11/all-feature workspace Clippy, **444 workspace tests**,
+**239 expanded all-feature tests** and the **real pipeline regression** passed.
+The latter also runs Vector validation and five projection tests. Two 100-probe
+same-host direct ping runs completed with JSON telemetry enabled and zero loss
+counters in the collected records. They are debug smoke measurements, not an
+A/B overhead study, connection-establishment timing or physical network evidence.
+See the [contract and O1–O6 sequence](observability.md) and
+[dated receipt](reports/rds-observability-20260925.md).
+
+W10.1/W10.2 remain partial. Dedicated secured admin/source metrics, detailed
+phase/reason correlation, exact-build diagnostics and redacted bundles, private
+estate rollout, expected-instance monitoring, independent failure probes,
+long-run resource/latency measurement and native macOS checks remain open.
+Existing SSH/desktop/sync/transport remediation gates are unchanged. No wave
+checkpoint, remote CI run, production activation or release readiness is claimed.

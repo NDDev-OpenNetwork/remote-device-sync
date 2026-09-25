@@ -1,0 +1,47 @@
+[
+  {
+    "name": "rds_process_failure",
+    "stream_type": "logs",
+    "stream_name": "rds_events",
+    "is_real_time": false,
+    "query_condition": {
+      "type": "sql",
+      "sql": "SELECT node, service, run_id, COUNT(DISTINCT sequence) AS failures FROM rds_events WHERE event = 'process_failed' GROUP BY node, service, run_id"
+    },
+    "trigger_condition": {"period": 5, "operator": ">=", "threshold": 1, "frequency": 1, "frequency_type": "minutes", "silence": 15, "timezone": "UTC"},
+    "context_attributes": {},
+    "row_template": "{node} {service} run={run_id} failed; inspect correlated events and local private diagnostics.",
+    "description": "A polled RDS process future returned an error. Does not cover SIGKILL, abort or host loss; independent liveness checks are required.",
+    "enabled": false
+  },
+  {
+    "name": "rds_telemetry_loss",
+    "stream_type": "logs",
+    "stream_name": "rds_events",
+    "is_real_time": false,
+    "query_condition": {
+      "type": "sql",
+      "sql": "SELECT node, service, run_id, MAX(telemetry_dropped_total) AS dropped, MAX(telemetry_oversize_total) AS oversized, MAX(telemetry_write_errors_total) AS write_errors FROM rds_events GROUP BY node, service, run_id HAVING MAX(telemetry_dropped_total) > 0 OR MAX(telemetry_oversize_total) > 0 OR MAX(telemetry_write_errors_total) > 0"
+    },
+    "trigger_condition": {"period": 5, "operator": ">=", "threshold": 1, "frequency": 1, "frequency_type": "minutes", "silence": 15, "timezone": "UTC"},
+    "context_attributes": {},
+    "row_template": "{node} {service} run={run_id}: dropped={dropped} oversized={oversized} output_errors={write_errors}; check collector and disk before interpreting rates.",
+    "description": "Cumulative loss during a process run. Repeats after silence while that run reports loss; total output failure requires independent liveness monitoring.",
+    "enabled": false
+  },
+  {
+    "name": "rds_connect_errors",
+    "stream_type": "logs",
+    "stream_name": "rds_events",
+    "is_real_time": false,
+    "query_condition": {
+      "type": "sql",
+      "sql": "SELECT node, service, COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS failures FROM (SELECT DISTINCT node, service, run_id, sequence, outcome FROM rds_events WHERE event = 'operation_completed' AND operation = 'connect' AND outcome IN ('ok', 'error')) GROUP BY node, service HAVING COUNT(*) >= 10 AND SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) * 5 >= COUNT(*)"
+    },
+    "trigger_condition": {"period": 5, "operator": ">=", "threshold": 1, "frequency": 1, "frequency_type": "minutes", "silence": 15, "timezone": "UTC"},
+    "context_attributes": {},
+    "row_template": "{node} {service}: {failures} failures in {attempts} observed connects; inspect discovery, policy and path evidence.",
+    "description": "At least ten observed connect attempts with at least 20 percent errors in five minutes. Excludes cancellations; log delivery is best effort, so this is not an SLO counter.",
+    "enabled": false
+  }
+]

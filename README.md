@@ -24,6 +24,8 @@ crates/
 ├── rds-server     GDS services host: relay + discovery + registry
 ├── rds-agent      daemon on a controlled device (ssh forward, desktop)
 ├── rds-cli        `rds` operator CLI
+├── rds-observe    bounded process logs and privacy-preserving telemetry
+├── rds-bench      development measurement/qualification harness
 ├── rds-desktop    capture/codec/input/render traits + platform backends
 ├── rds-audio      Opus audio pipeline (scaffold)
 └── rds-sync       FastCDC+BLAKE3 content-addressed sync
@@ -96,12 +98,16 @@ deletes use a new versioned signature contract; old directories require an
 explicit migration that is still being implemented. See
 [record state and migration limits](docs/record-state.md) before deployment.
 
-Observability: `rds-net` exposes a per-endpoint metrics registry (per-path
-RTT/loss/cwnd, datagrams and bytes split by `via="direct"`/`via="relay"`,
-QNT counters on the owned transport) with Prometheus text export behind the
-`metrics` feature; the directory serves it at `GET /v1/metrics` (loopback
-peers only) with per-writer counters under anonymized labels, and every agent
-connection logs inside an `rds.conn{peer, session_id}` span.
+Observability: all binaries share bounded stderr logging. Set
+`RDS_LOG_FORMAT=json` for the allowlisted export consumed by the supplied
+Vector/OpenObserve pipeline; local `text` diagnostics can contain private data.
+Process/session correlation, observed operation latency, loss counters and
+alert definitions have a disposable integration fixture. See the
+[contract, checks and remaining rollout plan](docs/observability.md).
+`rds-net` separately exposes observed path counters and coverage flags, with
+Prometheus rendering behind `metrics`. The directory's loopback-only
+`GET /v1/metrics` serves directory counters; it does not export the transport
+registry or establish a dedicated secured admin surface.
 
 ## Build and test
 

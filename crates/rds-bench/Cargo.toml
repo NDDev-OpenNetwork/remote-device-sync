@@ -12,6 +12,7 @@ default = []
 transport-noq = ["rds-net/transport-noq", "dep:noq"]
 
 [dependencies]
+rds-observe.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
@@ -24,7 +25,6 @@ rds-net.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

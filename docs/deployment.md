@@ -11,7 +11,7 @@ Reference deployment: `rds-server` (relay + discovery directory) and
 cargo build --release -p rds-server -p rds-agent -p rds-cli
 install -m0755 target/release/rds-server /usr/local/bin/
 install -m0755 target/release/rds-agent  /usr/local/bin/
-install -m0755 target/release/rds-cli    /usr/local/bin/
+install -m0755 target/release/rds        /usr/local/bin/
 
 # users + state
 useradd --system --home /var/lib/rds       --shell /usr/sbin/nologin rds
@@ -292,6 +292,19 @@ clock/storage refusal and preserve evidence before repair.
 ```sh
 # directory counters (loopback only)
 curl -s http://127.0.0.1:3341/v1/metrics
-# per-session structured log
-journalctl -u rds-agent -o json | jq 'select(.fields.session_id == "…")'
+# With RDS_LOG_FORMAT=json in the unit, substitute the exact run and session.
+journalctl -u rds-agent -o cat | jq -R --arg run '<run-id>' --argjson session 7 \
+  'fromjson? | select(.schema_version == 1 and .run_id == $run and .session_id == $session)'
 ```
+
+## Process diagnostics and observability
+
+Use [the observability contract](observability.md) for shared stderr logging,
+the schema-1 JSON export, Vector/OpenObserve development qualification and
+alert definitions. Set `RDS_LOG_FORMAT=json` in the private service environment
+before collection. Full `text` output is local debugging material and must not
+be treated as a redacted export. No production collector/backend is deployed
+by adding these repository examples; private service capture/rotation,
+ingestion credentials, retention and independent liveness remain deployment
+work. The existing directory-listener metrics route does not satisfy the
+planned dedicated secured admin boundary.

@@ -9,6 +9,7 @@ members = [
     "crates/rds-desktop",
     "crates/rds-discovery",
     "crates/rds-net",
+    "crates/rds-observe",
     "crates/rds-relay",
     "crates/rds-server",
     "crates/rds-sync",
@@ -22,6 +23,7 @@ repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
 
 # Dependency direction (enforced by convention, not by cargo):
 #   rds-core      leaf: types, framing, tokens — no io, no async runtime
+#   rds-observe   logging adapter; no product-crate dependencies
 #   rds-discovery → core types (own identity layer)
 #   rds-net       → rds-core, rds-discovery
 #   rds-relay     → rds-core, rds-net
@@ -61,6 +63,7 @@ rds-core = { path = "crates/rds-core" }
 rds-desktop = { path = "crates/rds-desktop" }
 rds-discovery = { path = "crates/rds-discovery" }
 rds-net = { path = "crates/rds-net" }
+rds-observe = { path = "crates/rds-observe" }
 rds-relay = { path = "crates/rds-relay" }
 rds-sync = { path = "crates/rds-sync" }
 serde = { version = "1", features = ["derive"] }

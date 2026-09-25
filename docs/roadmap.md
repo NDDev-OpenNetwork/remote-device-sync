@@ -6,6 +6,11 @@ Current execution order and reopened gates are in the
 The milestones below preserve the original direction; historical checkpoint
 completion does not establish that the audited defects or product gaps are closed.
 
+The [observability sequence](observability.md) now accompanies remediation:
+shared Rust telemetry, Vector/OpenObserve qualification, then secured source
+metrics, diagnostic bundles and private operational rollout. Its first local
+pipeline does not close product or release gates.
+
 Each workstream ends at a named **checkpoint** — a reproducible
 verification bundle (functional, simulation, impairment, interop,
 fuzz, soak, security layers as applicable) whose report is committed

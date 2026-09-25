@@ -13,6 +13,7 @@ desktop = ["dep:rds-desktop", "rds-desktop/x11"]
 transport-noq = ["rds-net/transport-noq"]
 
 [dependencies]
+rds-observe.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rds-core.workspace = true
@@ -23,7 +24,6 @@ rds-sync.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 iroh.workspace = true

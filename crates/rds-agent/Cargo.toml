@@ -13,6 +13,7 @@ desktop = ["dep:rds-desktop", "rds-desktop/x11"]
 transport-noq = ["rds-net/transport-noq"]
 
 [dependencies]
+rds-observe.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 clap.workspace = true
@@ -25,7 +26,6 @@ rds-discovery.workspace = true
 rds-sync.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 iroh-relay = { workspace = true, features = ["server"] }

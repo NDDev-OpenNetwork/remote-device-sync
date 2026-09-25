@@ -89,13 +89,12 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    rds_observe::run_main(rds_observe::Service::Server, "info", run(cli)).await
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     if let Some(Command::MigrateV2 {
         source,
         destination,
@@ -220,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
             info!(%addr, endpoint_id = %id, "owned relay listening");
         }
     }
+    rds_observe::emit(rds_observe::Event::ListenerReady);
     let unexpected = tokio::select! {
         biased;
         _ = relay.stopped() => Some("relay"),

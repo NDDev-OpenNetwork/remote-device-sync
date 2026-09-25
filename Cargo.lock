@@ -2843,10 +2843,10 @@ dependencies = [
  "rds-desktop",
  "rds-discovery",
  "rds-net",
+ "rds-observe",
  "rds-sync",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2869,10 +2869,10 @@ dependencies = [
  "rds-cli",
  "rds-discovery",
  "rds-net",
+ "rds-observe",
  "serde",
  "serde_json",
  "tokio",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2886,11 +2886,11 @@ dependencies = [
  "rds-desktop",
  "rds-discovery",
  "rds-net",
+ "rds-observe",
  "rds-sync",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2979,6 +2979,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rds-observe"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "rand 0.9.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rds-relay"
 version = "0.1.0"
 dependencies = [
@@ -2993,6 +3008,7 @@ dependencies = [
  "rds-core",
  "rds-discovery",
  "rds-net",
+ "rds-observe",
  "rustix",
  "rustls",
  "rustls-pki-types",
@@ -3014,12 +3030,12 @@ dependencies = [
  "rcgen",
  "rds-discovery",
  "rds-net",
+ "rds-observe",
  "rds-relay",
  "rustix",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

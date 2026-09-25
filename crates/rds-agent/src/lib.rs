@@ -217,6 +217,7 @@ impl Agent {
     /// Accept connections until the endpoint closes.
     pub async fn run(&self) -> anyhow::Result<()> {
         info!(id = %self.endpoint.id(), "agent listening");
+        rds_observe::emit(rds_observe::Event::ListenerReady);
         let mut connections = JoinSet::new();
         loop {
             tokio::select! {
@@ -229,6 +230,7 @@ impl Agent {
                 incoming = self.endpoint.accept() => {
                     let Some(incoming) = incoming else { break; };
                     let Ok(permit) = self.admission.clone().try_acquire_owned() else {
+                        rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);
                         // Dropping Incoming refuses the handshake without a
                         // parked application task or a new connection slot.
                         drop(incoming);
@@ -254,8 +256,14 @@ impl Agent {
                                     debug!(%error, "connection ended");
                                 }
                             }
-                            Ok(Err(error)) => debug!(%error, "incoming handshake failed"),
-                            Err(_) => debug!("incoming handshake timed out"),
+                            Ok(Err(error)) => {
+                                rds_observe::emit(rds_observe::Event::HandshakeFailed);
+                                debug!(%error, "incoming handshake failed");
+                            }
+                            Err(_) => {
+                                rds_observe::emit(rds_observe::Event::HandshakeTimedOut);
+                                debug!("incoming handshake timed out");
+                            }
                         }
                     });
                 }
@@ -282,6 +290,7 @@ impl Agent {
     /// Serve a single already-established connection.
     pub async fn serve(&self, conn: Connection) -> anyhow::Result<()> {
         let Ok(_permit) = self.admission.clone().try_acquire_owned() else {
+            rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);
             conn.close(5u32.into(), b"agent connection budget exhausted");
             anyhow::bail!("agent connection budget exhausted");
         };
@@ -313,11 +322,13 @@ async fn serve_connection(
 ) -> anyhow::Result<()> {
     let peer = conn.remote_id();
     if !policy.allow.contains(&peer) {
+        rds_observe::emit(rds_observe::Event::PeerRejected);
         warn!(%peer, "rejected: endpoint id not in allowlist");
         conn.close(1u32.into(), b"not allowed");
         anyhow::bail!("peer {peer} not in allowlist");
     }
     info!(%peer, "peer connected");
+    rds_observe::emit(rds_observe::Event::PeerAccepted);
     let authz = Arc::new(ConnAuthz::new(policy.grants_required()));
     let lifetime = ConnectionLifetime {
         conn: conn.clone(),
@@ -352,7 +363,10 @@ async fn serve_connection(
                 let active = stream_counter.enter();
                 streams.spawn(async move {
                     let _active = active;
-                    if let Err(error) = serve_stream(conn, send, recv, policy, authz, desktop).await {
+                    if let Err(error) = rds_observe::observe(
+                        rds_observe::Operation::ServiceStream,
+                        serve_stream(conn, send, recv, policy, authz, desktop),
+                    ).await {
                         debug!(%error, "stream ended");
                     }
                 }.instrument(span));

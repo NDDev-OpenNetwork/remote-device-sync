@@ -44,6 +44,7 @@ impl Scratch {
         command
             .args([BIND_FLAG, "127.0.0.1:0"])
             .env("RUST_LOG", "rds_relay=info,rds_server=info")
+            .env("RDS_LOG_FORMAT", "text")
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
             .stdout(log(&stdout))
@@ -139,6 +140,15 @@ struct Ready {
     directory: Option<SocketAddr>,
 }
 impl Process {
+    fn listener_output(&self) -> String {
+        // The standalone relay prints its addresses as command output; the
+        // composed server publishes private listener diagnostics on stderr.
+        read_log(if HOSTS_DIRECTORY {
+            &self.stderr
+        } else {
+            &self.stdout
+        })
+    }
     async fn exited(&mut self) -> ExitStatus {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -159,7 +169,7 @@ impl Process {
                     "child startup failed: {}",
                     read_log(&self.stderr)
                 );
-                let output = read_log(&self.stdout);
+                let output = self.listener_output();
                 let mut addr = None;
                 let mut id = None;
                 let mut directory = None;
@@ -403,7 +413,7 @@ async fn valid_manual_iroh_tls_starts_and_shuts_down() {
     process.ready(false).await;
     let addr = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let output = read_log(&process.stdout);
+            let output = process.listener_output();
             if let Some(line) = output.lines().find(|line| {
                 line.contains("relay tls listening") || line.contains("relay tls url:")
             }) {
