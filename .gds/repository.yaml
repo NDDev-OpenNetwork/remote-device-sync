@@ -23,14 +23,19 @@ product:
     Remote device access for the GDS estate: SSH-based connectivity and remote
     desktop sessions between enrolled devices, brokered through the GDS server.
   capabilities:
-    - "Rust library crate and remote-device-sync CLI (skeleton)"
-    - "SSH device-to-device session transport (design stage)"
-    - "Remote desktop (RDP) sessions brokered through the GDS server (design stage)"
+    - "Rust workspace: native SSH, shared session manager and device selection"
+    - "Signed discovery, scoped authorization, QUIC transports and owned relay"
+    - "Content-addressed single-file sync and bounded observability"
+    - "Experimental desktop protocol/backends; interactive renderer and native qualification pending"
   entrypoints:
-    - change: "Library crate"
-      path: "src/lib.rs"
-    - change: "CLI binary"
-      path: "src/main.rs"
+    - change: "Wire protocol and authorization types"
+      path: "crates/rds-core/src/lib.rs"
+    - change: "rds operator CLI"
+      path: "crates/rds-cli/src/main.rs"
+    - change: "Device agent and shared session manager"
+      path: "crates/rds-agent/src/main.rs"
+    - change: "Directory and relay server"
+      path: "crates/rds-server/src/main.rs"
     - change: "Package manifest"
       path: "Cargo.toml"
 
@@ -47,8 +52,8 @@ git:
 
 verification:
   commands:
-    lint: ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings"]
-    test: ["cargo test"]
+    lint: ["cargo fmt --check", "cargo clippy --locked --workspace --all-targets -- -D warnings"]
+    test: ["cargo test --locked --workspace"]
   required: ["lint", "test"]
   required_contexts: []
 
@@ -65,4 +70,13 @@ module:
   publication: {registry: "none", github_release: "optional"}
 
 release:
-  mode: "bundle"
+  mode: "github-release"
+  tag_style: "semver"
+  required_checks:
+    - "rust / clippy"
+    - "rust / test (ubuntu-latest)"
+    - "rust / test (macos-latest)"
+    - "rust supply chain / cargo-deny"
+    - "rust supply chain / cargo-audit"
+    - "codeql / CodeQL (rust)"
+    - "codeql / CodeQL (actions)"
