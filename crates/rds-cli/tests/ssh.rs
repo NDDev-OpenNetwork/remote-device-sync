@@ -347,17 +347,30 @@ async fn wrong_host_key_and_unsafe_private_files_never_authenticate() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     std::fs::remove_file(&identity).unwrap();
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &identity,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    // Apple targets do not expose rustix::fs::mkfifoat. Exercise special-file
+    // rejection on every Unix target, with the blocking FIFO case on Linux.
+    let socket = std::os::unix::net::UnixListener::bind(&identity).unwrap();
     let output = tokio::time::timeout(Duration::from_secs(3), fixture.command().output())
         .await
-        .expect("private-key FIFO blocked")
+        .expect("private-key socket blocked")
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
+    drop(socket);
+    std::fs::remove_file(&identity).unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &identity,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(3), fixture.command().output())
+            .await
+            .expect("private-key FIFO blocked")
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+    }
     assert_eq!(fixture.observed.auth.load(Ordering::SeqCst), 0);
     fixture.idle().await;
     fixture.close().await;
