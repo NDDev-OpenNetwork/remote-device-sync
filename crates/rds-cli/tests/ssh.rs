@@ -462,10 +462,21 @@ async fn tty_modes_and_shared_descriptor_flags_restore_on_rejection_and_signal()
             })
         );
         let restored = rustix::termios::tcgetattr(&slave).unwrap();
+        // XNU's ttioctl sets PENDIN when restoring ICANON without flushing
+        // pending input (bsd/kern/tty.c). It is kernel queue state, not a
+        // terminal mode that tcsetattr can restore byte-for-byte. Keep every
+        // other mode, control character and descriptor flag comparison exact.
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            restored.local_modes & !rustix::termios::LocalModes::PENDIN,
+            saved.local_modes & !rustix::termios::LocalModes::PENDIN
+        );
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(restored.local_modes, saved.local_modes);
         assert_eq!(restored.input_modes, saved.input_modes);
         assert_eq!(restored.output_modes, saved.output_modes);
         assert_eq!(restored.control_modes, saved.control_modes);
+        assert_eq!(restored.special_codes, saved.special_codes);
         assert_eq!(rustix::fs::fcntl_getfl(&slave).unwrap(), flags);
         fixture.idle().await;
         fixture.close().await;
