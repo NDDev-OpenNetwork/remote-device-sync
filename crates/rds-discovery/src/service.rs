@@ -129,10 +129,12 @@ struct Metrics {
     requests: AtomicU64,
 }
 
-/// Aggregate counters only; clones retain no store, policy or service tasks.
+/// Aggregate observations only; clones retain no store, policy or service tasks.
 #[derive(Clone)]
 pub struct DirectoryMetrics {
     counters: Arc<Metrics>,
+    records: Option<crate::RecordMetrics>,
+    policy: Option<crate::policy::PolicyMetrics>,
     connections: std::sync::Weak<TaskGroup>,
     workers: std::sync::Weak<TaskGroup>,
     maintenance: std::sync::Weak<TaskGroup>,
@@ -225,6 +227,35 @@ impl DirectoryMetrics {
                 values.insert(limit, max as u64);
             }
         }
+        values.insert(
+            "rds_directory_records_supported",
+            u64::from(self.records.is_some()),
+        );
+        let records = self.records.as_ref().and_then(|metrics| metrics.snapshot());
+        values.insert("rds_directory_records_known", u64::from(records.is_some()));
+        if let Some(records) = records {
+            values.extend([
+                ("rds_directory_records_healthy", u64::from(records.healthy)),
+                ("rds_directory_records_durable", u64::from(records.durable)),
+            ]);
+            if records.healthy {
+                values.extend([
+                    ("rds_directory_records_stored", records.records),
+                    ("rds_directory_records_identities", records.identities),
+                    ("rds_directory_records_capacity", records.capacity),
+                ]);
+                if let Some(generation) = records.generation {
+                    values.insert("rds_directory_records_generation", generation);
+                }
+            }
+        }
+        values.insert(
+            "rds_directory_policy_configured",
+            u64::from(self.policy.is_some()),
+        );
+        if let Some(policy) = &self.policy {
+            values.extend(policy.snapshot());
+        }
         values
     }
 }
@@ -235,6 +266,8 @@ impl DirectoryMetrics {
 pub struct Directory {
     addr: SocketAddr,
     metrics: Arc<Metrics>,
+    records: Option<crate::RecordMetrics>,
+    policy: Option<crate::policy::PolicyMetrics>,
     shutdown: watch::Sender<bool>,
     connections: Arc<TaskGroup>,
     workers: Arc<TaskGroup>,
@@ -271,6 +304,8 @@ impl Directory {
     pub fn metrics(&self) -> DirectoryMetrics {
         DirectoryMetrics {
             counters: self.metrics.clone(),
+            records: self.records.clone(),
+            policy: self.policy.clone(),
             connections: Arc::downgrade(&self.connections),
             workers: Arc::downgrade(&self.workers),
             maintenance: Arc::downgrade(&self.maintenance),
@@ -383,6 +418,8 @@ pub async fn serve(
     .await
     .map_err(std::io::Error::other)?
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+    let record_metrics = store.metrics();
+    let policy_metrics = policy.as_ref().map(PolicyStore::metrics);
     let state = Arc::new(State {
         store,
         policy: Mutex::new(policy),
@@ -462,6 +499,8 @@ pub async fn serve(
         }
     });
     Ok(Directory {
+        records: record_metrics,
+        policy: policy_metrics,
         addr: local,
         metrics: state.metrics.clone(),
         shutdown,

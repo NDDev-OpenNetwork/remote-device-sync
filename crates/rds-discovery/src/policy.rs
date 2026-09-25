@@ -11,6 +11,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
+mod metrics;
+use crate::observation::Published;
+pub use metrics::PolicyMetrics;
+use metrics::{Stream, Summary};
+
 const MAX_ROTATIONS: usize = 16;
 const MAX_NAMES: usize = 1024;
 
@@ -73,6 +78,7 @@ pub struct PolicyStore {
     state: State,
     disk: Option<AtomicFile>,
     failed: bool,
+    observed: Published<Summary>,
 }
 
 impl PolicyStore {
@@ -94,6 +100,7 @@ impl PolicyStore {
             },
             disk: None,
             failed: false,
+            observed: Published::new(Summary::empty(bootstrap.epoch, false)),
         })
     }
 
@@ -108,7 +115,8 @@ impl PolicyStore {
                     return Err(invalid("policy state checksum mismatch"));
                 }
                 store.state = envelope.state;
-                store.validate(bootstrap)?;
+                let summary = store.validate(bootstrap)?;
+                store.observed.finish(|value| *value = summary);
                 store.check_clock(now)?;
             }
             None if disk.initialized()? => {
@@ -122,10 +130,11 @@ impl PolicyStore {
             disk.seal()?;
         }
         store.disk = Some(disk);
+        store.observed.finish(|value| value.durable = true);
         Ok(store)
     }
 
-    fn validate(&self, bootstrap: Authority) -> Result<(), DiscoveryError> {
+    fn validate(&self, bootstrap: Authority) -> Result<Summary, DiscoveryError> {
         if self.state.format != 1
             || self.state.bootstrap != bootstrap
             || self.state.rotations.len() > MAX_ROTATIONS
@@ -142,6 +151,8 @@ impl PolicyStore {
             return Err(invalid("policy authority lacks rotation continuity"));
         }
         let key = authority.verifying_key()?;
+        let mut summary = Summary::empty(authority.epoch, true);
+        summary.wall_floor = self.state.wall_floor;
         if let Some(snap) = &self.state.registry {
             let payload = snap.verify(&key)?;
             self.check_stamp(payload.stamp)?;
@@ -151,6 +162,13 @@ impl PolicyStore {
                 .is_some_and(|l| l.matches_interval(payload.issued_at, payload.expires_at))
             {
                 return Err(invalid("registry lease metadata mismatch"));
+            }
+            if let Some(lease) = self.state.registry_lease {
+                summary.streams[0] = Some(Stream {
+                    revision: payload.stamp.revision,
+                    entries: payload.entries.len() as u64,
+                    lease,
+                });
             }
         }
         if let Some(snap) = &self.state.revocations {
@@ -163,6 +181,13 @@ impl PolicyStore {
             {
                 return Err(invalid("revocation lease metadata mismatch"));
             }
+            if let Some(lease) = self.state.revocations_lease {
+                summary.streams[1] = Some(Stream {
+                    revision: payload.stamp.revision,
+                    entries: payload.revoked.len() as u64,
+                    lease,
+                });
+            }
         }
         if let Some(names) = &self.state.names {
             let payload = names.anchor.verify_committed(&key)?;
@@ -174,6 +199,13 @@ impl PolicyStore {
             {
                 return Err(invalid("name lease metadata mismatch"));
             }
+            if let Some(lease) = self.state.names_lease {
+                summary.streams[2] = Some(Stream {
+                    revision: payload.stamp.revision,
+                    entries: names.hashes.len() as u64,
+                    lease,
+                });
+            }
             if names.hashes.len() > MAX_NAMES
                 || names.hashes.keys().any(|n| !crate::registry::valid_name(n))
                 || names.hashes.get(&payload.name)
@@ -182,7 +214,11 @@ impl PolicyStore {
                 return Err(invalid("invalid name freshness state"));
             }
         }
-        Ok(())
+        Ok(summary)
+    }
+
+    pub fn metrics(&self) -> PolicyMetrics {
+        PolicyMetrics(self.observed.observer())
     }
 
     pub fn authority(&self) -> Authority {
@@ -234,7 +270,12 @@ impl PolicyStore {
         Ok(())
     }
 
-    fn commit(&mut self, state: State) -> Result<(), DiscoveryError> {
+    fn commit(
+        &mut self,
+        state: State,
+        update: impl FnOnce(&mut Summary),
+    ) -> Result<(), DiscoveryError> {
+        self.observed.begin();
         if let Some(disk) = &self.disk {
             let result = (|| {
                 if disk.read()?.is_none() {
@@ -244,10 +285,15 @@ impl PolicyStore {
             })();
             if let Err(e) = result {
                 self.failed = true;
+                self.observed.finish(|summary| summary.healthy = false);
                 return Err(e);
             }
         }
         self.state = state;
+        self.observed.finish(|summary| {
+            summary.wall_floor = self.state.wall_floor;
+            update(summary);
+        });
         Ok(())
     }
 
@@ -274,7 +320,10 @@ impl PolicyStore {
         next.revocations_lease = None;
         next.names_lease = None;
         next.wall_floor = now.wall.as_secs();
-        self.commit(next)?;
+        self.commit(next, |summary| {
+            summary.epoch = transition.next.epoch;
+            summary.streams = [None; 3];
+        })?;
         Ok(())
     }
 
@@ -308,7 +357,13 @@ impl PolicyStore {
         next.revocations = Some(snap.clone());
         next.wall_floor = now.wall.as_secs();
         next.revocations_lease = Some(lease);
-        self.commit(next)?;
+        self.commit(next, |summary| {
+            summary.streams[1] = Some(Stream {
+                revision: payload.stamp.revision,
+                entries: payload.revoked.len() as u64,
+                lease,
+            });
+        })?;
         Ok(true)
     }
 
@@ -363,7 +418,13 @@ impl PolicyStore {
         next.registry = Some(snap.clone());
         next.wall_floor = now.wall.as_secs();
         next.registry_lease = Some(lease);
-        self.commit(next)?;
+        self.commit(next, |summary| {
+            summary.streams[0] = Some(Stream {
+                revision: payload.stamp.revision,
+                entries: payload.entries.len() as u64,
+                lease,
+            });
+        })?;
         Ok(true)
     }
 
@@ -431,7 +492,16 @@ impl PolicyStore {
             });
         }
         next.wall_floor = now.wall.as_secs();
-        self.commit(next)?;
+        let stream = next
+            .names
+            .as_ref()
+            .zip(next.names_lease)
+            .map(|(names, lease)| Stream {
+                revision: payload.stamp.revision,
+                entries: names.hashes.len() as u64,
+                lease,
+            });
+        self.commit(next, |summary| summary.streams[2] = stream)?;
         Ok(payload)
     }
 

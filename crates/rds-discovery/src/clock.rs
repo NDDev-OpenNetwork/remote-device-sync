@@ -18,8 +18,20 @@ pub struct Reading {
     pub continuous: Duration,
 }
 
+static BOOT: std::sync::OnceLock<Result<[u8; 16], String>> = std::sync::OnceLock::new();
+
 impl Reading {
     pub fn now() -> Result<Self, DiscoveryError> {
+        Self::sample(BOOT.get_or_init(platform::boot_id))
+    }
+
+    /// Observation-only clock: never initialize the boot cache or perform file
+    /// I/O. Unknown until a product clock read has initialized the cache.
+    pub fn cached_now() -> Option<Self> {
+        Self::sample(BOOT.get()?).ok()
+    }
+
+    fn sample(boot: &Result<[u8; 16], String>) -> Result<Self, DiscoveryError> {
         // Take the continuous sample first so sampling cannot extend a lease.
         let t = rustix::time::clock_gettime(platform::CLOCK);
         let seconds = u64::try_from(t.tv_sec).map_err(|_| invalid("negative monotonic clock"))?;
@@ -31,11 +43,7 @@ impl Reading {
         let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| invalid("clock before epoch"))?;
-        static BOOT: std::sync::OnceLock<Result<[u8; 16], String>> = std::sync::OnceLock::new();
-        let boot = BOOT
-            .get_or_init(platform::boot_id)
-            .as_ref()
-            .map_err(|e| invalid(e))?;
+        let boot = boot.as_ref().map_err(|e| invalid(e))?;
         Ok(Self {
             boot: *boot,
             wall,
@@ -89,6 +97,15 @@ impl Lease {
             && now.continuous < self.deadline
     }
 
+    /// Remaining usable duration under both clocks; invalid leases return zero.
+    /// This observes the existing deadline and never renews it.
+    pub fn remaining_at(&self, now: Reading) -> Duration {
+        if !self.valid_at(now) {
+            return Duration::ZERO;
+        }
+        (Duration::from_secs(self.expires_at) - now.wall).min(self.deadline - now.continuous)
+    }
+
     pub fn matches_interval(&self, issued: u64, expires: u64) -> bool {
         self.issued_at == issued
             && self.expires_at == expires
@@ -116,4 +133,45 @@ fn parse_boot(bytes: &[u8]) -> Result<[u8; 16], String> {
             u8::from_str_radix(&digits[index * 2..index * 2 + 2], 16).map_err(|e| e.to_string())?;
     }
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remaining_lease_uses_both_clocks_and_keeps_subsecond_freshness() {
+        let start = Reading {
+            boot: [3; 16],
+            wall: Duration::from_millis(100_100),
+            continuous: Duration::from_millis(10_000),
+        };
+        let lease = Lease::new(100, 101, start).unwrap();
+        assert_eq!(lease.remaining_at(start), Duration::from_millis(900));
+        assert!(lease.valid_at(start));
+        let suspended = Reading {
+            continuous: Duration::from_millis(10_800),
+            ..start
+        };
+        assert_eq!(lease.remaining_at(suspended), Duration::from_millis(100));
+        let forward = Reading {
+            wall: Duration::from_millis(100_999),
+            ..start
+        };
+        assert_eq!(lease.remaining_at(forward), Duration::from_millis(1));
+        assert_eq!(
+            lease.remaining_at(Reading {
+                boot: [4; 16],
+                ..start
+            }),
+            Duration::ZERO
+        );
+        assert_eq!(
+            lease.remaining_at(Reading {
+                continuous: Duration::from_millis(10_900),
+                ..start
+            }),
+            Duration::ZERO
+        );
+    }
 }

@@ -1,0 +1,202 @@
+{
+  "schema": 1,
+  "date": "2026-09-25",
+  "scope": "W10 O2 durable catalog/policy observation increment; no wave closure",
+  "base_commit": "a0776ca1f70084e09770abed52fc270d0ebb9fb7",
+  "host_target": "x86_64-unknown-linux-gnu",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "cargo_build_jobs": 2,
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "exit_code": 0,
+      "seconds": 1.339,
+      "outcome": "passed",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "fixture-fmt",
+      "command": [
+        "rustfmt",
+        "--check",
+        "--edition",
+        "2024",
+        "tests/support/admin_cli.rs"
+      ],
+      "exit_code": 0,
+      "seconds": 0.081,
+      "outcome": "passed",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 38.19,
+      "outcome": "passed",
+      "log_sha256": "8f8cf81c40a6b1bf817380daeecced4f570581c6e2437d6c2df5c021c296b44b"
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 34.856,
+      "outcome": "passed",
+      "log_sha256": "7f45b6e60a6d5ad6eb5c589c71cce267cd4526c79692b8a6c9630c02fa2a05c2"
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 32.675,
+      "outcome": "passed",
+      "log_sha256": "a254c9fb3d36ccf1afc39d0ec638612ac4ed80191c7ea9c650719575433ada64"
+    },
+    {
+      "name": "workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "exit_code": 0,
+      "seconds": 494.902,
+      "outcome": "passed",
+      "log_sha256": "3fb8fc13d5407fd3c7ab68a4ec4b0dc68f69d0733f222ac60feb2d72c358f00b",
+      "test_totals": {
+        "passed": 472,
+        "failed": 0,
+        "ignored": 2,
+        "result_targets": 80
+      }
+    },
+    {
+      "name": "expanded",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "rds-discovery",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-server",
+        "--all-features"
+      ],
+      "exit_code": 0,
+      "seconds": 359.806,
+      "outcome": "passed",
+      "log_sha256": "355ee7e3567f2c74576259c738ad040dd5a4fa8a2757e0184d5620493a0bcca5",
+      "test_totals": {
+        "passed": 211,
+        "failed": 0,
+        "ignored": 1,
+        "result_targets": 26
+      }
+    },
+    {
+      "name": "darwin-discovery",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "-p",
+        "rds-discovery",
+        "--all-targets",
+        "--target",
+        "aarch64-apple-darwin"
+      ],
+      "exit_code": 101,
+      "seconds": 7.358,
+      "outcome": "failed_environment",
+      "limitation": "ring C build selected Linux cc, which rejected Apple target flags; discovery Rust was not checked",
+      "log_sha256": "5d3f8c949ce0ed05f50db6de2bd07b80e24cc97dd86ced09bdcc552e76aa5616"
+    },
+    {
+      "name": "darwin-clang",
+      "command": [
+        "env",
+        "CC_aarch64_apple_darwin=clang",
+        "cargo",
+        "check",
+        "--locked",
+        "-p",
+        "rds-discovery",
+        "--all-targets",
+        "--target",
+        "aarch64-apple-darwin"
+      ],
+      "exit_code": 101,
+      "seconds": 0.914,
+      "outcome": "failed_environment",
+      "limitation": "Clang selected Linux stdint.h for Apple target, then failed on bits/libc-header-start.h; no usable macOS SDK configured",
+      "log_sha256": "2e1846dffb57314c8d3863f6262f4848b5d14e5c2bfa3c0377af3fb32d7e4583"
+    }
+  ],
+  "source_sha256": {
+    "Cargo.lock": "0145e2e874cf7bccf2725aa4b865644a95ebcf1cf6df6a5e8d0c4ed099bee110",
+    "Cargo.toml": "5985a41e349dca74c0d3b159e36298013c417f1dcec91fd4add2b5511b5e461c",
+    "crates/rds-agent/src/lib.rs": "ba476b0763d3b96842a3181f8d8bc5248270b95090b960ec0df81e553301daa1",
+    "crates/rds-agent/src/revocations.rs": "9f281308a5dabc33b04cc759cb85e794f2e7cba998bcdc2af966086c8ac0ad78",
+    "crates/rds-discovery/src/clock.rs": "6a764069a52bc68ccd8bc0637f6e0ab36212623b8d8a6fc16dfcf9a86cca220c",
+    "crates/rds-discovery/src/lib.rs": "db6928a5ce8f717f0f79061f02645ce54caac48eabab9bccd61d6f9b240157a2",
+    "crates/rds-discovery/src/observation.rs": "617f791414da7942928a401f36a3eedc2a3c6d67502e84bf48788ad576cd4a83",
+    "crates/rds-discovery/src/policy.rs": "d87e1f8e46cbb4f3f170f6b0632b6ef58d0ae160d0cd94b6681e6aec4b873e0b",
+    "crates/rds-discovery/src/policy/metrics.rs": "ffca69be55b2bda2a25de2df6a347f675404c89443bef2f65e8d37c440fb22c5",
+    "crates/rds-discovery/src/policy/tests.rs": "1a31448f90e5cffe2e81fa4119877658bc2a8a62e4d60bba5ccabe6da256a0ff",
+    "crates/rds-discovery/src/records.rs": "58f81db92679fc8bf08a54ff0ae823e27b02f61819e557d83b1d0b39eab5b8bd",
+    "crates/rds-discovery/src/records/expiry_tests.rs": "c50bda7e5d978a0021250ac64bcc7e5b57f801261f3a3b3140aecf9e37fd1cad",
+    "crates/rds-discovery/src/records/memory.rs": "9d273df644ee0b69633e8b0681a830a35d5692b7b98c6c009703db2c4a17bd21",
+    "crates/rds-discovery/src/records/metrics.rs": "ef1f8fe5614a00d5b5d62b1a7bfccb53a74fad2166aab750626df102391854fd",
+    "crates/rds-discovery/src/records/tests.rs": "60f434cf499eab95e9379ce9a7431277577a72314c96c1646d0f9b6be8b89aeb",
+    "crates/rds-discovery/src/service.rs": "9c2a3bcc1c09dc702b9d000184aaf679e3692cc2f1c17de9cbc7e808a54f322d",
+    "crates/rds-discovery/src/service/tasks.rs": "1a890524f1f3ba58b38305adaf64c03df2612e3d1089ad52ae751b2511c3fd8b",
+    "crates/rds-discovery/tests/directory_e2e.rs": "a5ae1a8769bf504fb981512ddd750a9f86f9e4ab4aa953101d66c10c94a509cd",
+    "crates/rds-discovery/tests/lifecycle.rs": "99e1c643fb0b2e06469b5a2c8a39bcf870f519047f19560076236f7cd604e86f",
+    "tests/support/admin_cli.rs": "8ef817d9a36de5dfd293e1163518f909ec89eb5c54c8db15a0af3787c725dcff"
+  },
+  "limits": [
+    "Native macOS not executed; discovery Apple Silicon cross-check failed in ring C build before checking RDS",
+    "No new Vector/OpenObserve live pipeline run; unchanged path has preceding receipt",
+    "No latency or observability-overhead benchmark",
+    "cargo-deny unavailable",
+    "No deployment or production alert delivery"
+  ]
+}

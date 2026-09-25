@@ -45,6 +45,8 @@ fn failed_commit_never_publishes_and_reopen_reconciles_one_unacknowledged_genera
         let tmp = Temp::new();
         let store = FileStore::new(&tmp.0).unwrap();
         store.put(&record()).unwrap();
+        let metrics = store.metrics().unwrap();
+        assert_eq!(metrics.snapshot().unwrap().generation, Some(2));
         store.inner.lock().unwrap().fault = Some((phase, false));
         assert!(
             store
@@ -52,8 +54,21 @@ fn failed_commit_never_publishes_and_reopen_reconciles_one_unacknowledged_genera
                 .is_err()
         );
         assert!(matches!(store.get(&key()), Err(DiscoveryError::Store(_))));
+        let failed = metrics.snapshot().unwrap();
+        assert!(!failed.healthy);
+        assert_eq!(failed.generation, Some(2));
+        assert_eq!(failed.records, 1);
         drop(store);
+        assert!(metrics.snapshot().is_none());
         let reopened = FileStore::new(&tmp.0).unwrap();
+        let recovered = reopened.metrics().unwrap().snapshot().unwrap();
+        assert!(recovered.healthy && recovered.durable);
+        assert_eq!(
+            recovered.generation,
+            Some(if phase == Phase::BeforeDatabase { 2 } else { 3 })
+        );
+        assert_eq!(recovered.records, u64::from(phase == Phase::BeforeDatabase));
+        assert_eq!(recovered.identities, 1);
         assert_eq!(
             reopened.get(&key()).is_ok(),
             phase == Phase::BeforeDatabase,
@@ -199,4 +214,56 @@ fn abrupt_exit_recovers_atomic_records_without_undoing_acknowledged_history() {
             assert!(matches!(reopened.put(&record), Err(DiscoveryError::Stale)));
         }
     }
+}
+
+#[test]
+fn record_observations_publish_after_commit_without_database_lock_or_io() {
+    let tmp = Temp::new();
+    let store = FileStore::new(&tmp.0).unwrap();
+    let metrics = store.metrics().unwrap();
+    let empty = metrics.snapshot().unwrap();
+    assert_eq!(
+        (empty.generation, empty.records, empty.identities),
+        (Some(1), 0, 0)
+    );
+    let held = store.inner.lock().unwrap();
+    assert_eq!(metrics.snapshot(), Some(empty));
+    drop(held);
+    let record = record();
+    store
+        .put_admitted(&record, &mut |_| {
+            assert!(metrics.snapshot().is_none());
+            Ok(())
+        })
+        .unwrap();
+    let committed = metrics.snapshot().unwrap();
+    assert_eq!(
+        (
+            committed.generation,
+            committed.records,
+            committed.identities
+        ),
+        (Some(2), 1, 1)
+    );
+    store.put(&record).unwrap();
+    assert_eq!(metrics.snapshot(), Some(committed));
+    let delete = DeleteRequest::new(&signer(), 2).unwrap();
+    assert!(
+        store
+            .remove_admitted(&delete, &mut |_| Err(DiscoveryError::RateLimited))
+            .is_err()
+    );
+    assert_eq!(metrics.snapshot(), Some(committed));
+    store.remove(&delete).unwrap();
+    let removed = metrics.snapshot().unwrap();
+    assert_eq!(
+        (removed.generation, removed.records, removed.identities),
+        (Some(3), 0, 1)
+    );
+    store.remove(&delete).unwrap();
+    assert_eq!(metrics.snapshot(), Some(removed));
+    drop(store);
+    assert!(metrics.snapshot().is_none());
+    let reopened = FileStore::new(&tmp.0).unwrap();
+    assert_eq!(reopened.metrics().unwrap().snapshot(), Some(removed));
 }

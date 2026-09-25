@@ -146,10 +146,16 @@ fn collection_is_bounded_compacts_content_and_retains_all_identity_floors() {
     for seed in 0..=GC_BATCH as u8 {
         put(&store, &record(seed, 1, 1000), time(1000, 10)).unwrap();
     }
+    let metrics = store.metrics().unwrap();
+    assert_eq!(metrics.snapshot().unwrap().records, (GC_BATCH + 1) as u64);
     assert_eq!(store.collect_at(Some(time(1300, 310))).unwrap(), GC_BATCH);
+    assert_eq!(metrics.snapshot().unwrap().records, 1);
     assert_eq!(store.collect_at(Some(time(1300, 310))).unwrap(), 1);
     assert_eq!(store.collect_at(Some(time(1300, 310))).unwrap(), 0);
     assert_eq!(store.len(), 0);
+    let collected = metrics.snapshot().unwrap();
+    assert_eq!(collected.records, 0);
+    assert_eq!(collected.identities, (GC_BATCH + 1) as u64);
     {
         let inner = store.inner.lock().unwrap();
         assert_eq!(inner.metadata.identities, (GC_BATCH + 1) as u64);
@@ -164,7 +170,9 @@ fn collection_is_bounded_compacts_content_and_retains_all_identity_floors() {
         }
     }
     drop(store);
+    assert!(metrics.snapshot().is_none());
     let store = FileStore::new(&tmp.0).unwrap();
+    assert_eq!(store.metrics().unwrap().snapshot(), Some(collected));
     for seed in 0..=GC_BATCH as u8 {
         assert!(matches!(
             put(&store, &record(seed, 1, 1300), time(1300, 310)),

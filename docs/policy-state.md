@@ -87,6 +87,12 @@ The explicit embedding API `use_local_revocations()` selects local policy; it
 has no managed freshness bound. The production CLI never selects it for grant
 mode. Allowlist-only operation remains an explicit separate configuration.
 
+Metadata-only [observations](observability.md#durable-catalog-and-policy-observations)
+are published by these owners after commit/reopen. Busy, failed and released
+owners remain explicit; exporting telemetry takes no transaction locks and
+cannot renew a lease or change stored ordering. No persistence format changes
+are required for the observation adapter.
+
 ## Configuration and migration
 
 Upgrade issuer, directory, agent and name clients together. Re-sign snapshots

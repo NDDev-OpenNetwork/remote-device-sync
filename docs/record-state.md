@@ -291,6 +291,12 @@ filesystem saturation or OS failure. Production throughput and file-capacity
 renewal reserve still require measurement. Membership removal alone does not
 recycle stored identity slots; authenticated retirement remains W4/migration.
 
+Metadata-only [observations](observability.md#durable-catalog-and-policy-observations)
+are published by these owners after commit/reopen. Busy, failed and released
+owners remain explicit; exporting telemetry takes no transaction locks and
+cannot renew a lease or change stored ordering. No persistence format changes
+are required for the observation adapter.
+
 ## Migration and operations
 
 The previous per-key JSON directory and experimental format-1/format-2 databases

@@ -215,12 +215,10 @@ impl AgentMetrics {
         // Clone the immutable value before checking its lease. No watch borrow
         // spans a clock read or exporter formatting; no identifiers are copied.
         let policy = agent.policy.denylist.borrow().clone();
-        values.insert("rds_agent_revoked_grants", policy.len() as u64);
-        // Unmanaged/local policy is explicitly distinct from a fresh GDS lease.
-        values.insert("rds_agent_revocations_local", u64::from(policy.is_local()));
-        if agent.policy.grants_required() {
-            values.insert("rds_agent_revocations_fresh", u64::from(policy.fresh()));
-        }
+        values.extend(policy.metrics(
+            rds_discovery::clock::Reading::cached_now(),
+            agent.policy.grants_required(),
+        ));
         values
     }
 }

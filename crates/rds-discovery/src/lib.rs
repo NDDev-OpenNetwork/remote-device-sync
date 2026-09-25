@@ -16,6 +16,7 @@ pub mod authority;
 pub mod client;
 pub mod clock;
 pub mod http;
+mod observation;
 mod persist;
 pub mod publisher;
 pub use publisher::{RecordDraft, RecordIssuer};
@@ -30,7 +31,7 @@ pub mod policy;
 mod records;
 pub use records::{
     FileStore, MAX_DATABASE as MAX_RECORD_DATABASE_BYTES, MAX_IDENTITIES as MAX_RECORD_IDENTITIES,
-    MemoryStore, MigrationReceipt, migrate_v2,
+    MemoryStore, MigrationReceipt, RecordMetrics, RecordSnapshot, migrate_v2,
 };
 mod admission;
 pub use admission::Enrollment;
@@ -123,6 +124,11 @@ pub fn now_unix() -> Result<u64, DiscoveryError> {
 /// Storage for endpoint records. The GDS server implements this over
 /// its database; agents and tests use the in-memory version.
 pub trait RecordStore: Send + Sync {
+    /// Optional metadata-only observer. Custom stores without this capability
+    /// remain explicitly unsupported; callers must not substitute `len()`.
+    fn metrics(&self) -> Option<RecordMetrics> {
+        None
+    }
     fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
         self.put_admitted(record, &mut |_| Ok(()))
     }

@@ -109,7 +109,23 @@ async fn aggregate_metrics_count_known_traffic_without_retaining_directory() {
         .await
         .unwrap();
     client.health().await.unwrap();
-    let snapshot = metrics.snapshot();
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = metrics.snapshot();
+            if snapshot.get("rds_directory_records_known") == Some(&1) {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(snapshot["rds_directory_records_supported"], 1);
+    assert_eq!(snapshot["rds_directory_records_stored"], 1);
+    assert_eq!(snapshot["rds_directory_records_identities"], 1);
+    assert_eq!(snapshot["rds_directory_records_durable"], 0);
+    assert!(!snapshot.contains_key("rds_directory_records_generation"));
+    assert_eq!(snapshot["rds_directory_policy_configured"], 0);
     assert_eq!(snapshot["rds_directory_puts_ok_total"], 1);
     assert_eq!(snapshot["rds_directory_gets_total"], 1);
     assert_eq!(snapshot["rds_directory_requests_total"], 3);
@@ -119,6 +135,12 @@ async fn aggregate_metrics_count_known_traffic_without_retaining_directory() {
     assert_eq!(metrics.snapshot()["rds_directory_connection_tasks"], 0);
     drop(dir);
     assert_eq!(metrics.snapshot()["rds_directory_workers_known"], 0);
+    assert_eq!(metrics.snapshot()["rds_directory_records_known"], 0);
+    assert!(
+        !metrics
+            .snapshot()
+            .contains_key("rds_directory_records_stored")
+    );
     assert_eq!(metrics.snapshot()["rds_directory_puts_ok_total"], 1);
 }
 

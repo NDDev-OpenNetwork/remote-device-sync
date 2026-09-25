@@ -193,13 +193,16 @@ Source semantics:
 - Agent: occupied connection slots and service tasks, configured budgets,
   grant/revocation state and the existing transport registry. Freshness is
   omitted when grants are not required; local revocation authority is an
-  explicit separate flag. A busy grant table is unknown, never a zero.
+  explicit separate flag. A busy grant table is unknown, never a zero. Epoch,
+  revision and remaining lease describe the effective watched revocation value,
+  published after acceptance, not an in-flight disk result.
 - Directory: parsed-request/publication/rejection/expiry counters and retained
   request/worker/maintenance task gauges. Malformed HTTP requests have a separate
   counter. Completed-but-unreaped handles count
   against their task budgets. Busy or released groups report `*_known=0` and
-  omit their gauges. Snapshots do not lock/read the durable catalog; record
-  inventory and durable policy revision/lease detail remain further O2 work.
+  omit their gauges. Record inventory and durable policy observations are
+  published by transaction owners; scrapes never lock/read the durable catalog.
+  See the durable observation contract below.
 - Owned relay: actual forwarded/dropped datagrams and payload bytes, admission,
   attached endpoints and bounded recent-flow history. Its table observations
   use try-locks with explicit unknown flags. `admission_rejected_total` counts
@@ -241,6 +244,58 @@ Its ports and credentials are unique to the fixture.
 References: [Vector's Prometheus scrape contract](https://vector.dev/docs/reference/configuration/sources/prometheus_scrape/),
 [HTTP message framing](https://www.rfc-editor.org/rfc/rfc9112.html),
 [constant-time equality](https://docs.rs/subtle/2.6.1/subtle/trait.ConstantTimeEq.html).
+
+
+### Durable catalog and policy observations
+
+`RecordStore::metrics()` is optional; custom backends without an observer report
+`rds_directory_records_supported=0` and `records_known=0`, with no invented
+inventory. Built-in stores provide weak, fixed-size metadata observations.
+Directory initialization acquires these handles once. A scrape does not call
+`len()`, verify signatures, scan rows, acquire a store/policy transaction lock or
+read boot identity from disk. `Reading::cached_now()` samples the platform clocks
+only if normal product work has already initialized the boot cache; otherwise
+freshness is explicitly unknown.
+
+Each owner copies metadata through a separate short publication mutex. Readers
+use `try_lock`, copy the entire group and release it before formatting. No I/O,
+validation or callbacks run with that mutex held. Record operations and policy
+commits mark their observation unknown while work is in progress. A panic leaves
+it unknown; detected storage uncertainty reports `healthy=0`. Public metrics omit
+inventory/revision/freshness when unhealthy. Exporter handles retain no files,
+database, file locks, tasks, signed payloads, device keys, names or grant IDs.
+
+| Group | Observations and interpretation |
+| --- | --- |
+| `rds_directory_records_*` | `supported`, `known`, `healthy`, `durable`; `stored` counts record payloads awaiting retirement, not currently fresh/reachable peers; `identities` includes tombstones and retained floors; `capacity` is the identity limit; `generation` is present only for the durable database |
+| `rds_directory_policy_*` | `configured`, `known`, `healthy`, `durable`, current authority `epoch`, and `clock_known` |
+| `rds_directory_{registry,revocations,name_cache}_*` | `present`, committed `revision`, aggregate `entries`, `fresh`, `lease_remaining_seconds`; absent streams omit revision/count/freshness |
+| `rds_agent_revocations_*` | Effective `snapshot_present`, `epoch`, `revision`, `local`; when grants are required, `clock_known`, `fresh` and managed `lease_remaining_seconds`. Local authority has no managed TTL. No lease means closed managed admission; an unavailable clock omits freshness for an existing lease |
+
+Database metadata is published only after both database and anchor commits.
+Exact retries do not advance generation; expiry collection can advance it even
+when a request returns expiry. Reopen validates/reconciles storage first, then
+publishes the recovered generation. Unacknowledged writes may become visible
+on successful recovery, as specified in [record state](record-state.md).
+In-memory inventory carries no durable generation. Neither expiry collection
+nor deletion releases remembered identity slots.
+
+Policy revision, count and lease are one observation. Signature/revision/quota
+refusal leaves the previous observation; identical retries never extend its
+lease. Rotation clears old streams. Freshness checks the committed policy wall
+floor, boot identity, wall expiry and the original suspend-inclusive deadline.
+Seconds are rounded down: zero remaining seconds can still be fresh for less
+than one second, so use the separate freshness gauge. Revisions remain visible
+for expired healthy policy. Failed persistence omits them until successful
+reopen. Agent failure retains the last effective revision for diagnosis while
+clearing its live lease; a late obsolete feed cannot publish a successor's state.
+
+These are coherent groups, not a cross-process/distributed transaction or a new
+authority for authorization/recovery. Prometheus-compatible consumers may round
+large integer revisions to floating-point precision: use the authenticated
+product state, never telemetry, to decide exact revision ordering. Labels remain
+bounded; the existing Vector admin projection accepts these fixed metric names.
+See [the implementation receipt](reports/rds-durable-metrics-20260925.md).
 
 ## Development qualification
 
@@ -345,7 +400,7 @@ running. A silent alert channel alone proves nothing.
 | Step | Work | Exit evidence |
 | --- | --- | --- |
 | O1 | Shared bounded schema, adapters, collector, basic queries/alerts | Rust and real pipeline regression receipts; this change |
-| O2 | Authenticated loopback admin listener and aggregate source metrics implemented; remaining: durable policy/record inventory, finer task/queue coverage and upstream-relay adapter | Proxy rejection, real daemon authentication/shutdown, known traffic and collector receipts; unknown/unavailable remains explicit |
+| O2 | Authenticated loopback admin listener and aggregate source metrics implemented; durable policy/record observations now implemented; remaining: finer task/queue coverage and upstream-relay adapter | Proxy rejection, real daemon authentication/shutdown, known traffic and collector receipts; unknown/unavailable remains explicit |
 | O3 | Stable reason codes and phase timing for discovery, grants, dialing, relay migration, SSH, decode/present and durable sync; negotiated operation IDs | Same operation traced across peers without credentials; cancellation/error/remote acknowledgment distinguished; loss/latency tests |
 | O4 | Redacted bounded support bundle, exact build/features/policy digests and GDS status; saved dashboards | Secret-canary tests, bounded archive, actual failure localization; no raw logs by default |
 | O5 | Private estate rollout using existing telemetry/alert channels; rotation, retention, quotas, TLS/roles, expected instances, independent liveness, collector/backend self-monitoring | Real host receipt, outage/recovery and notification delivery checks; no public credentials |
@@ -353,12 +408,15 @@ running. A silent alert channel alone proves nothing.
 
 ### Next reviewable increments
 
-1. Finish O2 durable observations: publish policy epoch/revision, bounded lease
-   freshness and catalog inventory from their existing transaction owners.
-   Scrapes must not perform disk I/O or take store locks. Acceptance: exact
-   changes after successful commits, failed writes and reopen; expired/busy or
-   unsupported state is explicit. Extend the upstream relay adapter only where
-   its API provides a truthful comparable observation.
+1. Continue O2 coverage: durable policy/catalog observations now have commit,
+   failure, expiry and reopen regressions. Add remaining task/queue coverage and
+   adapt the locked iroh-relay 1.2.0 public `Server::metrics().server` counters
+   through weak handles. Its `server` feature already enables metrics; no second
+   upstream HTTP metrics listener is needed. Keep upstream frame/byte semantics
+   distinct from owned-relay datagram/payload counters, and prove actual relayed
+   traffic plus owner drop before changing availability. Preserve no disk/store
+   locks during scrapes and explicit unsupported/busy/expired state. Production
+   inventory/lease dashboards and alert delivery remain O4/O5.
 2. Add O3 phase/reason contracts in the owning protocol crates, beginning with
    discovery → policy → connect → service admission. Keep fixed reason enums
    and separate local completion from peer acknowledgment. Acceptance: paired

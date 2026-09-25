@@ -10,6 +10,9 @@ The owner's 2026-09-25 observability addition is tracked in the
 [observability contract and O1–O6 execution sequence](observability.md), under
 remediation W10.1/W10.2. It uses shared Rust process telemetry with replaceable
 Vector/OpenObserve infrastructure and does not close historical C7 by itself.
+The durable catalog/policy observation increment is recorded in its
+[2026-09-25 receipt](reports/rds-durable-metrics-20260925.md); source coverage
+remains partial and the O3–O6 gates still apply.
 
 The detailed engineering plan. `docs/roadmap.md` holds milestones and
 gates; this file holds the workstreams: tasks, file-level scope, API

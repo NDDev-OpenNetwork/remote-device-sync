@@ -20,6 +20,9 @@ pub const MAX_IDENTITIES: usize = 4096;
 const GC_BATCH: usize = 64;
 mod entry;
 mod memory;
+mod metrics;
+use crate::observation::Published;
+pub use metrics::{RecordMetrics, RecordSnapshot};
 mod migration;
 use entry::{Entry, Stored, decide, decode, exact, observe};
 pub use memory::MemoryStore;
@@ -154,6 +157,7 @@ fn bounds(offset: u64, len: usize) -> io::Result<()> {
 /// ignored or overwritten. No database daemon or subprocess is used.
 pub struct FileStore {
     inner: Mutex<Inner>,
+    observed: Published<RecordSnapshot>,
 }
 struct Inner {
     db: Database,
@@ -323,7 +327,9 @@ impl FileStore {
         if !anchor.initialized()? {
             anchor.seal()?;
         }
+        let observed = Published::new(record_snapshot(&metadata, true));
         Ok(Self {
+            observed,
             inner: Mutex::new(Inner {
                 db,
                 anchor,
@@ -353,73 +359,102 @@ impl FileStore {
         now: Option<Reading>,
         admit: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
     ) -> Result<Option<EndpointRecord>, DiscoveryError> {
-        let mut inner = self.inner.lock().map_err(error)?;
-        inner.healthy()?;
-        let now = now.map(Ok).unwrap_or_else(Reading::now)?;
-        let floor = inner.metadata.wall_floor;
-        observe(floor, &mut inner.observed_wall, now)?;
-        inner.failed = true;
-        let old = {
-            let txn = inner.db.begin_read().map_err(error)?;
-            let table = txn.open_table(RECORDS).map_err(error)?;
-            table
-                .get(key.0.as_slice())
-                .map_err(error)?
-                .map(|value| decode(value.value(), &key))
-                .transpose()?
-        };
-        inner.failed = false;
-        let decision = decide(old.as_ref(), entry, &key, now)?;
-        if let Some(replacement) = decision.replacement {
-            if old.is_none() && inner.metadata.identities >= MAX_IDENTITIES as u64 {
-                return Err(error("record identity capacity exceeded"));
+        self.observed_access(|inner| {
+            inner.healthy()?;
+            let now = now.map(Ok).unwrap_or_else(Reading::now)?;
+            let floor = inner.metadata.wall_floor;
+            observe(floor, &mut inner.observed_wall, now)?;
+            inner.failed = true;
+            let old = {
+                let txn = inner.db.begin_read().map_err(error)?;
+                let table = txn.open_table(RECORDS).map_err(error)?;
+                table
+                    .get(key.0.as_slice())
+                    .map_err(error)?
+                    .map(|value| decode(value.value(), &key))
+                    .transpose()?
+            };
+            inner.failed = false;
+            let decision = decide(old.as_ref(), entry, &key, now)?;
+            if let Some(replacement) = decision.replacement {
+                if old.is_none() && inner.metadata.identities >= MAX_IDENTITIES as u64 {
+                    return Err(error("record identity capacity exceeded"));
+                }
+                if matches!(replacement, Stored::Active { .. }) {
+                    admit(old.is_some())?;
+                }
+                inner.commit(&[(key, replacement)], now)?;
             }
-            if matches!(replacement, Stored::Active { .. }) {
-                admit(old.is_some())?;
-            }
-            inner.commit(&[(key, replacement)], now)?;
-        }
-        decision.result
+            decision.result
+        })
     }
     fn collect_at(&self, now: Option<Reading>) -> Result<usize, DiscoveryError> {
-        let mut inner = self.inner.lock().map_err(error)?;
-        inner.healthy()?;
-        let now = now.map(Ok).unwrap_or_else(Reading::now)?;
-        let floor = inner.metadata.wall_floor;
-        observe(floor, &mut inner.observed_wall, now)?;
-        inner.failed = true;
-        let mut changes = Vec::new();
-        let mut scanned = 0;
-        let mut last = None;
-        {
-            let txn = inner.db.begin_read().map_err(error)?;
-            let table = txn.open_table(RECORDS).map_err(error)?;
-            let start = inner
-                .cursor
-                .as_ref()
-                .map_or(std::ops::Bound::Unbounded, |key| {
-                    std::ops::Bound::Excluded(key.as_slice())
-                });
-            for item in table
-                .range::<&[u8]>((start, std::ops::Bound::Unbounded))
-                .map_err(error)?
-                .take(GC_BATCH)
+        self.observed_access(|inner| {
+            inner.healthy()?;
+            let now = now.map(Ok).unwrap_or_else(Reading::now)?;
+            let floor = inner.metadata.wall_floor;
+            observe(floor, &mut inner.observed_wall, now)?;
+            inner.failed = true;
+            let mut changes = Vec::new();
+            let mut scanned = 0;
+            let mut last = None;
             {
-                let (key, value) = item.map_err(error)?;
-                let key = EndpointKey(key.value().try_into().map_err(error)?);
-                if let Some(retired) = decode(value.value(), &key)?.retire(&key, now)? {
-                    changes.push((key, retired));
+                let txn = inner.db.begin_read().map_err(error)?;
+                let table = txn.open_table(RECORDS).map_err(error)?;
+                let start = inner
+                    .cursor
+                    .as_ref()
+                    .map_or(std::ops::Bound::Unbounded, |key| {
+                        std::ops::Bound::Excluded(key.as_slice())
+                    });
+                for item in table
+                    .range::<&[u8]>((start, std::ops::Bound::Unbounded))
+                    .map_err(error)?
+                    .take(GC_BATCH)
+                {
+                    let (key, value) = item.map_err(error)?;
+                    let key = EndpointKey(key.value().try_into().map_err(error)?);
+                    if let Some(retired) = decode(value.value(), &key)?.retire(&key, now)? {
+                        changes.push((key, retired));
+                    }
+                    scanned += 1;
+                    last = Some(key.0);
                 }
-                scanned += 1;
-                last = Some(key.0);
             }
-        }
-        inner.failed = false;
-        if !changes.is_empty() {
-            inner.commit(&changes, now)?;
-        }
-        inner.cursor = if scanned == GC_BATCH { last } else { None };
-        Ok(changes.len())
+            inner.failed = false;
+            if !changes.is_empty() {
+                inner.commit(&changes, now)?;
+            }
+            inner.cursor = if scanned == GC_BATCH { last } else { None };
+            Ok(changes.len())
+        })
+    }
+
+    fn observed_access<T>(
+        &self,
+        work: impl FnOnce(&mut Inner) -> Result<T, DiscoveryError>,
+    ) -> Result<T, DiscoveryError> {
+        let mut inner = self.inner.lock().map_err(|e| {
+            self.observed.finish(|snapshot| snapshot.healthy = false);
+            error(e)
+        })?;
+        self.observed.begin();
+        let result = work(&mut inner);
+        self.observed.finish(|snapshot| {
+            *snapshot = record_snapshot(&inner.metadata, !inner.failed);
+        });
+        result
+    }
+}
+
+fn record_snapshot(metadata: &Metadata, healthy: bool) -> RecordSnapshot {
+    RecordSnapshot {
+        healthy,
+        durable: true,
+        generation: Some(metadata.generation),
+        records: metadata.live,
+        identities: metadata.identities,
+        capacity: MAX_IDENTITIES as u64,
     }
 }
 
@@ -516,6 +551,9 @@ impl Inner {
     }
 }
 impl RecordStore for FileStore {
+    fn metrics(&self) -> Option<RecordMetrics> {
+        Some(RecordMetrics(self.observed.observer()))
+    }
     fn put_admitted(
         &self,
         record: &EndpointRecord,

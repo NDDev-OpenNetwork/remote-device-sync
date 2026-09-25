@@ -211,6 +211,8 @@ mod tests {
         let gc_release = block(&maintenance).await;
         let (shutdown, _) = watch::channel(false);
         let directory = Directory {
+            records: None,
+            policy: None,
             metrics: Default::default(),
             addr: "127.0.0.1:0".parse().unwrap(),
             shutdown,

@@ -215,8 +215,26 @@ async fn check_authentication_and_signal_cleanup(unavailable_relay: Option<std::
             .starts_with("HTTP/1.1 404")
         );
     }
-    let metrics = wire(addr, &query).await;
+    let metrics = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let metrics = wire(addr, &query).await;
+            if ROLE != "server" || metrics.contains("rds_directory_records_known 1\n") {
+                break metrics;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(metrics.starts_with("HTTP/1.1 200"), "{metrics}");
+    if ROLE == "server" {
+        assert!(metrics.contains("rds_directory_records_supported 1\n"));
+        assert!(metrics.contains("rds_directory_records_healthy 1\n"));
+        assert!(metrics.contains("rds_directory_records_durable 1\n"));
+        assert!(metrics.contains("rds_directory_records_stored 0\n"));
+        assert!(metrics.contains("rds_directory_records_generation 1\n"));
+        assert!(metrics.contains("rds_directory_policy_configured 0\n"));
+    }
     assert!(metrics.contains("rds_admin_unauthorized_total 1\n"));
     if ROLE == "agent" {
         assert!(metrics.contains("rds_agent_connections_active 0\n"));

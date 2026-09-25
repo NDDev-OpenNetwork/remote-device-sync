@@ -46,7 +46,7 @@ Neither increment closes these product gaps or any wave.
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
 | W3.6 | Partial; validated selection and local child failure isolation | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link route loss and known tunnel closure retire stale relay selection. Mux child send/receive failures are isolated; policy withdraws failed advertisements, excludes failed routes even when last-path close is refused, and closes held connections after all-child loss. Real loopback fixtures preserve open-stream traffic and accept new connections on the surviving child. Policy-observed telemetry exposes sticky event loss and unknown selection. Full path-event resynchronization, lossless retirement metrics, interface/socket recreation, per-service scheduling and physical-network qualification remain open. |
-| W10.1/W10.2 | Partial; O1 foundation and O2 admin/source increment | Shared bounded Rust telemetry and Vector/OpenObserve pipeline; opt-in authenticated loopback metrics on agent/relay/server, aggregate source observations and old public metrics removal. Detailed durable policy/inventory and upstream adapter coverage, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
+| W10.1/W10.2 | Partial; O1 foundation and O2 admin/source increment | Shared bounded Rust telemetry and Vector/OpenObserve pipeline; opt-in authenticated loopback metrics on agent/relay/server, aggregate source observations and old public metrics removal. Durable policy/catalog observations and effective agent revocation revision/lease are implemented. Finer queue/task and upstream adapter coverage, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
 
 ## Authorization change
 
@@ -1180,3 +1180,32 @@ observations, phase/reason correlation, support bundles/dashboards, private
 rollout and independent liveness remain O2–O6. Native macOS execution, physical
 network/resource/failure campaigns and all open product/release gates remain.
 No wave closes and no production service was activated.
+
+
+## 2026-09-25 — durable catalog and policy observations
+
+W10 / O2 increment; no wave closure. Rust transaction owners now publish
+metadata-only catalog counts/capacity/generation and policy epoch/revision,
+aggregate entries and bounded lease freshness. Memory/custom backends, busy
+owners, expired leases and failed commits have distinct observations. Exporters
+retain no store/file locks and perform no disk reads or transaction locking.
+Agent revocation revision and TTL follow its effective watched admission value.
+
+The [receipt](reports/rds-durable-metrics-20260925.md) records verification and
+limits; [the contract](observability.md#durable-catalog-and-policy-observations)
+explains each gauge, failure/recovery and clock semantics. Existing cryptography,
+QUIC/TLS, redb and Vector/OpenObserve boundaries remain; no new dependency or
+persistence format is introduced.
+
+Linux verification passed: formatting, default/X11/all-feature workspace Clippy,
+472 workspace tests (2 ignored), and 211 expanded tests (1 ignored, overlapping).
+The Apple Silicon discovery cross-check stopped in `ring` C compilation: default
+Linux compiler rejected Apple flags; explicit Clang lacked a usable Apple SDK.
+This is retained as failed environment qualification, not a macOS pass.
+
+Remaining: finer queue/task and upstream relay coverage (O2), phase/reason
+correlation (O3), bounded diagnostic bundles/dashboards (O4), private rollout and
+independent delivered alerts (O5), platform/resource/latency campaigns (O6).
+Native SSH/PTY, desktop capture/viewer, sync completion, transport recovery and
+release qualification retain their W0–W10 gates. This increment does not establish
+complete product readiness or connection latency improvement.

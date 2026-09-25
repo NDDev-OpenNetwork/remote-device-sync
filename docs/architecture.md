@@ -123,6 +123,14 @@ shutdown of the composed host and a failure exit, with errors retained across
 observation and cleanup. See [runtime composition](relay-runtime.md)
 for feature selection, startup boundaries and compatibility.
 
+Durable catalog and policy metrics are metadata projections from their existing
+transaction owners. They publish after successful commit/reopen, expose storage
+uncertainty and omit unavailable gauges. Scrapes use weak observation handles
+and cached clock identity without database/policy locks or disk I/O. Agent
+revocation metrics follow the effective watched admission value. These groups
+are diagnostic observations, never another authorization or replay authority;
+see [observability](observability.md#durable-catalog-and-policy-observations).
+
 ## Research summary
 
 ### Connectivity models surveyed

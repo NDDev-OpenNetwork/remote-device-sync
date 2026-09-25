@@ -224,6 +224,12 @@ async fn close_joins_started_maintenance_and_schedules_no_successor() {
     let weak = Arc::downgrade(&store);
     let directory = serve(store).await;
     started(&gate).await;
+    // This custom backend supplies no observer. Scrapes must not call len()
+    // or invent an empty catalog, including while maintenance is stalled.
+    let metrics = directory.metrics().snapshot();
+    assert_eq!(metrics["rds_directory_records_supported"], 0);
+    assert_eq!(metrics["rds_directory_records_known"], 0);
+    assert!(!metrics.contains_key("rds_directory_records_stored"));
     Client::new(directory.addr()).health().await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(75), directory.close())
