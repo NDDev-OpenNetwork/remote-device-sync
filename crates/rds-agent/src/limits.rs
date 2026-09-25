@@ -34,7 +34,8 @@ impl AgentLimits {
         self.connections
     }
 
-    /// Concurrent service tasks in each connection, including hello/Authz I/O.
+    /// Concurrent tasks, including hello/Authz I/O. Grant mode requires at
+    /// least two and reserves one from long-lived service bodies for renewal.
     pub fn streams(self) -> usize {
         self.streams
     }

@@ -33,6 +33,13 @@ enum Action {
         #[arg(long)]
         grant_file: Option<PathBuf>,
     },
+    /// Extend a pinned session using a signed grant revision with the same scope.
+    Renew {
+        #[arg(long)]
+        session: SessionId,
+        #[arg(long)]
+        grant_file: PathBuf,
+    },
     /// Select a device for subsequent commands; existing streams stay pinned.
     Use { session: SessionId },
     /// Close a connection and all its streams, or cancel a pending dial.
@@ -94,6 +101,15 @@ pub async fn run(options: Options, directory: PathBuf) -> anyhow::Result<()> {
         Action::Connect { target, grant_file } => {
             let grant = read_grant(grant_file).await?;
             Command::Connect { target, grant }
+        }
+        Action::Renew {
+            session,
+            grant_file,
+        } => {
+            let grant = read_grant(Some(grant_file))
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("grant required"))?;
+            Command::Renew { session, grant }
         }
         Action::Use { session } => Command::Select { session },
         Action::Disconnect { session } => Command::Disconnect { session },

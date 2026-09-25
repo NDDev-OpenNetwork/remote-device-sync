@@ -335,12 +335,17 @@ async fn grant_agent(
 fn grant_for(
     iss: &ed25519_dalek::SigningKey,
     subject: rds_net::EndpointId,
+    audience: rds_net::EndpointId,
     services: Vec<ServiceKind>,
     ttl: Duration,
 ) -> Grant {
     Grant::issue(
         iss,
         *subject.as_bytes(),
+        *audience.as_bytes(),
+        rds_net::SecretKey::generate().to_bytes()[..16]
+            .try_into()
+            .unwrap(),
         services,
         ttl,
         GrantConstraints::default(),
@@ -375,6 +380,7 @@ async fn grant_mode_valid_grant_opens_services() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -415,6 +421,7 @@ async fn streams_before_grant_are_rejected() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -442,9 +449,12 @@ async fn expired_and_wrong_service_grants_rejected() {
     let expired = Grant::issue_at(
         &iss,
         rds_core::grant::GrantPayload {
+            version: rds_core::grant::GRANT_VERSION,
+            revision: 1,
             issuer: iss.verifying_key().to_bytes(),
             subject: *client.id().as_bytes(),
-            nonce: 1,
+            audience: *ticket.endpoint_id().as_bytes(),
+            nonce: [1; 16],
             services: vec![ServiceKind::Ping],
             not_before: 1,
             expires_at: 2,
@@ -461,6 +471,7 @@ async fn expired_and_wrong_service_grants_rejected() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -485,6 +496,7 @@ async fn revoked_grant_drops_live_and_new_connections() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -494,7 +506,7 @@ async fn revoked_grant_drops_live_and_new_connections() {
     rds_cli::ping(&conn, 1).await.unwrap();
 
     // Push the grant id onto the denylist: the live connection dies…
-    policy.revoke(grant.id());
+    policy.revoke(grant.id().unwrap());
     let closed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if rds_cli::ping(&conn, 2).await.is_err() {
@@ -526,6 +538,7 @@ async fn grant_replay_on_concurrent_connection_rejected() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -591,10 +604,11 @@ async fn failed_authz_reply_closes_connection_and_releases_grant() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(60),
     );
-    let grant_id = grant.id();
+    let grant_id = grant.id().unwrap();
     let mut encoded = Vec::new();
     write_frame(&mut encoded, &StreamHello::Authz(grant))
         .await

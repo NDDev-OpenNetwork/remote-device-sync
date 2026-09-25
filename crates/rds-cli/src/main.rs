@@ -548,4 +548,25 @@ mod config_tests {
         assert!(Cli::try_parse_from(["rds", "ssh", "peer"]).is_err());
         assert!(Cli::try_parse_from(args.into_iter().chain(["-L", "127.0.0.1:2222"])).is_err());
     }
+
+    #[test]
+    fn renewal_requires_an_explicit_session_and_signed_grant_file() {
+        let id = "01010101010101010101010101010101";
+        assert!(
+            Cli::try_parse_from([
+                "rds",
+                "session",
+                "renew",
+                "--session",
+                id,
+                "--grant-file",
+                "grant.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["rds", "session", "renew", "--grant-file", "grant.json"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["rds", "session", "renew", "--session", id]).is_err());
+    }
 }

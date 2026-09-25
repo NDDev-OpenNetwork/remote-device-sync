@@ -11,9 +11,10 @@ All waves remain open. W1.1–W1.4 and W1.6–W1.8 passed the local Linux check
 matrix; other tasks remain planned unless listed below. No deployment or owned-backend
 promotion has occurred. Native macOS checks still require their platform lane.
 
-Readiness review at source `ec48d75`: the repository is not a completed remote
-access product. The CLI SSH command still forwards to a host sshd and asks the
-user to run an external SSH client. Frame presentation returns unavailable;
+The historical readiness review at source `ec48d75` found an external SSH-client
+requirement; the later [native Rust SSH increment](ssh.md) removes that local
+requirement while retaining a configured remote SSH server. The repository is
+still not a completed remote access product. Frame presentation returns unavailable;
 ScreenCaptureKit, image-copy and PipeWire capture probes remain placeholders.
 The throughput scenario stops timing after sender finish without checking a
 receiver byte/digest acknowledgment. These implementation gaps remain in
@@ -40,6 +41,7 @@ Neither increment closes these product gaps or any wave.
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
+| W2.3 | Partial; destination-bound renewable grants | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. Tenant/policy binding, finer scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
 | W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer/sync manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
@@ -84,8 +86,9 @@ default features, `rds-desktop/x11`, and all features (all with `-D warnings`);
 changes do not close W1 or replace historical benchmark evidence.
 
 The signed revocation feed still needs durable anti-rollback/freshness/offline
-policy (W1.4); this patch does not close all of audit A02. Audience binding and
-renewable leases remain W2.3. Long-lived service task ownership remains W2.5.
+policy (W1.4) at this historical patch; subsequent sections record its completion.
+The later [grant v2 increment](grant-leases.md) adds audience binding and explicit
+renewable leases, while other W2.3 and task-ownership W2.5 work remains open.
 
 ## Sync correctness and filesystem change
 
@@ -1238,8 +1241,9 @@ Ordinary CLI ticket/ping/info/SSH-forward commands now use the running local
 agent. Agent control defaults to a dedicated directory beside its key; explicit
 paths and server-only `--no-control` remain available. Managed commands never
 fall back to an independently bound endpoint. Existing sessions stay pinned and
-are reused by concurrent CLI processes. Local IPC is version 2; remote protocols
-and the iroh default are unchanged.
+are reused by concurrent CLI processes. This increment introduced local IPC v2;
+the later [grant renewal increment](grant-leases.md) requires v3. The iroh default
+remains unchanged.
 
 Agent, explicit direct CLI and owned relay acquire the validated seed inode's
 exclusive runtime owner before network bind. Pure identity readers still work.
@@ -1297,3 +1301,48 @@ separation; authorized PTY survival/reattachment with bounded history; native
 macOS, lease/revocation, impaired-network and mixed SSH/video/sync qualification.
 Viewer/sync manager APIs and the other W0–W10/O2–O6 work retain their gates.
 No wave, deployment or complete-system readiness is closed by this increment.
+
+
+## Destination-bound grants and explicit live renewal
+
+W2.3 remains partial. Two negative tests first reproduced missing signature
+protocol separation and acceptance of an inverted signed interval within clock
+skew. Grant v2 now validates the domain, version, exact bounded payload, interval,
+subject and actual serving endpoint audience. A random issuer nonce identifies
+one authorization; its stable ID survives positive, increasing lease revisions.
+
+The connection owns one replay reservation and watchdog. Same-scope renewal
+extends its wall/continuous-clock lease without reconnecting or interrupting
+TCP bodies; duplicate requests retain the original deadline. Existing expiry
+and revocation remain enforced while a candidate reply stalls. Revocation of the
+initial ID closes the renewed connection. Invalid scope/identity/revision changes
+close only the affected connection, with an independent control peer kept live.
+
+A two-slot agent fixture proves that a held TCP body does not consume renewal
+capacity: grant mode reserves one of the existing task slots for control.
+Invalid one-slot grant configuration fails before identity creation or bind.
+Response FIN follows authorization commit; local control EOF follows manager
+publication. These barriers prevent immediate successive renewals from racing a
+pending predecessor. Cancellation before completion releases the pinned session.
+
+`rds session renew` requires an explicit session and grant file, updates the
+credential digest, and preserves device selection and open bodies. IPC v3 and
+grant v2 require coordinated migration. Two fixed authorization operation names
+join the existing telemetry/Vector schema without exporting grant contents.
+The [contract](grant-leases.md) and [dated receipt](reports/rds-grant-leases-20260925.md)
+record final evidence and remaining qualification. Final Linux checks passed:
+formatting, default/X11/all-feature Clippy, 529 default and 578 expanded tests
+(three ignored per overlapping run), separate OpenSSH interoperability,
+cargo-deny, Vector validation and nine projection tests. All 226 executable
+source/configuration hashes stayed fixed. The expanded run also exposed a
+relay-process fixture race; the corrected test waits for observed client closure
+under a deadline while retaining the Drain assertion. Both relay host variants
+and the final full matrix passed.
+
+Next, in dependency order: tenant/policy and per-resource authorization scopes;
+the GDS issuer/client API and automatic renewal/reconciliation; SSH host/account
+provisioning; viewer/sync manager operations; native macOS, suspend, physical
+network and mixed-load acceptance. Existing W0–W10 and O2–O6 tasks remain open.
+Scope reductions require explicit revocation and new authorization today. No
+wave-close, benchmark latency result, installed-agent update or deployment is
+claimed by this increment.

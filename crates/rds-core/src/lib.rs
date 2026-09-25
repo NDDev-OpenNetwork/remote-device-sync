@@ -71,6 +71,8 @@ pub enum StreamHello {
     /// service received before authorization starts is refused. Services that
     /// overlap its reply/commit transaction wait for completion with a deadline.
     Authz(grant::Grant),
+    /// Signed lease revision for this connection; same identity and exact scope.
+    RenewAuthz(grant::Grant),
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.

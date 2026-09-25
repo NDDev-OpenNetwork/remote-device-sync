@@ -16,7 +16,7 @@ in the same second are valid. Each new revision is a complete replacement.
 |---|---|---|
 | Registry | `rds/registry/v2\0` | 256 names; 256 KiB HTTP JSON body; 24-hour validity |
 | Name proof | `rds/name-binding/v2\0` | Version 2; exact requested name; 256-byte raw payload; 24-hour validity |
-| Revocations | `rds/revocations/v1\0` | 1024 grant hashes; 40 KiB raw payload; 300-second validity |
+| Revocations | `rds/revocations/v1\0` | 1024 stable grant IDs; 40 KiB raw payload; 300-second validity |
 | Authority rotation | `rds/authority-rotation/v1\0` | Both authorities sign; 1024-byte raw payload; 1-hour acceptance window |
 
 Signatures are checked before payload deserialization. All validity checks
@@ -27,6 +27,12 @@ the BLAKE3 digest of the registry payload, its revision and identical validity
 interval. The client remembers a global registry revision and up to 1024 name
 proof hashes, refusing overflow rather than evicting anti-rollback history.
 Receiving a proof for one name discloses no other inventory entries.
+
+[Grant v2](grant-leases.md) uses a stable session ID across renewal revisions.
+Revocation snapshots must carry those IDs, derived from issued/verified grants;
+old payload-hash IDs cannot revoke v2 sessions. The snapshot signature/version
+contract above is unchanged, but issuer and agent cutover must coordinate the
+ID migration. A grant lease revision is distinct from this policy-stream revision.
 
 ## Commit and restart
 

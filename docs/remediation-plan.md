@@ -232,6 +232,12 @@ new Rust modules only where a real ownership boundary is needed.
 | W2.7 | Own endpoint/address/service/frame types; isolate iroh/noq and native adapters; move async framing out of the documented runtime-free type layer or explicitly revise that contract. | Layer checks and feature-isolated builds; service crates do not depend on backend-specific path/address representation. |
 | W2.8 | Add session correlation and structured lifecycle events with typed reason codes, key-safe diagnostics and measured stage timestamps. | One trace explains dial→grant→service→migration→close across components without secrets or private filenames by default. |
 
+W2.3 implementation update (2026-09-25): [grant v2 and explicit renewal](grant-leases.md)
+bind subject/audience/session, preserve stable-ID revocation and continuous-clock
+expiry, and serialize managed renewal. Scope reductions currently require revoke
+and fresh authorization; tenant/policy binding, finer service scopes and automatic
+issuer renewal remain open. This is not the `r2-session-core` wave-close gate.
+
 ## W3 — complete owned connectivity and recovery
 
 Proposed gate: `r3-connectivity-parity`. Scope: net/noq, relay, server, bench.

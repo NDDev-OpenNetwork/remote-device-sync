@@ -82,6 +82,8 @@ async fn ssh_operations_export_only_fixed_names_and_lifecycle_outcomes() {
     .unwrap();
     let _default = tracing::subscriber::set_default(subscriber);
     let _: Result<(), ()> = observe(Operation::SshConnect, async { Ok(()) }).await;
+    let _: Result<(), ()> = observe(Operation::GrantAuthorize, async { Ok(()) }).await;
+    let _: Result<(), ()> = observe(Operation::GrantRenew, async { Err(()) }).await;
     assert!(
         tokio::time::timeout(
             Duration::from_millis(1),
@@ -95,11 +97,15 @@ async fn ssh_operations_export_only_fixed_names_and_lifecycle_outcomes() {
     );
     assert!(telemetry.shutdown().drained);
     let records = capture.records();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[1]["operation"], "grant_authorize");
+    assert_eq!(records[1]["outcome"], "ok");
+    assert_eq!(records[2]["operation"], "grant_renew");
+    assert_eq!(records[2]["outcome"], "error");
     assert_eq!(records[0]["operation"], "ssh_connect");
     assert_eq!(records[0]["outcome"], "ok");
-    assert_eq!(records[1]["operation"], "ssh_session");
-    assert_eq!(records[1]["outcome"], "cancelled");
+    assert_eq!(records[3]["operation"], "ssh_session");
+    assert_eq!(records[3]["outcome"], "cancelled");
 }
 
 #[test]

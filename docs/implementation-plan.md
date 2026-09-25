@@ -334,18 +334,19 @@ resolve→connect→first byte ≤ 300 ms on LAN, measured by the harness.
 
 ## 6. WS4 — capability authz
 
-- Grant record in `rds-core`: `{issuer: Key, subject: EndpointKey,
-  services: [Service], not_before, expires_at, constraints: {max_bps?,
-  ports?, displays?}, signature}` — our own signed format (ed25519-dalek
-  already in tree); biscuit deferred unless delegation chains prove
-  needed.
+- Implemented [grant v2](grant-leases.md) in `rds-core`: `{version, revision,
+  issuer, subject, audience, nonce, services, not_before, expires_at, constraints}`
+  inside a domain-separated Ed25519 signed envelope. Stable session IDs span
+  same-scope renewals. Existing ed25519-dalek/BLAKE3 supply primitives; delegation
+  chains are not implemented.
 - Enforcement: grant presented in the first control frame; agent
   verifies signature + expiry + service scope before opening service
   streams. Connection-level rejection = close before any stream
   service (same effect as `EndpointHooks::after_handshake`).
 - Revocation: short TTL (minutes) + GDS denylist channel — the server
-  pushes revoked grant hashes to agents on the control channel; agents
-  also drop connections whose grants expired.
+  publishes signed stable grant-ID snapshots polled by agents; agents also
+  close expired connections. Explicit client/managed renewal preserves streams;
+  automatic issuance/renewal and finer policy scopes remain W2.3/W4.2.
 - Tests: expired grant rejected; wrong-service grant rejected;
   revoked grant rejected after denylist push.
 

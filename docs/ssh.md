@@ -74,9 +74,10 @@ retains the existing exclusive endpoint-key ownership requirement. The SSH
 authentication key is separate from the RDS endpoint identity.
 
 This changes the meaning of `ssh` in both CLI command families: the old `-L`,
-`--bind` and `--max-connections` options belong to `forward`. Local IPC remains
-version 2; the existing OpenTcp operation supplies the stream. No RDS/relay wire
-version or remote agent protocol change is required.
+`--bind` and `--max-connections` options belong to `forward`. Local IPC is now
+version 3 after the later [grant renewal increment](grant-leases.md); OpenTcp
+continues to supply the SSH stream. The SSH engine itself introduces no remote
+RDS/relay framing change.
 
 ## Trust and authorization
 
@@ -193,8 +194,10 @@ Still required: GDS host-key provisioning/rotation and account scopes; native
 macOS execution; real relay/NAT/failover and slow-output qualification; broader
 upstream resource budgets, algorithms/certificates as policy requires; a scoped
 Rust OS session broker only with account-isolation evidence; reconnectable PTY
-authorization and bounded history; lease renewal, revocation and mixed
-SSH/video/sync soak. The full W5 gate remains open.
+authorization and bounded history; automatic issuer-driven renewal and mixed
+SSH/video/sync lease/revocation soak. Explicit same-scope [grant renewal](grant-leases.md)
+now preserves the underlying live TCP stream; it does not reattach a lost PTY.
+The full W5 gate remains open.
 
 The [dated implementation receipt](reports/rds-ssh-20260925.md) records the
 final local checks, source/configuration hashes and qualification limits.

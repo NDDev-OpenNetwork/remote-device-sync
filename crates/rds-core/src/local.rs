@@ -1,7 +1,7 @@
 //! Versioned local control protocol. This is not a remote service ALPN.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const MAX_SESSIONS: usize = 32;
 pub const TCP_CHUNK: usize = 16 * 1024;
 
@@ -95,6 +95,11 @@ pub enum Command {
     },
     /// Current addresses of the already-bound agent endpoint; no relay wait.
     Ticket,
+    /// Extend one explicitly pinned grant-backed session without reconnecting.
+    Renew {
+        session: SessionId,
+        grant: Box<crate::grant::Grant>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

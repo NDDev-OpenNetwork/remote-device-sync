@@ -10,6 +10,7 @@ pub(super) type Shared = Arc<Mutex<State>>;
 pub(super) struct Entry {
     pub peer: EndpointId,
     pub credential: Option<[u8; 32]>,
+    pub renewing: bool,
     pub cancel: CancellationToken,
     pub conn: Option<Connection>,
     pub sampler: Option<ConnSampler>,
@@ -150,6 +151,9 @@ pub(super) fn reserve(
 ) -> Result<Reserved, ErrorCode> {
     let mut state = lock(shared)?;
     if let Some((id, entry)) = state.entries.iter().find(|(_, e)| e.peer == peer) {
+        if entry.renewing {
+            return Err(ErrorCode::Busy);
+        }
         if entry.credential != credential {
             return Err(ErrorCode::CredentialConflict);
         }
@@ -174,6 +178,7 @@ pub(super) fn reserve(
         Entry {
             peer,
             credential,
+            renewing: false,
             cancel: cancel.clone(),
             conn: None,
             sampler: None,
@@ -186,6 +191,46 @@ pub(super) fn reserve(
         cancel,
         committed: false,
     }))
+}
+
+pub(super) fn renew(
+    shared: &Shared,
+    id: SessionId,
+) -> Result<(Reservation, Connection), ErrorCode> {
+    let mut state = lock(shared)?;
+    let entry = state.entries.get_mut(&id).ok_or(ErrorCode::NotFound)?;
+    if entry.renewing {
+        return Err(ErrorCode::Busy);
+    }
+    if entry.credential.is_none() {
+        return Err(ErrorCode::InvalidRequest);
+    }
+    let conn = entry.conn.clone().ok_or(ErrorCode::Busy)?;
+    let cancel = entry.cancel.clone();
+    entry.renewing = true;
+    state.changed();
+    Ok((
+        Reservation {
+            shared: shared.clone(),
+            id,
+            cancel,
+            committed: false,
+        },
+        conn,
+    ))
+}
+
+impl Reservation {
+    pub(super) fn commit(&mut self) -> Result<(), ErrorCode> {
+        let mut state = lock(&self.shared)?;
+        let entry = state.entries.get_mut(&self.id).ok_or(ErrorCode::NotFound)?;
+        if entry.renewing {
+            entry.renewing = false;
+            state.changed();
+        }
+        self.committed = true;
+        Ok(())
+    }
 }
 
 impl Drop for Reservation {
@@ -280,5 +325,52 @@ mod tests {
             observer.snapshot()["rds_agent_local_manager_snapshot_available"],
             0
         );
+    }
+
+    #[tokio::test]
+    async fn renewal_reservation_serializes_and_cancellation_removes_its_connection() {
+        let config = rds_net::EndpointConfig {
+            discovery: false,
+            bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+            ..Default::default()
+        };
+        let local = rds_net::bind_endpoint(config.clone()).await.unwrap();
+        let remote = rds_net::bind_endpoint(config).await.unwrap();
+        let (outgoing, incoming) =
+            tokio::join!(local.connect(remote.addr(), rds_core::ALPN), async {
+                remote.accept().await.unwrap().await.unwrap()
+            });
+        let conn = outgoing.unwrap();
+        let shared = State::new(local.id());
+        let _owner = Owner(shared.clone());
+        let Reserved::New(mut admission) = reserve(&shared, remote.id(), Some([1; 32])).unwrap()
+        else {
+            unreachable!()
+        };
+        let id = admission.id;
+        {
+            let mut state = lock(&shared).unwrap();
+            state.entries.get_mut(&id).unwrap().conn = Some(conn.clone());
+            state.selected = Some(id);
+        }
+        admission.commit().unwrap();
+        let (mut first, _) = renew(&shared, id).unwrap();
+        assert!(matches!(renew(&shared, id), Err(ErrorCode::Busy)));
+        assert!(matches!(
+            reserve(&shared, remote.id(), Some([1; 32])),
+            Err(ErrorCode::Busy)
+        ));
+        first.commit().unwrap();
+        assert!(!lock(&shared).unwrap().entries[&id].renewing);
+        let (cancelled, _) = renew(&shared, id).unwrap();
+        drop(cancelled); // Covers operation error, caller cancellation and local reply failure.
+        assert!(conn.is_closed());
+        assert!(lock(&shared).unwrap().entries.is_empty());
+        assert!(lock(&shared).unwrap().selected.is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(2), incoming.wait_closed())
+            .await
+            .unwrap();
+        local.close().await;
+        remote.close().await;
     }
 }

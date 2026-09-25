@@ -68,7 +68,7 @@ and standard-library APIs. Paths reject symlink components; macOS callers must
 use canonical paths. Linux integration evidence is recorded separately from
 the still-required native macOS and distinct-user qualification.
 
-Policy and endpoint-record leases use safe `rustix::time::clock_gettime`: `CLOCK_BOOTTIME` on Linux
+Policy, capability-grant and endpoint-record leases use safe `rustix::time::clock_gettime`: `CLOCK_BOOTTIME` on Linux
 and `CLOCK_MONOTONIC` on Darwin, both including suspend. These clocks have
 different semantics across platforms; do not substitute Rust `Instant` for the
 persisted lease deadline. References: [Linux clock documentation](https://man7.org/linux/man-pages/man2/clock_gettime.2.html),

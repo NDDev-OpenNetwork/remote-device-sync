@@ -114,6 +114,16 @@ heartbeat means its main future is polled, not that remote access is healthy.
 Abrupt termination, process abort and a stalled runtime need external liveness
 checks; a final event cannot be guaranteed.
 
+The authorization increment adds fixed `grant_authorize` and `grant_renew`
+operations in client and agent. `ok` means the local authorization transaction
+completed; it does not certify later service health or automatic issuer refresh.
+Cancellation/error remain distinct. The existing bounded schema/Vector projection
+exports no grant payload, signature, nonce, lease revision or device identity.
+Update the shipped Vector projection alongside these binaries; older operation
+allowlists drop the new authorization records. See
+[renewal semantics and migration](grant-leases.md) and its
+[validation receipt](reports/rds-grant-leases-20260925.md).
+
 ## Bounds, failure and shutdown
 
 Records are bounded to 4096 bytes before allocation/queue insertion; oversize

@@ -45,7 +45,10 @@ Rules every change follows. CI enforces what it can; the rest is review.
   bitstream with a fixed header — no serde in the hot path.
 - Standard SSH framing, key exchange and key formats belong to `russh`, behind
   `rds-ssh`; do not duplicate them as RDS control messages.
-- Protocol versioning rides the ALPN (`rds/0`, `rds-relay/0`).
+- Transport protocol selection uses ALPN (`rds/0`, `rds-relay/0`). Signed
+  objects and local IPC also carry independent explicit versions: [grant v2
+  and IPC v3](grant-leases.md) require a coordinated upgrade without weakening
+  authorization. General remote capability negotiation remains W2.2.
 
 ## Platform code
 

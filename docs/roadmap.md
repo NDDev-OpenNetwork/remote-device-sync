@@ -10,6 +10,10 @@ The [native SSH client](ssh.md) now uses russh and standard remote PTY requests
 over managed/direct TCP streams. W5 remains open for host/account enrollment,
 broker/reattachment and macOS/real-network/mixed-load qualification.
 
+[Destination-bound renewable grants](grant-leases.md) now cover explicit
+connection renewal and stable-ID revocation. W2.3/W4.2 remain open for policy
+and tenant scopes, automatic issuer integration and platform/network acceptance.
+
 The [observability sequence](observability.md) now accompanies remediation:
 shared Rust telemetry, Vector/OpenObserve qualification and authenticated
 aggregate source metrics now have local Linux evidence. Remaining source

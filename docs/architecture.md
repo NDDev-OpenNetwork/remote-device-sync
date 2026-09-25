@@ -291,15 +291,20 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   Every service stream raced ahead of the grant is refused; after
   verification each stream is scope-checked (`services`, `tcp_ports`,
   `displays`, `max_bps`). Grants are short-lived (`grant_max_ttl`),
+  bound to subject and serving-device audience by [grant v2](grant-leases.md),
   non-replayable across concurrent connections (`active_grants`), and
   revocable: the directory serves an estate-signed `SignedRevocations`
   snapshot at `GET /v1/revocations`, agents poll it into their denylist,
   and a revoked or expired grant closes its live connection.
 - Grant admission uses one connection-owned state machine. Pending service
-  requests remain refused during the Authz reply; its watchdog and replay
+  requests cannot proceed until Authz commits; its watchdog and replay
   reservation exist before the reply write. Failure or cancellation closes
   the connection and releases the lease. Denylist values survive without
   watchers; service admission rechecks revocation and expiry directly.
+  Renewal preserves the stable revocation ID and exact scope, atomically extends
+  a wall/continuous-clock lease before response FIN, and keeps one watchdog.
+  One task slot is reserved from service bodies in grant mode. Issuer automation,
+  tenant/policy binding and finer scopes remain open; see [contract](grant-leases.md).
 - GDS names: `GET /v1/names/{name}` returns one `SignedNameBinding`, signed
   by the registry issuer over `rds/name-binding/v2\0` plus the postcard
   payload `{stamp, registry_digest, version, name, key, issued_at, expires_at}`.
@@ -379,7 +384,8 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 
 | Service | Direction | Payload |
 | --- | --- | --- |
-| `Authz` | bi | capability grant (first stream in grant mode) |
+| `Authz` | bi | capability grant v2 (first stream in grant mode) |
+| `RenewAuthz` | bi | same-session, same-scope signed lease extension |
 | `Ping` | bi | nonce echo for RTT |
 | `Info` | bi | agent version, services, displays |
 | `TcpConnect { host, port }` | bi | raw byte splice (ssh = `127.0.0.1:22`) |

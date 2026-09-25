@@ -58,7 +58,8 @@ struct Cli {
     /// Pending handshakes and admitted connections; positive 16-bit limit.
     #[arg(long, default_value = "32")]
     max_connections: std::num::NonZeroU16,
-    /// Concurrent service tasks per connection, including hello/Authz I/O.
+    /// Concurrent tasks per connection. Grant mode needs >=2; one slot is
+    /// reserved from service bodies for authorization/renewal.
     #[arg(long, default_value = "64")]
     max_streams: std::num::NonZeroU16,
     /// Directory HTTP(S) origin or legacy IP:port; the agent publishes its
@@ -123,6 +124,10 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cli.issuers.is_empty() || cli.max_streams.get() >= 2,
+        "grant mode requires --max-streams at least 2"
+    );
     let prepared_admin = cli.admin.bind().await?;
     let mut config = cli
         .endpoint_config

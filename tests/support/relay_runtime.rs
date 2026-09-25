@@ -660,6 +660,16 @@ async fn explicit_development_open_mode_accepts_unlisted_peer_and_delivers_drain
         .await
         .unwrap();
     process.stop().await;
+    // Child exit does not synchronize the client's QUIC receive/control tasks.
+    // Drain deliberately keeps the tunnel usable during grace. Require actual
+    // local closure under a bounded deadline, without treating Drain as close.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while handle.is_available() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("client did not observe relay closure after process exit");
     assert!(
         handle.drained(),
         "binary did not deliver checked drain to its client"

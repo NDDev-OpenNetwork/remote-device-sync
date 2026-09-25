@@ -266,6 +266,10 @@ impl Agent {
 
     /// Accept connections until the endpoint closes.
     pub async fn run(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.policy.grants_required() || self.limits.streams() >= 2,
+            "grant mode requires at least two stream slots"
+        );
         info!(id = %self.endpoint.id(), "agent listening");
         rds_observe::emit(rds_observe::Event::ListenerReady);
         let mut connections = JoinSet::new();
@@ -287,6 +291,7 @@ impl Agent {
                         debug!("connection refused: admission budget exhausted");
                         continue;
                     };
+                    let audience = *self.endpoint.id().as_bytes();
                     let policy = self.policy.clone();
                     let desktop = self.desktop;
                     let metrics = self.endpoint.metrics();
@@ -301,7 +306,7 @@ impl Agent {
                                     peer = %conn.remote_id(),
                                     session_id = next_session_id(),
                                 );
-                                if let Err(error) = serve_connection(conn, policy, desktop, metrics, limits, stream_counter)
+                                if let Err(error) = serve_connection(conn, audience, policy, desktop, metrics, limits, stream_counter)
                                     .instrument(span).await {
                                     debug!(%error, "connection ended");
                                 }
@@ -339,6 +344,10 @@ impl Agent {
 
     /// Serve a single already-established connection.
     pub async fn serve(&self, conn: Connection) -> anyhow::Result<()> {
+        if self.policy.grants_required() && self.limits.streams() < 2 {
+            conn.close(5u32.into(), b"invalid grant stream budget");
+            anyhow::bail!("grant mode requires at least two stream slots");
+        }
         let Ok(_permit) = self.admission.clone().try_acquire_owned() else {
             rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);
             conn.close(5u32.into(), b"agent connection budget exhausted");
@@ -351,6 +360,7 @@ impl Agent {
         );
         serve_connection(
             conn,
+            *self.endpoint.id().as_bytes(),
             self.policy.clone(),
             self.desktop,
             self.endpoint.metrics(),
@@ -364,6 +374,7 @@ impl Agent {
 
 async fn serve_connection(
     conn: Connection,
+    audience: [u8; 32],
     policy: Arc<AgentPolicy>,
     desktop: bool,
     metrics: rds_net::metrics::Registry,
@@ -379,7 +390,11 @@ async fn serve_connection(
     }
     info!(%peer, "peer connected");
     rds_observe::emit(rds_observe::Event::PeerAccepted);
-    let authz = Arc::new(ConnAuthz::new(policy.grants_required()));
+    let authz = Arc::new(ConnAuthz::new(
+        policy.grants_required(),
+        audience,
+        limits.streams(),
+    ));
     let lifetime = ConnectionLifetime {
         conn: conn.clone(),
         authz: authz.clone(),
@@ -444,7 +459,18 @@ async fn serve_stream(
         Err(_) => anyhow::bail!("stream hello timed out"),
     };
     if let StreamHello::Authz(grant) = hello {
-        return authorize(&conn, send, grant, &policy, &authz).await;
+        return rds_observe::observe(
+            rds_observe::Operation::GrantAuthorize,
+            authorize(&conn, send, grant, &policy, &authz, false),
+        )
+        .await;
+    }
+    if let StreamHello::RenewAuthz(grant) = hello {
+        return rds_observe::observe(
+            rds_observe::Operation::GrantRenew,
+            authorize(&conn, send, grant, &policy, &authz, true),
+        )
+        .await;
     }
     let grant = match authz.service_scope(&policy).await {
         Ok(g) => g,
@@ -468,6 +494,21 @@ async fn serve_stream(
         write_frame(&mut send, &HelloAck::Error { message: why }).await?;
         anyhow::bail!("stream outside grant scope");
     }
+    let Some(_service_slot) = authz.try_service_slot() else {
+        tokio::time::timeout(
+            HELLO_TIMEOUT,
+            write_frame(
+                &mut send,
+                &HelloAck::Error {
+                    message: "service capacity reached; a slot is reserved for authorization"
+                        .into(),
+                },
+            ),
+        )
+        .await??;
+        send.finish()?;
+        anyhow::bail!("service capacity reached");
+    };
     let span = info_span!("rds.stream", service = ?service_kind(&hello));
     async move {
         match hello {
@@ -630,7 +671,7 @@ async fn serve_stream(
                 .await?;
                 anyhow::bail!("audio service not implemented");
             }
-            StreamHello::Authz(_) => {
+            StreamHello::Authz(_) | StreamHello::RenewAuthz(_) => {
                 // `authorize` early-returns on Authz, so this is
                 // unreachable — a request path still refuses rather
                 // than panic if that ever stops holding.
@@ -660,7 +701,7 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         StreamHello::Desktop(_) => ServiceKind::Desktop,
         StreamHello::Sync => ServiceKind::Sync,
         StreamHello::Audio(_) => ServiceKind::Audio,
-        StreamHello::Authz(_) => return None,
+        StreamHello::Authz(_) | StreamHello::RenewAuthz(_) => return None,
     })
 }
 

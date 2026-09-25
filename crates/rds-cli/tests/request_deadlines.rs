@@ -107,6 +107,38 @@ async fn canceling_request_resets_its_stream_without_closing_shared_connection()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canceling_renewal_after_ack_without_fin_closes_the_uncertain_connection() {
+    let (client, server, conn, peer) = pair().await;
+    let grant = rds_core::grant::Grant {
+        payload: vec![],
+        signature: vec![],
+    };
+    let mut task = tokio::spawn({
+        let conn = conn.clone();
+        async move { rds_cli::renew_authorization(&conn, &grant).await }
+    });
+    let (mut send, mut recv) = peer.accept_bi().await.unwrap();
+    let hello: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
+    assert!(matches!(hello, rds_core::StreamHello::RenewAuthz(_)));
+    rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut task)
+            .await
+            .is_err()
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(conn.is_closed());
+    tokio::time::timeout(Duration::from_secs(2), peer.wait_closed())
+        .await
+        .unwrap();
+    client.close().await;
+    server.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authorization_deadline_includes_stream_credit() {
     let client = rds_net::bind_endpoint(rds_net::EndpointConfig {
         discovery: false,

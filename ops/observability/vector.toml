@@ -32,7 +32,7 @@ assert!(includes(["diagnostic", "process_started", "process_completed", "process
 assert!(match(string!(r.run_id), r'^[0-9a-f]{32}$'))
 assert!(match(string!(r.target), r'^[a-zA-Z0-9_:.-]{1,128}$'))
 assert!(match(string!(r.version), r'^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$'))
-assert!(includes([null, "connect", "service_stream", "ssh_connect", "ssh_session"], r.operation))
+assert!(includes([null, "connect", "service_stream", "ssh_connect", "ssh_session", "grant_authorize", "grant_renew"], r.operation))
 assert!(includes([null, "ok", "error", "cancelled"], r.outcome))
 assert!(is_null(r.session_id) || is_integer(r.session_id))
 assert!(is_null(r.elapsed_us) || is_integer(r.elapsed_us))
@@ -232,3 +232,27 @@ extract_from = "safe"
 [[tests.outputs.conditions]]
 type = "vrl"
 source = "assert!(.operation == \"ssh_session\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.command) && !exists(.user) && !exists(.key))"
+
+[[tests]]
+name = "grant_authorize metadata survives without terminal content"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-cli\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": null, \"event\": \"operation_completed\", \"outcome\": \"cancelled\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"command\": \"PRIVATE_SENTINEL\", \"user\": \"PRIVATE_SENTINEL\", \"key\": \"PRIVATE_SENTINEL\", \"operation\": \"grant_authorize\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.operation == \"grant_authorize\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.command) && !exists(.user) && !exists(.key))"
+
+[[tests]]
+name = "grant_renew metadata survives without terminal content"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-cli\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": null, \"event\": \"operation_completed\", \"outcome\": \"cancelled\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"command\": \"PRIVATE_SENTINEL\", \"user\": \"PRIVATE_SENTINEL\", \"key\": \"PRIVATE_SENTINEL\", \"operation\": \"grant_renew\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.operation == \"grant_renew\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.command) && !exists(.user) && !exists(.key))"

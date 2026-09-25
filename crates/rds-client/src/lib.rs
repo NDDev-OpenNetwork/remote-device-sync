@@ -40,18 +40,45 @@ pub async fn connect_authorized(
 ) -> anyhow::Result<Connection> {
     let conn = connect(endpoint, target).await?;
     let mut authorization = Authorization::new(&conn);
-    bounded("authorization", async {
-        let (streams, ack) = exchange(&conn, &StreamHello::Authz(grant.clone())).await?;
-        match ack {
-            HelloAck::Ok => streams.complete().await,
-            HelloAck::Error { message } => anyhow::bail!("grant rejected: {message}"),
-            other => anyhow::bail!("unexpected ack {other:?}"),
-        }
-    })
+    rds_observe::observe(
+        rds_observe::Operation::GrantAuthorize,
+        bounded("authorization", async {
+            let (streams, ack) = exchange(&conn, &StreamHello::Authz(grant.clone())).await?;
+            match ack {
+                HelloAck::Ok => streams.complete().await,
+                HelloAck::Error { message } => anyhow::bail!("grant rejected: {message}"),
+                other => anyhow::bail!("unexpected ack {other:?}"),
+            }
+        }),
+    )
     .await?;
     authorization.commit();
     drop(authorization);
     Ok(conn)
+}
+
+/// Extend a live connection using a higher signed grant revision with exactly
+/// the same identity and scope. Cancellation/error closes the connection because
+/// the remote commit may be uncertain; never reconnect or replay a command here.
+pub async fn renew_authorization(
+    conn: &Connection,
+    grant: &rds_core::grant::Grant,
+) -> anyhow::Result<()> {
+    let mut authorization = Authorization::new(conn);
+    rds_observe::observe(
+        rds_observe::Operation::GrantRenew,
+        bounded("grant renewal", async {
+            let (streams, ack) = exchange(conn, &StreamHello::RenewAuthz(grant.clone())).await?;
+            match ack {
+                HelloAck::Ok => streams.complete().await,
+                HelloAck::Error { message } => anyhow::bail!("grant renewal rejected: {message}"),
+                other => anyhow::bail!("unexpected renewal ack {other:?}"),
+            }
+        }),
+    )
+    .await?;
+    authorization.commit();
+    Ok(())
 }
 
 /// Send a `Ping` and measure the full round trip, with one request deadline

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use rds_core::grant::{self, GrantId, VerifiedGrant};
 use rds_core::{HelloAck, write_frame};
+use rds_discovery::clock::{Lease, Reading};
 use rds_net::Connection;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -19,6 +20,7 @@ enum State {
     Pending,
     Authorizing(Option<GrantLease>),
     Granted(GrantLease),
+    Renewing(GrantLease),
     Closed,
 }
 
@@ -46,8 +48,35 @@ impl Drop for GrantSlot {
     }
 }
 
-struct GrantLease {
+#[derive(Clone)]
+struct ActiveGrant {
     grant: Arc<VerifiedGrant>,
+    validity: Lease,
+}
+
+impl ActiveGrant {
+    fn new(grant: VerifiedGrant, now: Reading) -> Result<Self, &'static str> {
+        if !grant.live_at(now.wall.as_secs()) {
+            return Err("grant expired");
+        }
+        let validity = Lease::new(now.wall.as_secs(), grant.payload.expires_at, now)
+            .map_err(|_| "grant lease invalid")?;
+        Ok(Self {
+            grant: Arc::new(grant),
+            validity,
+        })
+    }
+    fn live_at(&self, now: Reading) -> bool {
+        self.grant.live_at(now.wall.as_secs()) && self.validity.valid_at(now)
+    }
+    fn live(&self) -> bool {
+        Reading::now().is_ok_and(|now| self.live_at(now))
+    }
+}
+
+struct GrantLease {
+    current: Arc<ActiveGrant>,
+    updates: watch::Sender<Arc<ActiveGrant>>,
     watcher: Option<JoinHandle<()>>,
     _slot: GrantSlot,
 }
@@ -63,14 +92,20 @@ impl Drop for GrantLease {
 /// One mutex owns the state, reservation and watchdog together. No await
 /// occurs under it; a concurrent Authz can never overwrite a live lease.
 pub(crate) struct ConnAuthz {
+    audience: [u8; 32],
     state: Mutex<State>,
     changed: watch::Sender<()>,
     sync_busy: std::sync::atomic::AtomicBool,
+    service_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl ConnAuthz {
-    pub(crate) fn new(required: bool) -> Self {
+    pub(crate) fn new(required: bool, audience: [u8; 32], streams: usize) -> Self {
         Self {
+            audience,
+            service_slots: Arc::new(tokio::sync::Semaphore::new(
+                streams.saturating_sub(usize::from(required)),
+            )),
             state: Mutex::new(if required {
                 State::Pending
             } else {
@@ -89,7 +124,9 @@ impl ConnAuthz {
                 Ok(())
             }
             State::Open => Err("agent does not require grants"),
-            State::Authorizing(_) | State::Granted(_) => Err("already authorizing or authorized"),
+            State::Authorizing(_) | State::Granted(_) | State::Renewing(_) => {
+                Err("already authorizing or authorized")
+            }
             State::Closed => Err("connection closed"),
         }
     }
@@ -114,14 +151,17 @@ impl ConnAuthz {
         if denied.borrow().contains(&verified.id) {
             return Err("grant revoked");
         }
-        if !verified.live_at(grant::now_unix()) {
-            return Err("grant expired");
+        if verified.payload.audience != self.audience {
+            return Err("grant destination mismatch");
         }
+        let now = Reading::now().map_err(|_| "grant clock unavailable")?;
         let slot = GrantSlot::claim(policy, verified.id)?;
-        let grant = Arc::new(verified);
-        let watcher = tokio::spawn(watch_grant(conn.clone(), grant.clone(), denied));
+        let current = Arc::new(ActiveGrant::new(verified, now)?);
+        let (updates, receiver) = watch::channel(current.clone());
+        let watcher = tokio::spawn(watch_grant(conn.clone(), receiver, denied));
         *state = State::Authorizing(Some(GrantLease {
-            grant,
+            current,
+            updates,
             watcher: Some(watcher),
             _slot: slot,
         }));
@@ -133,13 +173,79 @@ impl ConnAuthz {
         let result = match std::mem::replace(&mut *state, State::Closed) {
             State::Authorizing(Some(lease))
                 if !conn.is_closed()
-                    && lease.grant.live_at(grant::now_unix())
-                    && policy.revocations_permit(&lease.grant.id) =>
+                    && lease.current.live()
+                    && policy.revocations_permit(&lease.current.grant.id) =>
             {
                 *state = State::Granted(lease);
                 Ok(())
             }
             _ => Err("authorization interrupted"),
+        };
+        drop(state);
+        self.changed.send_replace(());
+        result
+    }
+
+    fn begin_renewal(&self) -> Result<(), &'static str> {
+        let mut state = lock(&self.state);
+        if !matches!(*state, State::Granted(_)) {
+            return Err("renewal requires a granted idle authorization transaction");
+        }
+        if let State::Granted(lease) = std::mem::replace(&mut *state, State::Closed) {
+            *state = State::Renewing(lease);
+        }
+        Ok(())
+    }
+
+    fn prepare_renewal(&self, next: VerifiedGrant) -> Result<Arc<ActiveGrant>, &'static str> {
+        let state = lock(&self.state);
+        let State::Renewing(lease) = &*state else {
+            return Err("renewal interrupted");
+        };
+        let now = Reading::now().map_err(|_| "grant clock unavailable")?;
+        if !lease.current.live_at(now) {
+            return Err("previous grant expired");
+        }
+        let advance = lease
+            .current
+            .grant
+            .permits_renewal(&next)
+            .map_err(|_| "invalid grant renewal")?;
+        if advance {
+            Ok(Arc::new(ActiveGrant::new(next, now)?))
+        } else {
+            // Exact retry never resets the accepted wall/continuous deadline.
+            Ok(lease.current.clone())
+        }
+    }
+
+    fn commit_renewal(
+        &self,
+        next: Arc<ActiveGrant>,
+        policy: &AgentPolicy,
+        conn: &Connection,
+    ) -> Result<(), &'static str> {
+        let mut state = lock(&self.state);
+        let result = match std::mem::replace(&mut *state, State::Closed) {
+            State::Renewing(mut lease)
+                if !conn.is_closed()
+                    && lease.current.live()
+                    && next.live()
+                    && policy.revocations_permit(&next.grant.id) =>
+            {
+                // The watchdog holds its read guard through a synchronous close.
+                // Updating its view and checking connection closure cannot race a
+                // stale expiry decision into an accepted renewal.
+                lease.updates.send_replace(next.clone());
+                if conn.is_closed() {
+                    Err("renewal interrupted")
+                } else {
+                    lease.current = next;
+                    *state = State::Granted(lease);
+                    Ok(())
+                }
+            }
+            _ => Err("renewal interrupted"),
         };
         drop(state);
         self.changed.send_replace(());
@@ -160,7 +266,9 @@ impl ConnAuthz {
         let previous = std::mem::replace(&mut *lock(&self.state), State::Closed);
         self.changed.send_replace(());
         let watcher = match previous {
-            State::Authorizing(Some(mut lease)) | State::Granted(mut lease) => lease.watcher.take(),
+            State::Authorizing(Some(mut lease))
+            | State::Granted(mut lease)
+            | State::Renewing(mut lease) => lease.watcher.take(),
             _ => None,
         };
         // The lease and replay reservation have already dropped before await.
@@ -183,18 +291,18 @@ impl ConnAuthz {
             State::Pending => Err(ScopeError::Pending),
             State::Authorizing(_) => Err(ScopeError::Authorizing),
             State::Closed => Err(ScopeError::Closed),
-            State::Granted(lease) => {
-                if !lease.grant.live_at(grant::now_unix()) {
+            State::Granted(lease) | State::Renewing(lease) => {
+                if !lease.current.live() {
                     return Err(ScopeError::Expired);
                 }
                 let revocations = policy.denylist.borrow();
                 if !revocations.fresh() {
                     return Err(ScopeError::PolicyStale);
                 }
-                if revocations.contains(&lease.grant.id) {
+                if revocations.contains(&lease.current.grant.id) {
                     return Err(ScopeError::Revoked);
                 }
-                Ok(Some(lease.grant.clone()))
+                Ok(Some(lease.current.grant.clone()))
             }
         }
     }
@@ -222,6 +330,10 @@ impl ConnAuthz {
         })
         .await
         .unwrap_or(Err(ScopeError::AuthorizationTimeout))
+    }
+
+    pub(crate) fn try_service_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.service_slots.clone().try_acquire_owned().ok()
     }
 
     pub(crate) fn try_sync_slot(&self) -> bool {
@@ -299,8 +411,14 @@ pub(crate) async fn authorize(
     grant: grant::Grant,
     policy: &AgentPolicy,
     authz: &ConnAuthz,
+    renewal: bool,
 ) -> anyhow::Result<()> {
-    if let Err(message) = authz.begin() {
+    let begin = if renewal {
+        authz.begin_renewal()
+    } else {
+        authz.begin()
+    };
+    if let Err(message) = begin {
         let _ = tokio::time::timeout(
             AUTHZ_REPLY_TIMEOUT,
             write_frame(
@@ -321,49 +439,83 @@ pub(crate) async fn authorize(
     let verified = grant.verify(
         &policy.issuers,
         conn.remote_id().as_bytes(),
+        &authz.audience,
         policy.grant_max_ttl,
         grant::now_unix(),
     )?;
     let id = verified.id;
-    authz
-        .install(conn, policy, verified)
-        .map_err(anyhow::Error::msg)?;
+    let next = if renewal {
+        Some(
+            authz
+                .prepare_renewal(verified)
+                .map_err(anyhow::Error::msg)?,
+        )
+    } else {
+        authz
+            .install(conn, policy, verified)
+            .map_err(anyhow::Error::msg)?;
+        None
+    };
     // Watcher and reservation are already owned while the reply is in
     // flight. Service admission remains pending until this completes.
     tokio::time::timeout(AUTHZ_REPLY_TIMEOUT, write_frame(&mut send, &HelloAck::Ok)).await??;
+    if let Some(next) = next {
+        authz
+            .commit_renewal(next, policy, conn)
+            .map_err(anyhow::Error::msg)?;
+    } else {
+        authz.commit(policy, conn).map_err(anyhow::Error::msg)?;
+    }
+    // The client's successful transaction includes response FIN. Publish the
+    // authorization before FIN so an immediately subsequent renewal cannot see
+    // its predecessor still pending. A failed FIN still closes via Admission.
     send.finish()?;
-    authz.commit(policy, conn).map_err(anyhow::Error::msg)?;
     admission.committed = true;
-    tracing::info!(peer = %conn.remote_id(), grant = %blake3::Hash::from(id), "grant authorized");
+    tracing::info!(peer = %conn.remote_id(), grant = %blake3::Hash::from(id), renewal, "grant authorized");
     Ok(())
 }
 
 async fn watch_grant(
     conn: Connection,
-    grant: Arc<VerifiedGrant>,
+    mut current: watch::Receiver<Arc<ActiveGrant>>,
     mut denied: watch::Receiver<Arc<crate::RevocationPolicy>>,
 ) {
     loop {
-        // borrow_and_update also covers a revocation that happened before
-        // this task's first poll, without losing a concurrent later update.
         let snapshot = denied.borrow_and_update().clone();
-        if !snapshot.fresh() {
-            conn.close(4u32.into(), b"revocation policy stale");
-            return;
-        }
-        if snapshot.contains(&grant.id) {
-            conn.close(4u32.into(), b"grant revoked");
-            return;
-        }
-        let now = grant::now_unix();
-        if !grant.live_at(now) {
-            conn.close(3u32.into(), b"grant expired");
-            return;
-        }
-        // Periodic wall-clock checks also handle system-clock changes.
-        let wait = Duration::from_secs(grant.payload.expires_at.saturating_sub(now).min(1));
+        let wait = {
+            // Keep the watch read guard through any close, synchronizing that
+            // decision with renewal publication. Never hold it across await.
+            let active = current.borrow_and_update();
+            if !snapshot.fresh() {
+                conn.close(4u32.into(), b"revocation policy stale");
+                return;
+            }
+            if snapshot.contains(&active.grant.id) {
+                conn.close(4u32.into(), b"grant revoked");
+                return;
+            }
+            let Ok(now) = Reading::now() else {
+                conn.close(3u32.into(), b"grant clock unavailable");
+                return;
+            };
+            if !active.live_at(now) {
+                conn.close(3u32.into(), b"grant expired");
+                return;
+            }
+            active
+                .validity
+                .remaining_at(now)
+                .min(Duration::from_secs(1))
+        };
         tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
+            _ = conn.wait_closed() => return,
+            _ = tokio::time::sleep(wait) => {},
+            changed = current.changed() => {
+                if changed.is_err() {
+                    conn.close(3u32.into(), b"grant owner unavailable");
+                    return;
+                }
+            }
             changed = denied.changed() => {
                 if changed.is_err() {
                     conn.close(4u32.into(), b"revocation policy unavailable");
@@ -393,12 +545,18 @@ mod tests {
         (server, client, incoming, outgoing.unwrap())
     }
 
-    fn verified(policy: &AgentPolicy, subject: rds_net::EndpointId) -> VerifiedGrant {
+    fn verified(
+        policy: &AgentPolicy,
+        subject: rds_net::EndpointId,
+        audience: [u8; 32],
+    ) -> VerifiedGrant {
         policy.use_local_revocations();
         let issuer = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
         let grant = grant::Grant::issue(
             &issuer,
             *subject.as_bytes(),
+            audience,
+            [1; 16],
             vec![rds_core::ServiceKind::Ping],
             Duration::from_secs(60),
             Default::default(),
@@ -407,6 +565,7 @@ mod tests {
             .verify(
                 &HashSet::from([issuer.verifying_key().to_bytes()]),
                 subject.as_bytes(),
+                &audience,
                 policy.grant_max_ttl,
                 grant::now_unix(),
             )
@@ -417,10 +576,14 @@ mod tests {
     async fn service_during_authorization_reply_waits_for_commit() {
         let (server, client, conn, peer) = connection_pair().await;
         let policy = Arc::new(AgentPolicy::ssh_only(("127.0.0.1".into(), 9)));
-        let authz = Arc::new(ConnAuthz::new(true));
+        let authz = Arc::new(ConnAuthz::new(true, *server.id().as_bytes(), 64));
         authz.begin().unwrap();
         authz
-            .install(&conn, &policy, verified(&policy, conn.remote_id()))
+            .install(
+                &conn,
+                &policy,
+                verified(&policy, conn.remote_id(), authz.audience),
+            )
             .unwrap();
         // Hold the real admission state in the reply/commit window. A service
         // can arrive on another QUIC stream before that task runs commit().
@@ -465,13 +628,13 @@ mod tests {
         for revoke in [false, true] {
             let (server, client, conn, _peer) = connection_pair().await;
             let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
-            let authz = ConnAuthz::new(true);
+            let authz = ConnAuthz::new(true, *server.id().as_bytes(), 64);
             assert!(matches!(
                 authz.service_scope(&policy).await,
                 Err(ScopeError::Pending)
             ));
             authz.begin().unwrap();
-            let grant = verified(&policy, conn.remote_id());
+            let grant = verified(&policy, conn.remote_id(), authz.audience);
             let id = grant.id;
             authz.install(&conn, &policy, grant).unwrap();
             let waiting = authz.service_scope(&policy);
@@ -504,10 +667,14 @@ mod tests {
     async fn normal_teardown_joins_watchdog_and_releases_reservation() {
         let (server, client, conn, _peer) = connection_pair().await;
         let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
-        let authz = ConnAuthz::new(true);
+        let authz = ConnAuthz::new(true, *server.id().as_bytes(), 64);
         authz.begin().unwrap();
         authz
-            .install(&conn, &policy, verified(&policy, conn.remote_id()))
+            .install(
+                &conn,
+                &policy,
+                verified(&policy, conn.remote_id(), authz.audience),
+            )
             .unwrap();
         authz.commit(&policy, &conn).unwrap();
         let watcher = {
@@ -534,14 +701,20 @@ mod tests {
     async fn watchdog_checks_snapshot_before_waiting_for_changes() {
         let (server, client, conn, _peer) = connection_pair().await;
         let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
-        let grant = Arc::new(verified(&policy, conn.remote_id()));
+        let grant = Arc::new(verified(&policy, conn.remote_id(), *server.id().as_bytes()));
+        let now = Reading::now().unwrap();
+        let validity = Lease::new(now.wall.as_secs(), grant.payload.expires_at, now).unwrap();
         policy.revoke(grant.id);
         // A fresh subscriber considers this existing snapshot seen;
         // waiting only on changed() would miss the revocation forever.
         let receiver = policy.denylist.subscribe();
         tokio::time::timeout(
             Duration::from_secs(2),
-            watch_grant(conn.clone(), grant, receiver),
+            watch_grant(
+                conn.clone(),
+                watch::channel(Arc::new(ActiveGrant { grant, validity })).1,
+                receiver,
+            ),
         )
         .await
         .unwrap();
@@ -554,7 +727,7 @@ mod tests {
     async fn canceling_admission_releases_grant_and_never_reopens() {
         let (server, client, conn, _peer) = connection_pair().await;
         let policy = Arc::new(AgentPolicy::ssh_only(("127.0.0.1".into(), 9)));
-        let authz = Arc::new(ConnAuthz::new(true));
+        let authz = Arc::new(ConnAuthz::new(true, *server.id().as_bytes(), 64));
         let (ready, started) = tokio::sync::oneshot::channel();
         let task = tokio::spawn({
             let conn = conn.clone();
@@ -568,7 +741,11 @@ mod tests {
                     committed: false,
                 };
                 authz
-                    .install(&conn, &policy, verified(&policy, conn.remote_id()))
+                    .install(
+                        &conn,
+                        &policy,
+                        verified(&policy, conn.remote_id(), authz.audience),
+                    )
                     .unwrap();
                 ready.send(()).unwrap();
                 std::future::pending::<()>().await;
@@ -590,9 +767,9 @@ mod tests {
     async fn service_admission_rechecks_policy_and_connection_drop_releases_lease() {
         let (server, client, conn, _peer) = connection_pair().await;
         let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
-        let authz = Arc::new(ConnAuthz::new(true));
+        let authz = Arc::new(ConnAuthz::new(true, *server.id().as_bytes(), 64));
         authz.begin().unwrap();
-        let grant = verified(&policy, conn.remote_id());
+        let grant = verified(&policy, conn.remote_id(), authz.audience);
         let id = grant.id;
         authz.install(&conn, &policy, grant).unwrap();
         assert!(matches!(authz.scope(&policy), Err(ScopeError::Authorizing)));
@@ -608,7 +785,9 @@ mod tests {
             let State::Granted(lease) = &mut *state else {
                 panic!("missing grant")
             };
-            Arc::make_mut(&mut lease.grant).payload.expires_at = 0;
+            Arc::make_mut(&mut Arc::make_mut(&mut lease.current).grant)
+                .payload
+                .expires_at = 0;
         }
         assert!(matches!(authz.scope(&policy), Err(ScopeError::Expired)));
         drop(ConnectionLifetime {
@@ -623,7 +802,7 @@ mod tests {
 
     #[test]
     fn concurrent_authz_has_one_owner_and_cannot_reopen_after_close() {
-        let authz = Arc::new(ConnAuthz::new(true));
+        let authz = Arc::new(ConnAuthz::new(true, [8; 32], 64));
         let barrier = Arc::new(std::sync::Barrier::new(16));
         let successes = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
@@ -654,5 +833,152 @@ mod tests {
         assert_eq!(*lock(&policy.active_grants), HashSet::from([[2; 32]]));
         drop(second);
         assert!(lock(&policy.active_grants).is_empty());
+    }
+
+    #[test]
+    fn active_grant_expires_on_suspend_rollback_or_wall_deadline() {
+        let issuer = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+        let grant = grant::Grant::issue_at(
+            &issuer,
+            grant::GrantPayload {
+                version: grant::GRANT_VERSION,
+                revision: 1,
+                issuer: issuer.verifying_key().to_bytes(),
+                subject: [7; 32],
+                audience: [8; 32],
+                nonce: [1; 16],
+                services: vec![rds_core::ServiceKind::Ping],
+                not_before: 100,
+                expires_at: 160,
+                constraints: Default::default(),
+            },
+        )
+        .verify(
+            &HashSet::from([issuer.verifying_key().to_bytes()]),
+            &[7; 32],
+            &[8; 32],
+            Duration::from_secs(60),
+            100,
+        )
+        .unwrap();
+        let now = Reading {
+            boot: [1; 16],
+            wall: Duration::from_millis(100_500),
+            continuous: Duration::from_secs(10),
+        };
+        let active = ActiveGrant::new(grant, now).unwrap();
+        assert!(active.live_at(now));
+        assert!(active.live_at(Reading {
+            continuous: Duration::from_millis(69_499),
+            ..now
+        }));
+        assert!(!active.live_at(Reading {
+            continuous: Duration::from_millis(69_500),
+            ..now
+        }));
+        assert!(!active.live_at(Reading {
+            wall: Duration::from_millis(100_499),
+            ..now
+        }));
+        assert!(!active.live_at(Reading {
+            wall: Duration::from_secs(160),
+            ..now
+        }));
+        assert!(!active.live_at(Reading {
+            boot: [2; 16],
+            ..now
+        }));
+    }
+
+    #[tokio::test]
+    async fn renewal_retry_retains_deadline_and_single_replay_owner() {
+        let (server, client, conn, _peer) = connection_pair().await;
+        let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+        let authz = ConnAuthz::new(true, *server.id().as_bytes(), 64);
+        authz.begin().unwrap();
+        authz
+            .install(
+                &conn,
+                &policy,
+                verified(&policy, conn.remote_id(), authz.audience),
+            )
+            .unwrap();
+        authz.commit(&policy, &conn).unwrap();
+        let original = match &*lock(&authz.state) {
+            State::Granted(lease) => lease.current.clone(),
+            _ => unreachable!(),
+        };
+        authz.begin_renewal().unwrap();
+        assert!(authz.begin_renewal().is_err());
+        let retry = authz.prepare_renewal((*original.grant).clone()).unwrap();
+        assert!(Arc::ptr_eq(&original, &retry));
+        assert_eq!(lock(&policy.active_grants).len(), 1);
+        authz.commit_renewal(retry, &policy, &conn).unwrap();
+        assert!(authz.scope(&policy).is_ok());
+        assert_eq!(lock(&policy.active_grants).len(), 1);
+        authz.close_and_wait().await;
+        assert!(lock(&policy.active_grants).is_empty());
+        conn.close(0u32.into(), b"done");
+        client.close().await;
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn pending_renewal_never_disables_the_old_expiry_or_cancel_guard() {
+        for cancel in [false, true] {
+            let (server, client, conn, _peer) = connection_pair().await;
+            let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+            policy.use_local_revocations();
+            let authz = ConnAuthz::new(true, *server.id().as_bytes(), 64);
+            let issuer = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+            let first = grant::Grant::issue(
+                &issuer,
+                *conn.remote_id().as_bytes(),
+                authz.audience,
+                [1; 16],
+                vec![rds_core::ServiceKind::Ping],
+                Duration::from_secs(2),
+                Default::default(),
+            );
+            let verify = |token: &grant::Grant| {
+                token
+                    .verify(
+                        &HashSet::from([issuer.verifying_key().to_bytes()]),
+                        conn.remote_id().as_bytes(),
+                        &authz.audience,
+                        Duration::from_secs(300),
+                        grant::now_unix(),
+                    )
+                    .unwrap()
+            };
+            let initial = verify(&first);
+            let mut next = initial.payload.clone();
+            next.revision += 1;
+            next.expires_at += 60;
+            authz.begin().unwrap();
+            authz.install(&conn, &policy, initial).unwrap();
+            authz.commit(&policy, &conn).unwrap();
+            authz.begin_renewal().unwrap();
+            let guard = Admission {
+                conn: &conn,
+                authz: &authz,
+                committed: false,
+            };
+            let next = authz
+                .prepare_renewal(verify(&grant::Grant::issue_at(&issuer, next)))
+                .unwrap();
+            if !cancel {
+                // Candidate verified, but its reply/commit has not completed.
+                tokio::time::timeout(Duration::from_secs(3), conn.wait_closed())
+                    .await
+                    .unwrap();
+                assert!(authz.commit_renewal(next, &policy, &conn).is_err());
+            }
+            drop(guard);
+            assert!(conn.is_closed());
+            assert!(lock(&policy.active_grants).is_empty());
+            client.close().await;
+            server.close().await;
+        }
     }
 }

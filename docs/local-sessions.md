@@ -67,9 +67,10 @@ an independent endpoint and acquires the same exclusive key owner as the agent.
 An occupied key is an error. Direct mode requires a persisted key path; there is
 no accidental ephemeral-identity fallback. `desktop`, `send` and `recv` currently
 require this explicit mode because their manager APIs remain unimplemented.
-The local wire version is now **2** (adds current ticket retrieval); upgrade CLI
+The local wire version is now **3** (adds explicit grant renewal); upgrade CLI
 and agent together. Old/new local versions fail without mutating session state.
-The remote RDS and relay protocol versions have not changed.
+Remote ALPN/service framing is unchanged; signed grant v2 requires a coordinated
+issuer/agent/client migration. See [renewal contract](grant-leases.md).
 
 `list --json` returns instance ID, generation, endpoint, selected handle and
 entries. Handles print as 32 hexadecimal characters. `ping`, `info`, `ssh` and
@@ -101,9 +102,15 @@ Unix control-socket UID checks do not authenticate those TCP clients.
   hold a lock across resolution, dialing or service I/O.
 - One session per peer. Repeated connect with the same credential fingerprint
   reuses a connected session without another dial/Authz. A pending duplicate
-  returns `Busy`; different credentials require explicit disconnect. The table
+  returns `Busy`; different credentials require explicit renewal or disconnect. The table
   stores a digest, not the grant payload. Requests/grants/upstream errors are
   not logged or used as metric labels.
+- `session renew --session <id> --grant-file <path>` preserves the connection and
+  its existing streams with a same-scope signed extension. It serializes with
+  connect/reuse; a successful response changes the stored credential digest.
+  Cancellation/failure during the reserved transaction removes only that session.
+  Non-streaming replies require EOF after state publication; trailing bytes fail.
+  There is no issuer fetch/automatic renewal loop yet.
 - Remote Authz validates managed admission; plain allowlist mode uses one Ping
   reply to establish readiness. TCP-only grants need no Ping permission. Existing
   remote scope, expiry and revocation enforcement continues to apply.
@@ -144,7 +151,7 @@ broker.
 | Long-lived TCP streams | 64; leaves control worker space |
 | Request prelude / reply write | 5 seconds each |
 | Resolve + dial + Authz + operation | 45 seconds total |
-| Client exchange, including connect/response | 55 seconds |
+| Client exchange, including connect/response and control EOF | 55 seconds |
 | Framed postcard control message | 64 KiB; trailing payload rejected |
 | Target text | 8192 bytes |
 | CLI forwarding workers | positive 16-bit limit; default 64 |
@@ -179,10 +186,10 @@ production deployment is implied.
    runtime ownership are implemented. Qualify native macOS credentials,
    actual distinct-user rejection, relay-registration reuse,
    FD/RSS budgets and manager service APIs for media/sync.
-2. **W5 SSH:** maintained Rust SSH library behind an owned interface; host-key
-   pinning/known-hosts, credentials/agent policy, raw-mode restoration, PTY
-   resize, Ctrl-C, exit status and account/broker isolation. Verify two terminals
-   while switching and failure without duplicate exec.
+2. **W5 SSH:** native client, explicit host pins, credential selection, OS PTY
+   requests and terminal restoration are implemented. Complete GDS host/account
+   provisioning, broker isolation and authorized reattachment; qualify native
+   macOS, two terminals while switching and failure without duplicate exec.
 3. **W6 viewer:** newest-frame rendering and focus ownership; release pressed
    keys/buttons before changing devices. Reuse manager service APIs. Qualify
    native Linux backends and macOS capture/input permissions on real devices.

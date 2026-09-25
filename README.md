@@ -113,12 +113,16 @@ grants (`--issuer`, scope-checked per stream). Managed grant mode requires
 `--directory` and `--revocations-key`; stale policy closes access. Directory,
 agent and name CLI persist their policy revisions and freshness state. See
 [policy configuration and migration](docs/policy-state.md) before upgrading
-the issuer or deploying managed access.
+the issuer or deploying managed access. [Grant v2 and renewable leases](docs/grant-leases.md)
+bind access to the controlled endpoint. `rds session renew --session <id>
+--grant-file <path>` extends a live same-scope connection; automatic GDS issuance
+is still pending. Old grants must be reissued, and CLI/agent IPC v3 upgraded together.
 
 Endpoint publication also persists its revision counter and exact retry bytes
 (`rds-agent --record-state`, default beside the identity key). Records and
-deletes use a new versioned signature contract; old directories require an
-explicit migration that is still being implemented. See
+deletes use a versioned signature contract; old directories require the explicit
+offline migration and a coordinated issuer cutover. Legacy deployment cutover
+and platform qualification remain open. See
 [record state and migration limits](docs/record-state.md) before deployment.
 
 Observability: all binaries share bounded stderr logging. Set

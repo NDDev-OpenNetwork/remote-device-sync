@@ -98,6 +98,10 @@ impl Running {
         Grant::issue(
             &issuer(),
             *self.client.id().as_bytes(),
+            *self.agent.endpoint.id().as_bytes(),
+            rds_net::SecretKey::generate().to_bytes()[..16]
+                .try_into()
+                .unwrap(),
             vec![ServiceKind::Ping],
             Duration::from_secs(120),
             GrantConstraints::default(),
@@ -168,10 +172,10 @@ async fn missing_policy_denies_then_durable_revocation_closes_live_connection() 
     let conn = running.connect(&grant).await.unwrap();
     rds_cli::ping(&conn, 1).await.unwrap();
     client
-        .update_revocations(&snapshot(2, BTreeSet::from([grant.id()]), 60))
+        .update_revocations(&snapshot(2, BTreeSet::from([grant.id().unwrap()]), 60))
         .await
         .unwrap();
-    policy_changed(&running.agent.policy, |p| p.contains(&grant.id())).await;
+    policy_changed(&running.agent.policy, |p| p.contains(&grant.id().unwrap())).await;
     closed(&conn).await;
     assert!(running.connect(&grant).await.is_err());
     drop(feed);
@@ -284,7 +288,7 @@ async fn restart_and_replayed_network_snapshot_cannot_erase_revocations_or_renew
     let mut store = tmp.open();
     store
         .accept_revocations(
-            &snapshot(2, BTreeSet::from([revoked.id()]), 5),
+            &snapshot(2, BTreeSet::from([revoked.id().unwrap()]), 5),
             Reading::now().unwrap(),
         )
         .unwrap();
@@ -296,12 +300,24 @@ async fn restart_and_replayed_network_snapshot_cannot_erase_revocations_or_renew
         Duration::from_secs(1),
     )
     .unwrap();
-    assert!(running.agent.policy.denied().contains(&revoked.id()));
+    assert!(
+        running
+            .agent
+            .policy
+            .denied()
+            .contains(&revoked.id().unwrap())
+    );
     assert!(running.connect(&revoked).await.is_err());
     let conn = running.connect(&running.grant()).await.unwrap();
     closed(&conn).await;
     assert!(!running.agent.policy.denylist.borrow().fresh());
-    assert!(running.agent.policy.denied().contains(&revoked.id()));
+    assert!(
+        running
+            .agent
+            .policy
+            .denied()
+            .contains(&revoked.id().unwrap())
+    );
     assert!(running.connect(&running.grant()).await.is_err());
     drop(feed);
     running.shutdown().await;

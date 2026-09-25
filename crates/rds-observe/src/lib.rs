@@ -299,6 +299,8 @@ pub enum Operation {
     ServiceStream,
     SshConnect,
     SshSession,
+    GrantAuthorize,
+    GrantRenew,
 }
 
 impl Operation {
@@ -308,6 +310,8 @@ impl Operation {
             Self::ServiceStream => "service_stream",
             Self::SshConnect => "ssh_connect",
             Self::SshSession => "ssh_session",
+            Self::GrantAuthorize => "grant_authorize",
+            Self::GrantRenew => "grant_renew",
         }
     }
 }
@@ -402,6 +406,8 @@ impl Visit for SafeFields {
             ("operation", "service_stream") => self.operation = Some("service_stream"),
             ("operation", "ssh_connect") => self.operation = Some("ssh_connect"),
             ("operation", "ssh_session") => self.operation = Some("ssh_session"),
+            ("operation", "grant_authorize") => self.operation = Some("grant_authorize"),
+            ("operation", "grant_renew") => self.operation = Some("grant_renew"),
             ("outcome", "ok") => self.outcome = Some("ok"),
             ("outcome", "error") => self.outcome = Some("error"),
             ("outcome", "cancelled") => self.outcome = Some("cancelled"),

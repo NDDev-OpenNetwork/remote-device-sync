@@ -58,6 +58,49 @@ fn backends() -> Vec<Backend> {
     }
 }
 
+#[tokio::test]
+async fn control_reply_requires_commit_eof_and_rejects_trailing_bytes() {
+    use rds_core::local::{Request, Response, VERSION};
+    use std::os::unix::fs::PermissionsExt;
+    for trailing in [false, true] {
+        let root = Scratch::new();
+        let path = root.0.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let client = Client::new(&root.0);
+        let mut pending = tokio::spawn(async move { client.request(Command::List).await });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _: Request = rds_core::read_frame(&mut socket).await.unwrap();
+        rds_core::write_frame(
+            &mut socket,
+            &Response {
+                version: VERSION,
+                result: Ok(Reply::Done),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                .await
+                .is_err()
+        );
+        if trailing {
+            socket.write_all(&[1]).await.unwrap();
+        }
+        drop(socket);
+        let result = tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        if trailing {
+            assert!(matches!(result, Err(Error::Protocol)));
+        } else {
+            assert!(matches!(result, Ok(Reply::Done)));
+        }
+    }
+}
+
 async fn connect(client: &Client, target: String) -> SessionId {
     match client
         .request(Command::Connect {
@@ -432,6 +475,19 @@ async fn private_socket_preflight_refuses_unsafe_paths_and_recovers_only_a_dead_
         Err(Error::AlreadyRunning)
     ));
     drop(live);
+    // Concurrent process-spawn fixtures can briefly retain a listener FD until
+    // exec. Observe refusal before asserting recovery of a *dead* socket.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match UnixStream::connect(&socket).await {
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => break,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(1)).await,
+                Err(error) => panic!("unexpected socket retirement error: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     // The dead reserved socket survives a process death; a new owner recovers it.
     let recovered = Prepared::bind(&path).await.unwrap();
     drop(recovered);
@@ -513,6 +569,8 @@ async fn managed_grants_keep_service_restrictions_and_revoke_held_sessions() {
     let grant = rds_core::grant::Grant::issue(
         &issuer,
         *local.id().as_bytes(),
+        *remote.id().as_bytes(),
+        [1; 16],
         vec![rds_core::ServiceKind::Tcp],
         Duration::from_secs(60),
         Default::default(),
@@ -552,7 +610,49 @@ async fn managed_grants_keep_service_restrictions_and_revoke_held_sessions() {
     let (mut service, _) = tcp.accept().await.unwrap();
     stream.write_u8(7).await.unwrap();
     assert_eq!(service.read_u8().await.unwrap(), 7);
-    policy.revoke(grant.id());
+    let mut payload = grant
+        .verify(
+            &std::collections::HashSet::from([issuer.verifying_key().to_bytes()]),
+            local.id().as_bytes(),
+            remote.id().as_bytes(),
+            Duration::from_secs(300),
+            rds_core::grant::now_unix(),
+        )
+        .unwrap()
+        .payload;
+    payload.revision += 1;
+    payload.expires_at += 60;
+    let renewed = rds_core::grant::Grant::issue_at(&issuer, payload);
+    assert_eq!(grant.id().unwrap(), renewed.id().unwrap());
+    for _ in 0..2 {
+        assert!(matches!(
+            client
+                .request(Command::Renew {
+                    session: id,
+                    grant: Box::new(renewed.clone())
+                })
+                .await
+                .unwrap(),
+            Reply::Done
+        ));
+    }
+    assert_eq!(policy.active_grants.lock().unwrap().len(), 1);
+    assert!(matches!(
+        client
+            .request(Command::Connect {
+                target: Ticket::of(&remote).to_string(),
+                grant: Some(Box::new(grant.clone()))
+            })
+            .await,
+        Err(Error::Rejected(ErrorCode::CredentialConflict))
+    ));
+    assert!(
+        matches!(client.request(Command::Connect { target: Ticket::of(&remote).to_string(), grant: Some(Box::new(renewed)) }).await.unwrap(), Reply::Connected(reused) if reused == id)
+    );
+    assert_eq!(client.snapshot().await.unwrap().selected, Some(id));
+    stream.write_u8(8).await.unwrap();
+    assert_eq!(service.read_u8().await.unwrap(), 8);
+    policy.revoke(grant.id().unwrap());
     assert!(
         tokio::time::timeout(Duration::from_secs(3), stream.read_u8())
             .await

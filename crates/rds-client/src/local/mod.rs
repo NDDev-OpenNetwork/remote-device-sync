@@ -261,7 +261,7 @@ async fn serve(
         .map_err(|_| ErrorCode::Timeout)??;
     if let Ok(mut output) = result {
         if let Some(reservation) = &mut output.reservation {
-            reservation.committed = true;
+            reservation.commit()?;
         }
         if let Some((mut tcp, _permit)) = output.tcp {
             let (send, recv) = tcp.get_mut();
@@ -353,6 +353,28 @@ async fn execute(
                 tcp: None,
             })
         }
+        Command::Renew { session, grant } => {
+            let credential =
+                *blake3::hash(&postcard::to_stdvec(&grant).map_err(|_| ErrorCode::InvalidRequest)?)
+                    .as_bytes();
+            let (reservation, conn) = state::renew(shared, session)?;
+            tokio::select! {
+                biased;
+                _ = reservation.cancel.cancelled() => return Err(ErrorCode::NotFound),
+                result = crate::renew_authorization(&conn, &grant) => result.map_err(|_| ErrorCode::Remote)?,
+            }
+            let mut state = state::lock(shared)?;
+            let entry = state.entries.get_mut(&session).ok_or(ErrorCode::NotFound)?;
+            entry.credential = Some(credential);
+            // Keep the transaction reserved until the local success reply is
+            // written. Drop/cancel/reply failure removes this same pinned session.
+            drop(state);
+            Ok(Output {
+                reply: Reply::Done,
+                reservation: Some(reservation),
+                tcp: None,
+            })
+        }
         Command::Select { session } => {
             let mut state = state::lock(shared)?;
             state.connection(Some(session))?;
@@ -415,6 +437,7 @@ impl Client {
     }
 
     async fn exchange(&self, command: Command) -> Result<(Reply, UnixStream), Error> {
+        let body = matches!(command, Command::OpenTcp { .. });
         tokio::time::timeout(CLIENT_TIMEOUT, async {
             let mut stream = socket::connect(&self.directory).await?;
             write_frame(
@@ -428,6 +451,15 @@ impl Client {
             let response: Response = read_frame(&mut stream).await?;
             if response.version != VERSION {
                 return Err(ErrorCode::Version.into());
+            }
+            if !body {
+                // The server publishes a reserved transaction after writing
+                // its reply and before closing IPC. EOF is the commit barrier;
+                // a following renewal must not race a still-reserved entry.
+                let mut trailing = [0];
+                if stream.read(&mut trailing).await? != 0 {
+                    return Err(Error::Protocol);
+                }
             }
             Ok((response.result?, stream))
         })

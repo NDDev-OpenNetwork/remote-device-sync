@@ -23,3 +23,16 @@ fn invalid_admission_budget_fails_before_identity_or_bind() {
         }
     }
 }
+
+#[test]
+fn grant_mode_requires_control_capacity_before_identity_or_bind() {
+    let dir = Scratch::new();
+    let issuer = "ab".repeat(32);
+    let output = run(
+        &["--no-relay", "--issuer", &issuer, "--max-streams", "1"],
+        &dir,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--max-streams at least 2"));
+    assert!(!dir.0.join("endpoint.key").exists());
+}
