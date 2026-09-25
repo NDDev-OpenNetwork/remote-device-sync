@@ -74,8 +74,11 @@ impl World {
         conn: Option<&rds_net::Connection>,
     ) -> std::collections::BTreeMap<String, u64> {
         let mut out = std::collections::BTreeMap::new();
-        if let Some(conn) = conn {
-            self.client.metrics().sampler(conn.clone()).sample();
+        // Keep the observation owner through the scrape: dropping a sampler
+        // invalidates its last selected-path gauge, without retaining I/O.
+        let mut sampler = conn.map(|conn| self.client.metrics().sampler(conn.clone()));
+        if let Some(sampler) = &mut sampler {
+            sampler.sample();
         }
         for (k, v) in self.client.metrics().snapshot() {
             out.insert(format!("client_{k}"), v);

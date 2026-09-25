@@ -53,6 +53,18 @@ reset and stronger adaptation policy remain W6.7.
 ## Sampled metrics
 
 `ConnSampler` classifies observed cumulative deltas into direct/relay buckets.
+It retains backend weak observation handles and metadata only: no connection
+facade, uni-stream router or strong transport handle. `Registry::sampler` keeps
+its existing by-value signature, but passing the last connection handle no
+longer preserves I/O. Callers must retain their service's actual connection or
+stream owners. Streams may outlive all facades and continue to be observed.
+
+`run` registers a weak closure notification before waiting. Last-I/O drop and
+explicit/peer close wake it independently of the sampling interval; canceled
+or never-started sampler tasks release their gauges through normal drop.
+Reads briefly upgrade weak handles synchronously, never across an await.
+Closed iroh connections expose no live paths even while closed handles remain.
+
 Its per-path baselines are retired with observed paths, bounding retained map
 entries by concurrency instead of connection churn. Path IDs are never reused
 by the pinned engine. Samples can miss short-lived paths and final increments
@@ -64,6 +76,10 @@ include the outer tunnel's additional encapsulation cost.
 Existing RTT and congestion-window gauges describe the endpoint's last sample,
 not a sum or a per-connection series. Their validity and values share one locked
 observation; a registry snapshot cannot combine different samples' RTT/cwnd.
+The sample also records a metadata-only owner token. Dropping that sampler
+invalidates its selection/RTT/cwnd; dropping an older sampler cannot erase a
+newer sampler's selected observation. No stale sample from another connection
+is substituted. One-shot callers must keep the sampler through their scrape.
 The rest of the registry contains independently read counters, not an atomic
 transport-wide transaction. Unknown selection produces zero RTT/cwnd and
 `rds_net_selected_path_known = 0`.
@@ -82,6 +98,10 @@ gauges follow sampler lifetime and return to zero on drop; lost-event totals
 remain. `rds_net_live_paths` counts observed live paths and may undercount the
 engine. Noq byte totals currently exclude unobserved probes and missed paths.
 The CLI prints coverage before its path rows.
+Manual `sample()` users still own their polling and drop schedule: the registry
+does not spawn a watcher for them. `rds_net_active_connections` counts live
+sampler objects, not independently discovered open connections. Between samples
+their gauges describe the last observation until another sample or owner drop.
 
 ## Validation and remaining work
 
@@ -90,10 +110,13 @@ migration away from path zero, pending-probe exclusion, 70 sequential path opens
 past ID 63, actual event-buffer overflow with deliberately delayed consumption,
 sticky loss, unknown selection, observer cancellation, and post-close emptiness.
 Existing drop/stream ownership and failed-engine shutdown cases remain required.
+The [sampler lifecycle receipt](reports/rds-sampler-lifecycle-20260925.md)
+covers both backends, last-handle drop, stream survival, closure with a one-hour
+sampling interval, cancellation, late start and shared selected-gauge ownership.
 
 Full validated-path reconciliation, lossless retirement accounting, per-session
-metrics, weak sampler ownership, admin-surface exposure, native macOS and real
-network qualification remain open. No latency or throughput improvement is
+metrics, admin-surface exposure, native macOS and real network qualification
+remain open. No latency or throughput improvement is
 claimed from these correctness tests.
 
 Historical reports are preserved. Noq path-kind and selected-path evidence

@@ -688,6 +688,13 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
+    pub(crate) fn observer(&self) -> ConnectionObserver {
+        ConnectionObserver {
+            inner: self.inner.weak_handle(),
+            telemetry: self.telemetry.clone(),
+        }
+    }
+
     pub(crate) fn path_stats_snapshot(&self) -> crate::PathStatsSnapshot {
         self.telemetry.snapshot(self.inner.close_reason().is_some())
     }
@@ -757,5 +764,30 @@ impl Connection {
     /// Raw noq connection for the path-policy driver.
     pub fn inner(&self) -> &noq::Connection {
         &self.inner
+    }
+}
+
+/// Transport observation without a facade or a strong connection handle.
+pub(crate) struct ConnectionObserver {
+    inner: noq::WeakConnectionHandle,
+    telemetry: Arc<telemetry::Telemetry>,
+}
+
+impl ConnectionObserver {
+    pub fn snapshot(&self) -> crate::PathStatsSnapshot {
+        let closed = self
+            .inner
+            .upgrade()
+            .is_none_or(|conn| conn.close_reason().is_some());
+        self.telemetry.snapshot(closed)
+    }
+
+    pub fn closed(&self) -> impl Future<Output = ()> + Send + 'static {
+        let registered = self.inner.upgrade().map(|conn| conn.on_closed());
+        async move {
+            if let Some(closed) = registered {
+                closed.await;
+            }
+        }
     }
 }

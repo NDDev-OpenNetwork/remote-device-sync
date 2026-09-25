@@ -1050,3 +1050,21 @@ all-feature tests** passed. See [contract](socket-failure-isolation.md) and
 [receipt](reports/rds-mux-isolation-20260925.md). Full validated inventory,
 socket/interface recreation, relay bootstrap/replacement, native macOS and
 physical-network qualification remain open. No wave closes.
+
+
+## Weak metric sampler ownership
+
+Regressions on both transport backends reproduced idle samplers retaining
+connection I/O after the application dropped its last facade. Samplers now own
+weak backend observations and metadata only. Closure events wake their loop
+independently of the interval; actual streams remain I/O owners. Closed iroh
+handles expose no live paths. A last-selected sample is invalidated only by
+its own sampler drop, preserving a newer connection's observation. The bench
+keeps its one-shot observer through the scrape.
+
+**15 focused tests**, formatting, three Clippy lanes, **431 workspace**,
+**238 expanded all-feature** and **2 isolated iroh-only lifecycle tests**
+passed. See [contract](path-telemetry.md) and
+[receipt](reports/rds-sampler-lifecycle-20260925.md). Full path reconciliation,
+lossless metrics, receiver-confirmed throughput measurement, native macOS and
+physical-network qualification remain open. No wave closes.

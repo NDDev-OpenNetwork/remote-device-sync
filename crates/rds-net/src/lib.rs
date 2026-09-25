@@ -44,6 +44,7 @@ pub mod backends {
 }
 mod identity;
 pub mod metrics;
+mod observation;
 pub mod relay_control;
 mod uni;
 pub use uni::{UniRoutingStats, UniStreams};
@@ -529,28 +530,7 @@ impl Connection {
     /// connection-wide engine snapshot on Noq, even before event loss.
     pub fn path_stats_snapshot(&self) -> PathStatsSnapshot {
         match &self.inner {
-            ConnectionInner::Iroh(c) => PathStatsSnapshot {
-                paths: c
-                    .paths()
-                    .iter()
-                    .map(|p| {
-                        let s = p.stats();
-                        PathStats {
-                            path_id: path_id_u64(p.id()),
-                            rtt: s.rtt,
-                            cwnd: s.cwnd,
-                            sent: s.udp_tx.datagrams,
-                            lost: s.lost_packets,
-                            sent_bytes: s.udp_tx.bytes,
-                            recv_bytes: s.udp_rx.bytes,
-                            congestion_events: s.congestion_events,
-                            selected: p.is_selected(),
-                            via_relay: p.is_relay(),
-                        }
-                    })
-                    .collect(),
-                coverage: PathStatsCoverage::BackendSnapshot,
-            },
+            ConnectionInner::Iroh(c) => observation::iroh_snapshot(c),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.path_stats_snapshot(),
         }

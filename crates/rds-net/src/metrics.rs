@@ -58,8 +58,8 @@ struct Counters {
     path_events_lost: AtomicU64,
 }
 
-#[derive(Clone, Copy)]
 struct SelectedPathSample {
+    owner: Arc<()>,
     rtt_us: u64,
     cwnd_bytes: u64,
 }
@@ -91,14 +91,16 @@ impl Registry {
 
     /// Per-connection tracker folding cumulative `path_stats` into
     /// these counters. One per connection; `run` ends when the
-    /// connection closes.
+    /// connection closes. The sampler retains only a weak observation handle;
+    /// passing the last connection handle here does not keep I/O alive.
     pub fn sampler(&self, conn: Connection) -> ConnSampler {
         self.inner
             .active_connections
             .fetch_add(1, Ordering::Relaxed);
         ConnSampler {
             registry: self.clone(),
-            conn,
+            conn: crate::observation::Observer::new(&conn),
+            sample_owner: Arc::new(()),
             seen: HashMap::new(),
             last_live: 0,
             last_policy: 0,
@@ -111,7 +113,12 @@ impl Registry {
     /// embed and `render_prometheus` serializes.
     pub fn snapshot(&self) -> BTreeMap<&'static str, u64> {
         let c = &*self.inner;
-        let selected = *c.selected_path.lock().unwrap_or_else(|p| p.into_inner());
+        let selected = c
+            .selected_path
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|s| (s.rtt_us, s.cwnd_bytes));
         BTreeMap::from([
             (
                 "rds_net_connections_opened_total",
@@ -177,8 +184,8 @@ impl Registry {
                 "rds_net_active_connections",
                 c.active_connections.load(Ordering::Relaxed),
             ),
-            ("rds_net_rtt_us", selected.map_or(0, |s| s.rtt_us)),
-            ("rds_net_cwnd_bytes", selected.map_or(0, |s| s.cwnd_bytes)),
+            ("rds_net_rtt_us", selected.map_or(0, |s| s.0)),
+            ("rds_net_cwnd_bytes", selected.map_or(0, |s| s.1)),
             ("rds_net_live_paths", c.live_paths.load(Ordering::Relaxed)),
             (
                 "rds_net_policy_observed_connections",
@@ -230,7 +237,8 @@ impl Registry {
 /// teardown) and their final increments can be missed.
 pub struct ConnSampler {
     registry: Registry,
-    conn: Connection,
+    conn: crate::observation::Observer,
+    sample_owner: Arc<()>,
     /// path_id → (sent, lost, sent_bytes, recv_bytes, congestion_events)
     /// at the last sample.
     seen: HashMap<u64, (u64, u64, u64, u64, u64)>,
@@ -244,7 +252,7 @@ impl ConnSampler {
     /// Fold current `path_stats` into the registry. Safe to call any
     /// number of times — only deltas count.
     pub fn sample(&mut self) {
-        let snapshot = self.conn.path_stats_snapshot();
+        let snapshot = self.conn.snapshot();
         self.observe_coverage(snapshot.coverage);
         let paths = snapshot.paths;
         // A retired path ID is never reused by either pinned backend. Keep
@@ -285,6 +293,7 @@ impl ConnSampler {
             .selected_path
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = selected.map(|sel| SelectedPathSample {
+            owner: self.sample_owner.clone(),
             rtt_us: sel.rtt.as_micros().min(u64::MAX.into()) as u64,
             cwnd_bytes: sel.cwnd,
         });
@@ -335,11 +344,18 @@ impl ConnSampler {
 
     /// Sample every `interval` until the connection closes, with a
     /// final sample at teardown. Intended to run as a per-connection
-    /// task beside the service loop.
+    /// task beside the service loop. Closure wakes this wait immediately,
+    /// independently of the sampling interval. No I/O handle spans the wait.
     pub async fn run(mut self, interval: Duration) {
-        while !self.conn.is_closed() {
+        let closed = self.conn.closed();
+        tokio::pin!(closed);
+        loop {
             self.sample();
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                biased;
+                _ = &mut closed => break,
+                _ = tokio::time::sleep(interval) => {},
+            }
         }
         self.sample();
     }
@@ -380,6 +396,19 @@ impl ConnSampler {
 
 impl Drop for ConnSampler {
     fn drop(&mut self) {
+        let mut selected = self
+            .registry
+            .inner
+            .selected_path
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if selected
+            .as_ref()
+            .is_some_and(|sample| Arc::ptr_eq(&sample.owner, &self.sample_owner))
+        {
+            *selected = None;
+        }
+        drop(selected);
         self.registry
             .inner
             .policy_observed_connections

@@ -74,6 +74,13 @@ path the engine refuses to close. Loss of every child explicitly closes held
 connections. Socket recreation, complete path reconciliation and physical
 interface/failover qualification remain open.
 
+Transport metric samplers use weak backend observation handles and never own
+connection facades, uni routers or transport I/O. Closure wakes sampling tasks
+independently of their interval; real streams remain valid I/O owners after
+facade drop. Last-selected RTT/cwnd samples are invalidated when their sampler
+is dropped, without clearing a newer sampler's observation. See
+[path metrics](path-telemetry.md) for coverage and sampled-accounting limits.
+
 Owned requests also [pin the exact requested ALPN](protocol-negotiation.md) in
 an immutable per-protocol TLS configuration. A missing protocol fails before
 service use; concurrent requests cannot replace each other's offer.
