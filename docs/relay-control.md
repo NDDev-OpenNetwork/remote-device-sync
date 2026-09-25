@@ -134,6 +134,15 @@ admission and never grows beyond the configured entry count. The synthetic
 32-bit namespace still has collisions; incompatible simultaneous identities
 require direct connectivity or a future namespace design.
 
+Hash port zero is normalized to virtual port one because Noq rejects a zero
+remote port. Previously nonzero mappings are unchanged. A deterministic public
+key fixture that used to fail with InvalidRemoteAddress now establishes streams
+in both directions using relay sockets with no direct transport child. This is
+an internal address correction, not a key rotation or relay frame-format change.
+Older dialers retain their zero-port behavior; mixed-version qualification for
+this formerly failing identity class remains separate. Collision admission still
+applies when normalization shares an alias with another identity.
+
 The receive pump uses a bounded channel of shared byte slices. A full queue
 drops the new datagram and counts the loss; it does not block control processing
 or allocate an unbounded backlog. The pump yields after 64 frames. A receive

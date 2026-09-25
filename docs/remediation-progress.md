@@ -891,3 +891,17 @@ The focused run passed 73 tests. Final formatting, three Clippy lanes,
 [receipt](reports/rds-relay-lifecycle-20260925.md). Owned server CLI integration,
 global resource qualification, full path recovery and real service/platform
 acceptance remain open. No remediation wave is closed.
+
+## Nonzero virtual relay ports
+
+A public deterministic identity reproduced Noq refusing a relay-only dial because
+its synthetic hash port was zero. Zero now maps to virtual port one; existing
+nonzero aliases and endpoint identities are unchanged. Real relay-only sockets
+without direct children exchange pinned reliable streams in both directions.
+The focused run passed 59 tests.
+
+Formatting, three Clippy lanes, **364 workspace tests**, **111 all-feature
+network/relay tests** and **59 isolated network/relay tests** passed. See
+[receipt](reports/rds-relay-zero-port-20260925.md). Broader alias design,
+mixed-version/physical/native-platform qualification and owned server runtime
+integration remain open. No remediation wave is closed.

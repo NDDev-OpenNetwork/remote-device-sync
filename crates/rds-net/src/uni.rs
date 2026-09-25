@@ -217,6 +217,9 @@ mod tests {
             Backend::Noq,
         ];
         for backend in backends {
+            let mut phase = "bind client";
+            let started = std::time::Instant::now();
+            let mut observed = (0, 0);
             tokio::time::timeout(Duration::from_secs(5), async {
                 let config = || EndpointConfig {
                     backend,
@@ -225,7 +228,9 @@ mod tests {
                     ..Default::default()
                 };
                 let a = bind_endpoint(config()).await.unwrap();
+                phase = "bind server";
                 let b = bind_endpoint(config()).await.unwrap();
+                phase = "handshake";
                 let (conn, peer) = tokio::join!(a.connect(b.addr(), rds_core::ALPN), async {
                     b.accept().await.unwrap().await
                 });
@@ -242,6 +247,7 @@ mod tests {
                 }
                 let mut inbox = conn.uni_streams(UniHello::Sync).unwrap();
                 let mut streams = Vec::new();
+                phase = "send stream tags";
                 for _ in 0..QUEUE_DEPTH + MAX_PENDING + 8 {
                     let mut send = peer.open_uni().await.unwrap();
                     rds_core::write_frame(&mut send, &UniHello::Sync)
@@ -250,14 +256,15 @@ mod tests {
                     send.write_all(b"pending body").await.unwrap();
                     streams.push(send);
                 }
+                phase = "saturate inbox and pending workers";
                 loop {
-                    if inbox.rx.len() == QUEUE_DEPTH
-                        && conn.uni_routing_stats().pending == MAX_PENDING
-                    {
+                    observed = (inbox.rx.len(), conn.uni_routing_stats().pending);
+                    if observed == (QUEUE_DEPTH, MAX_PENDING) {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
+                phase = "cancel route workers";
                 conn.close(0u32.into(), b"close with full inbox");
                 while conn.uni_routing_stats().pending != 0 {
                     tokio::task::yield_now().await;
@@ -265,16 +272,25 @@ mod tests {
                 // Existing bounded inbox contents may drain after close; no
                 // blocked sender survives to refill or keep the channel open.
                 let mut drained = 0;
+                phase = "drain closed inbox";
                 while inbox.recv().await.is_some() {
                     drained += 1;
                 }
                 assert_eq!(drained, QUEUE_DEPTH);
                 drop(streams);
+                phase = "close client endpoint";
                 a.close().await;
+                phase = "close server endpoint";
                 b.close().await;
             })
             .await
-            .expect("full inbox kept route workers alive");
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{backend:?} full-inbox fixture timed out at {phase}; \
+                     last queue/pending={observed:?}, elapsed={:?}: {error}",
+                    started.elapsed()
+                )
+            });
         }
     }
 }

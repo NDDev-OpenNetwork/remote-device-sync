@@ -89,13 +89,14 @@ pub fn is_synthetic(addr: SocketAddr) -> bool {
 /// Deterministic: every endpoint computes the same address for a given peer.
 /// BLAKE3 fills 32 free bits (16 host bits and 16 port bits). This is not an
 /// identity: colliding peer registrations are refused while an existing
-/// owner is pinned or within its inactivity grace.
+/// owner is pinned or within its inactivity grace. Hash port zero maps to one:
+/// QUIC rejects a zero remote port. All previously nonzero mappings stay stable.
 pub fn synthetic_for(id: &EndpointId) -> SocketAddr {
     let h = blake3::hash(id.as_bytes());
     let b = h.as_bytes();
     SocketAddr::new(
         IpAddr::V4(Ipv4Addr::new(198, 19, b[0], b[1])),
-        u16::from_be_bytes([b[2], b[3]]),
+        u16::from_be_bytes([b[2], b[3]]).max(1),
     )
 }
 
