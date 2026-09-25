@@ -1,0 +1,162 @@
+{
+  "source_base": "bf42c2d",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "Cargo.lock": "56d8fbb4aef61d64cdb14c46056f4d5a34087cf5d759f85c0f5d858f080617b2",
+    "crates/rds-cli/Cargo.toml": "d00fdb80872ed37aa90ba71234a957f20ef3d8dee0871c67740fba3963ff4871",
+    "crates/rds-cli/src/lib.rs": "1bb2e4f4732a3a0679a542389ce4f77664ca38d0717832a378666fd4b4815865",
+    "crates/rds-cli/src/main.rs": "df996a5f6814ace1055cfca4f3bd1912b08c0ae9508065b76f14bef43c328038",
+    "crates/rds-cli/src/request.rs": "7afa8dee30f190079bd61c72dad33124dc82fc052d771179988cbec03a9738cd",
+    "crates/rds-cli/src/forward.rs": "2fcbe3baff072efc33e3c72f2a243af994152fd85a2bfd6765236ef83b0ad465",
+    "crates/rds-cli/tests/request_deadlines.rs": "60feb3971962c1b2516f06aed71f6bc3ad0c6364cc39d79a2bd1bab4773dc84b",
+    "crates/rds-cli/tests/forward_lifecycle.rs": "a4a06145e6d9149db6752bd853c3e7a37454eb88c7b0e0bed78067a4dd91573d",
+    "crates/rds-cli/tests/configuration.rs": "7a9d88734f319a1d5e3f6a0b81677cdad832243739dc2b66e720210597071738"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.7062555350130424,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 9.088812569971196,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 8.344782690051943,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 10.397786714020185,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 238.68273223598953,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 95.08428422897123,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-cli-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-cli",
+        "--test",
+        "configuration",
+        "--test",
+        "forward_lifecycle",
+        "--test",
+        "request_deadlines"
+      ],
+      "code": 0,
+      "seconds": 32.865269222995266,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 323,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 58
+    },
+    "test-owned": {
+      "passed": 109,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 29
+    },
+    "test-cli-isolated": {
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 3
+    }
+  },
+  "before_fix_failures": [
+    "zero_stream_credit_bounds_every_service_request",
+    "zero_receive_window_bounds_request_writes"
+  ],
+  "bounds": {
+    "connect_seconds": 30,
+    "complete_request_seconds": 15,
+    "default_forward_workers": 64
+  },
+  "limits": [
+    "Deadline fixtures use raw iroh QUIC configuration; forward lifetime covers both backends",
+    "One-shot Authz/Ping/Info require FIN without trailing bytes; current agent already finishes them",
+    "Normal listener exit joins workers; future Drop requests cancellation",
+    "No automatic request replay or remote side-effect rollback guarantee",
+    "Global timeout/retry classes, desktop/media and relay startup remain open",
+    "No native macOS, real NAT/failover, deployment or wave closure"
+  ]
+}

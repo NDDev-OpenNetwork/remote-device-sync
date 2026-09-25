@@ -1,0 +1,10 @@
+[sources.alert_fixture]
+type = "http_server"
+address = "127.0.0.1:8687"
+decoding.codec = "json"
+
+[sinks.alert_receipts]
+type = "console"
+inputs = ["alert_fixture"]
+target = "stdout"
+encoding.codec = "json"

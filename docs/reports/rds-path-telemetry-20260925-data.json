@@ -1,0 +1,187 @@
+{
+  "source_base": "b2f76dc7ee8f312d5c995101786a88c4c908a917",
+  "scope": [
+    "W0 observed transport metrics",
+    "W3.6 path selection telemetry",
+    "W10.1 observation coverage"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "Cargo.lock": "dd0f02ee9577dc797f676beb4839d192b39956c384088cbca37bc1f3befdf148",
+    "crates/rds-net/src/lib.rs": "022abb6a66667d7cd5cfa03e9a998910d6fccc69da449498a0668bbf2a5b3ce4",
+    "crates/rds-net/src/metrics.rs": "34631ffabaec1741461e65a9be58cc3f8ec9d1bc31e5324819b5acba7348e03b",
+    "crates/rds-net/src/backends/noq/mod.rs": "d97e2d1163b723a5028d1d354fe95b66e1d3f669b7a06a003b033b0170004280",
+    "crates/rds-net/src/backends/noq/drivers.rs": "08cb45a2b4c1facac93743ef8c46c9d20401480636ecfab4604f2f68634db431",
+    "crates/rds-net/src/backends/noq/policy.rs": "52c7f13cc022dc14cd68aa8b0a9b4c51e8677d5a92f0d21d10765851295fd829",
+    "crates/rds-net/src/backends/noq/telemetry.rs": "50108cf57d4c361e016826bc635c30f0cba4e8f5164609180332ba1f52cc2ae2",
+    "crates/rds-net/src/backends/noq/telemetry_tests.rs": "073936ff007c51bc0d5f37dcb9fc8992249077f6f8267ab9ea71ca5ea81dc0f4",
+    "crates/rds-net/tests/path_validation.rs": "19164e3b6d9050f413ee2de48a7b772050b181b1527567974ed607bf244e9abf",
+    "crates/rds-cli/src/main.rs": "17c5fb717990b2f7c0f81b4e7059dd3ac1e6dacff815e725c7665ee81fe0bca7",
+    "tests/support/relay_runtime.rs": "c958c9d08fe4cc0ea3734e9f38d88d8a1eb82b95ed419bfbf1ff0c3cd17f0df1"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.9149206039728597,
+      "build_jobs": 2
+    },
+    {
+      "name": "fmt-shared",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/relay_runtime.rs"
+      ],
+      "code": 0,
+      "seconds": 0.07089875906240195,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 172.66224394005258,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 100.31557602097746,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 27.898660591919906,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 669.5370319579961,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-server",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 487.6319706510985,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 419,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 72
+    },
+    "expanded": {
+      "passed": 226,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 43
+    }
+  },
+  "build": {
+    "jobs": 2,
+    "isolated_target_directory": true,
+    "reason": "Initial matrix was interrupted by disappearance of the workspace target directory. Full matrix repeated from fresh artifacts in a separate directory."
+  },
+  "failing_before": [
+    {
+      "test": "validated_secondary_carries_data_after_primary_closes",
+      "observation": "actual data carried by replacement path 1, but current_path_stats reported path 0",
+      "exit_code": 101
+    },
+    {
+      "test": "owned_binary_forwards_encrypted_traffic_and_reuses_identity_after_restart",
+      "observation": "single relay-only path reported via_relay=false after authenticated stream and datagram exchange",
+      "exit_code": 101
+    }
+  ],
+  "changes": [
+    "Connection facade and policy share bounded weak validated-path metadata; no guessed ID scan",
+    "Synchronous initial path seed, actual relay address classification and successfully applied policy selection",
+    "Explicit policy-observed coverage, sticky lost-event count and observer/connection liveness",
+    "Unknown selection has no historical/first-path substitute in pacing or metrics",
+    "RTT/cwnd/validity share one observation; per-path sampler baselines retire with paths",
+    "CLI reports coverage; sampled counters no longer documented as lossless"
+  ],
+  "regressions": [
+    "Real-process single-path owned relay traffic labels and sampled byte buckets on both binaries, including restart",
+    "Actual migration from path zero to a validated replacement; unvalidated silent probe excluded",
+    "70 sequential path opens cross ID 63, close the initial path, retain only one observed live path and deliver a datagram",
+    "Actual bounded engine-event overflow while a subscribed observer is deliberately not polled",
+    "Event loss survives later publication; selected path unavailable; metric loss delta counted once; coverage gauges released",
+    "Cancellation of running observer and drop of never-polled observation guard clear live metadata",
+    "Post-close facade exposes no live path or selected path; existing weak-I/O ownership regressions retained",
+    "Path ID conversion checks zero, former scan boundary and u32 maximum"
+  ],
+  "limits": [
+    "Noq policy observations are not a complete atomic engine snapshot, including before a lag notification",
+    "Full validated-path resynchronization and lossless retired/short-path accounting remain open",
+    "Selection is an observed policy preference, not per-packet proof; byte counters exclude outer relay encapsulation",
+    "Sampler still owns its Connection; per-session gauges and weak sampler lifetime remain open",
+    "Generic child socket error isolation, independent relay bootstrap, desktop path-epoch pacing reset and real network qualification remain open",
+    "No native macOS execution, production deployment or performance improvement claimed",
+    "No dependency, protocol version or runtime helper added; cargo-deny unavailable; all waves open"
+  ]
+}

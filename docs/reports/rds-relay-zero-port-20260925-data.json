@@ -1,0 +1,177 @@
+{
+  "source_base": "33005ec",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/uni.rs": "5a4576a83852c560708b0a27f447dd8c164d165fc2db589266347d9277b107d3",
+    "crates/rds-net/src/backends/noq/relay.rs": "8445b0e5aefcbf7e133784b5c87713c74be9f8a56679b1d983130274019ded6a",
+    "crates/rds-relay/tests/synthetic_address.rs": "22604d4e2c4a87777d06bf891458d9deeaf8de97f3f0310765f23a7d08afa6dd"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.7095737979980186,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.483501008013263,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 18.207921777968295,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 22.43329606601037,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 278.5977648199769,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 87.18163146299776,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "--no-default-features",
+        "--features",
+        "rds-net/transport-noq,rds-relay/owned-relay",
+        "--lib",
+        "--test",
+        "peer_registry",
+        "--test",
+        "receive_queue",
+        "--test",
+        "failure_isolation",
+        "--test",
+        "control_lifecycle",
+        "--test",
+        "owned_e2e",
+        "--test",
+        "synthetic_address"
+      ],
+      "code": 0,
+      "seconds": 65.5002309361007,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 364,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 67
+    },
+    "test-owned": {
+      "passed": 111,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 25
+    },
+    "test-isolated": {
+      "passed": 59,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 8
+    }
+  },
+  "before_fix_failures": [
+    "Valid deterministic peer identity failed relay-only initiation with Noq InvalidRemoteAddress: virtual port was zero."
+  ],
+  "fixture": {
+    "public_seed_pattern": "[135;32] with first4 bytes replaced by LE33349",
+    "search": "one-time offline bounded Rust search; no search in normal tests",
+    "transport": "only RelaySocket children; no direct child for either inner endpoint",
+    "verification": "TLS-pinned connection and reliable request/response streams in both directions"
+  },
+  "focused": {
+    "passed": 59,
+    "targets": 8
+  },
+  "prior_check_failure": {
+    "lane": "test-owned",
+    "test": "uni::tests::saturated_inbox_cancels_and_joins_pending_handoffs",
+    "error": "5-second fixture timeout; old fixture did not identify which stage timed out",
+    "followup": "Five isolated unchanged binary repetitions passed; stage diagnostics added without deadline or production behavior change; reran complete checks",
+    "root_cause": "Unresolved; host pressure observed subsequently is not proof of the failure cause"
+  },
+  "compatibility": [
+    "Only raw hash port0 maps to1; all previously nonzero aliases stay unchanged",
+    "Endpoint keys and relay frame format unchanged",
+    "Collision refusal remains in effect, including normalized aliases",
+    "No mixed-version proof for older zero-port dialers"
+  ],
+  "limits": [
+    "Not a larger/collision-free synthetic namespace",
+    "No latency benchmark, physical network, native macOS, deployment or wave closure"
+  ]
+}

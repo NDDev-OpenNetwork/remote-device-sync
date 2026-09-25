@@ -332,6 +332,8 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     let reg_key = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
     let snap = SignedRegistry::publish(
         &reg_key,
+        1,
+        1,
         BTreeMap::from([(
             "bench-agent".to_string(),
             EndpointKey(*agent_key.public().as_bytes()),
@@ -344,11 +346,11 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
         service::ServiceConfig {
             registry_key: Some(reg_key.verifying_key()),
             registry: Some(snap),
-            ..Default::default()
+            ..service::ServiceConfig::open_ephemeral()
         },
     )
     .await?;
-    let directory = client::Client::new(dir.addr());
+    let directory = client::Client::new(dir.addr()).with_registry_key(reg_key.verifying_key());
 
     // Agent endpoint: announce into the directory, then serve.
     let agent_ep = bind_endpoint(
@@ -364,12 +366,14 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
     let _announce = rds_net::announce(
         agent_ep.clone(),
         AnnounceConfig {
-            key: agent_key,
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&agent_key.to_bytes()),
+            ),
             directory: directory.clone(),
             services: vec![rds_discovery::Service::Ping],
             ttl: Duration::from_secs(120),
         },
-    );
+    )?;
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
     policy.allow.insert(client_key.public());
     let agent = Arc::new(Agent::new(agent_ep, policy));

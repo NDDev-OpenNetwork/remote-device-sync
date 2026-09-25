@@ -1,0 +1,164 @@
+{
+  "source_base": "97096e2",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/candidates.rs": "7e3aedec3b1aa6cccad354b9decb267698340db5e4055998d2190f74bf5e2b82",
+    "crates/rds-net/src/backends/noq/policy.rs": "aaefa4df3fc31463315a135ae592297f9b3f2efebc15b796006d4158770380e0",
+    "crates/rds-net/tests/candidate_race.rs": "304a6f45620c52ec64d00b3d1af5c67959aa07ecb2c60f76b63d815fb3127458"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6145878849783912,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 18.366204664926045,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.45248288696166,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 16.35947272600606,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 253.46581354003865,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 161.70279095496517,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--features",
+        "transport-noq",
+        "--lib",
+        "--test",
+        "path_validation",
+        "--test",
+        "turmoil_sim",
+        "--test",
+        "driver_lifecycle",
+        "--test",
+        "candidate_race"
+      ],
+      "code": 0,
+      "seconds": 40.37225745501928,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 356,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 62
+    },
+    "test-owned": {
+      "passed": 147,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 33
+    },
+    "test-isolated": {
+      "passed": 43,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 5
+    }
+  },
+  "before_fix_failures": [
+    "Eight supported silent IPv4 candidates excluded a working IPv6 listener on a dual-stack endpoint; authenticated datagram deadline expired."
+  ],
+  "selection": {
+    "total_direct_cap": 8,
+    "retained_per_family": 8,
+    "order": "sorted within family, alternating IPv4/IPv6 with empty-family backfill",
+    "canonicalization": "mapped IPv4 shares native IPv4 slot; native IPv6 scope IDs preserved"
+  },
+  "focused": {
+    "passed": 36,
+    "targets": 3
+  },
+  "limits": [
+    "Fixed total cap can omit a reachable later address within one family",
+    "Not staggered Happy Eyeballs, global admission or real WAN/NAT latency qualification",
+    "Relay bootstrap, path-event recovery, selected/relay metrics and transport failure isolation remain open",
+    "No native macOS, production deployment or wave closure"
+  ]
+}

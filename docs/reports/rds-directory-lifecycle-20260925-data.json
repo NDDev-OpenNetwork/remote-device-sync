@@ -1,0 +1,152 @@
+{
+  "source_base": "7980cca",
+  "scope": [
+    "W2.5 structured task ownership",
+    "W2.6 shutdown semantics",
+    "W3.2 runtime composition prerequisite"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "Cargo.lock": "c79b11a1464d4f3001e2a0f8c4ce44527d36be833969c93f3c758074f6757b6b",
+    "crates/rds-discovery/src/service.rs": "371cc0876eca78d5d138cf0d215af1d6e72233b60ba6c31cf2bc17cb167776f2",
+    "crates/rds-discovery/src/service/tasks.rs": "646c07c138ca0bf7e51b4e7e37a07ed7eeaa68a94f4fbe556732e19640206728",
+    "crates/rds-discovery/tests/lifecycle.rs": "26d3fff78d1b1ee78526844874d100d37042c4e4ba33046eddc153da17ab0a5e",
+    "crates/rds-server/Cargo.toml": "cd86e9eb56cd20676173895ea19e34c52d31c932b0f775485b26e5f09f4604b1",
+    "crates/rds-server/src/main.rs": "afc51de5cdf14c72a07c9b16994ade68c27f807eb1703340735b2bfd10bf07bb",
+    "crates/rds-server/tests/lifecycle.rs": "e2ea3f9bda983e7c472920777b3fd9579d35f9e862d256f8d5d40514422df255"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.818261376931332,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 4.092221417929977,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 28.70232462801505,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 22.02977322298102,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 684.0335764159681,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 256.58224967704155,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 400,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 70
+    },
+    "test-owned": {
+      "passed": 194,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 39
+    }
+  },
+  "focused": {
+    "discovery_library_and_lifecycle_and_budget_passed": 60,
+    "existing_ignored": 1,
+    "real_server_binary_passed": 3
+  },
+  "source_finding": "Directory Drop aborted its runner; request timeout detached spawn_blocking join handles. The old semaphore already retained the worker budget. There was no API to join all started storage work.",
+  "coverage": [
+    "Timed-out real HTTP job remains owned and charged",
+    "Canceled, repeated and concurrent close waiters converge; store references release and listener can rebind",
+    "Drop stops acceptance and releases state after explicitly released running job",
+    "One blocked maintenance job is joined; no successor remains",
+    "Silent/partial HTTP and TLS are canceled without waiting 30s connection deadline",
+    "Panicked storage worker returns generic500 and capacity recovers",
+    "Canceled fallback after runner panic retains the failure and drains connections plus both blocking groups",
+    "Queued blocking job is canceled without running; started work is awaited",
+    "Real server SIGTERM joins both services and the same catalog reopens",
+    "Occupied relay port exits after partial host startup",
+    "Malformed relay allowlist fails before creating catalog",
+    "Unix signal handlers installed before final readiness; no signal-test sleep"
+  ],
+  "limits": [
+    "Tests use temporary state and loopback, no live service restart",
+    "Close awaits nonpreemptible blocking filesystem operations; no fixed filesystem shutdown deadline",
+    "Drop cleanup needs continued executor progress",
+    "Startup policy bootstrap before serve returns is a separate cancellation boundary",
+    "No native macOS/deployment or arbitrary-flood qualification",
+    "Full server preflight, owned relay CLI, runner monitoring and wave closure remain open"
+  ]
+}

@@ -1,0 +1,185 @@
+{
+  "source_base": "470e0e38ce322c41f8ce586ffb88286e973c0524",
+  "scope": [
+    "W3.6 local child transport isolation",
+    "W3.7 transport recovery prerequisite"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "Cargo.lock": "dd0f02ee9577dc797f676beb4839d192b39956c384088cbca37bc1f3befdf148",
+    "crates/rds-net/src/backends/noq/drivers.rs": "a199eeb7079777407f1003ca04de819e6ac8b043e239ff27233efb3bcf4ce3b2",
+    "crates/rds-net/src/backends/noq/mod.rs": "1bbaa9ee4f2919e5577f6d27e4cc3d2168cb63273e9557c622dfd2fcb01530f7",
+    "crates/rds-net/src/backends/noq/policy.rs": "0d6ef4e4a4bb60c4bb6c84c6860650f41fda0bef6ce58b618ba2f7e309b8d2de",
+    "crates/rds-net/src/backends/noq/socket.rs": "9ac0a03df82e3c08724af114f3b1a60a5f7d6915a10d404056137f9bc953359d",
+    "crates/rds-net/src/backends/noq/socket/health.rs": "161f9313c41a9c591e659d6534ca53e536437e14e82f2d55449fff616329cb78",
+    "crates/rds-net/src/backends/noq/socket/tests.rs": "2cfad3aa75b46f7d1de2025852703544b20e65f7ec5d00982d4350efbf0279b6",
+    "crates/rds-net/src/backends/noq/telemetry_tests.rs": "14ee66b79cbf6d4ae6ee9280b15949424ff94f2fb07edc889a4f2ace3c9f701c",
+    "crates/rds-net/tests/mux_isolation.rs": "ace1f598ec8f291b1a1a937670557b8174f92c1819308a06997e03db6aaa0966"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 1.0186599519802257,
+      "build_jobs": 2
+    },
+    {
+      "name": "fmt-shared",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/relay_runtime.rs"
+      ],
+      "code": 0,
+      "seconds": 0.07885693502612412,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.603369125979953,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 16.768831219989806,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 20.108517576009035,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 259.51844411704224,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-server",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 303.4937118110247,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 427,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 73
+    },
+    "expanded": {
+      "passed": 234,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 44
+    }
+  },
+  "build": {
+    "jobs": 2,
+    "isolated_target_directory": true
+  },
+  "failing_before": [
+    {
+      "tests": [
+        "terminal_child_send_does_not_stop_healthy_path",
+        "terminal_child_receive_does_not_stop_healthy_path"
+      ],
+      "exit_code": 101,
+      "observation": "One child I/O error stopped the shared QUIC driver or prevented healthy sibling traffic."
+    },
+    {
+      "test": "failed_last_path_is_not_selected_while_another_socket_lives",
+      "exit_code": 101,
+      "observation": "Engine refused last-path close; reselection kept choosing the failed child until transport health became an eligibility condition."
+    }
+  ],
+  "repeat_campaign": {
+    "executions": 30,
+    "tests_per_execution": 3,
+    "failed": 0,
+    "scope": "real loopback QUIC with injected terminal send/receive errors"
+  },
+  "fixture_correction": "Initial full matrix exposed a test assuming a specific replacement PathId; diagnostics showed a healthy QNT-created path selected instead. Fixture now waits for the observed sibling and a selected healthy route, then requires existing stream and datagram continuity. No deadline was increased.",
+  "regressions": [
+    "Independent pending sender/receiver wake registrations and last-child error",
+    "Recoverable receive errors back off without starving healthy siblings",
+    "Interrupted/WouldBlock preserves the caller packet",
+    "Packet-scoped ICMP/PMTU/pressure errors preserve socket availability",
+    "Explicit-source routing, mapped IPv4 and metadata-only ownership",
+    "Real send/receive child failure with an existing bidirectional stream and datagram echo",
+    "QNT address withdrawal and a fresh accepted connection on the surviving socket",
+    "Last-child failure closes held connections and retires policy tasks",
+    "Failed last path excluded from selection even while another unrelated socket survives"
+  ],
+  "limits": [
+    "Opaque bind_with_socket cannot introspect child health; bind_with_mux supplies integration",
+    "Complete validated-path reconciliation, multi-bind local-port routing, socket recreation and hot interface changes remain open",
+    "Relay bootstrap independence, warm relay replacement and UDP-blocked fallback remain open",
+    "OS error scope requires native Linux/macOS and real interface/PMTU qualification",
+    "No throughput or latency improvement, deployed service readiness or wave closure claimed",
+    "No dependencies or runtime helper processes added; cargo-deny unavailable; native macOS not run"
+  ]
+}

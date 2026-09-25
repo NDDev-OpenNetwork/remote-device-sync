@@ -1,0 +1,185 @@
+{
+  "source_base": "e119fd6",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/drivers.rs": "5e5fa2393c7646da66b04c8d1c1150c48209dfa11d47128f33774d7d41b2d344",
+    "crates/rds-net/src/backends/noq/mod.rs": "69dd437c2ad0966aab1da31595ac6e6fdd13a7c98393f37ec1e5c34b9ae170bb",
+    "crates/rds-net/src/backends/noq/relay.rs": "cbd816a00d1a76212480768cd1ba7cfe34dbcb17ba707401489404925e271796",
+    "crates/rds-net/src/backends/noq/relay/peers.rs": "d5863eabdadfa08ef6ba8057c62927cddc286f5a41af3d0fd29c15f37a55f3de",
+    "crates/rds-net/src/config.rs": "8049c34271a6792c6a2b6f16e88be046607c3f6d4098043392e54aafb26c2e65",
+    "crates/rds-net/src/config/tests.rs": "e9620c6668c54d3d2e414a7ce8502e8c23038b54293e26ad730c739faa612c1c",
+    "crates/rds-net/src/lib.rs": "10147b5524e29d7c7eba31971361095acf9eb438481fd4e435e537f9cebf03a9",
+    "crates/rds-relay/tests/control_lifecycle.rs": "102d0b9b251b5fe6642e366fd88f9bb54aeb79ea952c2f62f6660d0d830f0ea9",
+    "crates/rds-relay/tests/failure_isolation.rs": "e317a8921dc9f784a5b44137efa684210ca99af3cfbf702c9e366f6c89d0e980",
+    "crates/rds-relay/tests/peer_registry.rs": "90ac8b8b66427e54a7d22d404ec1a759f60f977978fe31b8dfc1d28086b39acc",
+    "crates/rds-relay/tests/receive_queue.rs": "e3fefad68724d977fe3b26392dfe5906c41d6e2352d058d043276c43c76369ff"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6911117709241807,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 23.012849322054535,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 25.02717580611352,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 27.16607700206805,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 378.89891746698413,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 371.70677881897427,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "--no-default-features",
+        "--features",
+        "rds-net/transport-noq,rds-relay/owned-relay",
+        "--lib",
+        "--test",
+        "peer_registry",
+        "--test",
+        "receive_queue",
+        "--test",
+        "failure_isolation",
+        "--test",
+        "control_lifecycle",
+        "--test",
+        "owned_e2e"
+      ],
+      "code": 0,
+      "seconds": 70.4363355950918,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 364,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 66
+    },
+    "test-owned": {
+      "passed": 161,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 37
+    },
+    "test-isolated": {
+      "passed": 52,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 7
+    }
+  },
+  "before_fix_failures": [
+    "Distinct deterministic peer identities with the same synthetic address silently replaced the first route: first_received=false, second_received=true. Raw transport fixture, not demonstrated application plaintext exposure."
+  ],
+  "fixture_notes": [
+    "Deterministic collision keys were found once by an offline bounded search; normal tests perform no search.",
+    "An added capacity test initially failed compilation due to referring to bytes without a direct test dependency; changed to the existing Vec conversion, without adding a dependency."
+  ],
+  "focused": {
+    "passed": 52,
+    "targets": 7
+  },
+  "defaults": {
+    "max_peers": 1024,
+    "datagram_queue": 128,
+    "peer_grace_secs": 30
+  },
+  "ownership": {
+    "lease": "metadata only, owned through tracked weak connection policy lifetime",
+    "queue": "bounded channel of shared byte slices; drop full, drop oversized packet whole",
+    "diagnostics": "weak queue and connection references; separate concurrent field snapshots"
+  },
+  "limits": [
+    "32-bit aliases still collide; the correction refuses replacement, not a larger namespace",
+    "Grace can be evicted under new-peer pressure; lazy expiration retains bounded idle metadata",
+    "Noq may probe independently learned QNT addresses; no per-peer routing namespace claim",
+    "Client limits do not bound QUIC engine buffers, server admission/tasks or global RSS",
+    "No physical network, native macOS, production deployment or wave closure"
+  ]
+}

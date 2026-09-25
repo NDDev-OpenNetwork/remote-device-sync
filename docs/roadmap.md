@@ -1,5 +1,25 @@
 # Roadmap
 
+Current execution order and reopened gates are in the
+[2026-09-24 remediation plan](remediation-plan.md), backed by the
+[implementation/session audit](reports/rds-audit-20260924.md).
+The milestones below preserve the original direction; historical checkpoint
+completion does not establish that the audited defects or product gaps are closed.
+
+The [native SSH client](ssh.md) now uses russh and standard remote PTY requests
+over managed/direct TCP streams. W5 remains open for host/account enrollment,
+broker/reattachment and macOS/real-network/mixed-load qualification.
+
+[Destination-bound renewable grants](grant-leases.md) now cover explicit
+connection renewal and stable-ID revocation. W2.3/W4.2 remain open for policy
+and tenant scopes, automatic issuer integration and platform/network acceptance.
+
+The [observability sequence](observability.md) now accompanies remediation:
+shared Rust telemetry, Vector/OpenObserve qualification and authenticated
+aggregate source metrics now have local Linux evidence. Remaining source
+coverage, diagnostic bundles and private operational rollout retain their
+acceptance gates; the local pipeline does not close product or release gates.
+
 Each workstream ends at a named **checkpoint** — a reproducible
 verification bundle (functional, simulation, impairment, interop,
 fuzz, soak, security layers as applicable) whose report is committed

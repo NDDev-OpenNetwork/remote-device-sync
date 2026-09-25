@@ -12,8 +12,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Capability grants (WS4): signed service-scope tokens presented on
 /// the connection's first stream.
 pub mod grant;
+pub mod local;
 /// Owned relay protocol wire types (ALPN `rds-relay/0`).
 pub mod relay;
+mod tcp_target;
+pub use tcp_target::{TcpTarget, TcpTargetError};
 
 /// ALPN negotiated for all rds traffic.
 pub const ALPN: &[u8] = b"rds/0";
@@ -65,8 +68,11 @@ pub enum StreamHello {
     Audio(AudioHello),
     /// Present a capability [`grant::Grant`]. Must be the first stream
     /// on the connection when the agent runs in grant mode: every
-    /// service stream opened before the grant verifies is refused.
+    /// service received before authorization starts is refused. Services that
+    /// overlap its reply/commit transaction wait for completion with a deadline.
     Authz(grant::Grant),
+    /// Signed lease revision for this connection; same identity and exact scope.
+    RenewAuthz(grant::Grant),
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -102,6 +108,14 @@ pub enum ServiceKind {
     Sync,
     /// Audio forwarding (v0.3 codec; wire shape reserved in v2).
     Audio,
+    /// Download files from the agent's configured sync root.
+    SyncRead,
+    /// Upload files to the agent's configured sync root.
+    SyncWrite,
+    /// View a desktop without injecting input.
+    DesktopView,
+    /// Input modifier: requires `DesktopView` to open a session.
+    DesktopControl,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,12 +289,73 @@ where
     }
     let mut body = vec![0u8; len as usize];
     reader.read_exact(&mut body).await?;
-    postcard::from_bytes(&body).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    let (message, remaining) = postcard::take_from_bytes(&body)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if !remaining.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "trailing frame payload",
+        ));
+    }
+    Ok(message)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_wire_tags_are_append_only_and_old_decoders_refuse_new_scopes() {
+        use super::ServiceKind::*;
+        #[derive(serde::Deserialize)]
+        enum LegacyService {
+            Ping,
+            Info,
+            Tcp,
+            Desktop,
+            Sync,
+            Audio,
+        }
+        for (tag, kind) in [
+            Ping,
+            Info,
+            Tcp,
+            Desktop,
+            Sync,
+            Audio,
+            SyncRead,
+            SyncWrite,
+            DesktopView,
+            DesktopControl,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = postcard::to_stdvec(&kind).unwrap();
+            assert_eq!(bytes, vec![tag as u8]);
+            assert_eq!(postcard::from_bytes::<ServiceKind>(&bytes).unwrap(), kind);
+            assert_eq!(
+                postcard::from_bytes::<LegacyService>(&bytes).is_ok(),
+                tag < 6
+            );
+        }
+    }
     use super::*;
+
+    #[tokio::test]
+    async fn frame_rejects_trailing_postcard_payload() {
+        let message = StreamHello::TcpConnect {
+            host: "127.0.0.1".into(),
+            port: 22,
+        };
+        let mut body = postcard::to_stdvec(&message).unwrap();
+        body.extend_from_slice(&[0, 1]);
+        let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&body);
+        assert!(
+            read_frame::<_, StreamHello>(&mut bytes.as_slice())
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn frame_roundtrip() {

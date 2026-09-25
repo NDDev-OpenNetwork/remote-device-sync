@@ -1,0 +1,180 @@
+{
+  "source_base": "a4a2ad2",
+  "scope": [
+    "W3.2 owned binary integration",
+    "W2.1 shared relay configuration",
+    "W2.5 composed shutdown"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-relay/src/runtime.rs": "572bacc0ade3fc20e85e49fd9c69316f950ab80a19d20746ab5bf7590d6cb633",
+    "crates/rds-relay/src/lib.rs": "29a7eaa82b13cf39ed2c6d8290791d5250c91f9915178cb9790c38f796be195e",
+    "crates/rds-relay/src/main.rs": "78080adfdc4b4999eb94a5e12346c88c692e8f5eaffcca293f1c7ce852c09dff",
+    "crates/rds-relay/Cargo.toml": "284198baae4420b48c4a6141288d353d038b2400ece2947889996ac54acd143d",
+    "crates/rds-server/src/main.rs": "660dc4f51bb12cf85cd91fc154bce1bd7a15b6f3552ee1b0238499ab2c6d36c3",
+    "crates/rds-server/Cargo.toml": "05324d77785675f2f5bbe48881bedd28e9199e61e0de295ec4fcb031cb5218e4",
+    "crates/rds-relay/tests/runtime.rs": "9cf9b8fce1e2e8e7804d8c3bc4500a3880c275cb2444753ad0f5faa3711d6863",
+    "crates/rds-server/tests/runtime.rs": "cdbc0c0a7dbf99d50f51cbc543b89eedb770afe531007d6bbc9f532be98d0faa",
+    "tests/support/relay_runtime.rs": "db3b1b6021985ab3dbf461f6c8057d48fe717041f8e799ff70e505c8f9dd61c9",
+    ".github/workflows/ci.yml": "fb9de7d9e62f53a68c30195bafb54c8d6f1fbe00ecfd5093536c98c5dd2d34e2",
+    "Cargo.lock": "dd0f02ee9577dc797f676beb4839d192b39956c384088cbca37bc1f3befdf148"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6849843589589,
+      "build_jobs": 2
+    },
+    {
+      "name": "fmt-shared",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/relay_runtime.rs"
+      ],
+      "code": 0,
+      "seconds": 0.04884816997218877,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 4.7071273339679465,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 3.4616465870058164,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 5.370096283964813,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 223.6014049880905,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-server",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 147.80712969100568,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 413,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 72
+    },
+    "owned": {
+      "passed": 216,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 43
+    },
+    "focused_owned": {
+      "passed": 17,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 2
+    },
+    "focused_default": {
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 2
+    }
+  },
+  "changes": [
+    "Shared typed relay backend/allow/identity/limit/TLS arguments in both binaries",
+    "Explicit owned production allowlist, separately persisted identity and development-only open flag",
+    "Feature-off rejection, unused flag rejection, bounded one-time PEM parsing before state creation",
+    "Host registry/rotation/directory TLS read-only preflight before key/catalog initialization",
+    "Blocking identity/catalog initialization and joined checked relay/directory shutdown",
+    "CI owned server feature forwarding on Linux/macOS jobs"
+  ],
+  "qualification": [
+    "Actual child binaries: allowed peers exchange mutually authenticated inner streams and datagrams on a single relay path",
+    "Unknown peer refused before legitimate clients occupy capacity; max-one admission recovers after disconnect",
+    "Relay identity retained across two real process lifetimes; host catalog reused with one signed-record issuer",
+    "Host publishes and resolves a signed relay-only address before dialing it",
+    "Explicit development-open attach observes Drain and tunnel closure on SIGTERM",
+    "Malformed/mismatched/oversized PEM and host syntax failures leave no key/catalog; valid iroh manual TLS listener starts/stops",
+    "Iroh default and explicit mode retained; owned mode without build feature fails explicitly"
+  ],
+  "limits": [
+    "No real endpoint CLI/agent SSH, desktop or sync service acceptance in this fixture",
+    "Native macOS, actual NAT, UDP-blocked/TCP443, warm relay replacement, latency and resource qualification remain open",
+    "Preflight is not a transaction across all stores; valid new key survives later I/O failure",
+    "Readiness is local listener readiness, not automatic supervision or remote reachability",
+    "Ring and native OS/crypto boundaries remain; no new external runtime helper or dependency version",
+    "All remediation waves remain open; cargo-deny unavailable"
+  ]
+}

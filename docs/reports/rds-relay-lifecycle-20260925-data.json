@@ -1,0 +1,212 @@
+{
+  "source_base": "fb1fc65",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/candidates.rs": "996b524b8ed0a79127bac5af494862809fea9c8bb2fa4c54fa8062a8e14aa5ff",
+    "crates/rds-net/src/backends/noq/drivers.rs": "61b8b5f8eb900eae66cbb237c3255d437ab91d08bfd53ba3942e50ab771ab8f0",
+    "crates/rds-net/src/backends/noq/mod.rs": "472e948a3810450706041c6a27465eaa660e66aa4ce383c0bc6a587c84fae83f",
+    "crates/rds-net/src/backends/noq/policy.rs": "df154163c91975f535000b7b3357cbb3087ea82da16713f8343e2e47555fe687",
+    "crates/rds-net/src/backends/noq/relay.rs": "a971af7ddcef36f5dcc24a55222b8e6ac385e1f998a3b667fe12dcffe7ffea9f",
+    "crates/rds-net/tests/driver_lifecycle.rs": "c10e6d054fd1506b9c6a22569ecfd4979035a8616c0940b177a3a74c10d12bd8",
+    "crates/rds-relay/src/server.rs": "04f29ca0aae8d6c0db16b16ed3bb95c772e1d89dd0dcafcc780055be93d5b67e",
+    "crates/rds-relay/src/server/lifecycle_tests.rs": "21cec835167b63ca97e3c8c8a06e0e045e829f73d812c9ede6b4e1f253da8380",
+    "crates/rds-relay/tests/failure_isolation.rs": "56af2a4e6c6bf6c1df511d092265b46cc1e611a4ec4b8d088c02ff4d059bdc5f"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.7968480590498075,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 29.20658795698546,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 24.001265263999812,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 29.032036468968727,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 490.92906193900853,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 390.9076506339479,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "--no-default-features",
+        "--features",
+        "rds-net/transport-noq,rds-relay/owned-relay",
+        "--lib",
+        "--test",
+        "driver_lifecycle",
+        "--test",
+        "uni_lifecycle",
+        "--test",
+        "failed_driver_shutdown",
+        "--test",
+        "turmoil_sim",
+        "--test",
+        "peer_registry",
+        "--test",
+        "receive_queue",
+        "--test",
+        "failure_isolation",
+        "--test",
+        "control_lifecycle",
+        "--test",
+        "owned_e2e"
+      ],
+      "code": 0,
+      "seconds": 111.8970703749219,
+      "build_jobs": 2
+    },
+    {
+      "name": "failure-repeats",
+      "command": [
+        "target/debug/deps/failure_isolation-602232b1bcb0b512",
+        "--nocapture"
+      ],
+      "code": 0,
+      "seconds": 38.45621624100022,
+      "build_jobs": 2,
+      "repetitions": 30
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 364,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 66
+    },
+    "test-owned": {
+      "passed": 167,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 37
+    },
+    "test-isolated": {
+      "passed": 73,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 11
+    }
+  },
+  "before_fix_failures": [
+    "Dropping Relay left an actual client tunnel alive beyond one second.",
+    "Canceling drain after notice delivery left the server running after its two-second grace.",
+    "After initial server ownership correction, failure isolation intermittently sent a reply over the dead relay: request sent/received/replied=(1,1,0), both inner connections still open, peer direct Backup and failed relay Available. A diagnostic campaign reproduced this at run index6 and stopped."
+  ],
+  "focused": {
+    "passed": 73,
+    "targets": 11
+  },
+  "repeated_failure_isolation": {
+    "repetitions": 30,
+    "tests_per_repetition": 2,
+    "test_executions": 60,
+    "failed": 0
+  },
+  "server_defaults": {
+    "max_connections": 256,
+    "handshake_seconds": 15,
+    "registration_seconds": 15,
+    "worker_shutdown_grace_seconds": 5,
+    "drain_grace_seconds": 2,
+    "max_inline_notice_writers_per_broadcast": 16
+  },
+  "ownership": {
+    "runner": "owns JoinSet and cancel-independent drain; stored JoinHandle allows multiple/canceled callers to join",
+    "drop": "synchronous seal/close/signal, asynchronous runner cleanup; no synchronous Drop join",
+    "tunnel_health": "shared watch with weak/metadata handles, no new task and no per-session outer connection one-shot subscriptions",
+    "failed_path": "known validated relay paths excluded from selection; close where Noq permits, keep weak reference to a failed last-open path",
+    "advertisements": "no synthetic IP in endpoint direct candidates; failed relay omitted from fresh address/dial and local QNT withdrawn"
+  },
+  "limits": [
+    "Application object/work limits exclude lower-layer QUIC buffers and global RSS/FD budgets",
+    "Noq unobserved engine paths and arbitrary direct/remote-only failures are not reconciled by this correction",
+    "Raw injected sockets without RelayHandle provide no managed tunnel health signal",
+    "Transition datagrams remain unreliable; no replay or uninterrupted migration promise",
+    "Owned server runtime CLI integration remains W3.2",
+    "No physical network, native macOS, production deployment or wave closure"
+  ]
+}

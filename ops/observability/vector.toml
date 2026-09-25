@@ -1,0 +1,258 @@
+# Validated against the digest in images.env. Private deployment supplies env.
+# Run `vector validate` and `vector test` before activation. See observability.md.
+data_dir = "${RDS_VECTOR_STATE}"
+
+[secret.openobserve]
+type = "directory"
+path = "${RDS_VECTOR_SECRETS}"
+remove_trailing_whitespace = false
+
+[sources.rds]
+type = "file"
+include = ["${RDS_LOG_GLOB}"]
+read_from = "beginning"
+max_line_bytes = 4096
+acknowledgements.enabled = true
+
+[sources.collector]
+type = "internal_metrics"
+scrape_interval_secs = 15
+
+[transforms.safe]
+type = "remap"
+inputs = ["rds"]
+drop_on_error = true
+drop_on_abort = true
+source = '''
+r = object!(parse_json!(string!(.message)))
+assert!(r.schema_version == 1)
+assert!(includes(["rds-agent", "rds-cli", "rds-relay", "rds-server", "rds-bench"], r.service))
+assert!(includes(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"], r.level))
+assert!(includes(["diagnostic", "process_started", "process_completed", "process_failed", "heartbeat", "listener_ready", "peer_accepted", "peer_rejected", "handshake_failed", "handshake_timed_out", "connection_budget_exhausted", "operation_completed"], r.event))
+assert!(match(string!(r.run_id), r'^[0-9a-f]{32}$'))
+assert!(match(string!(r.target), r'^[a-zA-Z0-9_:.-]{1,128}$'))
+assert!(match(string!(r.version), r'^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$'))
+assert!(includes([null, "connect", "service_stream", "ssh_connect", "ssh_session", "grant_authorize", "grant_renew"], r.operation))
+assert!(includes([null, "ok", "error", "cancelled"], r.outcome))
+assert!(is_null(r.session_id) || is_integer(r.session_id))
+assert!(is_null(r.elapsed_us) || is_integer(r.elapsed_us))
+assert!(is_null(r.line) || is_integer(r.line))
+if !is_null(r.session_id) { assert!(int!(r.session_id) >= 0) }
+if !is_null(r.elapsed_us) { assert!(int!(r.elapsed_us) >= 0) }
+if !is_null(r.line) { assert!(int!(r.line) > 0) }
+sequence = int!(r.sequence)
+timestamp_us = int!(r.timestamp_unix_us)
+uptime_us = int!(r.uptime_us)
+dropped = int!(r.telemetry_dropped_total)
+oversize = int!(r.telemetry_oversize_total)
+write_errors = int!(r.telemetry_write_errors_total)
+assert!(sequence >= 0 && timestamp_us > 0 && uptime_us >= 0 && dropped >= 0 && oversize >= 0 && write_errors >= 0)
+node = "${RDS_OBSERVE_NODE}"
+assert!(match(node, r'^[a-zA-Z0-9_-]{1,32}$'))
+. = {
+  "schema_version": 1, "_timestamp": timestamp_us,
+  "timestamp": from_unix_timestamp!(timestamp_us, unit: "microseconds"),
+  "uptime_us": uptime_us, "service": r.service, "version": r.version,
+  "run_id": r.run_id, "sequence": sequence, "level": r.level,
+  "target": r.target, "line": r.line, "session_id": r.session_id,
+  "event": r.event, "operation": r.operation, "outcome": r.outcome,
+  "elapsed_us": r.elapsed_us, "node": node,
+  "telemetry_dropped_total": dropped, "telemetry_oversize_total": oversize,
+  "telemetry_write_errors_total": write_errors
+}
+'''
+
+[transforms.operations]
+type = "filter"
+inputs = ["safe"]
+condition = '.event == "operation_completed" && !is_null(.elapsed_us) && !is_null(.operation) && !is_null(.outcome)'
+
+[transforms.operation_metrics]
+type = "log_to_metric"
+inputs = ["operation_samples"]
+
+[transforms.operation_samples]
+type = "remap"
+inputs = ["operations"]
+source = '.elapsed_seconds = to_float!(.elapsed_us) / 1000000.0'
+
+[[transforms.operation_metrics.metrics]]
+type = "counter"
+field = "elapsed_seconds"
+name = "rds_observed_operations_total"
+tags.service = "{{ service }}"
+tags.operation = "{{ operation }}"
+tags.outcome = "{{ outcome }}"
+tags.node = "{{ node }}"
+
+[[transforms.operation_metrics.metrics]]
+type = "histogram"
+field = "elapsed_seconds"
+name = "rds_observed_operation_duration_seconds"
+tags.service = "{{ service }}"
+tags.operation = "{{ operation }}"
+tags.outcome = "{{ outcome }}"
+tags.node = "{{ node }}"
+
+# Internal metrics can carry filenames, endpoint URLs and hostnames. Rebuild
+# the label map; never forward those private labels or unbounded identities.
+[transforms.collector_metrics]
+type = "remap"
+inputs = ["collector"]
+drop_on_abort = true
+source = '''
+# Export only collector health/resource families with bounded component labels.
+# Per-file or per-endpoint counters must not be merged by stripping their key.
+if !includes(["component_errors_total", "component_discarded_events_total", "buffer_size_bytes", "buffer_size_events", "buffer_max_size_bytes", "buffer_max_size_events", "buffer_received_events_total", "buffer_sent_events_total", "buffer_discarded_events_total", "uptime_seconds"], .name) { abort }
+tags = .tags
+if exists(tags.file) || exists(tags.path) || exists(tags.endpoint) { abort }
+.tags = {"node": "${RDS_OBSERVE_NODE}"}
+if is_string(tags.component_id) { .tags.component_id = tags.component_id }
+if is_string(tags.component_kind) { .tags.component_kind = tags.component_kind }
+if is_string(tags.component_type) { .tags.component_type = tags.component_type }
+if is_string(tags.error_type) { .tags.error_type = tags.error_type }
+if is_string(tags.stage) { .tags.stage = tags.stage }
+if is_string(tags.intentional) { .tags.intentional = tags.intentional }
+if is_string(tags.output) { .tags.output = tags.output }
+'''
+
+[sinks.logs]
+type = "http"
+inputs = ["safe"]
+uri = "${RDS_OO_URL}/api/${RDS_OO_ORG}/rds_events/_json"
+method = "post"
+# Standard Basic header, pre-encoded to avoid inserting arbitrary password
+# quotes/backslashes into Vector 0.58's text-level secret substitution.
+request.headers.Authorization = "SECRET[openobserve.authorization]"
+encoding.codec = "json"
+encoding.timestamp_format = "rfc3339"
+compression = "gzip"
+batch.max_bytes = 1048576
+batch.max_events = 512
+batch.timeout_secs = 1
+buffer.type = "disk"
+buffer.max_size = 536870912
+buffer.when_full = "block"
+request.timeout_secs = 10
+request.concurrency = 2
+healthcheck.enabled = true
+healthcheck.uri = "${RDS_OO_URL}/healthz"
+tls.verify_certificate = true
+tls.verify_hostname = true
+
+[sinks.metrics]
+type = "prometheus_remote_write"
+# The optional vector-admin.toml contributes admin_metrics to the same sink.
+inputs = ["*_metrics"]
+endpoint = "${RDS_OO_URL}/api/${RDS_OO_ORG}/prometheus/api/v1/write"
+expire_metrics_secs = 600
+buckets = [0.00005, 0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 3600.0]
+request.headers.Authorization = "SECRET[openobserve.authorization]"
+batch.timeout_secs = 1
+batch.max_events = 512
+buffer.type = "memory"
+buffer.max_events = 2048
+buffer.when_full = "drop_newest"
+request.timeout_secs = 10
+request.concurrency = 1
+tls.verify_certificate = true
+tls.verify_hostname = true
+
+# A private, local independent scrape exposes collector trouble during a
+# backend outage. Never put this listener behind the public directory proxy.
+[sinks.local_metrics]
+type = "prometheus_exporter"
+inputs = ["collector_metrics"]
+address = "${RDS_VECTOR_LOCAL_METRICS_ADDR:-127.0.0.1:9598}"
+
+[[tests]]
+name = "private text cannot enter export"
+no_outputs_from = ["safe"]
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "private terminal error /private/file credential=SECRET"
+
+[[tests]]
+name = "schema projection strips every unknown field"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-agent\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": 7, \"event\": \"operation_completed\", \"operation\": \"connect\", \"outcome\": \"error\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"peer\": \"PRIVATE_SENTINEL\", \"message\": \"PRIVATE_SENTINEL\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.session_id == 7)\nassert!(.event == \"operation_completed\")\nassert!(!exists(.peer) && !exists(.message) && !exists(.file) && !exists(.host))"
+
+[[tests]]
+name = "unknown schema is rejected"
+no_outputs_from = ["safe"]
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 2, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-agent\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": 7, \"event\": \"operation_completed\", \"operation\": \"connect\", \"outcome\": \"error\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"peer\": \"PRIVATE_SENTINEL\", \"message\": \"PRIVATE_SENTINEL\"}"
+
+[[tests]]
+name = "unbounded metric label is rejected"
+no_outputs_from = ["safe"]
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-agent\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": 7, \"event\": \"operation_completed\", \"operation\": \"PRIVATE_SENTINEL\", \"outcome\": \"error\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"peer\": \"PRIVATE_SENTINEL\", \"message\": \"PRIVATE_SENTINEL\"}"
+
+[[tests]]
+name = "secret-shaped process identity is rejected"
+no_outputs_from = ["safe"]
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-agent\", \"version\": \"0.1.0\", \"run_id\": \"PRIVATE_SENTINEL\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": 7, \"event\": \"operation_completed\", \"operation\": \"connect\", \"outcome\": \"error\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"peer\": \"PRIVATE_SENTINEL\", \"message\": \"PRIVATE_SENTINEL\"}"
+
+[[tests]]
+name = "ssh_connect metadata survives without terminal content"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-cli\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": null, \"event\": \"operation_completed\", \"outcome\": \"cancelled\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"command\": \"PRIVATE_SENTINEL\", \"user\": \"PRIVATE_SENTINEL\", \"key\": \"PRIVATE_SENTINEL\", \"operation\": \"ssh_connect\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.operation == \"ssh_connect\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.command) && !exists(.user) && !exists(.key))"
+
+[[tests]]
+name = "ssh_session metadata survives without terminal content"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-cli\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": null, \"event\": \"operation_completed\", \"outcome\": \"cancelled\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"command\": \"PRIVATE_SENTINEL\", \"user\": \"PRIVATE_SENTINEL\", \"key\": \"PRIVATE_SENTINEL\", \"operation\": \"ssh_session\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.operation == \"ssh_session\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.command) && !exists(.user) && !exists(.key))"
+
+[[tests]]
+name = "grant_authorize metadata survives without terminal content"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-cli\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": null, \"event\": \"operation_completed\", \"outcome\": \"cancelled\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"command\": \"PRIVATE_SENTINEL\", \"user\": \"PRIVATE_SENTINEL\", \"key\": \"PRIVATE_SENTINEL\", \"operation\": \"grant_authorize\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.operation == \"grant_authorize\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.command) && !exists(.user) && !exists(.key))"
+
+[[tests]]
+name = "grant_renew metadata survives without terminal content"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-cli\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": null, \"event\": \"operation_completed\", \"outcome\": \"cancelled\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"command\": \"PRIVATE_SENTINEL\", \"user\": \"PRIVATE_SENTINEL\", \"key\": \"PRIVATE_SENTINEL\", \"operation\": \"grant_renew\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.operation == \"grant_renew\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.command) && !exists(.user) && !exists(.key))"

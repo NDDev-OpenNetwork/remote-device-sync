@@ -19,10 +19,15 @@ ExecStart=/usr/local/bin/rds-server \
     --http-addr 0.0.0.0:3341 \
     --directory /var/lib/rds/directory
 # Estate deployments add:
+#   --directory-allow <base32-device-key>   (repeat per enrolled publisher;
+#   empty denies directory record publish/fetch/delete)
 #   --registry-key <base32 verifying key> --registry /var/lib/rds/registry.json
 #   --allow <endpoint-id>…   (empty = open relay — do NOT expose open
 #   relays on a public IP beyond short-lived bring-up)
-# Optional native relay TLS (docs/deployment.md):
+# Native directory TLS on --http-addr (docs/deployment.md):
+#   --directory-tls-cert /var/lib/rds/directory-chain.pem
+#   --directory-tls-key /var/lib/rds/directory-key.pem
+# Optional native relay TLS, configured separately:
 #   --tls-cert /var/lib/rds/cert.pem --tls-key /var/lib/rds/key.pem
 #   or --tls-acme-domain … --tls-acme-cache /var/lib/rds/acme
 #   ACME's TLS-ALPN-01 needs :443 reachable — that also requires

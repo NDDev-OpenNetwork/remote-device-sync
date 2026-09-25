@@ -10,7 +10,9 @@
 //! The directory is only a cache of self-certifying records: the
 //! resolved `EndpointAddr` is authenticated by the record signature,
 //! and the QUIC handshake re-authenticates the key anyway. A hostile
-//! or stale directory yields a failed dial, never a wrong peer.
+//! directory cannot substitute a different key for a verified name. Name
+//! freshness is lifetime-bounded with a volatile client anti-rollback cache;
+//! durable revisions and authority rotation remain remediation W1.4.
 
 use anyhow::{Context, bail};
 
@@ -23,7 +25,8 @@ use crate::parse_target;
 /// Resolve `target` to an [`EndpointAddr`].
 ///
 /// `directory` is the discovery service address (the `--server` flag).
-/// Names require it; bare keys use it when present.
+/// Names also require its configured registry trust anchor; bare keys use
+/// the directory when present without trusting name answers.
 pub async fn resolve_target(
     directory: Option<DirectoryClient>,
     target: &str,

@@ -17,7 +17,8 @@ Rules every change follows. CI enforces what it can; the rest is review.
 ## Safety
 
 - `unsafe` is confined to platform-backend modules (`rds-desktop`
-  capture/codec/input, `rds-net` socket layer). Workspace lint flags it
+  capture/codec/input, `rds-net` socket layer, and the read-only
+  `rds-discovery/clock/macos.rs` boot-identifier adapter). Workspace lint flags it
   everywhere else; backends opt out per module with a `// SAFETY:` note
   per block.
 - Never trust the wire: every decoder/parser bounds its inputs; every
@@ -30,15 +31,24 @@ Rules every change follows. CI enforces what it can; the rest is review.
   impossible-invariant paths (commented).
 - Tokio is the only runtime. No `std::thread` for core loops;
   `spawn_blocking` for sync FFI (capture backends, codecs).
+  `rds-observe` isolates synchronous stderr in one bounded output adapter
+  thread, outside service/transport loops; a stuck OS write must not hold
+  Tokio runtime shutdown. See [observability](observability.md) for the
+  bounded wait and explicit possible record loss.
 - No unbounded queues on latency paths: bounded `mpsc`, drop-stale
   policy at the producer, never let backlog accumulate.
 
 ## Wire protocol
 
-- `rds-core` owns every wire type; postcard + explicit length prefix;
+- `rds-core` owns RDS control wire types; postcard + explicit length prefix;
   64 KiB max frame on control paths. Media streams carry raw codec
   bitstream with a fixed header — no serde in the hot path.
-- Protocol versioning rides the ALPN (`rds/0`, `rds-relay/0`).
+- Standard SSH framing, key exchange and key formats belong to `russh`, behind
+  `rds-ssh`; do not duplicate them as RDS control messages.
+- Transport protocol selection uses ALPN (`rds/0`, `rds-relay/0`). Signed
+  objects and local IPC also carry independent explicit versions: [grant v2
+  and IPC v3](grant-leases.md) require a coordinated upgrade without weakening
+  authorization. General remote capability negotiation remains W2.2.
 
 ## Platform code
 

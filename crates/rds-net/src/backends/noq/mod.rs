@@ -18,10 +18,16 @@
 //! Until this backend reaches parity (same-harness benchmarks vs the
 //! iroh backend), `iroh` remains the default selected at bind time.
 
+mod candidates;
+mod dial;
+mod drivers;
 mod hmac;
 pub mod policy;
 pub mod relay;
 pub mod socket;
+mod telemetry;
+#[cfg(test)]
+mod telemetry_tests;
 mod tls;
 
 use std::fmt;
@@ -77,6 +83,7 @@ fn transport_config(max_multipath_paths: Option<u32>) -> Arc<noq::TransportConfi
 /// negotiated so additional paths and NAT traversal can be layered on
 /// after connect.
 pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<Endpoint> {
+    config.validate_for(crate::Backend::Noq)?;
     let runtime = Arc::new(noq::TokioRuntime);
     let binds = if config.bind_addrs.is_empty() {
         vec![SocketAddr::from(([0, 0, 0, 0], 0))]
@@ -100,8 +107,16 @@ pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<
     config.secret_key = Some(key.clone());
     let relay_handle = match &config.relay_endpoint {
         Some(relay_addr) => {
-            let (socket, handle) =
-                relay::RelaySocket::connect(relay_addr.clone(), key, binds[0]).await?;
+            // The primary socket already owns its configured port. The outer
+            // relay connection needs a separate ephemeral port on that interface.
+            let relay_bind = SocketAddr::new(binds[0].ip(), 0);
+            let (socket, handle) = relay::RelaySocket::connect_with_limits(
+                relay_addr.clone(),
+                key,
+                relay_bind,
+                config.relay_limits,
+            )
+            .await?;
             sockets.push(Box::new(socket));
             Some(handle)
         }
@@ -110,7 +125,7 @@ pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<
 
     let mux = socket::Mux::new(sockets)?;
     let local_addrs = mux.local_addrs();
-    bind_with_socket(config, Box::new(mux), local_addrs, runtime, relay_handle).await
+    bind_with_mux(config, mux, local_addrs, runtime, relay_handle).await
 }
 
 /// Bind an endpoint on a caller-provided transport.
@@ -127,10 +142,56 @@ pub async fn bind_with_socket(
     runtime: Arc<dyn Runtime>,
     relay: Option<relay::RelayHandle>,
 ) -> anyhow::Result<Endpoint> {
+    bind_socket(config, socket, local_addrs, runtime, relay, None).await
+}
+
+/// Bind a mux with shared failure state wired into endpoint advertisements and
+/// connection policy. Generic `bind_with_socket` cannot introspect a trait object.
+pub async fn bind_with_mux(
+    config: crate::EndpointConfig,
+    mux: socket::Mux,
+    local_addrs: Vec<SocketAddr>,
+    runtime: Arc<dyn Runtime>,
+    relay: Option<relay::RelayHandle>,
+) -> anyhow::Result<Endpoint> {
+    let health = mux.health();
+    anyhow::ensure!(
+        local_addrs
+            .iter()
+            .all(|address| health.bound_available(*address)),
+        "mux advertisements must name active bound transports"
+    );
+    bind_socket(
+        config,
+        Box::new(mux),
+        local_addrs,
+        runtime,
+        relay,
+        Some(health),
+    )
+    .await
+}
+
+async fn bind_socket(
+    config: crate::EndpointConfig,
+    socket: Box<dyn noq::AsyncUdpSocket>,
+    local_addrs: Vec<SocketAddr>,
+    runtime: Arc<dyn Runtime>,
+    relay: Option<relay::RelayHandle>,
+    transport_health: Option<socket::Health>,
+) -> anyhow::Result<Endpoint> {
+    config.validate_for(crate::Backend::Noq)?;
+    let local_addr = local_addrs
+        .first()
+        .copied()
+        .context("endpoint has no local address")?;
+    anyhow::ensure!(
+        config.relay_endpoint.is_some() == relay.is_some(),
+        "injected transport relay configuration does not match its attached relay"
+    );
     let secret_key = config.secret_key.unwrap_or_else(SecretKey::generate);
     let tls = tls::TlsConfig::new(secret_key.clone());
 
-    let client_crypto = tls.client_config(config.alpns.clone())?;
     let server_crypto = tls.server_config(config.alpns.clone())?;
 
     let endpoint_config =
@@ -139,8 +200,15 @@ pub async fn bind_with_socket(
     let transport = transport_config(config.max_multipath_paths);
     let mut server_config = noq::ServerConfig::with_crypto(Arc::new(server_crypto));
     server_config.transport = transport.clone();
-    let mut client_config = noq::ClientConfig::new(Arc::new(client_crypto));
-    client_config.transport_config(transport);
+    // An immutable per-protocol offer avoids both silent ALPN fallback and
+    // races caused by changing the endpoint's default config before dialing.
+    let mut client_configs = std::collections::BTreeMap::new();
+    for alpn in &config.alpns {
+        let crypto = tls.client_config(vec![alpn.clone()])?;
+        let mut client = noq::ClientConfig::new(Arc::new(crypto));
+        client.transport_config(transport.clone());
+        client_configs.insert(alpn.clone(), client);
+    }
 
     let endpoint = noq::Endpoint::new_with_abstract_socket(
         endpoint_config,
@@ -149,12 +217,7 @@ pub async fn bind_with_socket(
         runtime,
     )
     .context("create noq endpoint")?;
-    endpoint.set_default_client_config(client_config);
 
-    let local_addr = local_addrs
-        .first()
-        .copied()
-        .context("endpoint has no local address")?;
     debug!(?local_addrs, id = %secret_key.public(), "noq endpoint bound");
 
     Ok(Endpoint {
@@ -162,9 +225,11 @@ pub async fn bind_with_socket(
         id: secret_key.public(),
         local_addr,
         local_addrs,
-        alpns: config.alpns,
+        client_configs: Arc::new(client_configs),
         relay,
         metrics: crate::metrics::Registry::default(),
+        drivers: Arc::new(drivers::Drivers::new(transport_health.clone())),
+        transport_health,
     })
 }
 
@@ -215,13 +280,15 @@ pub struct Endpoint {
     id: EndpointId,
     local_addr: SocketAddr,
     local_addrs: Vec<SocketAddr>,
-    alpns: Vec<Vec<u8>>,
+    client_configs: Arc<std::collections::BTreeMap<Vec<u8>, noq::ClientConfig>>,
     /// Relay tunnel handle when `relay_endpoint` was configured —
     /// steers synthetic-address sends and advertises the relay url.
     relay: Option<relay::RelayHandle>,
     /// Endpoint metrics — the connection driver records QNT progress
     /// here; the facade surfaces it via `Endpoint::metrics`.
     metrics: crate::metrics::Registry,
+    drivers: Arc<drivers::Drivers>,
+    transport_health: Option<socket::Health>,
 }
 
 impl fmt::Debug for Endpoint {
@@ -240,6 +307,12 @@ impl Endpoint {
         self.metrics.clone()
     }
 
+    /// Policy tasks still running, including their final cleanup. Completed
+    /// tasks release storage immediately; endpoint close waits for zero.
+    pub fn active_path_drivers(&self) -> usize {
+        self.drivers.len()
+    }
+
     /// This endpoint's public identity.
     pub fn id(&self) -> EndpointId {
         self.id
@@ -255,6 +328,12 @@ impl Endpoint {
         &self.local_addrs
     }
 
+    /// Local child I/O failures for mux-backed endpoints. None for an opaque
+    /// injected socket; this metadata does not establish remote reachability.
+    pub fn transport_health(&self) -> Option<Vec<socket::ChildHealth>> {
+        self.transport_health.as_ref().map(socket::Health::snapshot)
+    }
+
     /// Advertised address: our identity plus the direct IP candidates we
     /// know about, plus the home relay when one is attached. Observed
     /// external addresses join this set once the candidate pipeline
@@ -262,9 +341,22 @@ impl Endpoint {
     pub fn addr(&self) -> EndpointAddr {
         let mut addrs = std::collections::BTreeSet::new();
         for local in &self.local_addrs {
-            addrs.extend(advertised_addrs(*local));
+            if !relay::is_synthetic(*local)
+                && self
+                    .transport_health
+                    .as_ref()
+                    .is_none_or(|health| health.bound_available(*local))
+            {
+                addrs.extend(advertised_addrs(*local));
+            }
         }
-        if let Some(handle) = &self.relay {
+        if let Some(handle) = &self.relay
+            && handle.is_available()
+            && self
+                .transport_health
+                .as_ref()
+                .is_none_or(|health| health.path_available(relay::synthetic_for(&self.id), None))
+        {
             addrs.insert(TransportAddr::Relay(handle.url.clone()));
         }
         EndpointAddr { id: self.id, addrs }
@@ -272,48 +364,70 @@ impl Endpoint {
 
     /// Connect to a peer by advertised address.
     ///
-    /// The first direct candidate becomes the primary path; remaining
-    /// candidates are opened as additional QUIC paths after the handshake.
+    /// Race up to eight direct candidates plus the attached relay with a
+    /// handshake deadline. Only the first authenticated success is retained;
+    /// additional addresses then become paths on that same connection.
     /// `alpn` must be one of the protocol ids configured at bind time.
     pub async fn connect(&self, target: EndpointAddr, alpn: &[u8]) -> anyhow::Result<Connection> {
-        if !self.alpns.iter().any(|a| a.as_slice() == alpn) {
+        let Some(client_config) = self.client_configs.get(alpn) else {
             bail!("alpn {alpn:?} not configured on this endpoint");
-        }
+        };
         let remote_id = target.id;
-        let candidates = policy::ip_candidates(&target);
+        anyhow::ensure!(
+            self.transport_health
+                .as_ref()
+                .is_none_or(|health| !health.all_failed()),
+            "all endpoint transports failed"
+        );
+        let local = self
+            .transport_health
+            .as_ref()
+            .map(socket::Health::live_addrs)
+            .unwrap_or_else(|| self.local_addrs.clone());
+        let candidates = policy::dial_candidates(&target, &local);
         // A relayed path is usable when the peer's advertised relay is
         // the one we are attached to; it becomes the synthetic remote.
-        let relay_remote = self.relay_remote(&target);
-        let primary = candidates
-            .first()
-            .copied()
-            .or(relay_remote)
-            .ok_or_else(|| anyhow::anyhow!("no reachable addresses for {remote_id}"))?;
-        if relay_remote.is_some()
-            && let Some(handle) = &self.relay
+        // Reserve before dialing; cancellation releases to bounded grace.
+        // Direct-only tickets also need a lease for later learned relay paths.
+        let (peer_lease, relay_error) = match self
+            .relay
+            .as_ref()
+            .map(|handle| handle.register_peer(remote_id))
+            .transpose()
         {
-            handle.register_peer(remote_id);
+            Ok(lease) => (lease, None),
+            Err(error) => {
+                tracing::debug!(%remote_id, %error, "relay peer registration refused; direct candidates remain usable");
+                (None, Some(error))
+            }
+        };
+        let relay_remote = self.relay_remote(&target).filter(|_| peer_lease.is_some());
+        let mut attempts = candidates.clone();
+        if let Some(relay) = relay_remote
+            && !attempts.contains(&relay)
+        {
+            attempts.push(relay);
+        }
+        if attempts.is_empty() {
+            if let Some(error) = relay_error {
+                return Err(error).context("relay-only dial could not reserve the peer route");
+            }
+            bail!("no reachable addresses for {remote_id}");
         }
 
         let server_name = tls::name::encode(remote_id);
-        let connecting = self
-            .inner
-            .connect(primary, &server_name)
-            .context("initiate connect")?;
-        let conn = connecting.await.context("handshake")?;
+        let conn = dial::race(&self.inner, client_config, &attempts, &server_name)
+            .await
+            .context("all connection candidates failed")?;
 
-        let mut seeds = policy::open_extra_paths(&conn, &candidates);
-        if let Some(syn) = relay_remote {
-            // When the synthetic address was the primary path this is a
-            // no-op dedupe that returns the existing PathId.
-            let open = conn.open_path_ensure(syn, noq::PathStatus::Available);
-            seeds.extend(open.path_id());
-        }
-        self.wire_connection(&conn, seeds);
+        // Subscribe before any additional path can finish validation. Only
+        // the completed handshake is initially eligible for path selection.
+        let telemetry = self.wire_connection(&conn, attempts, peer_lease)?;
 
         Ok(Connection {
             inner: conn,
             remote_id,
+            telemetry,
         })
     }
 
@@ -321,15 +435,20 @@ impl Endpoint {
     pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
         let accept = self.inner.accept();
         let mut our_addrs = self.advertised_socket_addrs();
-        if self.relay.is_some() {
+        if self
+            .relay
+            .as_ref()
+            .is_some_and(relay::RelayHandle::is_available)
+        {
             our_addrs.push(relay::synthetic_for(&self.id));
         }
         let relay = self.relay.clone();
         let metrics = self.metrics.clone();
+        let drivers = self.drivers.clone();
         async move {
             accept
                 .await
-                .map(|i| Incoming::new(i, our_addrs, relay, metrics))
+                .map(|i| Incoming::with_drivers(i, our_addrs, relay, metrics, drivers))
         }
     }
 
@@ -337,6 +456,13 @@ impl Endpoint {
     /// we are attached to.
     fn relay_remote(&self, target: &EndpointAddr) -> Option<SocketAddr> {
         let handle = self.relay.as_ref()?;
+        if !handle.is_available()
+            || self.transport_health.as_ref().is_some_and(|health| {
+                !health.path_available(relay::synthetic_for(&target.id), None)
+            })
+        {
+            return None;
+        }
         target.addrs.iter().find_map(|a| match a {
             TransportAddr::Relay(url) => relay::parse_relay_url(url)
                 .filter(|(rid, _)| *rid == handle.relay_id)
@@ -350,7 +476,13 @@ impl Endpoint {
     fn advertised_socket_addrs(&self) -> Vec<SocketAddr> {
         self.local_addrs
             .iter()
-            .filter(|l| !relay::is_synthetic(**l))
+            .filter(|l| {
+                !relay::is_synthetic(**l)
+                    && self
+                        .transport_health
+                        .as_ref()
+                        .is_none_or(|health| health.bound_available(**l))
+            })
             .flat_map(|l| advertised_addrs(*l))
             .filter_map(|a| match a {
                 TransportAddr::Ip(sock) => Some(sock),
@@ -364,27 +496,42 @@ impl Endpoint {
     /// peer can then upgrade to a relayed path in-band), kick a
     /// traversal round so it probes ours, and spawn the driver that
     /// opens paths to its in-band advertised candidates and keeps the
-    /// best path selected. `seed_paths` are the PathIds open at wiring
-    /// time (their Established events predate subscription).
-    fn wire_connection(&self, conn: &noq::Connection, seed_paths: Vec<noq::PathId>) {
+    /// best validated path selected. Subscribe before QNT or extra path opens;
+    /// only the authenticated handshake path is seeded.
+    fn wire_connection(
+        &self,
+        conn: &noq::Connection,
+        candidates: Vec<SocketAddr>,
+        peer_lease: Option<relay::PeerLease>,
+    ) -> anyhow::Result<Arc<telemetry::Telemetry>> {
         let mut ours = self.advertised_socket_addrs();
-        if self.relay.is_some() {
+        if peer_lease.is_some()
+            && self
+                .relay
+                .as_ref()
+                .is_some_and(relay::RelayHandle::is_available)
+        {
             ours.push(relay::synthetic_for(&self.id));
         }
+        let telemetry = self.drivers.spawn(
+            conn,
+            self.metrics.clone(),
+            ours.clone(),
+            candidates,
+            peer_lease,
+            self.relay.clone(),
+        )?;
         policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn, &self.metrics);
-        tokio::spawn(policy::connection_driver(
-            conn.weak_handle(),
-            conn.nat_traversal_updates(),
-            conn.path_events(),
-            seed_paths,
-            self.metrics.clone(),
-        ));
+        Ok(telemetry)
     }
 
-    /// Close all connections and the endpoint.
+    /// Close all connections and wait for this endpoint's policy tasks.
+    /// Relay tunnel pumps and QUIC packet draining have separate lifecycles.
     pub async fn close(&self) {
+        self.drivers.close_admission();
         self.inner.close(0u32.into(), b"closed");
+        self.drivers.wait().await;
     }
 }
 
@@ -399,6 +546,7 @@ pub struct Incoming {
     relay: Option<relay::RelayHandle>,
     /// Endpoint metrics — the driver records QNT progress here.
     metrics: crate::metrics::Registry,
+    drivers: Arc<drivers::Drivers>,
 }
 
 impl Incoming {
@@ -409,12 +557,29 @@ impl Incoming {
         relay: Option<relay::RelayHandle>,
         metrics: crate::metrics::Registry,
     ) -> Self {
+        Self::with_drivers(
+            incoming,
+            our_addrs,
+            relay,
+            metrics,
+            Arc::new(drivers::Drivers::default()),
+        )
+    }
+
+    fn with_drivers(
+        incoming: noq::Incoming,
+        our_addrs: Vec<SocketAddr>,
+        relay: Option<relay::RelayHandle>,
+        metrics: crate::metrics::Registry,
+        drivers: Arc<drivers::Drivers>,
+    ) -> Self {
         Self {
             incoming: Some(incoming),
             connecting: None,
             our_addrs,
             relay,
             metrics,
+            drivers,
         }
     }
 
@@ -439,23 +604,53 @@ impl Future for Incoming {
                     Err(e) => Err(e.into()),
                     Ok(inner) => match peer_endpoint_id(&inner) {
                         Some(remote_id) => {
-                            if let Some(handle) = &self.relay {
-                                handle.register_peer(remote_id);
+                            let registration = self
+                                .relay
+                                .as_ref()
+                                .map(|handle| handle.register_peer(remote_id))
+                                .transpose();
+                            let lease = match registration {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    tracing::debug!(%remote_id, %error, "incoming relay registration refused");
+                                    let arrived_over_relay = inner
+                                        .path(noq::PathId::ZERO)
+                                        .and_then(|path| path.remote_address().ok())
+                                        .is_some_and(relay::is_synthetic);
+                                    if arrived_over_relay {
+                                        inner.close(0u32.into(), b"relay peer route unavailable");
+                                        return Poll::Ready(Err(error.into()));
+                                    }
+                                    None
+                                }
+                            };
+                            let mut ours = self.our_addrs.clone();
+                            if lease.is_none()
+                                || self
+                                    .relay
+                                    .as_ref()
+                                    .is_some_and(|handle| !handle.is_available())
+                            {
+                                ours.retain(|address| !relay::is_synthetic(*address));
                             }
-                            policy::advertise_addrs(&inner, &self.our_addrs);
-                            policy::initiate_traversal_round(&inner, &self.metrics);
-                            // The handshake path is always PathId::ZERO;
-                            // its Established event predates our
-                            // subscription, so seed it explicitly.
-                            let seeds = vec![noq::PathId::ZERO];
-                            tokio::spawn(policy::connection_driver(
-                                inner.weak_handle(),
-                                inner.nat_traversal_updates(),
-                                inner.path_events(),
-                                seeds,
-                                self.metrics.clone(),
-                            ));
-                            Ok(Connection { inner, remote_id })
+                            self.drivers
+                                .spawn(
+                                    &inner,
+                                    self.metrics.clone(),
+                                    ours.clone(),
+                                    Vec::new(),
+                                    lease,
+                                    self.relay.clone(),
+                                )
+                                .map(|telemetry| {
+                                    policy::advertise_addrs(&inner, &ours);
+                                    policy::initiate_traversal_round(&inner, &self.metrics);
+                                    Connection {
+                                        inner,
+                                        remote_id,
+                                        telemetry,
+                                    }
+                                })
                         }
                         None => Err(anyhow::anyhow!("peer presented no identity")),
                     },
@@ -480,6 +675,7 @@ impl Future for Incoming {
 pub struct Connection {
     inner: noq::Connection,
     remote_id: EndpointId,
+    telemetry: Arc<telemetry::Telemetry>,
 }
 
 impl fmt::Debug for Connection {
@@ -492,6 +688,17 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
+    pub(crate) fn observer(&self) -> ConnectionObserver {
+        ConnectionObserver {
+            inner: self.inner.weak_handle(),
+            telemetry: self.telemetry.clone(),
+        }
+    }
+
+    pub(crate) fn path_stats_snapshot(&self) -> crate::PathStatsSnapshot {
+        self.telemetry.snapshot(self.inner.close_reason().is_some())
+    }
+
     /// Verified peer identity (from the TLS raw public key).
     pub fn remote_id(&self) -> EndpointId {
         self.remote_id
@@ -557,5 +764,30 @@ impl Connection {
     /// Raw noq connection for the path-policy driver.
     pub fn inner(&self) -> &noq::Connection {
         &self.inner
+    }
+}
+
+/// Transport observation without a facade or a strong connection handle.
+pub(crate) struct ConnectionObserver {
+    inner: noq::WeakConnectionHandle,
+    telemetry: Arc<telemetry::Telemetry>,
+}
+
+impl ConnectionObserver {
+    pub fn snapshot(&self) -> crate::PathStatsSnapshot {
+        let closed = self
+            .inner
+            .upgrade()
+            .is_none_or(|conn| conn.close_reason().is_some());
+        self.telemetry.snapshot(closed)
+    }
+
+    pub fn closed(&self) -> impl Future<Output = ()> + Send + 'static {
+        let registered = self.inner.upgrade().map(|conn| conn.on_closed());
+        async move {
+            if let Some(closed) = registered {
+                closed.await;
+            }
+        }
     }
 }

@@ -15,7 +15,7 @@ async fn announce_publishes_and_keeps_record_live() {
     let dir = service::serve(
         "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         store.clone(),
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();
@@ -32,12 +32,15 @@ async fn announce_publishes_and_keeps_record_live() {
     let _announce = announce(
         endpoint.clone(),
         AnnounceConfig {
-            key,
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+            ),
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
         },
-    );
+    )
+    .unwrap();
 
     // The announce task publishes asynchronously; poll until visible.
     let ek = EndpointKey(*endpoint.id().as_bytes());
@@ -69,7 +72,7 @@ async fn announce_republishes_when_addrs_change() {
     let dir = service::serve(
         "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         store,
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();
@@ -100,12 +103,15 @@ async fn announce_republishes_when_addrs_change() {
     let _announce = announce(
         endpoint.clone(),
         AnnounceConfig {
-            key,
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+            ),
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
         },
-    );
+    )
+    .unwrap();
     let ek = EndpointKey(*endpoint.id().as_bytes());
 
     let mut first = None;
@@ -191,30 +197,29 @@ async fn resolve_refuses_aged_out_record() {
     let dir = service::serve(
         "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         store,
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();
     let client = Client::new(dir.addr());
 
-    // One hand-signed record with a 1s TTL — deterministic, no
-    // background task that could republish past the boundary.
+    // Check successful resolution with a lifetime independent of scheduling
+    // at a whole-second expiry boundary. No announcer can renew either record.
     let signing = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]);
     let ek = EndpointKey(signing.verifying_key().to_bytes());
     let now = rds_discovery::now_unix().unwrap();
-    let rec = rds_discovery::EndpointRecord::sign(
-        &rds_discovery::Payload {
-            key: ek,
-            addrs: vec!["10.0.0.9:4200".parse().unwrap()],
-            relay_urls: vec![],
-            services: vec![Service::Ping],
-            issued_at: now,
-            expires_at: now + 1,
-        },
-        &signing,
-    )
-    .unwrap();
-    client.publish(&rec).await.unwrap();
+    let mut payload = rds_discovery::Payload {
+        version: rds_discovery::RECORD_VERSION,
+        revision: 1,
+        key: ek,
+        addrs: vec!["10.0.0.9:4200".parse().unwrap()],
+        relay_urls: vec![],
+        services: vec![Service::Ping],
+        issued_at: now,
+        expires_at: now + 300,
+    };
+    let fresh = rds_discovery::EndpointRecord::sign(&payload, &signing).unwrap();
+    client.publish(&fresh).await.unwrap();
 
     let id = rds_net::EndpointId::from_bytes(&ek.0).unwrap();
     let bare = format!("{id}");
@@ -222,17 +227,61 @@ async fn resolve_refuses_aged_out_record() {
         .await
         .expect("fresh record resolves");
 
-    // Past expiry the same stored record must be refused. issued_at
-    // and now are whole seconds, so a 1s TTL is fresh for up to ~2s
-    // real time — sleep past the worst-case boundary.
-    tokio::time::sleep(Duration::from_millis(2200)).await;
+    // Install a short-lived successor. Five seconds leaves at least four
+    // seconds from issuance, beyond the client's three-second PUT deadline.
+    // Do not require a second round trip to complete inside this short lease.
+    payload.revision = 2;
+    payload.issued_at = rds_discovery::now_unix().unwrap();
+    payload.expires_at = payload.issued_at + 5;
+    let rec = rds_discovery::EndpointRecord::sign(&payload, &signing).unwrap();
+    client.publish(&rec).await.unwrap();
+    // Wait for the signed boundary, not a guessed delay from an earlier step.
+    let expiry = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(payload.expires_at);
+    tokio::time::sleep(
+        expiry
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default(),
+    )
+    .await;
     let err = rds_net::resolve_target(Some(client.clone()), &bare)
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("verification") || err.to_string().contains("expired"),
-        "aged record must fail verification, got {err}"
+        matches!(
+            err.downcast_ref::<rds_discovery::DiscoveryError>(),
+            Some(rds_discovery::DiscoveryError::Http { status: 410, .. })
+        ),
+        "directory must refuse aged record, got {err:#}"
     );
+
+    // A hostile directory can still replay expired signed bytes. The resolver
+    // must enforce validity independently, even when HTTP reports success.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hostile = Client::new(listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        rds_discovery::http::read_request(&mut stream)
+            .await
+            .unwrap()
+            .unwrap();
+        rds_discovery::http::write_response(
+            &mut stream,
+            &rds_discovery::http::Response::json(200, rec),
+        )
+        .await
+        .unwrap();
+    });
+    let err = rds_net::resolve_target(Some(hostile), &bare)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<rds_discovery::DiscoveryError>(),
+            Some(rds_discovery::DiscoveryError::Expired)
+        ),
+        "{err:#}"
+    );
+    server.await.unwrap();
 }
 
 /// Resolve path e2e: announce → resolve_target by bare key → connect.
@@ -242,7 +291,7 @@ async fn resolve_then_connect_by_bare_key() {
     let dir = service::serve(
         "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
         store,
-        ServiceConfig::default(),
+        ServiceConfig::open_ephemeral(),
     )
     .await
     .unwrap();
@@ -277,12 +326,15 @@ async fn resolve_then_connect_by_bare_key() {
     let _announce = announce(
         agent.clone(),
         AnnounceConfig {
-            key,
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+            ),
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
         },
-    );
+    )
+    .unwrap();
 
     // "CLI" endpoint resolves the agent's bare key via the directory.
     let cli_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())

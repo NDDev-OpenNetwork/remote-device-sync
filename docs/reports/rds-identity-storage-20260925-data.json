@@ -1,0 +1,212 @@
+{
+  "source_base": "7616a3b",
+  "scope": [
+    "W2.4 stable identity prerequisite",
+    "W3.2 persisted owned relay identity prerequisite"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/Cargo.toml": "33b7e0128df7a565137fd51d35eb74b3914d4e17f88bcb0cb5be1e7e651710df",
+    "crates/rds-net/src/lib.rs": "05e646a0f34266c03682d2ac6093bdf75ee79f8b04fa6036323e82af02d6c745",
+    "crates/rds-net/src/backends/iroh.rs": "bd4ec095512c9dba8ef1813c8d32460e3ee7b6063c70923ee0c74a5ad87fb60d",
+    "crates/rds-net/src/identity.rs": "72ccd6efc13dc195c5dac2ffd9ac1209d4661e674bb6f262ef4e40f6baa507ca",
+    "crates/rds-net/src/identity/unix.rs": "84867b3b3c359c6b31eb58a293af03e0c7c81cd925dfc7534e3d9dc161115eae",
+    "crates/rds-net/src/identity/unix/tests.rs": "fe804d42edc9fbf402ea3e2a0ca16a8560798a811cafabd0eb69c71a6d77e2ac",
+    "crates/rds-net/tests/identity_storage.rs": "9f2c155c32f1dcaee1b226938883ab13e2cf53a7bd94ceb0910e7d18f15f178e",
+    "crates/rds-cli/src/main.rs": "e4aae32a94fdc8c1ac17638637d843b0391533d7a71126b5fd991b1f31054a61",
+    "crates/rds-cli/tests/configuration.rs": "1a3ba1b9166255a19b6efb3d1f190537fb41061cc7189d96bb81c22d22ea967b",
+    "crates/rds-agent/src/main.rs": "12d3a3cc8b189a22458d743f4b5c1f985d4d623c85e2583dcefbfe8427a950eb",
+    "tests/support/endpoint_cli.rs": "62421b12791984dd40c69631def91e179ca766fad85873caf0a570fbb7fd7764"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.704690700978972,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 49.736920644994825,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 29.17261744197458,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 32.7751526189968,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 356.65069427294657,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 287.08284658996854,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--lib",
+        "--test",
+        "identity_storage"
+      ],
+      "code": 0,
+      "seconds": 32.55914825806394,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 390,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 68
+    },
+    "test-owned": {
+      "passed": 194,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 39
+    },
+    "test-isolated": {
+      "passed": 36,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 2
+    }
+  },
+  "before_fix": {
+    "passed": 2,
+    "failed": 3,
+    "failures": [
+      "Final key symlink was followed",
+      "Mode0644 seed was accepted",
+      "Hardlinked seed was accepted"
+    ]
+  },
+  "focused": {
+    "directory_lock_unit_tests": 17,
+    "cli_configuration_tests": 6
+  },
+  "umask_regression": [
+    {
+      "existing_marker": false,
+      "create_code": 0,
+      "reload_code": 0,
+      "key_mode": "0o600",
+      "marker_mode": "0o600",
+      "same_nonempty_identity": true,
+      "pending_exists": false
+    },
+    {
+      "existing_marker": true,
+      "create_code": 0,
+      "reload_code": 0,
+      "key_mode": "0o600",
+      "marker_mode": "0o600",
+      "same_nonempty_identity": true,
+      "pending_exists": false
+    }
+  ],
+  "transaction": {
+    "lock": "opened parent directory inode, acquired before marker creation;2s bounded wait; explicit descriptor unlock",
+    "staging": "one exact reserved private singly linked pending file",
+    "publication": "complete32byte seed sync then no-replace rename and directory sync",
+    "recovery": "returned-error and abrupt process exit at7boundaries, including strict-umask exits before marker/staging permission initialization",
+    "concurrency": "8independent fixture processes and8actual CLI id processes; only Busy may be retried after contention",
+    "path_validation": "POSIX ownership/mode, nofollow/nonblocking regular file,33byte read limit, inode aliases"
+  },
+  "prior_check_findings": [
+    "A real CLI reproduction returned success for a new mode000 seed under umask0777, then reload failed. New file descriptors now receive0600; directory-inode locking plus metadata recovery also covers exit before chmod",
+    "A subsequent all-feature build hit compiler ENOSPC; old inactive test executables from this workspace were removed and full checks rerun. This was not a runtime storage fault test",
+    "Initial CLI fixtures inherited a group-writable umask; fixture directories now explicitly0700, application checks unchanged",
+    "Initial workspace concurrency test encountered the documented2s Busy result; final tests require success or Busy with no identity, then same-key retry after contention",
+    "Source review caught Linux-only mknodat in a shared Unix test; FIFO test is Linux-gated and socket/directory test is common"
+  ],
+  "compatibility": [
+    "Raw32 seed and default paths unchanged",
+    "Old backend import path retained",
+    "Return type is now Result<SecretKey,KeyStoreError>",
+    "Existing nonprivate/symlink/hardlink/malformed keys and writable-by-others parent are refused, never auto-fixed",
+    "Older uncooperative writers can still expose their own partial direct writes"
+  ],
+  "limits": [
+    "No native macOS/case-folding filesystem execution",
+    "No extended ACL audit",
+    "No physical power loss, real exhaustion or network filesystem qualification",
+    "Existing ancestor hierarchy assumed durably provisioned",
+    "Filesystem I/O is blocking and not bounded by the2s advisory-lock deadline",
+    "Not local IPC, enrollment, rotation, owned runtime deployment or wave closure"
+  ]
+}

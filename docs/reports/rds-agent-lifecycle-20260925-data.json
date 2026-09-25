@@ -1,0 +1,136 @@
+{
+  "source_base": "1e046e2",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-agent/src/authz.rs": "b2cbc1e67bc12430628374718063316806a3f77e43c2b0ca412aca744bfb1db0",
+    "crates/rds-agent/src/lib.rs": "b1c646f1e5cd1c1ecd1bf120f0714ae0e002217298e064d89e65528dbb2af5d2",
+    "crates/rds-agent/src/main.rs": "f913e126027f6db9529c3a72859c2c25d1f8d5f38d13c0f486c5e1698db703ef",
+    "crates/rds-agent/src/limits.rs": "eb49885f668b73dcd1d93b9c665d8604da96ca950faacbade306dcfe736d3542",
+    "crates/rds-agent/tests/configuration.rs": "90a8ed38436bcd37dc5b1ed0c1bb61fc90c15e2ff6de14780288f86ac1af3f1b",
+    "crates/rds-agent/tests/lifecycle.rs": "86e13d79faaede138f21d492967c28885053c785203da267877770988964e85b",
+    "crates/rds-net/src/lib.rs": "40640ca936fa79382281d741555908501b7ae65fbc43ac4179abb979efc91a4d"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6431994989980012,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.00086283206474,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.285878623020835,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 15.035921619040892,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 242.50989959796425,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 134.9985728529282,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 314,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 56
+    },
+    "test-owned": {
+      "passed": 100,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 27
+    }
+  },
+  "before_fix_failures": [
+    "canceling_iroh_runner_closes_child_sessions",
+    "canceling_owned_runner_closes_child_sessions"
+  ],
+  "defaults": {
+    "connections": 32,
+    "service_tasks_per_connection": 64,
+    "handshake_seconds": 15,
+    "hello_seconds": 15,
+    "normal_shutdown_seconds": 5
+  },
+  "limits": [
+    "Application slots, not process RSS/FD or transport-buffer limits",
+    "Normal teardown joins services and grant watchdog; future Drop and shutdown fallback request nested cancellation asynchronously",
+    "No global media/relay/disk ownership or fairness qualification",
+    "No native macOS, physical NAT/failover, deployment or wave closure"
+  ]
+}

@@ -1,0 +1,170 @@
+{
+  "source_base": "a27f90e",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/drivers.rs": "a0c960eb445d0583192b8f224043b73fb86dc5aef4ecd8c00f651ea3185e802d",
+    "crates/rds-net/src/backends/noq/mod.rs": "f84bd6267f42f64011ece5c85fc41c81603da0da563efe27c3709239598a1638",
+    "crates/rds-net/src/backends/noq/policy.rs": "d8c9dd46e331bb7d74bfd8b8b7491c707b28c216c7e5a7b679cd7f04365e8a03",
+    "crates/rds-net/tests/driver_lifecycle.rs": "f381efdf41565b71d089c67f699af8dd99dbefc88f801c961247cbf1b120c50e",
+    "crates/rds-net/tests/path_validation.rs": "8b4b8974931e8bafedd39605848524cc0d54549ebeb40e61fd659b973f0536f0",
+    "crates/rds-net/tests/turmoil_sim.rs": "9cf82370d98865a4f66ec300f7e25d65672175d450d9cdfb0f4fa18850f3cc97"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.7888192440150306,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 14.121360406978056,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 15.230609923950396,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.085448344005272,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 292.7663574939361,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 207.11174324702006,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--features",
+        "transport-noq",
+        "--lib",
+        "--test",
+        "path_validation",
+        "--test",
+        "turmoil_sim",
+        "--test",
+        "driver_lifecycle"
+      ],
+      "code": 0,
+      "seconds": 24.43703870405443,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 344,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 62
+    },
+    "test-owned": {
+      "passed": 135,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 33
+    },
+    "test-isolated": {
+      "passed": 25,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 4
+    }
+  },
+  "before_fix_failures": [
+    "silent_additional_path_starts_as_backup: Available instead of Backup"
+  ],
+  "simulation": {
+    "one_way_delay_ms": 200,
+    "asserted_primary_rtt_above_ms": 350,
+    "pending_candidate": "silent simulated host",
+    "assertions": [
+      "pending path remains Backup",
+      "working primary remains Available",
+      "datagram echo still succeeds"
+    ]
+  },
+  "fixture_corrections": [
+    "Opening an extra path immediately after TLS can fail until spare peer connection IDs arrive; fixture now establishes that precondition with bounded retry. Production retry remains open.",
+    "A draft simulator PathId literal was corrected from i32 to u32 before successful execution."
+  ],
+  "limits": [
+    "Noq already blocked data on unvalidated paths; this corrects application eligibility/priority",
+    "Logical primary-path closure, not physical NIC/NAT/relay failure",
+    "Production candidate credit retry, lost-event reconciliation and complete metrics remain open",
+    "Simulation harness does not establish production resource bounds",
+    "No native macOS, production deployment or wave closure"
+  ]
+}

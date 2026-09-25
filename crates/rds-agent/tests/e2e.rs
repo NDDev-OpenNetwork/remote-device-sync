@@ -39,6 +39,102 @@ async fn tcp_echo() -> u16 {
     port
 }
 
+#[cfg(feature = "transport-noq")]
+fn tcp_target_backends() -> Vec<rds_net::Backend> {
+    vec![rds_net::Backend::Iroh, rds_net::Backend::Noq]
+}
+
+#[test]
+fn tcp_target_policy_matches_equivalent_ip_spellings() {
+    let policy = AgentPolicy::ssh_only(("0:0:0:0:0:0:0:1".into(), 22));
+    assert!(policy.permits_tcp("::1", 22));
+    assert!(!policy.permits_tcp("::1", 23));
+    assert!(!policy.permits_tcp("127.0.0.1", 22));
+    let mapped = AgentPolicy::ssh_only(("::ffff:127.0.0.1".into(), 22));
+    assert!(mapped.permits_tcp("127.0.0.1", 22));
+}
+
+#[test]
+fn tcp_target_policy_rejects_malformed_targets_in_development_mode() {
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 22));
+    policy.allow_any_tcp = true;
+    for (host, port) in [
+        ("", 22),
+        ("localhost", 0),
+        ("[::1]", 22),
+        ("0.0.0.0", 22),
+        ("a\0b", 22),
+    ] {
+        assert!(!policy.permits_tcp(host, port), "accepted invalid target");
+    }
+}
+
+#[cfg(not(feature = "transport-noq"))]
+fn tcp_target_backends() -> Vec<rds_net::Backend> {
+    vec![rds_net::Backend::Iroh]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canonical_ipv6_tcp_target_connects_without_widening_policy() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for backend in tcp_target_backends() {
+            let listener = TcpListener::bind("[::1]:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let destination: rds_core::TcpTarget =
+                format!("[0:0:0:0:0:0:0:1]:{port}").parse().unwrap();
+            assert_eq!(destination.host(), "::1");
+            let echo = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0u8; 8];
+                socket.read_exact(&mut bytes).await.unwrap();
+                socket.write_all(&bytes).await.unwrap();
+                socket.shutdown().await.unwrap();
+            });
+            let config = || EndpointConfig {
+                backend,
+                discovery: false,
+                bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                ..Default::default()
+            };
+            let server = bind_endpoint(config()).await.unwrap();
+            let client = bind_endpoint(config()).await.unwrap();
+            let mut policy = AgentPolicy::ssh_only(destination.clone().into_parts());
+            policy.allow.insert(client.id());
+            let agent = Agent::new(server.clone(), policy);
+            let serving = tokio::spawn(async move { agent.run().await });
+            let conn = rds_cli::connect(&client, server.addr()).await.unwrap();
+            // Bypass the client validator to exercise the untrusted wire path.
+            let oversized = "a".repeat(254);
+            for (host, port) in [("", port), ("::1", 0), (oversized.as_str(), port)] {
+                let (mut raw_send, mut raw_recv) = conn.open_bi().await.unwrap();
+                write_frame(&mut raw_send, &StreamHello::TcpConnect { host: host.into(), port }).await.unwrap();
+                raw_send.finish().unwrap();
+                let ack: HelloAck = read_frame(&mut raw_recv).await.unwrap();
+                assert!(matches!(ack, HelloAck::Error { message } if message.starts_with("invalid TCP destination:")));
+            }
+            // Same port on a different address remains outside this policy.
+            assert!(rds_cli::open_tcp(&conn, "127.0.0.1", port).await.is_err());
+            let (mut send, mut recv) =
+                rds_cli::open_tcp(&conn, destination.host(), destination.port())
+                    .await
+                    .unwrap();
+            send.write_all(b"ipv6-rds").await.unwrap();
+            send.finish().unwrap();
+            let mut bytes = [0u8; 8];
+            recv.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"ipv6-rds");
+            echo.await.unwrap();
+            conn.close(0u32.into(), b"test complete");
+            serving.abort();
+            let _ = serving.await;
+            client.close().await;
+            server.close().await;
+        }
+    })
+    .await
+    .expect("IPv6 TCP service must complete over each transport");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ping_and_tcp_forward_over_relay() {
     let (_relay, relay_url) = test_relay().await;
@@ -231,6 +327,7 @@ async fn grant_agent(
     let iss = issuer();
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
     policy.issuers.insert(iss.verifying_key().to_bytes());
+    policy.use_local_revocations(); // This fixture tests local grant rules; managed feeds have their own suite.
     let ticket = Ticket::of(&agent_ep);
     (agent_ep, policy, iss, ticket)
 }
@@ -238,12 +335,17 @@ async fn grant_agent(
 fn grant_for(
     iss: &ed25519_dalek::SigningKey,
     subject: rds_net::EndpointId,
+    audience: rds_net::EndpointId,
     services: Vec<ServiceKind>,
     ttl: Duration,
 ) -> Grant {
     Grant::issue(
         iss,
         *subject.as_bytes(),
+        *audience.as_bytes(),
+        rds_net::SecretKey::generate().to_bytes()[..16]
+            .try_into()
+            .unwrap(),
         services,
         ttl,
         GrantConstraints::default(),
@@ -278,6 +380,7 @@ async fn grant_mode_valid_grant_opens_services() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -318,6 +421,7 @@ async fn streams_before_grant_are_rejected() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -345,9 +449,12 @@ async fn expired_and_wrong_service_grants_rejected() {
     let expired = Grant::issue_at(
         &iss,
         rds_core::grant::GrantPayload {
+            version: rds_core::grant::GRANT_VERSION,
+            revision: 1,
             issuer: iss.verifying_key().to_bytes(),
             subject: *client.id().as_bytes(),
-            nonce: 1,
+            audience: *ticket.endpoint_id().as_bytes(),
+            nonce: [1; 16],
             services: vec![ServiceKind::Ping],
             not_before: 1,
             expires_at: 2,
@@ -364,6 +471,7 @@ async fn expired_and_wrong_service_grants_rejected() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -388,6 +496,7 @@ async fn revoked_grant_drops_live_and_new_connections() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -397,7 +506,7 @@ async fn revoked_grant_drops_live_and_new_connections() {
     rds_cli::ping(&conn, 1).await.unwrap();
 
     // Push the grant id onto the denylist: the live connection dies…
-    policy.revoke(grant.id());
+    policy.revoke(grant.id().unwrap());
     let closed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if rds_cli::ping(&conn, 2).await.is_err() {
@@ -429,6 +538,7 @@ async fn grant_replay_on_concurrent_connection_rejected() {
     let grant = grant_for(
         &iss,
         client.id(),
+        ticket.endpoint_id(),
         vec![ServiceKind::Ping],
         Duration::from_secs(120),
     );
@@ -446,6 +556,83 @@ async fn grant_replay_on_concurrent_connection_rejected() {
 }
 
 // ---- WS6: sync service ------------------------------------------------
+
+#[test]
+fn revocations_survive_without_watchers() {
+    let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.replace_denylist(std::collections::HashSet::from([[1; 32]]));
+    assert!(policy.denied().contains(&[1; 32]));
+    policy.revoke([2; 32]);
+    assert_eq!(policy.denied().len(), 2);
+
+    let receiver = policy.denylist.subscribe();
+    drop(receiver);
+    policy.revoke([3; 32]);
+    assert_eq!(policy.denied().len(), 3);
+}
+
+#[test]
+fn concurrent_revocations_are_not_lost() {
+    let policy = Arc::new(AgentPolicy::ssh_only(("127.0.0.1".into(), 9)));
+    let _receiver = policy.denylist.subscribe();
+    let barrier = Arc::new(std::sync::Barrier::new(16));
+    std::thread::scope(|scope| {
+        for i in 0..16 {
+            let policy = policy.clone();
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                policy.revoke([i; 32]);
+            });
+        }
+    });
+    assert_eq!(policy.denied().len(), 16);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_authz_reply_closes_connection_and_releases_grant() {
+    let (_relay, relay_url) = test_relay().await;
+    let client = client_ep(&relay_url).await;
+    let (ep, mut policy, iss, ticket) = grant_agent(&relay_url).await;
+    policy.allow.insert(client.id());
+    let agent = Agent::new(ep.clone(), policy);
+    let policy = agent.policy.clone();
+    let task = serve(agent);
+    let conn = rds_cli::connect(&client, rds_net::parse_target(&ticket.to_string()).unwrap())
+        .await
+        .unwrap();
+    let grant = grant_for(
+        &iss,
+        client.id(),
+        ticket.endpoint_id(),
+        vec![ServiceKind::Ping],
+        Duration::from_secs(60),
+    );
+    let grant_id = grant.id().unwrap();
+    let mut encoded = Vec::new();
+    write_frame(&mut encoded, &StreamHello::Authz(grant))
+        .await
+        .unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    // Let the agent accept the stream, but withhold the Authz body
+    // until STOP_SENDING has reached its reply half.
+    send.write_all(&encoded[..5]).await.unwrap();
+    recv.stop(0u32.into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    send.write_all(&encoded[5..]).await.unwrap();
+    send.finish().unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !conn.is_closed() || policy.active_grants.lock().unwrap().contains(&grant_id) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("failed Authz ACK retained access or leaked its reservation");
+    assert!(rds_cli::ping(&conn, 1).await.is_err());
+    client.close().await;
+    ep.close().await;
+    task.abort();
+}
 
 /// One sync session per connection: a second `Sync` stream while the
 /// first is open is refused, and the slot frees when the first ends.

@@ -1,0 +1,172 @@
+{
+  "source_base": "b2e69ff",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-agent/src/authz.rs": "5efbdb6c591a5ab6924299255ead225c04e961ac07ae94d71e32ddda354e1cc3",
+    "crates/rds-agent/src/lib.rs": "93797286b2d9e634a438fbfb60f8bc8fbdb8fd084d370d803f74bff8f9cbda6a",
+    "crates/rds-agent/src/main.rs": "bcd1e77956def7f3fdfdde32ec138d91115cb050f14c24e3cea4f714689eb484",
+    "crates/rds-agent/tests/configuration.rs": "0a98fb947f470142209a91e94149d9a64196c812d94b26ac91827ed0a9700e43",
+    "crates/rds-agent/tests/e2e.rs": "71ea67215df808e94d44445cc1dca4734c744f6c57bce755fb5c1eb4988e5cf2",
+    "crates/rds-cli/src/lib.rs": "423f69c3dfa12c0d5446dbbd217f7445efde5d4b6120a6b73a4f0961994aa9ec",
+    "crates/rds-cli/src/main.rs": "681bff138d996c13f3d2b9c69b1f39c4b4bbe3020d74889ac86681e579b6f51f",
+    "crates/rds-cli/tests/configuration.rs": "b0926ede500e00df916bdf824604faf061b035f783ec0a2cfab29408fe01b748",
+    "crates/rds-core/src/lib.rs": "bb633219c5a2f8562fd964deac275bbdec41f6e4f868d3e8684cf86948927689",
+    "crates/rds-core/src/tcp_target.rs": "39aea841f24042674662913c8b5dca9a0caf44a385c10b2d0c2545a9fd77b325",
+    "tests/support/endpoint_cli.rs": "81af8b26e62702c1860eca5a9edc209ad5768578ba4a4712dfa7eeca76d3bb43"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.5552613630425185,
+      "build_jobs": 2
+    },
+    {
+      "name": "support-fmt",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/endpoint_cli.rs"
+      ],
+      "code": 0,
+      "seconds": 0.03279437904711813,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 14.506061043939553,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 15.32153716601897,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 14.226282945019193,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 222.97746550198644,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 104.1456429909449,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-agent",
+        "--no-default-features",
+        "--test",
+        "configuration"
+      ],
+      "code": 0,
+      "seconds": 28.189648728002794,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 296,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 53
+    },
+    "test-owned": {
+      "passed": 81,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 24
+    },
+    "test-isolated": {
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 2
+    }
+  },
+  "before_fix_failures": [
+    "CLI and agent accepted malformed TCP target flags",
+    "Policy denied equivalent IPv6 spellings",
+    "Development allow_any_tcp admitted invalid destinations",
+    "Real QUIC service in Authorizing window received a premature Pending rejection"
+  ],
+  "validation_discovery": "Initial all-feature managed-revocation outage test failed after successful Authz with grant-required rejection; deterministic admission-window regression then failed before correction. The original integration fixture was not changed.",
+  "limits": [
+    "Syntax normalization is not DNS answer pinning or SSH host-key/authentication policy",
+    "Role/authority configuration and timeout classes remain open",
+    "No native macOS, real WAN/NAT, deployed desktop/SSH qualification",
+    "No remediation wave closes"
+  ]
+}

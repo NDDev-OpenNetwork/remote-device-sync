@@ -1,0 +1,191 @@
+{
+  "source_base": "92f7218",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/dial.rs": "3057af8b5a6071ddd6bd25b617fae274ad35a0359a0f69f1b7d22f873c0325cf",
+    "crates/rds-net/src/backends/noq/drivers.rs": "23a72b57978dfe317d8f920b376b53b795981ac15fd6fca39885e611e8b5db18",
+    "crates/rds-net/src/backends/noq/mod.rs": "50750e19f754b81997d6854b3dadf4e9e161db4aa814475165789ac1b51553cd",
+    "crates/rds-net/src/backends/noq/policy.rs": "df47dab938e4dd536df7353459d86b334f5d5fd79e5ba7c88f743bb49dd8adef",
+    "crates/rds-net/src/backends/noq/relay.rs": "ce4b5fa3b8453870015b802e1a08df3614e0f67bcb617d775d4a07b76de5a8da",
+    "crates/rds-net/src/backends/noq/socket.rs": "8d24cbc28df73038128c97061e6caa1baa6dc5adc73e58b30e2af39c18d35e1c",
+    "crates/rds-net/tests/candidate_race.rs": "e420610313f449cce26c5a68584b87a67b3bafa87c6b3d1a04b0a67260ef747d",
+    "crates/rds-net/tests/driver_lifecycle.rs": "568442663d1e610297ad602e1949385ccef33b9da753bb0556069e03664929fd",
+    "crates/rds-relay/tests/owned_e2e.rs": "9aed6c9e57661d33527ccaab9305264c7eea05c419c7ece51ff78ab341506e85"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6229179410729557,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 18.90677123493515,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.36917692492716,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 18.572349272901192,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 303.0056336520938,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 219.44445353595074,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--features",
+        "transport-noq",
+        "--lib",
+        "--test",
+        "candidate_race"
+      ],
+      "code": 0,
+      "seconds": 39.523228010046296,
+      "build_jobs": 2
+    },
+    {
+      "name": "bench",
+      "command": [
+        "cargo",
+        "run",
+        "-q",
+        "-p",
+        "rds-bench",
+        "--features",
+        "transport-noq",
+        "--",
+        "run",
+        "--scenario",
+        "handshake",
+        "--backend",
+        "noq",
+        "--iterations",
+        "20",
+        "--json",
+        "<private-evidence>/handshake.json",
+        "--md",
+        "<private-evidence>/handshake.md"
+      ],
+      "code": 0,
+      "seconds": 34.180152793065645,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 337,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 60
+    },
+    "test-owned": {
+      "passed": 128,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 31
+    },
+    "test-isolated": {
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 2
+    }
+  },
+  "before_fix_failures": [
+    "blackholed_first_candidate_does_not_block_a_healthy_second",
+    "silent_direct_candidate_does_not_block_attached_relay"
+  ],
+  "additional_regression": "IPv4-first mixed mux rejected IPv6; internal unsupported-family QNT probes could close the connection. Fixed and both orders/directions plus dual-stack relay tested.",
+  "fixture_correction": "Engine-draining assertion changed from 2 to 5 seconds because three initial PTOs retain closing state for approximately 3 seconds; initial failed fixture retained privately.",
+  "bounds": {
+    "direct_candidates": 8,
+    "attached_relay_candidates": 1,
+    "whole_handshake_deadline_seconds": 15
+  },
+  "limits": [
+    "Initial race, not live-session recovery",
+    "No independent relay bootstrap, remote scope/interface enumeration or topology qualification",
+    "Candidate count per connect, not global budget",
+    "QUIC closing packet state follows protocol draining timers",
+    "Unroutable probes discarded; actual child I/O failure isolation remains open",
+    "No native macOS/deployment/wave closure"
+  ]
+}

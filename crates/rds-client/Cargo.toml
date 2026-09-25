@@ -1,0 +1,29 @@
+[package]
+name = "rds-client"
+description = "Rust client operations and agent-owned local session manager"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+transport-noq = ["rds-net/transport-noq"]
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+postcard = { workspace = true, features = ["use-std"] }
+rand.workspace = true
+rds-core.workspace = true
+rds-discovery.workspace = true
+rds-net.workspace = true
+rds-observe.workspace = true
+rustix = { workspace = true, features = ["process"] }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

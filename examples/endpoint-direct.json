@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "backend": "iroh",
+  "relay": { "mode": "disabled" },
+  "bind_addrs": ["127.0.0.1:0"]
+}

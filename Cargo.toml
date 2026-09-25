@@ -5,12 +5,15 @@ members = [
     "crates/rds-bench",
     "crates/rds-audio",
     "crates/rds-cli",
+    "crates/rds-client",
     "crates/rds-core",
     "crates/rds-desktop",
     "crates/rds-discovery",
     "crates/rds-net",
+    "crates/rds-observe",
     "crates/rds-relay",
     "crates/rds-server",
+    "crates/rds-ssh",
     "crates/rds-sync",
 ]
 
@@ -22,12 +25,15 @@ repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
 
 # Dependency direction (enforced by convention, not by cargo):
 #   rds-core      leaf: types, framing, tokens — no io, no async runtime
+#   rds-observe   logging adapter; no product-crate dependencies
 #   rds-discovery → core types (own identity layer)
 #   rds-net       → rds-core, rds-discovery
 #   rds-relay     → rds-core, rds-net
 #   rds-audio     → rds-core
 #   rds-sync      → rds-core, rds-net
 #   rds-desktop   → rds-core, rds-net
+#   rds-client    → rds-core, rds-net, rds-discovery (outgoing sessions and local IPC)
+#   rds-ssh       → standard SSH library and async I/O (no endpoint ownership)
 #   rds-agent     → everything client-facing
 #   rds-cli       → everything user-facing
 #   rds-server    → rds-relay, rds-discovery
@@ -48,25 +54,36 @@ noq-proto = "1"
 postcard = "1"
 proptest = "1"
 rand = "0.9"
+redb = "4.3"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+rustix = { version = "1", features = ["fs"] }
+russh = { version = "=0.63.3", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "logging", "tls12", "ring"] }
 rustls-pki-types = { version = "1", features = ["alloc"] }
 rds-agent = { path = "crates/rds-agent" }
 rds-audio = { path = "crates/rds-audio" }
 rds-bench = { path = "crates/rds-bench" }
 rds-cli = { path = "crates/rds-cli" }
+rds-client = { path = "crates/rds-client" }
 rds-core = { path = "crates/rds-core" }
 rds-desktop = { path = "crates/rds-desktop" }
 rds-discovery = { path = "crates/rds-discovery" }
 rds-net = { path = "crates/rds-net" }
+rds-observe = { path = "crates/rds-observe" }
 rds-relay = { path = "crates/rds-relay" }
 rds-sync = { path = "crates/rds-sync" }
+rds-ssh = { path = "crates/rds-ssh" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+tokio-util = { version = "0.7.19", features = ["rt"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+webpki-roots = "1"
 
 # Shared lint floor — every crate inherits via `[lints] workspace = true`.
 # `unsafe_code` stays a warning: FFI backends in rds-desktop must `allow`

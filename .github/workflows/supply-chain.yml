@@ -26,7 +26,7 @@ jobs:
     uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-supply-chain.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
     with:
       runner: ubuntu-latest
-      toolchain: stable
+      toolchain: "1.98.1"
       enable_deny: true
       enable_audit: true
       enable_machete: true

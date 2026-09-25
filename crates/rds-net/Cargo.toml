@@ -22,8 +22,12 @@ postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
 rds-discovery.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rustix = { workspace = true, features = ["process"] }
 tokio.workspace = true
 tokio-stream = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
@@ -40,6 +44,7 @@ metrics = []
 transport-noq = [
     "dep:noq",
     "dep:tokio-stream",
+    "dep:tokio-util",
     "dep:blake3",
     "dep:rand",
 ]

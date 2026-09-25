@@ -12,17 +12,36 @@
 //! [`http`], [`service`] and [`client`]; the estate-signed name
 //! registry in [`registry`].
 
+pub mod authority;
 pub mod client;
+pub mod clock;
 pub mod http;
+mod observation;
+mod persist;
+pub mod publisher;
+pub use publisher::{RecordDraft, RecordIssuer};
+mod record_wire;
+mod relay_route;
+pub use record_wire::{
+    DeletePayload, DeleteRequest, EndpointRecord, MAX_DIRECT_ADDRS, MAX_RECORD_BYTES,
+    MAX_RECORD_TTL, MAX_RELAY_URL_BYTES, MAX_RELAY_URLS, Payload, RECORD_VERSION,
+};
+pub use relay_route::OwnedRelayRoute;
+pub mod policy;
+mod records;
+pub use records::{
+    FileStore, MAX_DATABASE as MAX_RECORD_DATABASE_BYTES, MAX_IDENTITIES as MAX_RECORD_IDENTITIES,
+    MemoryStore, MigrationReceipt, RecordMetrics, RecordSnapshot, migrate_v2,
+};
+mod admission;
+pub use admission::Enrollment;
 pub mod registry;
 pub mod revocations;
 pub mod service;
+pub mod tls;
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -66,36 +85,12 @@ pub enum Service {
     Sync,
 }
 
-/// What the endpoint publishes about itself. The `signature` covers the
-/// postcard encoding of `Payload`; everything else is derived at load.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EndpointRecord {
-    /// Encoded [`Payload`] bytes.
-    pub payload: Vec<u8>,
-    /// Ed25519 signature over `payload`, made by the payload's key.
-    pub signature: Vec<u8>,
-}
-
-/// Signed portion of an [`EndpointRecord`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Payload {
-    pub key: EndpointKey,
-    /// Direct candidate addresses (IPv4/IPv6).
-    pub addrs: Vec<SocketAddr>,
-    /// Relay base URLs the endpoint is reachable through.
-    pub relay_urls: Vec<String>,
-    /// Services this endpoint serves.
-    pub services: Vec<Service>,
-    /// Unix seconds when the record was issued. Stores reject a record
-    /// whose `issued_at` is not newer than the stored one — replay of an
-    /// older record cannot roll the directory back.
-    pub issued_at: u64,
-    /// Unix seconds after which the record must be refreshed.
-    pub expires_at: u64,
-}
-
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
+    #[error("policy state is owned by another process")]
+    Busy,
+    #[error("directory configuration invalid: {0}")]
+    Configuration(String),
     #[error("record signature invalid")]
     BadSignature,
     #[error("record malformed: {0}")]
@@ -112,68 +107,10 @@ pub enum DiscoveryError {
     Http { status: u16, message: String },
     #[error("rate limited")]
     RateLimited,
+    #[error("publisher is not enrolled")]
+    NotEnrolled,
     #[error("store error: {0}")]
     Store(String),
-}
-
-impl EndpointRecord {
-    /// Sign a fresh record for `key` valid for `ttl`.
-    pub fn publish(
-        key: &SigningKey,
-        addrs: Vec<SocketAddr>,
-        relay_urls: Vec<String>,
-        services: Vec<Service>,
-        ttl: Duration,
-    ) -> Result<Self, DiscoveryError> {
-        let issued_at = now_unix()?;
-        let payload = Payload {
-            key: EndpointKey(key.verifying_key().to_bytes()),
-            addrs,
-            relay_urls,
-            services,
-            issued_at,
-            expires_at: issued_at + ttl.as_secs(),
-        };
-        Self::sign(&payload, key)
-    }
-
-    /// Serialize and sign an already-built [`Payload`].
-    pub fn sign(payload: &Payload, key: &SigningKey) -> Result<Self, DiscoveryError> {
-        let bytes = postcard::to_stdvec(payload)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let signature = key.sign(&bytes);
-        Ok(Self {
-            payload: bytes,
-            signature: signature.to_bytes().to_vec(),
-        })
-    }
-
-    /// Verify the signature and return the payload. Expiry is checked by
-    /// callers that care (a store may still return expired records for
-    /// diagnostics).
-    pub fn verify(&self) -> Result<Payload, DiscoveryError> {
-        let payload: Payload = postcard::from_bytes(&self.payload)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let key = VerifyingKey::from_bytes(&payload.key.0)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let sig_bytes: [u8; 64] = self
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| DiscoveryError::InvalidRecord("signature is not 64 bytes".into()))?;
-        key.verify_strict(&self.payload, &Signature::from_bytes(&sig_bytes))
-            .map_err(|_| DiscoveryError::BadSignature)?;
-        Ok(payload)
-    }
-
-    /// Verify and additionally require the record to be unexpired.
-    pub fn verify_fresh(&self) -> Result<Payload, DiscoveryError> {
-        let payload = self.verify()?;
-        if payload.expires_at < now_unix()? {
-            return Err(DiscoveryError::Expired);
-        }
-        Ok(payload)
-    }
 }
 
 /// Current unix time in seconds.
@@ -184,81 +121,44 @@ pub fn now_unix() -> Result<u64, DiscoveryError> {
         .as_secs())
 }
 
-/// Reject `new` when the stored `old` was issued at the same time or
-/// later — replay protection shared by every store and the HTTP layer.
-pub fn check_freshness(old: Option<&EndpointRecord>, new: &Payload) -> Result<(), DiscoveryError> {
-    match old {
-        Some(old) => {
-            let old_issued = old.verify()?.issued_at;
-            if new.issued_at <= old_issued {
-                return Err(DiscoveryError::Stale);
-            }
-            Ok(())
-        }
-        None => Ok(()),
-    }
-}
-
-/// A delete tombstone: signed by the record's key, authorizes removal.
-/// Replaying an older tombstone against a newer record is refused by
-/// the same `issued_at` ordering as record replacement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteRequest {
-    /// Encoded [`DeletePayload`] bytes.
-    pub payload: Vec<u8>,
-    /// Ed25519 signature over `payload`, made by the record's key.
-    pub signature: Vec<u8>,
-}
-
-/// Signed portion of a [`DeleteRequest`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeletePayload {
-    pub key: EndpointKey,
-    pub issued_at: u64,
-}
-
-impl DeleteRequest {
-    /// Sign a delete for `key` at the current time.
-    pub fn new(key: &SigningKey) -> Result<Self, DiscoveryError> {
-        let payload = DeletePayload {
-            key: EndpointKey(key.verifying_key().to_bytes()),
-            issued_at: now_unix()?,
-        };
-        let bytes = postcard::to_stdvec(&payload)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let signature = key.sign(&bytes);
-        Ok(Self {
-            payload: bytes,
-            signature: signature.to_bytes().to_vec(),
-        })
-    }
-
-    /// Verify signature and return the payload.
-    pub fn verify(&self) -> Result<DeletePayload, DiscoveryError> {
-        let payload: DeletePayload = postcard::from_bytes(&self.payload)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let key = VerifyingKey::from_bytes(&payload.key.0)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        let sig_bytes: [u8; 64] = self
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| DiscoveryError::InvalidRecord("signature is not 64 bytes".into()))?;
-        key.verify_strict(&self.payload, &Signature::from_bytes(&sig_bytes))
-            .map_err(|_| DiscoveryError::BadSignature)?;
-        Ok(payload)
-    }
-}
-
 /// Storage for endpoint records. The GDS server implements this over
 /// its database; agents and tests use the in-memory version.
 pub trait RecordStore: Send + Sync {
-    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError>;
+    /// Optional metadata-only observer. Custom stores without this capability
+    /// remain explicitly unsupported; callers must not substitute `len()`.
+    fn metrics(&self) -> Option<RecordMetrics> {
+        None
+    }
+    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
+        self.put_admitted(record, &mut |_| Ok(()))
+    }
+    /// Invoke `admit(known_identity)` exactly once for a valid higher revision,
+    /// after verifying the signature, signed key agreement and current lifetime,
+    /// under the same ownership as compare/commit and before changing state.
+    /// Duplicate/stale/invalid operations never call it. Its error refuses the
+    /// mutation. `known_identity` includes deletion and expiry floors.
+    /// The callback must be bounded and must not reenter the store.
+    fn put_admitted(
+        &self,
+        record: &EndpointRecord,
+        admit: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError>;
     fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError>;
-    /// Remove `key` when `tombstone` is authorized and not older than
-    /// the stored record's `issued_at`. `Ok` when already absent.
-    fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError>;
-    /// Number of live records (metrics).
+    /// Commit an authorized, fresh delete at a higher revision. Exact signed
+    /// retries succeed without rewriting; deleted identities retain history.
+    fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError> {
+        self.remove_admitted(tombstone, &mut |_| Ok(()))
+    }
+    /// Deletion shares the same admission contract and publisher budget as PUT.
+    fn remove_admitted(
+        &self,
+        tombstone: &DeleteRequest,
+        admit: &mut dyn FnMut(bool) -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError>;
+    /// Inspect at most 64 identities and reclaim expired signed content. Keep
+    /// all replay floors. Repeated calls rotate over the bounded catalog.
+    fn collect_expired(&self) -> Result<usize, DiscoveryError>;
+    /// Number of stored records awaiting expiry collection (metrics).
     fn len(&self) -> usize;
     /// Whether the store holds no live records.
     fn is_empty(&self) -> bool {
@@ -266,118 +166,16 @@ pub trait RecordStore: Send + Sync {
     }
 }
 
-/// In-memory store; rejects forged or expired records on `put`.
-#[derive(Default)]
-pub struct MemoryStore {
-    records: std::sync::RwLock<HashMap<EndpointKey, EndpointRecord>>,
-}
-
-impl RecordStore for MemoryStore {
-    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        let payload = record.verify()?;
-        let mut records = self
-            .records
-            .write()
-            .map_err(|_| DiscoveryError::Store("store poisoned".into()))?;
-        check_freshness(records.get(&payload.key), &payload)?;
-        records.insert(payload.key, record.clone());
-        Ok(())
-    }
-
-    fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
-        self.records
-            .read()
-            .map_err(|_| DiscoveryError::Store("store poisoned".into()))?
-            .get(key)
-            .cloned()
-            .ok_or(DiscoveryError::NotFound)
-    }
-
-    fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError> {
-        let del = tombstone.verify()?;
-        let mut records = self
-            .records
-            .write()
-            .map_err(|_| DiscoveryError::Store("store poisoned".into()))?;
-        if let Some(stored) = records.get(&del.key)
-            && stored.verify()?.issued_at > del.issued_at
-        {
-            return Err(DiscoveryError::Stale);
-        }
-        records.remove(&del.key);
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.records.read().map(|r| r.len()).unwrap_or(0)
-    }
-}
-
-/// Append-only file store: one `<base32-key>.json` record file per
-/// endpoint under `dir`. Suitable for the GDS server's on-disk directory.
-pub struct FileStore {
-    dir: std::path::PathBuf,
-}
-
-impl FileStore {
-    pub fn new(dir: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
-        let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
-    }
-
-    fn path(&self, key: &EndpointKey) -> std::path::PathBuf {
-        self.dir.join(format!("{key}.json"))
-    }
-}
-
-impl RecordStore for FileStore {
-    fn put(&self, record: &EndpointRecord) -> Result<(), DiscoveryError> {
-        let payload = record.verify()?;
-        check_freshness(self.get(&payload.key).ok().as_ref(), &payload)?;
-        let bytes = serde_json::to_vec_pretty(record)
-            .map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))?;
-        std::fs::write(self.path(&payload.key), bytes)
-            .map_err(|e| DiscoveryError::Store(e.to_string()))
-    }
-
-    fn get(&self, key: &EndpointKey) -> Result<EndpointRecord, DiscoveryError> {
-        let path = self.path(key);
-        let bytes = std::fs::read(&path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => DiscoveryError::NotFound,
-            _ => DiscoveryError::Store(e.to_string()),
-        })?;
-        serde_json::from_slice(&bytes).map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))
-    }
-
-    fn remove(&self, tombstone: &DeleteRequest) -> Result<(), DiscoveryError> {
-        let del = tombstone.verify()?;
-        if let Ok(stored) = self.get(&del.key)
-            && stored.verify()?.issued_at > del.issued_at
-        {
-            return Err(DiscoveryError::Stale);
-        }
-        match std::fs::remove_file(self.path(&del.key)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(DiscoveryError::Store(e.to_string())),
-        }
-    }
-
-    fn len(&self) -> usize {
-        std::fs::read_dir(&self.dir)
-            .map(|rd| rd.flatten().count())
-            .unwrap_or(0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use std::{net::SocketAddr, time::Duration};
 
     fn rec(key: &SigningKey) -> EndpointRecord {
         EndpointRecord::publish(
             key,
+            1,
             vec![SocketAddr::from(([10, 0, 0, 5], 4200))],
             vec!["https://relay.example.com".into()],
             vec![Service::Ping, Service::TcpForward],

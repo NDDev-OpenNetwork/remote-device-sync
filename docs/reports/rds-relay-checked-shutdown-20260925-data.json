@@ -1,0 +1,197 @@
+{
+  "source_base": "661a6e7",
+  "scope": [
+    "W2.5 relay ownership under runner failure",
+    "W3.2 checked shutdown prerequisite"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-relay/src/server.rs": "9ab0dd94306a863ff42efb2c9b303d6469406a89f7bdf1aec85b498a20f2cf87",
+    "crates/rds-relay/src/server/lifecycle_tests.rs": "649d455d0b44f0fc1a195b9003d1b5aa5a0361e67e624817dd1b90890da79731",
+    "crates/rds-relay/tests/control_lifecycle.rs": "d9bd52cbdcbfaeab1957a08f30bd2b662d81e3098dea2dacf9406174861776b5",
+    "crates/rds-relay/tests/failure_isolation.rs": "04da36233cc1bb4624bdc3733ed094e7f7f2d5a44a2a9291ea653f7824eddd5a",
+    "crates/rds-relay/tests/owned_e2e.rs": "e9ade392a6339cf154c4c020e1f9771089fb10d11aa8a76cbcf4c1f09bcf279d",
+    "crates/rds-relay/tests/peer_registry.rs": "f8f9dfa69d3d425daafbc2900a368ed2985318e29c2f47f0104bc75a18bcd1e9",
+    "crates/rds-relay/tests/receive_queue.rs": "7536b5e0a995445a503260835aac97ec7862b006ad171e7cc92855e191c9bdba",
+    "crates/rds-relay/tests/synthetic_address.rs": "6ee645ab419160015ecb0d0d8466c610dd7c0eca214558011a27a1c88ce96088"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6822168040089309,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 1.5692348099546507,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 1.0942911769961938,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 7.453160320990719,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 152.81665620103013,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 106.31939833599608,
+      "build_jobs": 2
+    }
+  ],
+  "test_refinement_checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.7686286700190976,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "rds-relay",
+        "--all-targets",
+        "--all-features",
+        "--features",
+        "rds-net/metrics",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 7.398457239964046,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-relay",
+        "--all-features",
+        "--features",
+        "rds-net/metrics",
+        "--lib"
+      ],
+      "code": 0,
+      "seconds": 26.733381279045716,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 400,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 70
+    },
+    "test-owned": {
+      "passed": 195,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 39
+    }
+  },
+  "focused_library_passed": 10,
+  "source_findings": [
+    "Owned Relay close/drain returned unit and only logged runner JoinError",
+    "Connection JoinSet lived only in accept runner, so abnormal exit lost join ownership"
+  ],
+  "changes": [
+    "Typed cloneable ShutdownError retaining the original JoinError",
+    "close/drain return Result and all existing owned-relay test callers inspect it",
+    "Shared connection JoinSet retained by Relay after runner failure",
+    "Runner outcome saved before fallback awaits; serialized canceled/concurrent/repeated joins",
+    "Existing 5s connection cleanup grace reused, then abort and join"
+  ],
+  "regression": [
+    "Actual relay with an attached RelaySocket, private test-only abort of runner",
+    "Close canceled while blocked on retained child set, then canceled during child join",
+    "Controlled async child explicitly released; repeated/concurrent closes return same error allocation",
+    "Child set empty, owner Weak released, active admission/history/path drivers zero, tunnel unavailable"
+  ],
+  "limits": [
+    "No production failure-injection flag or helper process",
+    "Drop cannot synchronously join and needs continued runtime progress",
+    "Normal runner cleanup proceeds independently; canceled failure fallback is resumed by another close caller",
+    "No native macOS, process-wide panic or real network/service qualification",
+    "Owned relay binary integration, preflight and full operational readiness remain open"
+  ]
+}

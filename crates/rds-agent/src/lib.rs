@@ -8,8 +8,9 @@
 //! - **Capability** — when `policy.issuers` is non-empty the peer must
 //!   additionally present a [`Grant`](rds_core::grant::Grant) signed by
 //!   a trusted issuer as the first stream on the connection. Until a
-//!   grant verifies, every service stream is refused; afterwards each
-//!   stream is checked against the grant's service scope and
+//!   authorization begins, service streams are refused; streams overlapping
+//!   its reply/commit transaction wait with a deadline. Afterwards each
+//!   stream is checked against the committed grant's service scope and
 //!   constraints (TCP ports, displays, bitrate ceiling).
 //!
 //! Revocation: `policy.denylist` holds revoked grant ids — a live
@@ -26,15 +27,22 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rds_core::grant::{self, GrantId, VerifiedGrant};
+use rds_core::grant::{GrantId, VerifiedGrant};
 use rds_core::{
     AgentInfo, HelloAck, PROTOCOL_VERSION, ServiceKind, StreamHello, read_frame, write_frame,
 };
 use rds_net::{Connection, Endpoint, EndpointId};
 use tokio::net::TcpStream;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
 use tracing::{Instrument, debug, info, info_span, warn};
+
+mod authz;
+mod limits;
+mod revocations;
+use authz::{ConnAuthz, ConnectionLifetime, authorize};
+pub use limits::AgentLimits;
+pub use revocations::{RevocationFeed, RevocationPolicy, watch_revocations};
 
 /// Monotonic session ids for structured tracing — every connection's
 /// `rds.conn` span carries one, so `session_id` filters a whole
@@ -49,6 +57,8 @@ fn next_session_id() -> u64 {
 /// otherwise park a task per stream for the connection's lifetime —
 /// bounded here so silent streams cost seconds, not the session.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Mutex acquisition that survives a poisoned lock: every mutex here
 /// guards plain data (a state word, an `Option`, a `HashSet`) whose
@@ -75,11 +85,11 @@ pub struct AgentPolicy {
     pub issuers: HashSet<[u8; 32]>,
     /// Maximum grant lifetime accepted at verify time.
     pub grant_max_ttl: Duration,
-    /// Revoked grant ids; updated by [`Agent::denylist`] feeds (the
-    /// estate's signed revocation snapshot) or tests pushing directly.
+    /// Revoked grant ids and freshness; updated by [`watch_revocations`]
+    /// from the estate's signed snapshot or by explicit local policy.
     /// The `watch` channel notifies live connections so a revoked grant
     /// drops its session, not just future ones.
-    pub denylist: watch::Sender<Arc<HashSet<GrantId>>>,
+    pub denylist: watch::Sender<Arc<RevocationPolicy>>,
     /// Grant ids currently bound to a live connection — the replay
     /// guard: the same grant cannot run two concurrent sessions.
     pub active_grants: Arc<Mutex<HashSet<GrantId>>>,
@@ -109,18 +119,24 @@ impl AgentPolicy {
             allow_any_tcp: false,
             issuers: HashSet::new(),
             grant_max_ttl: Duration::from_secs(300),
-            denylist: watch::channel(Arc::new(HashSet::new())).0,
+            denylist: watch::channel(Arc::new(RevocationPolicy::default())).0,
             active_grants: Arc::new(Mutex::new(HashSet::new())),
             sync_dir: None,
         }
     }
 
     pub fn permits_tcp(&self, host: &str, port: u16) -> bool {
+        let Ok(target) = rds_core::TcpTarget::new(host, port) else {
+            return false;
+        };
+        self.permits_tcp_target(&target)
+    }
+
+    fn permits_tcp_target(&self, target: &rds_core::TcpTarget) -> bool {
         self.allow_any_tcp
-            || self
-                .tcp_targets
-                .iter()
-                .any(|(h, p)| *p == port && h.eq_ignore_ascii_case(host))
+            || self.tcp_targets.iter().any(|(host, port)| {
+                rds_core::TcpTarget::new(host, *port).is_ok_and(|allowed| &allowed == target)
+            })
     }
 
     /// Whether this connection's peer must present a grant.
@@ -129,58 +145,26 @@ impl AgentPolicy {
     }
 
     /// Revoke a grant id — pushes onto the denylist and notifies every
-    /// live connection watcher. Returns the receiver for tests.
+    /// live connection watcher. The value is retained without subscribers.
     pub fn revoke(&self, id: GrantId) {
-        let mut set = (**self.denylist.borrow()).clone();
-        set.insert(id);
-        let _ = self.denylist.send(Arc::new(set));
+        self.denylist.send_modify(|set| {
+            Arc::make_mut(&mut Arc::make_mut(set).ids).insert(id);
+        });
     }
 
     /// Read the current denylist snapshot.
     pub fn denied(&self) -> Arc<HashSet<GrantId>> {
-        self.denylist.borrow().clone()
+        self.denylist.borrow().ids.clone()
     }
 
-    /// Replace the whole denylist — what a fresh estate revocation
-    /// snapshot means. Live connections re-check on the notification.
+    /// Replace revoked ids without changing freshness. Managed feeds commit
+    /// and publish their own complete snapshots; this does not renew a lease.
+    /// Live connections re-check on the notification.
     pub fn replace_denylist(&self, ids: HashSet<GrantId>) {
-        let _ = self.denylist.send(Arc::new(ids));
+        self.denylist.send_modify(|value| {
+            Arc::make_mut(value).ids = Arc::new(ids);
+        });
     }
-}
-
-/// Poll the directory's denylist snapshot into `policy` every
-/// `interval`. Verifies against the estate registry key; a missing
-/// snapshot clears nothing (denylist stays as last seen). Returns the
-/// task handle — abort it to stop polling.
-///
-/// The pull model replaces the plan's server-push: bounded staleness is
-/// the `interval`, and the signed snapshot keeps integrity on an
-/// untrusted directory.
-pub fn watch_revocations(
-    client: rds_discovery::client::Client,
-    registry_key: ed25519_dalek::VerifyingKey,
-    policy: Arc<AgentPolicy>,
-    interval: Duration,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut seen_issued_at = 0u64;
-        loop {
-            match client.fetch_revocations().await {
-                Ok(Some(snap)) => match snap.verify(&registry_key) {
-                    Ok(payload) if payload.issued_at > seen_issued_at => {
-                        seen_issued_at = payload.issued_at;
-                        policy.replace_denylist(payload.revoked.into_iter().collect());
-                        debug!(issued_at = payload.issued_at, "denylist refreshed");
-                    }
-                    Ok(_) => {}
-                    Err(e) => debug!("revocations snapshot rejected: {e}"),
-                },
-                Ok(None) => {}
-                Err(e) => debug!("revocations fetch failed: {e}"),
-            }
-            tokio::time::sleep(interval).await;
-        }
-    })
 }
 
 /// A bound agent: endpoint plus policy, ready to `run`.
@@ -188,15 +172,92 @@ pub struct Agent {
     pub endpoint: Endpoint,
     pub policy: Arc<AgentPolicy>,
     desktop: bool,
+    limits: AgentLimits,
+    admission: Arc<Semaphore>,
+    stream_counter: limits::StreamCounter,
+}
+
+/// Weak, in-memory observation: keeping an exporter alive never owns agent I/O.
+#[derive(Clone)]
+pub struct AgentMetrics(std::sync::Weak<Agent>);
+
+impl AgentMetrics {
+    pub fn snapshot(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        let Some(agent) = self.0.upgrade() else {
+            return std::collections::BTreeMap::from([("rds_agent_metrics_available", 0)]);
+        };
+        let mut values = agent.endpoint.metrics().snapshot();
+        values.extend([
+            ("rds_agent_metrics_available", 1),
+            (
+                "rds_agent_connections_active",
+                agent.active_connections() as u64,
+            ),
+            (
+                "rds_agent_connections_limit",
+                agent.limits.connections() as u64,
+            ),
+            ("rds_agent_streams_active", agent.active_streams() as u64),
+            (
+                "rds_agent_streams_per_connection_limit",
+                agent.limits.streams() as u64,
+            ),
+            (
+                "rds_agent_grants_required",
+                u64::from(agent.policy.grants_required()),
+            ),
+        ]);
+        let grants = agent.policy.active_grants.try_lock().ok();
+        values.insert("rds_agent_active_grants_known", u64::from(grants.is_some()));
+        if let Some(grants) = grants {
+            values.insert("rds_agent_active_grants", grants.len() as u64);
+        }
+        // Clone the immutable value before checking its lease. No watch borrow
+        // spans a clock read or exporter formatting; no identifiers are copied.
+        let policy = agent.policy.denylist.borrow().clone();
+        values.extend(policy.metrics(
+            rds_discovery::clock::Reading::cached_now(),
+            agent.policy.grants_required(),
+        ));
+        values
+    }
 }
 
 impl Agent {
+    pub fn metrics(self: &Arc<Self>) -> AgentMetrics {
+        AgentMetrics(Arc::downgrade(self))
+    }
+
     pub fn new(endpoint: Endpoint, policy: AgentPolicy) -> Self {
+        let limits = AgentLimits::default();
         Self {
             endpoint,
             policy: Arc::new(policy),
             desktop: cfg!(feature = "desktop"),
+            limits,
+            admission: Arc::new(Semaphore::new(limits.connections())),
+            stream_counter: Default::default(),
         }
+    }
+
+    /// Select budgets before starting the agent. Consuming self prevents
+    /// replacing the admission semaphore while a runner borrows this agent.
+    pub fn with_limits(mut self, limits: AgentLimits) -> Self {
+        self.limits = limits;
+        self.admission = Arc::new(Semaphore::new(limits.connections()));
+        self
+    }
+
+    /// Occupied connection slots, including pending handshakes. This differs
+    /// from the transport sampler's count of established allowed connections.
+    pub fn active_connections(&self) -> usize {
+        self.limits.connections() - self.admission.available_permits()
+    }
+
+    /// Service tasks across this agent, including hello/Authz waits. This does
+    /// not count uni routing, blocking disk jobs or native media workers.
+    pub fn active_streams(&self) -> usize {
+        self.stream_counter.active()
     }
 
     pub fn id(&self) -> EndpointId {
@@ -205,35 +266,93 @@ impl Agent {
 
     /// Accept connections until the endpoint closes.
     pub async fn run(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.policy.grants_required() || self.limits.streams() >= 2,
+            "grant mode requires at least two stream slots"
+        );
         info!(id = %self.endpoint.id(), "agent listening");
-        while let Some(incoming) = self.endpoint.accept().await {
-            let policy = self.policy.clone();
-            let desktop = self.desktop;
-            let metrics = self.endpoint.metrics();
-            tokio::spawn(async move {
-                match incoming.await {
-                    Ok(conn) => {
-                        let span = info_span!(
-                            "rds.conn",
-                            peer = %conn.remote_id(),
-                            session_id = next_session_id(),
-                        );
-                        let res = serve_connection(conn, policy, desktop, metrics)
-                            .instrument(span)
-                            .await;
-                        if let Err(e) = res {
-                            debug!("connection ended: {e}");
-                        }
+        rds_observe::emit(rds_observe::Event::ListenerReady);
+        let mut connections = JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                result = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(Err(error)) = result {
+                        debug!(%error, "connection task ended");
                     }
-                    Err(e) => debug!("incoming handshake failed: {e}"),
                 }
-            });
+                incoming = self.endpoint.accept() => {
+                    let Some(incoming) = incoming else { break; };
+                    let Ok(permit) = self.admission.clone().try_acquire_owned() else {
+                        rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);
+                        // Dropping Incoming refuses the handshake without a
+                        // parked application task or a new connection slot.
+                        drop(incoming);
+                        debug!("connection refused: admission budget exhausted");
+                        continue;
+                    };
+                    let audience = *self.endpoint.id().as_bytes();
+                    let policy = self.policy.clone();
+                    let desktop = self.desktop;
+                    let metrics = self.endpoint.metrics();
+                    let limits = self.limits;
+                    let stream_counter = self.stream_counter.clone();
+                    connections.spawn(async move {
+                        let _permit = permit;
+                        match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
+                            Ok(Ok(conn)) => {
+                                let span = info_span!(
+                                    "rds.conn",
+                                    peer = %conn.remote_id(),
+                                    session_id = next_session_id(),
+                                );
+                                if let Err(error) = serve_connection(conn, audience, policy, desktop, metrics, limits, stream_counter)
+                                    .instrument(span).await {
+                                    debug!(%error, "connection ended");
+                                }
+                            }
+                            Ok(Err(error)) => {
+                                rds_observe::emit(rds_observe::Event::HandshakeFailed);
+                                debug!(%error, "incoming handshake failed");
+                            }
+                            Err(_) => {
+                                rds_observe::emit(rds_observe::Event::HandshakeTimedOut);
+                                debug!("incoming handshake timed out");
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        // Endpoint closure wakes established connections and handshakes. Let
+        // their normal paths join service workers before this runner returns.
+        if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+            while let Some(result) = connections.join_next().await {
+                if let Err(error) = result {
+                    debug!(%error, "connection task ended");
+                }
+            }
+        })
+        .await
+        .is_err()
+        {
+            debug!("agent shutdown budget expired; aborting connection tasks");
+            connections.shutdown().await;
         }
         Ok(())
     }
 
     /// Serve a single already-established connection.
     pub async fn serve(&self, conn: Connection) -> anyhow::Result<()> {
+        if self.policy.grants_required() && self.limits.streams() < 2 {
+            conn.close(5u32.into(), b"invalid grant stream budget");
+            anyhow::bail!("grant mode requires at least two stream slots");
+        }
+        let Ok(_permit) = self.admission.clone().try_acquire_owned() else {
+            rds_observe::emit(rds_observe::Event::ConnectionBudgetExhausted);
+            conn.close(5u32.into(), b"agent connection budget exhausted");
+            anyhow::bail!("agent connection budget exhausted");
+        };
         let span = info_span!(
             "rds.conn",
             peer = %conn.remote_id(),
@@ -241,134 +360,89 @@ impl Agent {
         );
         serve_connection(
             conn,
+            *self.endpoint.id().as_bytes(),
             self.policy.clone(),
             self.desktop,
             self.endpoint.metrics(),
+            self.limits,
+            self.stream_counter.clone(),
         )
         .instrument(span)
         .await
     }
 }
 
-/// Per-connection authorization state.
-///
-/// `Pending` — grant mode on, nothing verified yet: every service
-/// stream is refused until an `Authz` stream lands a valid grant.
-/// `Granted` — a verified grant; service streams are scope-checked.
-/// `Open` — legacy mode (`issuers` empty): allowlist alone authorizes.
-enum AuthzState {
-    Open,
-    Pending,
-    Granted(Arc<VerifiedGrant>),
-}
-
-/// Shared per-connection authz cell plus its lifecycle hooks.
-struct ConnAuthz {
-    state: Mutex<AuthzState>,
-    /// Set when the first grant verifies — watchers that close the
-    /// connection on expiry/revocation. Aborted when the conn ends.
-    watcher: Mutex<Option<JoinHandle<()>>>,
-    /// The active grant id, released back into `active_grants` on
-    /// connection teardown so the slot frees for a future session.
-    grant_id: Mutex<Option<GrantId>>,
-    /// One sync session per connection: the journal is per-destination
-    /// and the uni demux serves a single `Sync` claim at a time, so a
-    /// concurrent session gets a clean refusal instead of a race.
-    sync_busy: std::sync::atomic::AtomicBool,
-}
-
-impl ConnAuthz {
-    fn new(required: bool) -> Self {
-        Self {
-            state: Mutex::new(if required {
-                AuthzState::Pending
-            } else {
-                AuthzState::Open
-            }),
-            watcher: Mutex::new(None),
-            grant_id: Mutex::new(None),
-            sync_busy: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    /// Take the per-connection sync slot, or `false` if a session is
-    /// already running.
-    fn try_sync_slot(&self) -> bool {
-        !self
-            .sync_busy
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-    }
-
-    fn release_sync_slot(&self) {
-        self.sync_busy
-            .store(false, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Scope the connection currently has for service streams.
-    fn scope(&self) -> Result<Option<Arc<VerifiedGrant>>, &'static str> {
-        match &*lock(&self.state) {
-            AuthzState::Open => Ok(None),
-            AuthzState::Pending => Err("grant required: send Authz first"),
-            AuthzState::Granted(g) => Ok(Some(g.clone())),
-        }
-    }
-}
-
 async fn serve_connection(
     conn: Connection,
+    audience: [u8; 32],
     policy: Arc<AgentPolicy>,
     desktop: bool,
     metrics: rds_net::metrics::Registry,
+    limits: AgentLimits,
+    stream_counter: limits::StreamCounter,
 ) -> anyhow::Result<()> {
     let peer = conn.remote_id();
     if !policy.allow.contains(&peer) {
+        rds_observe::emit(rds_observe::Event::PeerRejected);
         warn!(%peer, "rejected: endpoint id not in allowlist");
         conn.close(1u32.into(), b"not allowed");
         anyhow::bail!("peer {peer} not in allowlist");
     }
     info!(%peer, "peer connected");
-    // Fold this connection's per-path transport counters into the
-    // endpoint registry for the connection's lifetime.
-    tokio::spawn(metrics.sampler(conn.clone()).run(Duration::from_secs(1)));
-    let authz = Arc::new(ConnAuthz::new(policy.grants_required()));
+    rds_observe::emit(rds_observe::Event::PeerAccepted);
+    let authz = Arc::new(ConnAuthz::new(
+        policy.grants_required(),
+        audience,
+        limits.streams(),
+    ));
+    let lifetime = ConnectionLifetime {
+        conn: conn.clone(),
+        authz: authz.clone(),
+    };
+    // The sampler is part of this future, so cancellation drops its gauges
+    // immediately rather than leaving a detached observer holding Connection.
+    let mut sampler = metrics.sampler(conn.clone());
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut streams = JoinSet::new();
     loop {
-        let (send, recv) = match conn.accept_bi().await {
-            Ok(streams) => streams,
-            Err(e) => {
-                debug!(%peer, "connection closed: {e}");
-                teardown(&conn, &policy, &authz);
-                return Ok(());
+        tokio::select! {
+            biased;
+            _ = conn.wait_closed() => break,
+            result = streams.join_next(), if !streams.is_empty() => {
+                if let Some(Err(error)) = result { debug!(%error, "stream task ended"); }
             }
-        };
-        let policy = policy.clone();
-        let conn = conn.clone();
-        let authz = authz.clone();
-        let span = tracing::Span::current();
-        tokio::spawn(
-            async move {
-                if let Err(e) = serve_stream(conn, send, recv, policy, authz, desktop).await {
-                    debug!("stream ended: {e}");
-                }
+            _ = tick.tick() => sampler.sample(),
+            incoming = conn.accept_bi(), if streams.len() < limits.streams() => {
+                let (send, recv) = match incoming {
+                    Ok(streams) => streams,
+                    Err(error) => {
+                        debug!(%peer, %error, "connection closed");
+                        break;
+                    }
+                };
+                let policy = policy.clone();
+                let conn = conn.clone();
+                let authz = authz.clone();
+                let span = tracing::Span::current();
+                let active = stream_counter.enter();
+                streams.spawn(async move {
+                    let _active = active;
+                    if let Err(error) = rds_observe::observe(
+                        rds_observe::Operation::ServiceStream,
+                        serve_stream(conn, send, recv, policy, authz, desktop),
+                    ).await {
+                        debug!(%error, "stream ended");
+                    }
+                }.instrument(span));
             }
-            .instrument(span),
-        );
+        }
     }
-}
-
-/// Connection teardown: stop the expiry/revocation watcher and release
-/// the grant slot so the same grant may authorize a future session.
-fn teardown(_conn: &Connection, policy: &AgentPolicy, authz: &ConnAuthz) {
-    if let Some(w) = lock(&authz.watcher).take() {
-        w.abort();
-    }
-    if let Some(id) = lock(&authz.grant_id).take() {
-        lock(&policy.active_grants).remove(&id);
-    }
-}
-
-/// Close the connection hard when the presented grant is unusable.
-fn deny(conn: &Connection, why: &'static str) {
-    conn.close(2u32.into(), why.as_bytes());
+    sampler.sample();
+    authz.close_and_wait().await;
+    drop(lifetime);
+    streams.shutdown().await;
+    Ok(())
 }
 
 async fn serve_stream(
@@ -385,11 +459,26 @@ async fn serve_stream(
         Err(_) => anyhow::bail!("stream hello timed out"),
     };
     if let StreamHello::Authz(grant) = hello {
-        return authorize(&conn, send, recv, grant, &policy, &authz).await;
+        return rds_observe::observe(
+            rds_observe::Operation::GrantAuthorize,
+            authorize(&conn, send, grant, &policy, &authz, false),
+        )
+        .await;
     }
-    let grant = match authz.scope() {
+    if let StreamHello::RenewAuthz(grant) = hello {
+        return rds_observe::observe(
+            rds_observe::Operation::GrantRenew,
+            authorize(&conn, send, grant, &policy, &authz, true),
+        )
+        .await;
+    }
+    let grant = match authz.service_scope(&policy).await {
         Ok(g) => g,
         Err(why) => {
+            if why.terminal() {
+                conn.close(2u32.into(), why.message().as_bytes());
+            }
+            let why = why.message();
             write_frame(
                 &mut send,
                 &HelloAck::Error {
@@ -405,6 +494,21 @@ async fn serve_stream(
         write_frame(&mut send, &HelloAck::Error { message: why }).await?;
         anyhow::bail!("stream outside grant scope");
     }
+    let Some(_service_slot) = authz.try_service_slot() else {
+        tokio::time::timeout(
+            HELLO_TIMEOUT,
+            write_frame(
+                &mut send,
+                &HelloAck::Error {
+                    message: "service capacity reached; a slot is reserved for authorization"
+                        .into(),
+                },
+            ),
+        )
+        .await??;
+        send.finish()?;
+        anyhow::bail!("service capacity reached");
+    };
     let span = info_span!("rds.stream", service = ?service_kind(&hello));
     async move {
         match hello {
@@ -434,7 +538,20 @@ async fn serve_stream(
                 send.finish()?;
             }
             StreamHello::TcpConnect { host, port } => {
-                if !policy.permits_tcp(&host, port) {
+                let target = match rds_core::TcpTarget::new(&host, port) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        write_frame(
+                            &mut send,
+                            &HelloAck::Error {
+                                message: format!("invalid TCP destination: {error}"),
+                            },
+                        )
+                        .await?;
+                        return Err(error.into());
+                    }
+                };
+                if !policy.permits_tcp_target(&target) {
                     write_frame(
                         &mut send,
                         &HelloAck::Error {
@@ -444,6 +561,7 @@ async fn serve_stream(
                     .await?;
                     anyhow::bail!("tcp target {host}:{port} rejected");
                 }
+                let (host, port) = target.into_parts();
                 match TcpStream::connect((host.as_str(), port)).await {
                     Ok(mut tcp) => {
                         write_frame(&mut send, &HelloAck::Ok).await?;
@@ -475,6 +593,9 @@ async fn serve_stream(
                                 hello,
                                 rds_desktop::SessionConfig {
                                     bitrate_ceiling: max_bps,
+                                    view_only: grant
+                                        .as_ref()
+                                        .is_some_and(|g| !g.permits_desktop_control()),
                                     ..Default::default()
                                 },
                             )
@@ -526,7 +647,7 @@ async fn serve_stream(
                     .await?;
                     anyhow::bail!("sync service not configured");
                 };
-                if !authz.try_sync_slot() {
+                let Some(_sync_slot) = authz.try_sync_slot() else {
                     write_frame(
                         &mut send,
                         &HelloAck::Error {
@@ -535,11 +656,25 @@ async fn serve_stream(
                     )
                     .await?;
                     anyhow::bail!("concurrent sync session refused");
-                }
+                };
                 write_frame(&mut send, &HelloAck::Ok).await?;
-                let res = rds_sync::engine::serve(conn, send, recv, dir).await;
-                authz.release_sync_slot();
-                res?;
+                let access = grant
+                    .as_ref()
+                    .map_or(rds_sync::engine::Access::READ_WRITE, |g| {
+                        rds_sync::engine::Access {
+                            read: g.permits_sync_read(),
+                            write: g.permits_sync_write(),
+                        }
+                    });
+                rds_sync::engine::serve_with_access(
+                    conn,
+                    send,
+                    recv,
+                    dir,
+                    access,
+                    rds_sync::engine::TRANSFER_TIMEOUT,
+                )
+                .await?;
             }
             StreamHello::Audio(_) => {
                 // Wire shape landed in protocol v2; capture/codec support
@@ -553,7 +688,7 @@ async fn serve_stream(
                 .await?;
                 anyhow::bail!("audio service not implemented");
             }
-            StreamHello::Authz(_) => {
+            StreamHello::Authz(_) | StreamHello::RenewAuthz(_) => {
                 // `authorize` early-returns on Authz, so this is
                 // unreachable — a request path still refuses rather
                 // than panic if that ever stops holding.
@@ -573,133 +708,6 @@ async fn serve_stream(
     .await
 }
 
-/// Verify an `Authz` stream's grant and bind it to this connection.
-///
-/// On success the connection flips to `Granted`, the replay guard holds
-/// the grant id, and a watcher closes the connection the moment the
-/// grant expires or lands on the denylist.
-async fn authorize(
-    conn: &Connection,
-    mut send: rds_net::SendStream,
-    _recv: rds_net::RecvStream,
-    grant: grant::Grant,
-    policy: &AgentPolicy,
-    authz: &ConnAuthz,
-) -> anyhow::Result<()> {
-    if !policy.grants_required() {
-        write_frame(
-            &mut send,
-            &HelloAck::Error {
-                message: "agent does not require grants".into(),
-            },
-        )
-        .await?;
-        anyhow::bail!("Authz on a grant-free agent");
-    }
-    {
-        // A second Authz stream is never valid — either still pending
-        // (fine, this is the first) or already granted (refuse).
-        if matches!(*lock(&authz.state), AuthzState::Granted(_)) {
-            write_frame(
-                &mut send,
-                &HelloAck::Error {
-                    message: "already authorized".into(),
-                },
-            )
-            .await?;
-            anyhow::bail!("duplicate Authz stream");
-        }
-    }
-    let peer = conn.remote_id();
-    let verified = match grant.verify(
-        &policy.issuers,
-        peer.as_bytes(),
-        policy.grant_max_ttl,
-        grant::now_unix(),
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(%peer, "grant rejected: {e}");
-            write_frame(
-                &mut send,
-                &HelloAck::Error {
-                    message: format!("grant rejected: {e}"),
-                },
-            )
-            .await?;
-            deny(conn, "grant rejected");
-            anyhow::bail!("grant rejected: {e}");
-        }
-    };
-    // Denylist first, then the replay guard — both under one lock-free
-    // read + one mutex so admission is atomic.
-    if policy.denied().contains(&verified.id) {
-        write_frame(
-            &mut send,
-            &HelloAck::Error {
-                message: "grant revoked".into(),
-            },
-        )
-        .await?;
-        deny(conn, "grant revoked");
-        anyhow::bail!("grant revoked");
-    }
-    let admitted = lock(&policy.active_grants).insert(verified.id);
-    if !admitted {
-        write_frame(
-            &mut send,
-            &HelloAck::Error {
-                message: "grant already in use".into(),
-            },
-        )
-        .await?;
-        deny(conn, "grant replay");
-        anyhow::bail!("grant replay on concurrent connection");
-    }
-    let grant = Arc::new(verified);
-    *lock(&authz.state) = AuthzState::Granted(grant.clone());
-    *lock(&authz.grant_id) = Some(grant.id);
-    write_frame(&mut send, &HelloAck::Ok).await?;
-    send.finish()?;
-    info!(%peer, grant = %blake3::Hash::from(grant.id), "grant authorized");
-    *lock(&authz.watcher) = Some(tokio::spawn(watch_grant(
-        conn.clone(),
-        grant,
-        policy.denylist.subscribe(),
-    )));
-    Ok(())
-}
-
-/// Live-grant watchdog: closes the connection at `expires_at` or when
-/// the grant id appears on the denylist — whichever comes first.
-async fn watch_grant(
-    conn: Connection,
-    grant: Arc<VerifiedGrant>,
-    mut denylist: watch::Receiver<Arc<HashSet<GrantId>>>,
-) {
-    let expiry = tokio::time::sleep(Duration::from_secs(
-        grant.payload.expires_at.saturating_sub(grant::now_unix()),
-    ));
-    tokio::pin!(expiry);
-    loop {
-        tokio::select! {
-            _ = &mut expiry => {
-                conn.close(3u32.into(), b"grant expired");
-                return;
-            }
-            changed = denylist.changed() => {
-                if changed.is_err() {
-                    return; // sender dropped — policy gone
-                }
-                if denylist.borrow().contains(&grant.id) {
-                    conn.close(4u32.into(), b"grant revoked");
-                    return;
-                }
-            }
-        }
-    }
-}
-
 /// The service a `StreamHello` selects; `None` for `Authz`, which is
 /// not a service stream.
 fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
@@ -710,7 +718,7 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         StreamHello::Desktop(_) => ServiceKind::Desktop,
         StreamHello::Sync => ServiceKind::Sync,
         StreamHello::Audio(_) => ServiceKind::Audio,
-        StreamHello::Authz(_) => return None,
+        StreamHello::Authz(_) | StreamHello::RenewAuthz(_) => return None,
     })
 }
 
@@ -729,7 +737,7 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
     let Some(kind) = service_kind(hello) else {
         return Err("authz is not a service".into());
     };
-    if !grant.permits(kind) {
+    if !grant.permits_service(kind) {
         return Err(format!("service {kind:?} not granted"));
     }
     Ok(())

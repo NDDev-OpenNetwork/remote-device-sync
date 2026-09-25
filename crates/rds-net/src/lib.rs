@@ -34,6 +34,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 
 pub mod announce;
+pub mod config;
 pub mod backends {
     /// Current transport substrate (iroh 1.x on noq underneath).
     pub mod iroh;
@@ -41,7 +42,12 @@ pub mod backends {
     #[cfg(feature = "transport-noq")]
     pub mod noq;
 }
+mod identity;
 pub mod metrics;
+mod observation;
+pub mod relay_control;
+mod uni;
+pub use uni::{UniRoutingStats, UniStreams};
 pub mod resolve;
 
 // Shared identity and address types — the same key material works on
@@ -56,13 +62,14 @@ pub use iroh::endpoint::{
 };
 
 pub use announce::{Announce, AnnounceConfig, announce};
-pub use backends::iroh::{
-    Ticket, default_key_path, load_or_create_key, parse_target, relay_url_of,
-};
+pub use backends::iroh::{Ticket, parse_target, relay_url_of};
+pub use config::{ConfigError, EndpointOverrides, EndpointSettings, RelayLimits, RelaySettings};
+pub use identity::{KeyOwner, KeyStoreError, acquire_key, default_key_path, load_or_create_key};
 pub use resolve::resolve_target;
 
 /// Which transport substrate an endpoint binds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Backend {
     /// iroh endpoint: relay fallback, hole punching, n0 discovery.
     /// The default until `noq` passes the C1 parity gate.
@@ -83,11 +90,11 @@ pub struct EndpointConfig {
     pub secret_key: Option<SecretKey>,
     /// UDP bind addresses. Empty binds `0.0.0.0:0`. Multiple entries
     /// bind multiple interfaces on backends that support socket muxing
-    /// (`noq`); single-socket backends use the first entry.
+    /// (`noq`); iroh refuses more than one entry.
     pub bind_addrs: Vec<SocketAddr>,
-    /// Custom relay URLs. Empty uses the backend's default relay set
-    /// (n0 public relays for iroh). Multiple relays give the client
-    /// automatic failover — production deployments should run ≥2.
+    /// Custom iroh relay URLs. Refused by the owned backend, which uses
+    /// `relay_endpoint`. Empty uses the backend's preset (iroh public relays
+    /// when discovery is enabled; otherwise direct only).
     pub relays: Vec<RelayUrl>,
     /// Publish/resolve addresses via the backend's lookup services
     /// (iroh: n0 DNS + pkarr). `false` binds the `Minimal` preset —
@@ -107,6 +114,9 @@ pub struct EndpointConfig {
     /// relayed paths that migrate like any other QUIC path.
     #[cfg(feature = "transport-noq")]
     pub relay_endpoint: Option<EndpointAddr>,
+    /// Per-tunnel peer/queue limits and unpinned mapping retirement.
+    #[cfg(feature = "transport-noq")]
+    pub relay_limits: RelayLimits,
     /// QUIC ALPN protocol ids. Defaults to `rds/0`.
     pub alpns: Vec<Vec<u8>>,
 }
@@ -122,6 +132,8 @@ impl Default for EndpointConfig {
             max_multipath_paths: None,
             #[cfg(feature = "transport-noq")]
             relay_endpoint: None,
+            #[cfg(feature = "transport-noq")]
+            relay_limits: RelayLimits::default(),
             alpns: vec![rds_core::ALPN.to_vec()],
         }
     }
@@ -349,7 +361,7 @@ pub struct Connection {
     inner: ConnectionInner,
     /// Routes inbound uni streams to the consumer that claimed their
     /// `UniHello` tag — see [`Connection::uni_streams`].
-    demux: std::sync::Arc<UniDemux>,
+    demux: std::sync::Arc<uni::Demux>,
 }
 
 #[derive(Clone)]
@@ -359,114 +371,33 @@ enum ConnectionInner {
     Noq(backends::noq::Connection),
 }
 
-/// Per-connection uni-stream router: one `accept_uni` owner that reads
-/// each stream's `UniHello` tag and hands the stream to the consumer
-/// that claimed the tag. Without it, independent consumers racing on
-/// `accept_uni` steal each other's streams.
-#[derive(Default)]
-struct UniDemux {
-    state: std::sync::Mutex<UniDemuxState>,
-}
-
-#[derive(Default)]
-struct UniDemuxState {
-    routes: std::collections::HashMap<rds_core::UniHello, tokio::sync::mpsc::Sender<RecvStream>>,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-/// Demux queue depth per kind. Desktop frame streams arrive one per
-/// frame and the consumer drains them into per-stream tasks
-/// immediately, so 128 covers bursts without letting a wedged consumer
-/// grow memory unboundedly.
-const UNI_DEMUX_DEPTH: usize = 128;
-
-/// Inbound uni streams of one [`rds_core::UniHello`] kind — see
-/// [`Connection::uni_streams`].
-pub struct UniStreams {
-    kind: rds_core::UniHello,
-    rx: tokio::sync::mpsc::Receiver<RecvStream>,
-}
-
-impl UniStreams {
-    /// The kind this inbox serves.
-    pub fn kind(&self) -> rds_core::UniHello {
-        self.kind
-    }
-
-    /// Next inbound stream of this kind; `None` once the connection
-    /// dies.
-    pub async fn recv(&mut self) -> Option<RecvStream> {
-        self.rx.recv().await
-    }
-}
-
-/// How long an inbound uni stream may sit before writing its `UniHello`
-/// tag. A peer that opens streams and never tags them would otherwise
-/// park a demux task per stream until the connection dies.
-const UNI_TAG_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The demux body: accept, then hand each stream its own tag-read task
-/// so a peer that stalls before writing the `UniHello` cannot block
-/// routing of the streams queued behind it (head-of-line). Runs until
-/// the connection dies; a route whose consumer dropped is removed so a
-/// later `uni_streams` can reclaim the kind. On exit every registered
-/// sender is dropped so parked [`UniStreams::recv`] callers observe
-/// `None` — a dead connection ends its inboxes, it does not leave them
-/// waiting forever.
-async fn uni_demux(conn: Connection, demux: std::sync::Arc<UniDemux>) {
-    loop {
-        let stream = match conn.accept_uni().await {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        let demux = std::sync::Arc::clone(&demux);
-        tokio::spawn(async move {
-            route_uni(stream, &demux).await;
-        });
-    }
-    let mut st = demux.state.lock().unwrap();
-    st.task = None;
-    st.routes.clear();
-}
-
-/// Read one stream's tag and hand it to the claimed inbox. Stream order
-/// within a kind is not the accept order under parallel tag reads;
-/// consumers order by their own wire sequencing (frame `seq`, chunk
-/// index).
-async fn route_uni(mut stream: RecvStream, demux: &UniDemux) {
-    let kind = match tokio::time::timeout(
-        UNI_TAG_TIMEOUT,
-        rds_core::read_frame::<_, rds_core::UniHello>(&mut stream),
-    )
-    .await
-    {
-        Ok(Ok(k)) => k,
-        Ok(Err(e)) => {
-            tracing::debug!("uni stream dropped, unreadable tag: {e}");
-            return;
+impl ConnectionInner {
+    fn accept_uni(&self) -> AcceptUni<'_> {
+        match self {
+            Self::Iroh(c) => c.accept_uni(),
+            #[cfg(feature = "transport-noq")]
+            Self::Noq(c) => c.accept_uni(),
         }
-        Err(_) => {
-            tracing::debug!("uni stream dropped: tag timeout");
-            return;
-        }
-    };
-    let tx = demux.state.lock().unwrap().routes.get(&kind).cloned();
-    match tx {
-        Some(tx) => {
-            // Backpressure, not loss: a full queue parks the router task
-            // until the consumer drains it (sync transfers must never
-            // silently lose a chunk stream). Other streams keep routing.
-            if tx.send(stream).await.is_err() {
-                // Only remove the route if the map still holds *this*
-                // channel — a re-claimed kind must not be clobbered by
-                // a stale sender's failure.
-                let mut st = demux.state.lock().unwrap();
-                if st.routes.get(&kind).is_some_and(|t| t.same_channel(&tx)) {
-                    st.routes.remove(&kind);
-                }
+    }
+
+    async fn closed(&self) {
+        match self {
+            Self::Iroh(c) => {
+                c.closed().await;
+            }
+            #[cfg(feature = "transport-noq")]
+            Self::Noq(c) => {
+                c.inner().closed().await;
             }
         }
-        None => tracing::debug!("uni {kind:?} stream dropped: no consumer"),
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Iroh(c) => c.close_reason().is_some(),
+            #[cfg(feature = "transport-noq")]
+            Self::Noq(c) => c.inner().close_reason().is_some(),
+        }
     }
 }
 
@@ -528,11 +459,7 @@ impl Connection {
     /// services use tagged streams, a direct `accept_uni` races the
     /// demux and can steal tagged streams from their consumers.
     pub fn accept_uni(&self) -> AcceptUni<'_> {
-        match &self.inner {
-            ConnectionInner::Iroh(c) => c.accept_uni(),
-            #[cfg(feature = "transport-noq")]
-            ConnectionInner::Noq(c) => c.accept_uni(),
-        }
+        self.inner.accept_uni()
     }
 
     /// Claim inbound uni streams tagged `kind` (the `UniHello` first
@@ -544,19 +471,13 @@ impl Connection {
     ///
     /// Must be called inside a tokio runtime.
     pub fn uni_streams(&self, kind: rds_core::UniHello) -> anyhow::Result<UniStreams> {
-        let (tx, rx) = tokio::sync::mpsc::channel(UNI_DEMUX_DEPTH);
-        let mut st = self.demux.state.lock().unwrap();
-        if st.routes.get(&kind).is_some_and(|s| !s.is_closed()) {
-            anyhow::bail!("uni stream kind {kind:?} already claimed");
-        }
-        st.routes.insert(kind, tx);
-        if st.task.is_none() {
-            st.task = Some(tokio::spawn(uni_demux(
-                self.clone(),
-                std::sync::Arc::clone(&self.demux),
-            )));
-        }
-        Ok(UniStreams { kind, rx })
+        self.demux.claim(&self.inner, kind)
+    }
+
+    /// Current uni-router work and local receive limits. These are resource
+    /// limits of this implementation, not negotiated protocol capabilities.
+    pub fn uni_routing_stats(&self) -> UniRoutingStats {
+        self.demux.stats()
     }
 
     /// Send an unreliable datagram.
@@ -589,82 +510,61 @@ impl Connection {
     /// Whether the connection has closed (either side). Samplers use
     /// this as their stop condition.
     pub fn is_closed(&self) -> bool {
-        match &self.inner {
-            ConnectionInner::Iroh(c) => c.close_reason().is_some(),
-            #[cfg(feature = "transport-noq")]
-            ConnectionInner::Noq(c) => c.inner().close_reason().is_some(),
-        }
+        self.inner.is_closed()
     }
 
-    /// Snapshot of every live path's transport counters, normalized
-    /// across backends. Used by media pacing (WS5) and metrics (WS7).
+    /// Wait for transport closure. Service owners coordinate their own cleanup;
+    /// this notification does not imply all application tasks have been joined.
+    pub async fn wait_closed(&self) {
+        self.inner.closed().await;
+    }
+
+    /// Counters for currently observed live paths. Noq observations contain
+    /// only the handshake path and subsequently consumed Established events.
+    /// Use [`Self::path_stats_snapshot`] when coverage matters.
     pub fn path_stats(&self) -> Vec<PathStats> {
+        self.path_stats_snapshot().paths
+    }
+
+    /// Path counters with their observation scope. This is not an atomic
+    /// connection-wide engine snapshot on Noq, even before event loss.
+    pub fn path_stats_snapshot(&self) -> PathStatsSnapshot {
         match &self.inner {
-            ConnectionInner::Iroh(c) => c
-                .paths()
-                .iter()
-                .map(|p| {
-                    let s = p.stats();
-                    PathStats {
-                        path_id: path_id_u64(p.id()),
-                        rtt: s.rtt,
-                        cwnd: s.cwnd,
-                        sent: s.udp_tx.datagrams,
-                        lost: s.lost_packets,
-                        sent_bytes: s.udp_tx.bytes,
-                        recv_bytes: s.udp_rx.bytes,
-                        congestion_events: s.congestion_events,
-                        selected: p.is_selected(),
-                        via_relay: p.is_relay(),
-                    }
-                })
-                .collect(),
+            ConnectionInner::Iroh(c) => observation::iroh_snapshot(c),
             #[cfg(feature = "transport-noq")]
-            ConnectionInner::Noq(c) => {
-                // PathIds are sequential from ZERO; probe until a run of
-                // misses marks the end of the live set.
-                let mut out = Vec::new();
-                let mut misses = 0u32;
-                for raw in 0..64u32 {
-                    match c.inner().path_stats(noq::PathId::from(raw)) {
-                        Some(s) => {
-                            misses = 0;
-                            out.push(PathStats {
-                                path_id: u64::from(raw),
-                                rtt: s.rtt,
-                                cwnd: s.cwnd,
-                                sent: s.udp_tx.datagrams,
-                                lost: s.lost_packets,
-                                sent_bytes: s.udp_tx.bytes,
-                                recv_bytes: s.udp_rx.bytes,
-                                congestion_events: s.congestion_events,
-                                selected: raw == 0,
-                                via_relay: false,
-                            });
-                        }
-                        None => {
-                            misses += 1;
-                            if misses >= 8 {
-                                break;
-                            }
-                        }
-                    }
-                }
-                out
-            }
+            ConnectionInner::Noq(c) => c.path_stats_snapshot(),
         }
     }
 
-    /// Stats of the path currently selected for transmission — the one
-    /// media pacing should react to. `None` before the first path exists.
+    /// Stats of the observed selected path, for media pacing. Returns None
+    /// when selection is unknown, closed, or Noq path events have been lost;
+    /// historical traffic volume is not evidence of current selection.
     pub fn current_path_stats(&self) -> Option<PathStats> {
-        let paths = self.path_stats();
-        paths
-            .iter()
-            .find(|p| p.selected)
-            .copied()
-            .or_else(|| paths.into_iter().max_by_key(|p| p.sent))
+        self.path_stats().into_iter().find(|p| p.selected)
     }
+}
+
+/// Scope of the accompanying path observation, not a delivery guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStatsCoverage {
+    /// Snapshot exposed by the backend's own path manager (iroh).
+    BackendSnapshot,
+    /// Noq paths whose validation the RDS policy has observed. Events may be
+    /// queued, and additional engine paths are not inferred from addresses.
+    PolicyObserved {
+        /// Cumulative broadcast events lost. Never reset without a complete
+        /// validated-path reconciliation; currently no such engine API exists.
+        lost_events: u64,
+        /// Whether the observer and connection are still running.
+        driver_running: bool,
+    },
+}
+
+/// Current observed paths, with an explicit coverage contract.
+#[derive(Debug, Clone)]
+pub struct PathStatsSnapshot {
+    pub paths: Vec<PathStats>,
+    pub coverage: PathStatsCoverage,
 }
 
 /// Per-path transport counters, backend-normalized. All fields are
@@ -687,15 +587,17 @@ pub struct PathStats {
     pub recv_bytes: u64,
     /// Congestion events signalled on this path.
     pub congestion_events: u64,
-    /// Whether the connection currently transmits on this path.
+    /// Observed preferred path: iroh selection, or the last successfully
+    /// applied Noq policy choice that is still Available. Not per-packet proof.
     pub selected: bool,
     /// Whether this path traverses a relay (vs a direct address).
     pub via_relay: bool,
 }
 
 fn path_id_u64(id: iroh::endpoint::PathId) -> u64 {
-    // PathId's inner u32 is crate-private; its Display prints the number.
-    id.to_string().parse().unwrap_or(u64::MAX)
+    // Invariant of the pinned noq-proto PathId shared by both backends:
+    // Display delegates to its inner u32. Never fabricate a colliding ID.
+    id.to_string().parse().expect("PathId Display is a u32")
 }
 
 impl fmt::Debug for Connection {

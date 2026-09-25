@@ -1,0 +1,183 @@
+{
+  "source_base": "991f236",
+  "scope": [
+    "W2.5 admitted relay work bounds",
+    "W3.2 malformed datagram handling"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-relay/src/server.rs": "7b092e510422d2065f36ee5f276cb10cb21f6dd27344519819a4acaa3662feeb",
+    "crates/rds-relay/src/server/accounting_tests.rs": "b79c89578063cc0a9b9eca086f6e78474bac7057e0da37ea52bdb1d04d2ddfef"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.8497648820048198,
+      "build_jobs": 2
+    },
+    {
+      "name": "fmt-shared",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/relay_runtime.rs"
+      ],
+      "code": 0,
+      "seconds": 0.07132607302628458,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 4.670802278909832,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 4.584633906953968,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 5.963250915054232,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 157.2571614140179,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-server",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 151.73875788308214,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 413,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 72
+    },
+    "owned": {
+      "passed": 219,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 43
+    },
+    "focused": {
+      "passed": 39,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 10
+    }
+  },
+  "before_fix": {
+    "test": "server::accounting_tests::malformed_datagrams_are_charged_before_validation",
+    "failed": 1,
+    "observed_charge": [
+      false,
+      false,
+      false
+    ],
+    "inputs": [
+      "empty frame",
+      "three-byte frame",
+      "32-byte invalid curve-point destination"
+    ],
+    "cleanup": "client and relay joined, occupied admission zero before assertion"
+  },
+  "budget": {
+    "units_per_second": 67108864,
+    "burst_units": 4194304,
+    "min_charge": 1024,
+    "charge": "max(raw_frame_bytes, min_charge)",
+    "scope": "each relay attachment",
+    "small_frame_steady_per_second": 65536,
+    "small_frame_full_burst": 4096
+  },
+  "changes": [
+    "Charge raw datagram before frame validation and route lookup",
+    "Minimum per-frame work cost includes empty/malformed frames",
+    "Look up exact raw destination bytes in TLS-authenticated attachment table; no per-datagram curve decompression",
+    "Deterministic token refill/cap tests replace sleep-based timing"
+  ],
+  "regression": [
+    "Real QUIC malformed-input accounting now passes",
+    "Small-frame finite burst and positive charge, exact larger-frame byte charge",
+    "Fixed-time refill and idle-burst cap",
+    "Existing relay-only encrypted forwarding, unknown peer, failure isolation, resource ownership, drain, real binary restart suites"
+  ],
+  "limits": [
+    "Budget limits admitted application work, not raw QUIC receive/decrypt cost or process-global CPU",
+    "Reattachment starts a new budget; reconnect/control-rate/global-fairness policy remains open",
+    "Small valid datagrams now consume minimum charge, a deliberate admission behavior change",
+    "No wire/state/dependency change and no external helper",
+    "No measured speedup, throughput qualification, native macOS or physical flood acceptance",
+    "All remediation waves remain open; cargo-deny unavailable"
+  ]
+}

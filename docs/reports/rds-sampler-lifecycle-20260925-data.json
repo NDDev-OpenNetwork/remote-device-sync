@@ -1,0 +1,200 @@
+{
+  "source_base": "fca82e34fa27fbdfff7fa7262ef165079ee92a6a",
+  "scope": [
+    "W2.5 sampler ownership",
+    "W0 measurement validity",
+    "W10.1 observation lifecycle"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "Cargo.lock": "dd0f02ee9577dc797f676beb4839d192b39956c384088cbca37bc1f3befdf148",
+    "crates/rds-bench/src/world.rs": "039bde71937dcaed87fd33740570b37e402ade57ba28032c487f8a580cf6f4d3",
+    "crates/rds-net/src/backends/noq/mod.rs": "bc7b06a5a0f25b94e38b5ca15750a84235b9e42bb7e0fd899f677e630d772dff",
+    "crates/rds-net/src/lib.rs": "a4d55b227d371fb990ded4523d75cc8dfa0a8fe4f9a716b6bed963fb51da7b00",
+    "crates/rds-net/src/metrics.rs": "5fb3f64e8a7e28adf5d99cf7d6b8d581fd11b573cfd299cb7fe5947ffcf0a2b9",
+    "crates/rds-net/src/observation.rs": "2124edacdd071f66d9a00093d98e2132f6a8d5e8f9e621ec9379d948de17b241",
+    "crates/rds-net/tests/sampler_lifecycle.rs": "33f21ab88794a280b0c6b750092093f5494a50e548f00e15e1e3add4b24be774"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.8810631330125034,
+      "build_jobs": 2
+    },
+    {
+      "name": "fmt-shared",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/relay_runtime.rs"
+      ],
+      "code": 0,
+      "seconds": 0.06718025903683156,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 18.773266217904165,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 19.36618950602133,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 23.632635995047167,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 345.804934461019,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-server",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 278.75582032697275,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-iroh-only",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--test",
+        "sampler_lifecycle"
+      ],
+      "code": 0,
+      "seconds": 48.77658453397453,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 431,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 74
+    },
+    "expanded": {
+      "passed": 238,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 45
+    },
+    "isolated_iroh": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 1
+    }
+  },
+  "focused_tests": {
+    "passed": 15,
+    "targets": 4
+  },
+  "build": {
+    "jobs": 2,
+    "isolated_target_directory": true
+  },
+  "failing_before": {
+    "tests": [
+      "iroh_sampler_observes_without_owning_connection",
+      "owned_sampler_observes_without_owning_connection"
+    ],
+    "exit_code": 101,
+    "observation": "An idle sampler kept transport I/O alive after the application dropped its last Connection handle; peer-close deadline expired."
+  },
+  "changes": [
+    "Samplers retain weak backend observation handles without facade or uni-router ownership",
+    "Weak close notifications wake run independently of sampling interval",
+    "Closed iroh handles expose no live path snapshot",
+    "A metadata owner token invalidates only its own last selected RTT/cwnd sample on drop",
+    "Benchmark one-shot observation owner remains alive through its registry scrape"
+  ],
+  "regressions": [
+    "Both backend peers observe last application-handle drop while an idle sampler is retained",
+    "Explicit close ends a running sampler with a one-hour sampling interval and handles retained",
+    "Already open bidirectional streams carry data after facade drop; last stream drop ends sampling",
+    "Canceled sampler releases gauges without closing the application connection; datagram still arrives",
+    "Late sampler run after closure returns without waiting for the interval",
+    "Dropping an older connection sampler preserves a newer selected gauge; dropping its owner clears it",
+    "Existing transport metrics, policy lifecycle and uni-router tests remain green"
+  ],
+  "limits": [
+    "Sampled counters can miss retired or short-lived paths and final increments",
+    "No complete Noq path inventory, per-session series or lossless teardown accounting",
+    "Manual sample callers retain polling/drop responsibility; active_connections counts live sampler objects",
+    "Endpoint gauges describe the last sample and remain separate from atomic connection-wide state",
+    "Native macOS and physical network qualification not run; cargo-deny unavailable",
+    "No dependency, runtime helper, wire version, backend default, performance improvement or wave closure"
+  ]
+}

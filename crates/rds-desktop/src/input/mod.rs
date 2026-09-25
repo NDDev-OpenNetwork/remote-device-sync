@@ -19,6 +19,8 @@ pub mod macos;
 
 use crate::{DesktopError, InputSink};
 
+pub(crate) mod worker;
+
 /// First usable input backend on this machine.
 pub fn probe() -> Result<Box<dyn InputSink>, DesktopError> {
     #[cfg(all(target_os = "linux", feature = "x11"))]

@@ -1,0 +1,184 @@
+{
+  "source_base": "948d66d",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/lib.rs": "00b38fedf0e56f5a37bce7a37b356a85c3b0f82fd38882fc1832192398598d02",
+    "crates/rds-net/src/uni.rs": "e4499eb5c82d61c981bca89f804e82eb9a2e4f106b2dfc453b518438d9f57d29",
+    "crates/rds-net/tests/uni_demux.rs": "a2e07e6065beb190c4536ed31470a36ca94c247e83381fb9af3f3a25b2508d7e",
+    "crates/rds-net/tests/uni_lifecycle.rs": "f57ba02544393576e16b2737e43626e2ca00d66051d833310331f3f74b5866d1"
+  },
+  "checks": [
+    {
+      "name": "targeted",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--all-features",
+        "--test",
+        "uni_lifecycle",
+        "--test",
+        "uni_demux"
+      ],
+      "code": 0,
+      "seconds": 10.267119047115557,
+      "build_jobs": 2
+    },
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6526666139252484,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 23.176295978948474,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.90466735197697,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 21.93854106508661,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 283.48959148302674,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 202.23746570700314,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--test",
+        "uni_lifecycle",
+        "--test",
+        "uni_demux"
+      ],
+      "code": 0,
+      "seconds": 23.262494213995524,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "targeted": {
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 2
+    },
+    "test": {
+      "passed": 307,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 55
+    },
+    "test-owned": {
+      "passed": 92,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 26
+    },
+    "test-isolated": {
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 2
+    }
+  },
+  "before_fix_failures": [
+    "discarded_iroh_uni_router_does_not_keep_connection_alive",
+    "discarded_owned_uni_router_does_not_keep_connection_alive"
+  ],
+  "bounds": {
+    "pending_tasks": 64,
+    "inbox_streams_per_kind": 128,
+    "tag_timeout_seconds": 10
+  },
+  "saturation_fixture": {
+    "quic_uni_credit": 512,
+    "full_inbox": 128,
+    "pending_handoffs": 64,
+    "additional_queued_streams": 8
+  },
+  "limits": [
+    "Local implementation bounds, not negotiated/session-ID routing",
+    "Full kind queues can occupy pending-task budget; cross-kind QoS remains open",
+    "Drop requests cancellation; normal router exit joins workers before clearing producers",
+    "Not global process RSS/FD, agent, relay, media or blocking disk qualification",
+    "No native macOS, real NAT/failover, deployment or wave closure"
+  ]
+}

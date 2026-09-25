@@ -9,6 +9,7 @@
 //! `handshake`, `transfer`, `multiconnect`, plus rds-specific
 //! `ping`, `relay-fallback`, `impaired`.
 
+pub mod capacity;
 pub mod impair;
 pub mod report;
 pub mod scenario;

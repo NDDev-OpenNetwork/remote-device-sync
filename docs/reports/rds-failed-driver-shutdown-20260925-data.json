@@ -1,0 +1,165 @@
+{
+  "source_base": "b503a2e",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/drivers.rs": "c251db542031f383893c68c41b689eaf97b1d55de4d6f2a8851137b9cc9def45",
+    "crates/rds-net/tests/failed_driver_shutdown.rs": "519053c071db936daecc533dd02038592cab40968644e7fcd559403974db4fbc"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6617407500743866,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 13.05253161105793,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 14.032884103013203,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 15.864199499017559,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 292.547604485997,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 213.2740916950861,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--features",
+        "transport-noq",
+        "--lib",
+        "--test",
+        "failed_driver_shutdown",
+        "--test",
+        "uni_lifecycle",
+        "--test",
+        "turmoil_sim",
+        "--test",
+        "driver_lifecycle"
+      ],
+      "code": 0,
+      "seconds": 36.43295987392776,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 357,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 64
+    },
+    "test-owned": {
+      "passed": 150,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 35
+    },
+    "test-isolated": {
+      "passed": 40,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 5
+    }
+  },
+  "before_fix_failures": [
+    "After confirmed terminal sender failure, retained Connection plus Path handles left Endpoint::close waiting beyond the one-second deadline."
+  ],
+  "fixture_notes": [
+    "Initial single-I/O-handle baseline passed via implicit close; retaining a Path reproduced the stopped-driver case."
+  ],
+  "focused": {
+    "passed": 15,
+    "targets": 4
+  },
+  "shutdown": {
+    "signal": "endpoint-owned CancellationToken under serialized admission close",
+    "action": "upgrade only a weak connection handle and close state directly before policy task exits",
+    "strong_handle_across_await": false
+  },
+  "limits": [
+    "Explicit local shutdown of admitted connections, not recovery of failed transport/protocol driver",
+    "Not a guarantee of successful peer notification or complete underlying QUIC packet/history draining",
+    "Generic child failure isolation, global resource bounds and service recovery remain open",
+    "No physical network, native macOS, production deployment or wave closure"
+  ]
+}

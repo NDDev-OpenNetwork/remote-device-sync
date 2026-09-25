@@ -89,6 +89,16 @@ impl<T> Sender<T> {
 }
 
 impl<T> Receiver<T> {
+    /// Queued depth at one instant; arrivals may change it after this call.
+    pub fn len(&self) -> usize {
+        self.0.queue.lock().unwrap().len()
+    }
+
+    /// True when nothing is queued at this instant.
+    pub fn is_empty(&self) -> bool {
+        self.0.queue.lock().unwrap().is_empty()
+    }
+
     /// Next item, awaiting when empty. Returns `None` when every sender
     /// is gone — a dropped queue reads as closed.
     pub async fn recv(&mut self) -> Option<T> {

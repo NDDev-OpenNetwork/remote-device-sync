@@ -1,0 +1,159 @@
+{
+  "source_base": "7fbe947",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/mod.rs": "bac9e7c4561edf283d294fec14b2421d95e3d9c301a49f44c560cebbc6d3c5a5",
+    "crates/rds-net/src/backends/noq/dial.rs": "64d89eb310262b9e8e0ae00a77eb0b2cd4a04a911cc743aa52559b5b35aa76ad",
+    "crates/rds-net/src/backends/noq/tls.rs": "6d16978cb408c3bae01733db098297a40ecbfdb0ac4925c5f2c615b12ce4457b",
+    "crates/rds-net/tests/alpn_selection.rs": "4e6414dc794404f6c6e28e872854ce5dedf92b66dca569d24d8a03543c87d985"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.5571691959630698,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 13.173599291942082,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 14.383489459054545,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.07089240604546,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 276.6129284161143,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 193.9822967259679,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--features",
+        "transport-noq",
+        "--lib",
+        "--test",
+        "alpn_selection",
+        "--test",
+        "candidate_race"
+      ],
+      "code": 0,
+      "seconds": 38.48740278102923,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 341,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 61
+    },
+    "test-owned": {
+      "passed": 132,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 32
+    },
+    "test-isolated": {
+      "passed": 26,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 3
+    }
+  },
+  "before_fix_failures": [
+    "requested_protocol_overrides_the_servers_other_preference",
+    "missing_requested_protocol_cannot_fall_back_to_another",
+    "concurrent_protocol_requests_cannot_change_each_others_offer"
+  ],
+  "bounds": {
+    "configured_alpns": 16,
+    "offered_alpns_per_dial": 1,
+    "tls_session_cache_entries_per_endpoint": 256
+  },
+  "fixture_trial": "A trial waiting for a wrong server to observe client TLS rejection within 2 seconds timed out. Peer-visible rejection is not a client-failure completion signal. The original wrong-identity regression was retained unchanged; deterministic port-zero refusal separately covers failure-before-success ordering.",
+  "limits": [
+    "Exact ALPN only, not full capability/version/limit negotiation",
+    "Reused endpoints tested; successful TLS resumption not measured",
+    "Existing underlying early-data settings unchanged; no into_0rtt/application early-data path added",
+    "No native macOS, production deployment or wave closure"
+  ]
+}

@@ -1,5 +1,19 @@
 # Implementation plan — owned connectivity core (v0.2) and beyond
 
+Follow-up execution: [remediation plan](remediation-plan.md), based on the
+[2026-09-24 audit](reports/rds-audit-20260924.md). It identifies reopened
+acceptance criteria and remaining product work. This original WS0–WS8 plan
+and its dated reports are historical requirements/evidence, not a claim that
+all current behavior satisfies them.
+
+The owner's 2026-09-25 observability addition is tracked in the
+[observability contract and O1–O6 execution sequence](observability.md), under
+remediation W10.1/W10.2. It uses shared Rust process telemetry with replaceable
+Vector/OpenObserve infrastructure and does not close historical C7 by itself.
+The durable catalog/policy observation increment is recorded in its
+[2026-09-25 receipt](reports/rds-durable-metrics-20260925.md); source coverage
+remains partial and the O3–O6 gates still apply.
+
 The detailed engineering plan. `docs/roadmap.md` holds milestones and
 gates; this file holds the workstreams: tasks, file-level scope, API
 sketches, tests, exit criteria. Every fact about external crates/drafts
@@ -7,6 +21,15 @@ below was verified against vendored sources or upstream documents on
 2026-09-21; where a fact is a projection, it is marked.
 
 ## 0. Doctrine
+
+The current product-facing increment is the W2.4
+[local session manager](local-sessions.md). Default CLI connectivity and local
+key-inode runtime ownership are implemented. Remaining manager work covers
+viewer/sync APIs and installed-device qualification. The [native SSH client](ssh.md)
+now covers standard shell/exec/PTY requests; host-key/account enrollment,
+broker/reattachment and real-network/platform qualification remain W5 work,
+alongside viewer/input switching. This supplements the complete remediation plan;
+the manager does not close a wave or replace WS0 acceptance requirements.
 
 - **Harness first**: WS0 builds the measurement rig before any
   transport code, so every later change is measured, not argued.
@@ -91,7 +114,7 @@ A gate id is a promise: wave N+1 must keep wave N's checks green.
 | WS5 | session/media protocol v2 | `rds-core`, `rds-desktop` | C5: latency under loss | C1 |
 | WS6 | sync transfer protocol | `rds-sync`, `rds-cli` | C6: never corrupts | C1 |
 | WS7 | observability surface | `rds-net`, `rds-server`, `rds-agent` | C7: numbers are real | C1–C3 |
-| WS8 | deploy on gds-services + real E2E | estate side | C8: real metal | all |
+| WS8 | deploy on directory-host + real E2E | estate side | C8: real metal | all |
 
 v0.3+ media/platform work (Vulkan Video, KMS, SCK, wgpu render) starts
 only after C1–C3 pass.
@@ -278,8 +301,9 @@ selection without dropping live sessions.
 
 - **D1** — `rds-server` HTTP API (or QUIC service stream; pick HTTP for
   ops simplicity): `PUT /v1/records` (verify → store; rate-limited),
-  `GET /v1/records/{key}`, `DELETE`, `GET /v1/health`,
-  `GET /v1/metrics`. Store: `rds_discovery::FileStore`.
+  `GET /v1/records/{key}`, `DELETE`, `GET /v1/health`. Store:
+  `rds_discovery::FileStore`. The original `/v1/metrics` route was removed by
+  remediation O2; metrics use the separate authenticated admin listener.
 - **D2** — agent publish loop (`rds-net` `announce` task): publish on
   start, refresh at `expires_at − TTL/3`, re-publish on
   `PathEvent::ObservedAddr` change.
@@ -310,18 +334,25 @@ resolve→connect→first byte ≤ 300 ms on LAN, measured by the harness.
 
 ## 6. WS4 — capability authz
 
-- Grant record in `rds-core`: `{issuer: Key, subject: EndpointKey,
-  services: [Service], not_before, expires_at, constraints: {max_bps?,
-  ports?, displays?}, signature}` — our own signed format (ed25519-dalek
-  already in tree); biscuit deferred unless delegation chains prove
-  needed.
+- Implemented [grant v2](grant-leases.md) in `rds-core`: `{version, revision,
+  issuer, subject, audience, nonce, services, not_before, expires_at, constraints}`
+  inside a domain-separated Ed25519 signed envelope. Stable session IDs span
+  same-scope renewals. Existing ed25519-dalek/BLAKE3 supply primitives; delegation
+  chains are not implemented.
 - Enforcement: grant presented in the first control frame; agent
   verifies signature + expiry + service scope before opening service
   streams. Connection-level rejection = close before any stream
   service (same effect as `EndpointHooks::after_handshake`).
+- Directional permissions: `SyncRead`/`SyncWrite` are checked before any
+  filesystem access. `DesktopView` needs `DesktopControl` for input; view-only
+  never invokes the sink. Legacy broad capabilities retain their meaning.
+  Appended tags fail closed on older decoders. See the [2026-09-26
+  receipt](reports/rds-service-scopes-20260926.md); account/tenant and per-path
+  policy, native screen/seat isolation and consent remain open.
 - Revocation: short TTL (minutes) + GDS denylist channel — the server
-  pushes revoked grant hashes to agents on the control channel; agents
-  also drop connections whose grants expired.
+  publishes signed stable grant-ID snapshots polled by agents; agents also
+  close expired connections. Explicit client/managed renewal preserves streams;
+  automatic issuance/renewal and resource policy integration remain W2.3/W4.2.
 - Tests: expired grant rejected; wrong-service grant rejected;
   revoked grant rejected after denylist push.
 
@@ -398,7 +429,9 @@ random offset) with byte-identical result — run 20×, all pass.
 - `rds-net` metrics: per-path RTT/loss/congestion, path events, QNT
   attempts/success, relay-vs-direct bytes. Facade over
   `iroh-metrics`-style counters; Prometheus export behind feature.
-- `rds-server`: `/v1/metrics` scrape endpoint, per-endpoint accounting.
+- `rds-server`: separate authenticated loopback `GET /metrics`, aggregate
+  accounting. Remediation O2 supersedes the original public-listener route and
+  removes stable per-writer labels; see [current contract](observability.md).
 - Session event log: structured `tracing` spans per session with
   `session_id`, exported for bench reports.
 
@@ -408,24 +441,24 @@ random offset) with byte-identical result — run 20×, all pass.
 | --- | --- |
 | green bars | CI matrix pass |
 | functional | every metric the bench report cites exists in the export; counter accuracy proven by a known-traffic test |
-| security | `/v1/metrics` exposes no keys/secrets/peer content; endpoint list requires auth or is localhost-only — documented |
+| security | admin metrics require a separate loopback listener and bearer authentication; the public listener returns 404 even through a local proxy; no keys/secrets/peer labels/content |
 
 **Gate G7**: every number in `docs/reports/` is produced by the harness
 reading metrics — no hand-measured prose.
 
 ## 10. WS8 — deployment
 
-- `rds-server` on `gds-services` (systemd unit, relay + directory).
+- `rds-server` on `directory-host` (systemd unit, relay + directory).
 - Estate side (private repo): device inventory gains `endpoint_key`;
   GDS policy ties allowlists to estate membership.
-- Real-E2E: `rds ssh` between `nddev-amsterdam` and `gds-services`;
+- Real-E2E: `rds ssh` between `device-a` and `directory-host`;
   desktop smoke on attended session; report committed.
 
 **Checkpoint C8** — the system works on real metal, not just in sims:
 
 | Layer | Check |
 | --- | --- |
-| functional | `rds ssh` across real NAT (amsterdam ↔ gds-services): connect, run commands, survive a relay↔direct transition |
+| functional | `rds ssh` across real NAT (device-a ↔ directory-host): connect, run commands, survive a relay↔direct transition |
 | impairment | real-network report: measured RTT/loss/path used, compared against harness predictions — deltas explained |
 | soak | 1-hour real session: reconnects counted, RSS steady on both ends |
 | security | deploy review: systemd sandboxing (ProtectSystem, NoNewPrivileges), key permissions 0600, ports/firewall documented |

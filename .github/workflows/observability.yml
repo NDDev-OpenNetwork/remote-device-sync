@@ -1,0 +1,47 @@
+name: observability
+
+on:
+  pull_request:
+    paths:
+      - "crates/rds-observe/**"
+      - "ops/observability/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/observability.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/rds-observe/**"
+      - "ops/observability/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/observability.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: observability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    permissions:
+      contents: read
+    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-ci.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
+    with:
+      runner: ubuntu-latest
+      toolchain: "1.98.1"
+      components: "clippy,rustfmt"
+      build_command: "cargo build --locked -p rds-observe --example fixture"
+      test_matrix_os: '["ubuntu-latest"]'
+      test_command: >-
+        bash -euo pipefail -c '
+        . ops/observability/images.env;
+        docker pull "$RDS_VECTOR_IMAGE";
+        docker pull "$RDS_OPENOBSERVE_IMAGE";
+        cargo build --locked -p rds-observe --example fixture;
+        cargo test --locked -p rds-observe --test pipeline -- --ignored --nocapture'
+      fmt_command: "cargo fmt --all -- --check"
+      clippy_command: "cargo clippy --locked -p rds-observe --all-targets -- -D warnings"
+      timeout_minutes: 20

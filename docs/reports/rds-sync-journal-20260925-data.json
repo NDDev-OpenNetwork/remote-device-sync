@@ -1,0 +1,123 @@
+{
+  "source_base": "553519d",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-sync/src/lib.rs": "44adfe627430657c1a00dffdb8744c33f83ff08209b636afb081380b1e6f712f",
+    "crates/rds-sync/src/confined.rs": "e26d6bb1867424f01d38d9615b4c42e9a10153f55ed691bfb3d29b5d9ee0b382",
+    "crates/rds-sync/src/fault.rs": "5c7c4ea6bd3b9982d6f5c9a79ac05fd845f8430cdbc7d8c584d969c9ae64a678",
+    "crates/rds-sync/src/journal.rs": "e3d57f8ec374d6bcdc4bb6a0a59c2651a01610f1c41bcb78029c1a9779255baf",
+    "crates/rds-sync/src/journal/tests.rs": "2cccdf8d45d110053f886f7ea6ba635f9300f383f402e1f9d8e8695b851f762d",
+    "crates/rds-sync/src/proto.rs": "67f6ffa3394e4b7694504e015bc76e5b73c6fa03117a38ae90ee83a9807c1721",
+    "crates/rds-sync/tests/journal.rs": "d7891787d0f4975549acd96843078e6a1238af38cbe7906e0aadf0c7e0120b55",
+    "crates/rds-sync/tests/sync_e2e.rs": "078dd8d6c3643f0bfd49d32119601291b2d669873eaa4eeb3a78d0e8fe4562ab"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 1.2137737410375848
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 2.9990771560696885
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 2.1701670980546623
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 1.6116629230091348
+    },
+    {
+      "name": "workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 114.44143520388752
+    },
+    {
+      "name": "owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 91.57948438997846
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 273,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 50
+    },
+    "owned": {
+      "passed": 59,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 18
+    }
+  },
+  "fault_matrix": {
+    "boundaries": 23,
+    "process_exits": 23,
+    "returned_errors": 46,
+    "temporary_object_cases": 12
+  },
+  "limits": [
+    "Simulated syscall errors, not physical power loss or a real full disk",
+    "No native macOS, nested mount-point or 1 GiB/20-kill qualification",
+    "No inactive/legacy journal quotas or collection; no deployment"
+  ]
+}

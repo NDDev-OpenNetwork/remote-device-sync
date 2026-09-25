@@ -2,6 +2,133 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-26
+
+**Engineering preview.** This first published workspace release is for explicit
+evaluation and integration, not production readiness or an in-place upgrade of
+earlier development state. Native Linux x86_64 and macOS arm64 bundles contain
+`rds`, `rds-agent`, `rds-relay` and `rds-server`, with both transport backends and
+the owned relay. Desktop capture/rendering is not enabled in these binaries.
+See [release instructions](docs/releases.md) for verification and limitations.
+
+- Native SSH uses the standard SSH protocol through `russh`, OS PTYs, explicit
+  host-key pins and private-key/SSH-agent authentication. A shared Rust session
+  manager owns connections and supports explicit device/session selection.
+- Grant v2 binds audience, session identity, monotonic renewal and directional
+  sync/view/control scopes. Local IPC is version 3. Renewals currently require
+  an explicit caller; GDS automatic issuance/renewal is not shipped.
+- Bounded file sync, signed discovery, durable policy/record state and protected
+  metrics/logging have regression and fault-injection coverage. Vector and
+  OpenObserve configurations are included in the source archive under `ops/`.
+- Previous development wire formats and policy snapshots are not automatically
+  migrated. Re-enroll/re-sign and provision fresh isolated state for evaluation;
+  preserve old keys/data until a reviewed migration exists.
+- Interactive desktop presentation, native macOS/Wayland desktop backends,
+  platform packaging/notarization, automatic updates/rollback, broad NAT/WAN and
+  physical-device qualification remain open. W0–W10 are not closed by this tag.
+
+Development history included in this release:
+
+- Add a Rust directory-capacity scenario to `rds-bench`, using shared production
+  bounds and fresh synthetic state. Measure full-catalog renewal, deletion,
+  reactivation and reopen; retain machine-readable evidence for 4096 identities.
+  Production limits and storage behavior are unchanged. Document the pending
+  offline migration procedure and measured startup-validation cost. See the
+  [capacity receipt](docs/reports/rds-capacity-20260924.md).
+
+- Harden directory HTTP framing in both directions: reject duplicate lengths,
+  transfer encoding, malformed fields/start lines and unsupported encodings;
+  enforce exact head/body limits and validate outgoing fields before sending.
+  Buffer header reads while preserving the body, close after one exchange, and
+  omit bodies for parsed HEAD requests even on worker overload. No new dependency
+  or runtime helper. This is a restricted private HTTP profile; proxy/tunnel
+  compatibility remains unqualified. See [record-state.md](docs/record-state.md).
+
+- Default directory enrollment to deny; provision publishers separately with
+  repeated `rds-server --directory-allow`. Unknown identities cannot publish,
+  fetch or delete retained records. Admit only verified higher revisions under
+  the store's compare/commit lock; duplicate, stale and forged requests spend
+  no write quota. Separate new identity, known renewal, extra-write and policy
+  budgets so one writer cannot exhaust every admitted device's renewal quota.
+  Custom stores implement `put_admitted`/`remove_admitted`; synthetic fixtures
+  explicitly opt into open enrollment. See [record-state.md](docs/record-state.md)
+  for limits and the remaining GDS/migration/throughput qualification.
+
+- Persist suspend-inclusive record leases and clock floors; refuse rollback,
+  require a successor after OS reboot, and collect expired content in bounded
+  owned jobs while retaining revision/digest history. Bound memory-store
+  identities and preserve renewal at identity saturation. Add collection metrics
+  and exact successor retry after HTTP 410. The database becomes format 3;
+  earlier formats require the still-pending migration procedure. No production
+  dependency or external helper is added. See [record-state.md](docs/record-state.md).
+  Custom `RecordStore` implementations must provide bounded `collect_expired`.
+
+- Give endpoint updates and deletions one explicit revision sequence, separate
+  signature domains, bounded fields and exact expiry checks. Exact signed retries
+  are idempotent; equal-revision conflicts are refused. Persist publisher counters
+  and pending bytes before announce, supervise fatal publication failures, and
+  require durable agent state (`--record-state`). This changes the pre-1.0 wire
+  and library APIs: `publish`/delete construction require a revision;
+  `Client::remove` takes a signed deletion; `AnnounceConfig` takes a `RecordIssuer`
+  and `announce` returns a result. Migration and directory admission remain
+  pending; see [record-state.md](docs/record-state.md).
+  Preserve owned `rds-relay://` locators through shared typed identity/socket
+  parsing, including IPv6 brackets, and exercise announce-to-relay connectivity.
+
+- Release policy, database and sync receive locks when their Rust owner drops,
+  including when another thread's fork temporarily inherits a descriptor.
+  Persistent lock inodes are retained; successor ownership remains exclusive.
+
+- Keep signed delete tombstones in both record stores and serialize mutations.
+  Replace per-key JSON writes with an embedded Rust redb transaction plus a
+  durable generation anchor; refuse corrupt/missing state and database-only
+  rollback. Bound and exclusively own the protected database file. Legacy
+  directories require explicit migration, which remains pending along with
+  enrollment quota/fairness work; see [record-state.md](docs/record-state.md).
+
+- Persist signed policy revisions, authority rotations and absolute freshness
+  leases across restart. Managed grant mode now requires a configured revocation
+  feed; missing/stale policy, feed shutdown or failed durable commit closes
+  admission and live connections. Registry/name signatures move to v2 and
+  revocations to domain-separated v1 with positive epoch/revision metadata.
+  Re-sign snapshots and upgrade consumers together. Add protected state and
+  rotation options to all three binaries; see [policy-state.md](docs/policy-state.md)
+  for restart/boot behavior, migration, limits and outstanding qualification.
+  Directory disk/signature jobs use a bounded blocking pool. No external runtime
+  program added; OS clock/filesystem bindings reuse locked dependencies.
+
+- Add native directory HTTPS and DNS origins to `rds --server` and
+  `rds-agent --directory`. Verify certificate chains/hostnames, support explicit
+  private CA bundles, and keep one deadline across DNS/TCP/TLS/HTTP. No insecure
+  fallback, redirect following or external TLS helper. Server flags
+  `--directory-tls-cert/--directory-tls-key` configure the directory separately
+  from relay TLS. Pending requests and their connection budget now belong to the
+  service lifetime. Library API: `Client::addr()` returns `Option<SocketAddr>`
+  because DNS origins have no fixed literal address.
+
+- Verify device names at the client using an independently configured registry
+  key and a per-name signature proof. Bind name, endpoint identity and validity;
+  reject unsigned replies, redirects, expired/future bindings and in-process
+  rollback. Directory name GETs now stop serving expired snapshots. Registry
+  snapshots require per-name proofs from the issuer; name clients require
+  `--registry-key`. This changes the pre-1.0 name API; re-sign old snapshots.
+
+- Persist verified destination chunks before advertising reuse, including
+  edits and size changes. Assemble through uniquely owned staging files;
+  preserve unrelated `.rds-part` siblings and clean only owned journal names.
+  Pin all journal/destination operations to no-follow directory handles and
+  hold the pull source inode across manifest/chunk reads. Serialize receives
+  per root across processes, sync data/parents before success, and release
+  receives when their control stream is canceled. No external helper added.
+  Library API: `Journal::assemble(self)` now consumes the pinned journal;
+  the path-returning `proto::resolve_under` helper is removed because it
+  cannot provide race-free filesystem confinement.
+
+- Preserve revocations without subscribers and during concurrent updates.
+  Make grant admission atomic: failed/canceled Authz responses close the
+  connection, release replay reservations and stop watchdogs. Recheck expiry
+  and revocation at service admission; observe the initial denylist snapshot.
+
 - Idle-desktop suppression: the X11 capturer subscribes a DAMAGE object
   on the root window (`NON_EMPTY` report level, re-armed via
   `DamageSubtract`); while the screen is still, the producer skips the

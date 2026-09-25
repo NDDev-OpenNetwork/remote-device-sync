@@ -1,0 +1,163 @@
+{
+  "source_base": "5d07dcb",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "Cargo.lock": "f599e3f08f65bb83683028cd78ccf3ab4ba95e90c29417d343fef0efa213b385",
+    "crates/rds-net/src/lib.rs": "eb5d56c13328ced4188605800af68a9ed2a97f962e304a3535cc90c2f314dff4",
+    "crates/rds-net/src/relay_control.rs": "7347d7d65d894793211675f36a539e7d6a0fbd8a141d61913d339c9c5e280c1a",
+    "crates/rds-net/src/backends/noq/relay.rs": "22e4e1fd082996989d5a2ed803c1acd3d05d7183c7615d286c605d75d7e416fa",
+    "crates/rds-relay/Cargo.toml": "549142717363954d7ae3aec258f268a046681d60eba3ce4769f634bb32422d9f",
+    "crates/rds-relay/src/server.rs": "65106254b0cc06e286ee28b505edb454ea63c75647ec50ada058101c2ec41b09",
+    "crates/rds-relay/tests/control_lifecycle.rs": "ae7604c3481ebb7a43f917b4ba78fafd4ebd8e350453bcd1924b897e1b7bf521",
+    "crates/rds-sync/src/engine.rs": "adad3bb0e39c0a315e07a1997ef26727167bd272a9e33a08ba1a5bf8ce2120eb",
+    "crates/rds-sync/src/engine/tests.rs": "589113390fd2430f77316d17f0f51c4104a1f7c4fd32603aa1de7986ea45b8fa",
+    "crates/rds-sync/tests/sync_e2e.rs": "29d611415f43711ede41f7a5433e63f3a96afab60ce58197d8d59aec38fda979"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.7119281300110742,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.447620667051524,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 15.434581720968708,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 14.176430506980978,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 313.41306493396405,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 472.97039077989757,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-codec-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "relay_control::tests",
+        "--lib"
+      ],
+      "code": 0,
+      "seconds": 18.906905826064758,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 329,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 59
+    },
+    "test-owned": {
+      "passed": 118,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 30
+    },
+    "test-codec-isolated": {
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 1
+    }
+  },
+  "before_fix_failures": [
+    "socket_client_observes_drain_before_tunnel_closes",
+    "dropping_socket_releases_its_relay_attachment"
+  ],
+  "bounds": {
+    "control_body_bytes": 4096,
+    "notice_tasks_per_broadcast": 16,
+    "control_write_seconds": 1,
+    "drain_grace_seconds": 2,
+    "client_registration_seconds": 15,
+    "server_registration_seconds": 15
+  },
+  "initial_matrix_failure": "G6 final immediate retry met an active journal lock; queued-store cancellation corrected separately in 5d07dcb and full matrix rerun",
+  "limits": [
+    "Framed receipt and usable grace, not warm alternate relay migration",
+    "Not global attachment/notice/queue/RSS/FD limits",
+    "Drop requests pump abort; explicit socket close joins pumps",
+    "Server accept task ownership and complete joined shutdown remain open",
+    "No physical NAT/failover, native macOS, deployment or wave closure"
+  ]
+}

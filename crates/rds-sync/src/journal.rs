@@ -1,124 +1,170 @@
-//! Resumable receive state under the destination directory.
+//! Resumable receive state under an opened destination root.
 //!
-//! Layout: `<dir>/.rds-sync/<root-hex>/` holds one in-flight transfer:
-//! `meta` pins `{rel_path, size, root}` (postcard + BLAKE3 trailer so
-//! a torn write is detected and discarded) and `parts/<chunk-hash-hex>`
-//! holds one verified chunk per file. Parts are the source of truth —
-//! a chunk counts as present only when its file's content hashes to
-//! its name — so a torn `meta`, a partial part write, or a lost
-//! journal all degrade to a clean rescan, never to corruption.
+//! `.rds-sync/<root-hex>/parts/<chunk-hash-hex>` contains verified bytes,
+//! including chunks reused from the old destination. Advisory `meta` holds
+//! postcard + a BLAKE3 trailer. I/O uses directory capabilities, exclusive
+//! staging files and atomic replacement; no descendant symlink is followed.
+//! A receive lock per root prevents concurrent owners from sharing cleanup.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
-    ChunkHash, Manifest, SyncError,
-    proto::{check_manifest, resolve_under},
+    AVG_CHUNK, ChunkHash, MAX_CHUNK, MIN_CHUNK, Manifest, SyncError,
+    confined::{Directory, PENDING, ReceiveLock},
+    fault::{Point, hit},
+    proto::{check_manifest, check_rel_path},
 };
 
 /// Directory name (under the sync root) holding in-flight state.
 pub const STATE_DIR: &str = ".rds-sync";
+const ASSEMBLY: &str = "assembly";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize)]
 struct Meta {
     rel_path: String,
     size: u64,
     root: ChunkHash,
 }
 
-/// Resumable state for one in-flight receive.
+/// Resumable state for one in-flight receive. A journal pins its root and
+/// destination parent when opened. The destination path returned by assembly
+/// is informational; later I/O must not use it as a confinement proof.
 pub struct Journal {
-    dir: PathBuf,
-    meta: Meta,
+    state: Directory,
+    dir: Directory,
+    parts: Directory,
+    dest_parent: Directory,
+    dest_state: Directory,
+    dest_name: OsString,
+    dest_path: PathBuf,
+    _lock: ReceiveLock,
+    _parent_lock: Option<ReceiveLock>,
     manifest: Manifest,
-    /// Chunk indices whose parts verified on disk.
     have: HashSet<u32>,
-    /// Chunks verified-and-stored this session (re-fetch accounting).
     fetched: u64,
 }
 
 impl Journal {
-    /// Open (or create) receive state for `manifest` destined at
-    /// `dir/rel_path`. Verifies every existing part by content hash;
-    /// a corrupt part is deleted and re-fetched, a torn `meta` is
-    /// rebuilt from the offer.
+    /// Validate the offer, pin directories, claim the root's receive lock,
+    /// and re-verify existing parts. A root with an active receive is
+    /// refused immediately; callers can retry once its transfer ends.
     pub fn open(dest_dir: &Path, rel_path: &str, manifest: &Manifest) -> Result<Self, SyncError> {
         check_manifest(manifest)?;
-        std::fs::create_dir_all(dest_dir)?;
-        // The state dir is resolved under the canonical root: a
-        // symlinked `.rds-sync` cannot redirect journal writes outside.
-        let dir = resolve_under(dest_dir, &Path::new(STATE_DIR).join(hex(&manifest.root)))?;
-        std::fs::create_dir_all(dir.join("parts"))?;
-        // Meta is advisory: pin the destination but never trust it for
-        // chunk truth. A torn/absent meta just gets rewritten.
-        let meta = Meta {
-            rel_path: rel_path.to_string(),
-            size: manifest.size,
-            root: manifest.root,
+        let rel = check_rel_path(rel_path)?;
+        let root = Directory::open_root(dest_dir, true)?;
+        let state = root.child(STATE_DIR.as_ref(), true)?;
+        state.make_private()?;
+        // Serialize receives within a root, including different processes.
+        // A string-keyed per-path lock is insufficient on case-insensitive or
+        // normalization-insensitive filesystems. One persistent inode also
+        // avoids accumulating a lock file for every historical destination.
+        let receive_lock = state.lock("receive.lock".as_ref())?;
+        let content_id = hex(&manifest.root);
+        let (dest_parent, dest_name) = root.parent(&rel, true)?;
+        // The destination's parent is the common ownership point even when
+        // different configured roots overlap. Keep its assembly inode on the
+        // same filesystem, including destinations below a mount point.
+        let dest_state = dest_parent.child(STATE_DIR.as_ref(), true)?;
+        dest_state.make_private()?;
+        let parent_lock = if state.same_inode(&dest_state)? {
+            None
+        } else {
+            Some(dest_state.lock("receive.lock".as_ref())?)
         };
-        write_meta(&dir, &meta)?;
-        let mut j = Self {
+        dest_state.discard_owned(ASSEMBLY.as_ref())?;
+        // Refuse symlinks and special files even if they contain no reusable
+        // bytes. NONBLOCK + fstat prevents a FIFO from blocking admission.
+        let existing = match dest_parent.read_file(&dest_name) {
+            Ok(file) => Some(file),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let dir = state.child(content_id.as_ref(), true)?;
+        let parts = dir.child("parts".as_ref(), true)?;
+        parts.discard_owned(PENDING.as_ref())?;
+        write_meta(
+            &dir,
+            &Meta {
+                rel_path: rel.to_string_lossy().into_owned(),
+                size: manifest.size,
+                root: manifest.root,
+            },
+        )?;
+        let mut journal = Self {
+            state,
             dir,
-            meta,
+            parts,
+            dest_parent,
+            dest_state,
+            dest_name,
+            dest_path: dest_dir.join(rel),
+            _lock: receive_lock,
+            _parent_lock: parent_lock,
             manifest: manifest.clone(),
             have: HashSet::new(),
             fetched: 0,
         };
-        j.rescan();
-        j.seed_from_destination(dest_dir);
-        Ok(j)
+        journal.rescan()?;
+        if let Some(file) = existing {
+            journal.seed_from_destination(file)?;
+        }
+        Ok(journal)
     }
 
-    /// Dedup against the already-assembled destination: if
-    /// `dest_dir/rel_path` exists, chunk it and count every matching
-    /// hash as present — identical content needs zero wire chunks.
-    /// Chunk boundaries are content-defined, so the same bytes cut
-    /// identically. Streamed: memory stays at one max-size chunk
-    /// regardless of file size.
-    fn seed_from_destination(&mut self, dest_dir: &Path) {
-        // No seeding through a symlink that escapes the root.
-        let Ok(dest) = resolve_under(dest_dir, Path::new(&self.meta.rel_path)) else {
-            return;
-        };
-        // Cheap gate first: only a regular file of identical size can
-        // contribute chunks — a manifest scan of anything else is waste.
-        let Ok(meta) = std::fs::metadata(&dest) else {
-            return;
-        };
-        if !meta.is_file() || meta.len() != self.manifest.size {
-            return;
-        }
-        let Ok(file) = std::fs::File::open(&dest) else {
-            return;
-        };
-        let Ok(existing) = crate::manifest_of_reader(file) else {
-            return;
-        };
-        let present: HashSet<ChunkHash> = existing.chunks.iter().map(|c| c.hash).collect();
+    /// Reused chunks become immutable verified parts before advertising have.
+    /// File size and original offsets do not constrain content-defined reuse.
+    /// Reading remains bounded to one chunk plus the manifest's hash index.
+    fn seed_from_destination(&mut self, file: File) -> Result<(), SyncError> {
+        let mut wanted: HashMap<(ChunkHash, u32), Vec<u32>> = HashMap::new();
         for (i, c) in self.manifest.chunks.iter().enumerate() {
-            if present.contains(&c.hash) {
-                self.have.insert(i as u32);
+            if !self.have.contains(&(i as u32)) {
+                wanted.entry((c.hash, c.len)).or_default().push(i as u32);
             }
         }
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        for chunk in fastcdc::v2020::StreamCDC::new(
+            file,
+            MIN_CHUNK as usize,
+            AVG_CHUNK as usize,
+            MAX_CHUNK as usize,
+        ) {
+            let chunk = chunk.map_err(io::Error::from)?;
+            let hash = *blake3::hash(&chunk.data).as_bytes();
+            if let Some(indices) = wanted.remove(&(hash, chunk.length as u32)) {
+                self.parts.write_state(hex(&hash).as_ref(), &chunk.data)?;
+                self.have.extend(indices);
+                if wanted.is_empty() {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
-    /// Re-verify every part on disk against the manifest; drop any
-    /// whose bytes do not hash to the manifest entry.
-    fn rescan(&mut self) {
+    fn rescan(&mut self) -> Result<(), SyncError> {
         self.have.clear();
         for (i, c) in self.manifest.chunks.iter().enumerate() {
-            let p = self.part_path(&c.hash);
-            let Ok(data) = std::fs::read(&p) else {
-                continue;
+            let name = hex(&c.hash);
+            let data = match self.parts.read_state(name.as_ref(), c.len as usize) {
+                Ok(data) => data,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
             };
             if data.len() == c.len as usize && blake3::hash(&data).as_bytes() == &c.hash {
                 self.have.insert(i as u32);
             } else {
-                let _ = std::fs::remove_file(&p); // corrupt part: re-fetch
+                self.parts.unlink(name.as_ref(), false)?;
             }
         }
+        Ok(())
     }
 
     /// Manifest indices still missing — what the receiver asks for.
@@ -128,11 +174,8 @@ impl Journal {
             .collect()
     }
 
-    /// Store one received chunk. The payload is verified against the
-    /// manifest hash BEFORE it touches the state directory — a corrupt
-    /// or forged chunk is an error, never a part. Returns `true` when
-    /// the chunk was newly present (a resent chunk verifies but is not
-    /// rewritten).
+    /// Verify and persist a received chunk before counting it as present.
+    /// Returns false for a verified retransmission; local reuse is not fetched.
     pub fn store(&mut self, index: u32, data: &[u8]) -> Result<bool, SyncError> {
         let c = self
             .manifest
@@ -147,12 +190,7 @@ impl Journal {
         if self.have.contains(&index) {
             return Ok(false);
         }
-        let part = self.part_path(&c.hash);
-        // Write tmp + rename: a crash mid-write leaves a *.tmp, which
-        // rescan ignores — parts are only ever complete files.
-        let tmp = part.with_extension("tmp");
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(&tmp, &part)?;
+        self.parts.write_state(hex(&c.hash).as_ref(), data)?;
         self.have.insert(index);
         self.fetched += 1;
         Ok(true)
@@ -178,110 +216,82 @@ impl Journal {
         self.manifest.chunks.len()
     }
 
-    /// Concatenate verified parts in manifest order, check the file
-    /// root, and atomically rename into place. Only runs when
-    /// `complete()` — failure here means a bug or tampering.
-    pub fn assemble(&self, dest_dir: &Path) -> Result<PathBuf, SyncError> {
+    /// Re-verify parts, concatenate into an exclusively owned staging file,
+    /// check the root and atomically replace the pinned destination. Data and
+    /// its parent are synced before success; failures before rename retain the
+    /// old destination. A directory-sync error after rename is an uncertain
+    /// commit and is returned, never acknowledged as complete.
+    pub fn assemble(self) -> Result<PathBuf, SyncError> {
         if !self.complete() {
             return Err(SyncError::Manifest("assemble before complete".into()));
         }
-        // Resolved under the canonical root — a symlinked intermediate
-        // component is refused rather than followed outside.
-        let dest = resolve_under(dest_dir, Path::new(&self.meta.rel_path))?;
-        // Dedup fast path: the destination may already hold the exact
-        // content (identical resend) — verify its root and finish.
-        // Streamed hash: no whole-file read.
-        if let Ok(root) = hash_file(&dest)
-            && root == self.manifest.root
-        {
-            let _ = std::fs::remove_dir_all(&self.dir);
-            return Ok(dest);
-        }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // Suffix is appended, not substituted, so a peer's literal
-        // `x.rds-part` name cannot alias the temp file to dest.
-        let tmp = dest.with_added_extension("rds-part");
-        // A pre-existing tmp may be a stale artifact — or a planted
-        // symlink. Remove it (remove_file unlinks the link itself, not
-        // its target) and create exclusively so the assembly write can
-        // never follow a link.
-        let _ = std::fs::remove_file(&tmp);
+        let mut stage = self.dest_state.stage_named(ASSEMBLY.into())?;
         let mut root = blake3::Hasher::new();
-        {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?;
-            for c in &self.manifest.chunks {
-                let data = std::fs::read(self.part_path(&c.hash))?;
-                root.update(&data);
-                f.write_all(&data)?;
+        for c in &self.manifest.chunks {
+            let data = self
+                .parts
+                .read_state(hex(&c.hash).as_ref(), c.len as usize)?;
+            if data.len() != c.len as usize || blake3::hash(&data).as_bytes() != &c.hash {
+                return Err(SyncError::Manifest("part changed before assembly".into()));
             }
+            root.update(&data);
+            crate::fault::write(&mut stage.file, &data)?;
         }
         if root.finalize().as_bytes() != &self.manifest.root {
-            let _ = std::fs::remove_file(&tmp);
             return Err(SyncError::Manifest(
                 "assembled file failed root hash".into(),
             ));
         }
-        std::fs::rename(&tmp, &dest)?;
-        let _ = std::fs::remove_dir_all(&self.dir);
-        Ok(dest)
+        hit(Point::Written)?;
+        stage.install_in(&self.dest_parent, &self.dest_name)?;
+        // Publication is durable now. A cleanup failure does not turn a
+        // committed file into a failed transfer; the next open re-verifies
+        // remaining state. Log only the error, never private filenames.
+        if let Err(error) = self.cleanup() {
+            tracing::warn!(%error, "sync committed; journal cleanup incomplete");
+        }
+        Ok(self.dest_path)
     }
 
-    fn part_path(&self, hash: &ChunkHash) -> PathBuf {
-        self.dir.join("parts").join(hex(hash))
-    }
-}
-
-fn write_meta(dir: &Path, meta: &Meta) -> Result<(), SyncError> {
-    let body = postcard::to_allocvec(meta)
-        .map_err(|e| SyncError::Manifest(format!("meta encode: {e}")))?;
-    let mut buf = body.clone();
-    buf.extend_from_slice(blake3::hash(&body).as_bytes());
-    let tmp = dir.join("meta.tmp");
-    std::fs::write(&tmp, &buf)?;
-    std::fs::rename(&tmp, dir.join("meta"))?;
-    Ok(())
-}
-
-/// Load `meta` if it parses and checksums — used by tooling/inspect;
-/// correctness never depends on it.
-#[allow(dead_code)]
-fn read_meta(dir: &Path) -> Option<Meta> {
-    let buf = std::fs::read(dir.join("meta")).ok()?;
-    let (body, trailer) = buf.split_at(buf.len().checked_sub(32)?);
-    if blake3::hash(body).as_bytes() != trailer {
-        return None; // torn write
-    }
-    postcard::from_bytes(body).ok()
-}
-
-/// Stream-hash a file — bounded memory regardless of size.
-fn hash_file(path: &Path) -> std::io::Result<ChunkHash> {
-    let mut f = std::fs::File::open(path)?;
-    let mut h = blake3::Hasher::new();
-    std::io::copy(&mut f, &mut HasherWriter(&mut h))?;
-    Ok(*h.finalize().as_bytes())
-}
-
-/// `std::io::Write` adapter that feeds a BLAKE3 hasher — lets
-/// `io::copy` stream the file through the digest without buffering.
-struct HasherWriter<'a>(&'a mut blake3::Hasher);
-
-impl std::io::Write for HasherWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.update(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn cleanup(&self) -> io::Result<()> {
+        // Remove only names belonging to this manifest under held handles.
+        // Never recursively traverse unknown entries or another transfer.
+        for c in &self.manifest.chunks {
+            remove_if_present(&self.parts, hex(&c.hash).as_ref(), false)?;
+            hit(Point::PartRemoved)?;
+        }
+        self.parts.sync()?;
+        remove_if_present(&self.dir, "meta".as_ref(), false)?;
+        hit(Point::MetaRemoved)?;
+        remove_if_present(&self.dir, "parts".as_ref(), true)?;
+        self.dir.sync()?;
+        hit(Point::PartsRemoved)?;
+        remove_if_present(&self.state, hex(&self.manifest.root).as_ref(), true)?;
+        self.state.sync()?;
+        hit(Point::JournalRemoved)?;
         Ok(())
     }
 }
 
-fn hex(hash: &ChunkHash) -> String {
-    hash.iter().map(|b| format!("{b:02x}")).collect()
+fn remove_if_present(dir: &Directory, name: &std::ffi::OsStr, directory: bool) -> io::Result<()> {
+    match dir.unlink(name, directory) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
+
+fn write_meta(dir: &Directory, meta: &Meta) -> Result<(), SyncError> {
+    let mut body = postcard::to_allocvec(meta)
+        .map_err(|e| SyncError::Manifest(format!("meta encode: {e}")))?;
+    let hash = blake3::hash(&body);
+    body.extend_from_slice(hash.as_bytes());
+    dir.write_state("meta".as_ref(), &body)?;
+    Ok(())
+}
+
+fn hex(hash: &ChunkHash) -> String {
+    blake3::Hash::from(*hash).to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests;

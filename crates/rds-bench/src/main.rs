@@ -27,6 +27,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Qualify a full synthetic directory: durable renewals, deletion and reopen.
+    DirectoryCapacity {
+        /// New private directory; existing paths are refused and never removed.
+        #[arg(long)]
+        state_dir: PathBuf,
+        /// Even number of full shrink/expand renewal passes, 2..=64.
+        #[arg(long, default_value_t = 2)]
+        rounds: u32,
+        #[arg(long)]
+        json: Option<PathBuf>,
+        #[arg(long)]
+        md: Option<PathBuf>,
+    },
     /// Run a scenario (or `all`) and write a report.
     Run {
         #[arg(long, value_enum)]
@@ -82,14 +95,38 @@ enum Cmd {
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    rds_observe::run_main(rds_observe::Service::Bench, "warn", run(cli)).await
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.cmd {
+        Cmd::DirectoryCapacity {
+            state_dir,
+            rounds,
+            json,
+            md,
+        } => {
+            let reports =
+                tokio::task::spawn_blocking(move || rds_bench::capacity::run(&state_dir, rounds))
+                    .await??;
+            let suite = BenchSuite {
+                tool: concat!("rds-bench ", env!("CARGO_PKG_VERSION")).into(),
+                unix_ts: unix_ts(),
+                git: rds_bench::report::git_sha(),
+                reports,
+            };
+            println!("{}", suite.to_markdown());
+            if let Some(p) = json {
+                std::fs::write(&p, serde_json::to_string_pretty(&suite)?)
+                    .with_context(|| format!("write {p:?}"))?;
+            }
+            if let Some(p) = md {
+                std::fs::write(&p, suite.to_markdown()).with_context(|| format!("write {p:?}"))?;
+            }
+            Ok(())
+        }
         Cmd::Run {
             scenario,
             iterations,

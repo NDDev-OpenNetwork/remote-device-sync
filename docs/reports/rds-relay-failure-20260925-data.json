@@ -1,0 +1,167 @@
+{
+  "source_base": "59c0575",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/relay.rs": "98b5bee57c70b7f0fecb01b4e59f52ec99ccda3478e3ded19370d7852aae0d2a",
+    "crates/rds-relay/tests/failure_isolation.rs": "ccc01a98234f4233770d302d00e164ef743f0473c186a1929ad758b8ecac930d",
+    "crates/rds-relay/tests/control_lifecycle.rs": "81ee05885b178f9b257f027662d7f336dee523966e8f37b78d0a59ce65011537"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.7787147109629586,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 15.898864318034612,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 15.468739951960742,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 17.720811835024506,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 301.22785518702585,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 199.01140642398968,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "--no-default-features",
+        "--features",
+        "rds-relay/owned-relay",
+        "--lib",
+        "--test",
+        "failure_isolation",
+        "--test",
+        "control_lifecycle"
+      ],
+      "code": 0,
+      "seconds": 48.2543805380119,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 356,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 63
+    },
+    "test-owned": {
+      "passed": 149,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 34
+    },
+    "test-isolated": {
+      "passed": 35,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 4
+    }
+  },
+  "before_fix_failures": [
+    "Validated relay-path closure: direct traffic and endpoint cleanup each exceeded a three-second deadline.",
+    "Original missing-peer send branch: unknown relay destination interrupted direct traffic."
+  ],
+  "baseline_notes": [
+    "Initial failure fixture lacked a cleanup deadline and its test process was terminated; bounded rerun reproduced both traffic and cleanup stalls.",
+    "Missing-peer baseline restored only that original error-return branch while retaining the closed-link fix and weak availability diagnostic."
+  ],
+  "focused": {
+    "passed": 16,
+    "targets": 6
+  },
+  "real_multipath": {
+    "relay_path_validated_before_close": true,
+    "post_close_direct_roundtrips": 25,
+    "closed_tunnel_observed_via": "weak local availability handle",
+    "late_mapping": "direct traffic survives missing mapping; same pending path validates after registration"
+  },
+  "limits": [
+    "Relay-link loss only: generic UDP child I/O errors and dead protocol-driver shutdown remain separate work",
+    "No warm replacement or relay-only continuity guarantee",
+    "Peer-map capacity/collisions, receive queue, automatic mapping lifecycle and server task ownership remain open",
+    "No physical network, native macOS, production deployment or wave closure"
+  ]
+}
