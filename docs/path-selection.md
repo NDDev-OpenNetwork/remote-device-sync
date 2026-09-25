@@ -21,6 +21,12 @@ that can justify demoting a slower but working path.
 Task ownership remains weak. No Connection, Path or OpenPath handle is held by
 the policy across an await. Dropping the last application I/O handle can still
 close the connection, while explicit endpoint close waits for policy tasks.
+Endpoint shutdown seals admission and signals every owned policy future. Each
+future directly closes its weakly referenced connection before exiting, even if
+a fatal sender I/O error has already stopped noq's protocol driver. Merely queuing
+an endpoint-close event to that stopped driver is insufficient when multiple I/O
+handles remain. The signal also releases pending candidate retries. Subscriptions
+are still created before spawning, and no strong handle crosses an await.
 
 ## Qualification and limits
 
@@ -76,3 +82,20 @@ This queue retries local allocation refusal, not failed path validation, session
 reconnection or application requests. It does not provide global connection
 admission, reconnect jitter, transport-failure isolation, complete path event
 recovery or real-network performance qualification.
+
+## Shutdown after a protocol-driver I/O failure
+
+A real UDP test first carries an authenticated datagram, then injects a terminal
+send error and confirms that the sender returned it. Both a Connection and Path
+handle remain alive while endpoint close runs. Before the shutdown signal was
+added, close exceeded the one-second test deadline; direct Connection::close was
+needed for fixture cleanup. Afterward close completes, the retained connection
+has a close reason and the endpoint owns zero policy tasks. An earlier single-
+handle fixture completed through implicit close and did not reproduce this case.
+
+This is an explicit local shutdown guarantee for admitted connections, not
+recovery of a failed protocol driver, generic child-socket isolation, successful
+peer notification, or proof that every underlying QUIC packet/history entry has
+drained. In-flight handshakes and service/relay task groups retain their separate
+ownership and timeout contracts. Connection-state mutex work and OS/runtime
+scheduling are not given a hard real-time bound by this test.

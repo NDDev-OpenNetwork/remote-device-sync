@@ -27,7 +27,9 @@ configuration remain W2 work; the endpoint schema does not claim to cover them.
 
 Owned noq endpoints now track path-policy tasks. A weak QUIC closure notification
 ends each driver without retaining the connection; endpoint close seals task
-admission, closes QUIC connections and waits for policy-task cleanup. Streams
+admission, directly closes weakly referenced connections through a shutdown
+signal and waits for policy-task cleanup, including after a stopped protocol
+I/O driver. Streams
 may legitimately outlive a Connection wrapper. Completed drivers are removed
 immediately, and `active_path_drivers()` exposes the owned endpoint's count.
 This boundary does not yet own every agent, relay or disk task; see the

@@ -26,7 +26,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
-| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, relay queues and disk cancellation remain open. |
+| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, relay queues and disk cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
@@ -842,3 +842,18 @@ tests** passed. See [contract](relay-control.md) and
 changed. Generic child I/O failure/shutdown, peer-table and queue bounds, warm
 replacement, complete metrics and physical/native-platform qualification remain
 open. No remediation wave is closed.
+
+## Explicit shutdown after failed protocol I/O
+
+A terminal UDP send failure reproduced endpoint-close stalling when Connection
+and Path handles remained alive. The endpoint now signals tracked policy tasks
+to directly close weakly referenced connection state before exiting. Admission
+is sealed first, subscriptions still precede spawn and no strong I/O handle
+crosses an await. The focused lifecycle/simulation run passed 15 tests.
+
+Final formatting, three Clippy lanes, **357 workspace tests**, **150
+all-feature network/agent/CLI/relay tests** and **40 isolated owned-network
+tests** passed. See [contract](path-selection.md) and
+[receipt](reports/rds-failed-driver-shutdown-20260925.md). Generic transport
+recovery, relay queue/peer ownership, global resource bounds and physical/native
+platform qualification remain open. No remediation wave is closed.
