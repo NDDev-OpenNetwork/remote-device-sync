@@ -20,7 +20,13 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
+rds-net.workspace = true
 rustix = { workspace = true, features = ["process"] }
+
+[features]
+default = []
+owned-relay = ["rds-relay/owned-relay"]
 
 [lints]
 workspace = true

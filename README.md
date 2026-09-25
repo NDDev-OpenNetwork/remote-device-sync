@@ -65,6 +65,15 @@ rds-server --relay-addr 0.0.0.0:3340 --http-addr 0.0.0.0:3341 \
 rds --server https://directory.example.com:3341 --registry-key <base32-verifying-key> ping device-a
 ```
 
+Both relay binaries also support `--relay-backend noq` when built with
+`owned-relay`. This mode requires a separate persistent `--relay-key-file` and
+an explicit peer allowlist; an open test relay requires
+`--development-open-relay`. Client and agent use `--backend noq --owned-relay`
+with the relay's pinned public identity and address. See the
+[relay runtime contract and build examples](docs/relay-runtime.md).
+The iroh backend remains the default while owned connectivity qualification
+is in progress.
+
 The directory requires configured publishers (`--directory-allow`,
 repeat per device). An empty list denies record publish/fetch/delete. A signed
 reachability record or name binding does not enroll a device.

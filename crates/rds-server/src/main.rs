@@ -15,13 +15,16 @@
 //! private signing key.
 
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use rds_discovery::registry::SignedRegistry;
 use rds_discovery::service::{self, ServiceConfig};
 use rds_discovery::{FileStore, RecordStore};
+use rds_relay::{RelayArgs, RelayBinding};
 use tracing::info;
 
 #[derive(Parser)]
@@ -36,6 +39,8 @@ struct Cli {
     /// Address the relay endpoint binds to.
     #[arg(long, default_value = "0.0.0.0:3340")]
     relay_addr: SocketAddr,
+    #[command(flatten)]
+    relay: RelayArgs,
     /// Address the discovery HTTP(S) API binds to.
     #[arg(long, default_value = "0.0.0.0:3341")]
     http_addr: SocketAddr,
@@ -52,16 +57,14 @@ struct Cli {
     /// Empty denies record publish/fetch/delete. Independent of relay --allow.
     #[arg(long = "directory-allow")]
     directory_allow: Vec<rds_discovery::EndpointKey>,
-    /// Restrict relay use to these endpoint ids. Empty = open relay.
-    #[arg(long = "allow")]
-    allow: Vec<String>,
     /// Base32 verifying key that signs estate registry snapshots.
     /// Required for name resolution and `PUT /v1/registry`.
     #[arg(long)]
     registry_key: Option<String>,
-    /// Bootstrap authority epoch (rotation receipts advance it durably).
-    #[arg(long, default_value = "1")]
-    registry_epoch: u64,
+    /// Bootstrap authority epoch; defaults to 1 with --registry-key.
+    /// Rotation receipts advance it durably.
+    #[arg(long, requires = "registry_key")]
+    registry_epoch: Option<NonZeroU64>,
     /// Private policy state directory; default is a sibling of endpoint records.
     #[arg(long, requires = "registry_key")]
     policy_state: Option<PathBuf>,
@@ -69,31 +72,8 @@ struct Cli {
     #[arg(long, requires = "registry_key")]
     authority_rotation: Vec<PathBuf>,
     /// JSON file with the initial estate-signed registry snapshot.
-    #[arg(long)]
+    #[arg(long, requires = "registry_key")]
     registry: Option<PathBuf>,
-    /// PEM certificate chain enabling HTTPS relaying. Requires --tls-key.
-    /// Unprivileged services cannot bind :443 — use --tls-https-addr ≥1024.
-    #[arg(long, requires = "tls_key")]
-    tls_cert: Option<PathBuf>,
-    /// PEM private key for --tls-cert.
-    #[arg(long, requires = "tls_cert")]
-    tls_key: Option<PathBuf>,
-    /// HTTPS bind address when relay TLS is enabled. ACME needs :443.
-    #[arg(long, default_value = "0.0.0.0:3443")]
-    tls_https_addr: SocketAddr,
-    /// Let's Encrypt domain via in-process ACME (TLS-ALPN-01, needs :443
-    /// reachable). Repeatable. Mutually exclusive with --tls-cert.
-    #[arg(long, conflicts_with = "tls_cert")]
-    tls_acme_domain: Vec<String>,
-    /// ACME contact (repeatable); emails need a `mailto:` prefix.
-    #[arg(long, requires = "tls_acme_domain")]
-    tls_acme_contact: Vec<String>,
-    /// Directory caching issued ACME certificates across restarts.
-    #[arg(long, requires = "tls_acme_domain")]
-    tls_acme_cache: Option<PathBuf>,
-    /// Use the Let's Encrypt staging directory (untrusted certs; testing).
-    #[arg(long)]
-    tls_acme_staging: bool,
 }
 
 #[derive(Subcommand)]
@@ -128,26 +108,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Complete read-only configuration checks before identity/catalog creation
+    // or listener startup. Durable authority checks still belong to PolicyStore.
     let enrolled_publishers = cli.directory_allow.len();
     let enrollment = rds_discovery::Enrollment::new(cli.directory_allow)?;
-
-    let allow: Vec<iroh::EndpointId> = cli
-        .allow
-        .iter()
-        .map(|s| s.parse())
-        .collect::<Result<_, _>>()?;
-    let tls = rds_relay::tls_from_flags(
-        cli.tls_https_addr,
-        cli.tls_cert,
-        cli.tls_key,
-        cli.tls_acme_domain,
-        cli.tls_acme_contact,
-        cli.tls_acme_cache,
-        cli.tls_acme_staging,
-    )?;
-    let store: Arc<dyn RecordStore> = Arc::new(FileStore::new(&cli.directory)?);
-    info!(dir = %cli.directory.display(), "endpoint record directory ready");
-
+    let relay = cli.relay.prepare()?;
     let registry_key = cli
         .registry_key
         .as_deref()
@@ -162,28 +127,49 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("--registry-key invalid: {e}"))
         })
         .transpose()?;
+    let authority = registry_key
+        .as_ref()
+        .map(|key| {
+            rds_discovery::authority::Authority::new(
+                key,
+                cli.registry_epoch.map(NonZeroU64::get).unwrap_or(1),
+            )
+        })
+        .transpose()?;
     let registry = cli
         .registry
         .as_deref()
-        .map(|p| -> anyhow::Result<SignedRegistry> {
-            Ok(serde_json::from_slice(&std::fs::read(p)?)?)
+        .map(|path| -> anyhow::Result<SignedRegistry> {
+            Ok(serde_json::from_slice(&read_config_file(
+                path,
+                rds_discovery::http::MAX_BODY,
+                "registry snapshot",
+            )?)?)
         })
         .transpose()?;
-    if registry.is_some() && registry_key.is_none() {
-        anyhow::bail!("--registry given without --registry-key");
-    }
-
-    let policy = if let Some(key) = &registry_key {
-        let authority = rds_discovery::authority::Authority::new(key, cli.registry_epoch)?;
+    let rotations = rds_discovery::policy::read_rotations(&cli.authority_rotation)?;
+    let directory_tls = match (&cli.directory_tls_cert, &cli.directory_tls_key) {
+        (Some(cert), Some(key)) => Some(rds_discovery::tls::server_config_from_pem(
+            &read_config_file(cert, 1024 * 1024, "directory TLS chain")?,
+            &read_config_file(key, 64 * 1024, "directory TLS key")?,
+        )?),
+        (None, None) => None,
+        _ => anyhow::bail!("directory TLS requires both certificate and key"),
+    };
+    let relay = relay.initialize().await?;
+    let directory_path = cli.directory.clone();
+    let store: Arc<dyn RecordStore> =
+        Arc::new(tokio::task::spawn_blocking(move || FileStore::new(&directory_path)).await??);
+    info!(dir = %cli.directory.display(), "endpoint record directory ready");
+    let policy = if let Some(authority) = authority {
         let path = cli
             .policy_state
             .unwrap_or_else(|| cli.directory.with_extension("policy"));
-        let receipts = cli.authority_rotation;
         Some(
             tokio::task::spawn_blocking(move || -> Result<_, rds_discovery::DiscoveryError> {
                 let now = rds_discovery::clock::Reading::now()?;
                 let mut store = rds_discovery::policy::PolicyStore::open(&path, authority, now)?;
-                for receipt in rds_discovery::policy::read_rotations(&receipts)? {
+                for receipt in rotations {
                     store.apply_rotation(&receipt, now)?;
                 }
                 Ok(store)
@@ -192,15 +178,6 @@ async fn main() -> anyhow::Result<()> {
         )
     } else {
         None
-    };
-
-    let directory_tls = match (&cli.directory_tls_cert, &cli.directory_tls_key) {
-        (Some(cert), Some(key)) => Some(rds_discovery::tls::server_config_from_pem(
-            &std::fs::read(cert)?,
-            &std::fs::read(key)?,
-        )?),
-        (None, None) => None,
-        _ => anyhow::bail!("directory TLS requires both certificate and key"),
     };
     let https = directory_tls.is_some();
     let dir = service::serve(
@@ -217,56 +194,47 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     info!(addr = %dir.addr(), https, enrolled_publishers, "discovery directory listening");
-
-    let relay = match rds_relay::serve(cli.relay_addr, allow, tls).await {
+    let relay = match relay.bind(cli.relay_addr).await {
         Ok(relay) => relay,
         Err(error) => {
-            // A partially started service still owns listener and disk work.
             dir.close().await?;
-            return Err(error);
+            return Err(error.into());
         }
     };
-    // Readiness must not race signal-handler installation.
-    let shutdown = match shutdown_signal() {
+    let shutdown = match rds_relay::shutdown_signal() {
         Ok(shutdown) => shutdown,
         Err(error) => {
             let _ = tokio::join!(relay.shutdown(), dir.close());
             return Err(error.into());
         }
     };
-    info!(addr = %relay.http_addr().expect("relay config enabled"), "relay listening");
-    if let Some(addr) = relay.https_addr() {
-        info!(%addr, "relay tls listening");
+    match relay.binding() {
+        RelayBinding::Iroh { http, https } => {
+            info!(addr = %http, "relay listening");
+            if let Some(addr) = https {
+                info!(%addr, "relay tls listening");
+            }
+        }
+        RelayBinding::Noq { addr, id } => {
+            info!(%addr, endpoint_id = %id, "owned relay listening");
+        }
     }
-
     shutdown.await;
-    // Start both shutdowns before awaiting either; directory storage work
-    // remains owned until it finishes, even when relay shutdown fails.
     let (relay_result, directory_result) = tokio::join!(relay.shutdown(), dir.close());
     directory_result?;
     relay_result?;
     Ok(())
 }
 
-/// Install SIGINT/SIGTERM handlers before publishing final readiness.
-#[cfg(unix)]
-fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    Ok(async move {
-        tokio::select! {
-            _ = interrupt.recv() => {}
-            _ = term.recv() => {}
-        }
-    })
-}
-
-#[cfg(not(unix))]
-fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
-    Ok(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
+fn read_config_file(path: &std::path::Path, limit: usize, label: &str) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .with_context(|| format!("could not open {label}"))?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= limit, "{label} exceeds {limit} bytes");
+    Ok(bytes)
 }
 
 #[cfg(test)]

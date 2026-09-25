@@ -94,6 +94,13 @@ health wakes attached connection policy so stale relay RTT cannot keep a failed
 link selected over a validated direct path. Global resource and physical-network
 qualification remain open.
 
+Both server binaries share a validated relay runtime: iroh remains the default;
+the opt-in owned QUIC mode loads a separate durable identity and requires an
+allowlist unless explicitly opened for development. The host prepares relay,
+registry and TLS configuration before creating identity/catalog state, then
+awaits both services on shutdown. See [runtime composition](relay-runtime.md)
+for feature selection, startup boundaries and compatibility.
+
 ## Research summary
 
 ### Connectivity models surveyed

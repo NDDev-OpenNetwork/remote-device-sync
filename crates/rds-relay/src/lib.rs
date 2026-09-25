@@ -2,14 +2,19 @@
 //!
 //! Two generations live here:
 //!
-//! - [`iroh_server`] — the shipping relay: embedded `iroh-relay` with an
+//! - [`serve`] — the default relay: embedded `iroh-relay` with an
 //!   endpoint allowlist. Forwards already-encrypted QUIC traffic; cannot
 //!   read session content.
-//! - [`proto`] — the owned relay protocol under design: datagram
-//!   forwarding keyed by `EndpointId`, intended to run inside the
-//!   `rds-server` composition on the GDS host.
+//! - [`proto`] — the owned relay wire protocol. The `owned-relay` feature
+//!   adds its QUIC server; [`RelayArgs`] selects either implementation for
+//!   the standalone binary and the GDS-facing `rds-server` composition.
 
 pub mod proto;
+mod runtime;
+pub use runtime::{
+    PreparedRelay, ReadyRelay, RelayArgs, RelayBackend, RelayBinding, RelayConfigError,
+    RelayRuntimeError, RunningRelay, shutdown_signal,
+};
 #[cfg(feature = "owned-relay")]
 pub mod server;
 
@@ -78,13 +83,20 @@ pub async fn serve(
     allow: Vec<EndpointId>,
     tls: Option<RelayTls>,
 ) -> anyhow::Result<Server> {
+    let tls = tls.map(tls_config).transpose()?;
+    serve_prepared(addr, allow, tls).await
+}
+
+async fn serve_prepared(
+    addr: SocketAddr,
+    allow: Vec<EndpointId>,
+    tls: Option<TlsConfig>,
+) -> anyhow::Result<Server> {
     let mut relay_config = RelayConfig::new(addr);
     if !allow.is_empty() {
         relay_config.access = Arc::new(AllowList(allow.into_iter().collect()));
     }
-    if let Some(tls) = tls {
-        relay_config.tls = Some(tls_config(tls)?);
-    }
+    relay_config.tls = tls;
     let mut config = ServerConfig::default();
     config.relay = Some(relay_config);
     Ok(Server::spawn(config).await?)
@@ -128,8 +140,8 @@ pub fn tls_from_flags(
 }
 
 fn tls_config(tls: RelayTls) -> anyhow::Result<TlsConfig> {
-    // ring: pure-Rust provider already in the tree; aws-lc-rs would add a
-    // C build dependency for no gain here.
+    // Reuse the existing ring provider. Its Rust API includes native crypto;
+    // this does not claim a pure-Rust transitive dependency graph.
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?;
@@ -140,9 +152,11 @@ fn tls_config(tls: RelayTls) -> anyhow::Result<TlsConfig> {
             key_pem,
         } => {
             use rustls_pki_types::pem::PemObject;
-            let certs = rustls_pki_types::CertificateDer::pem_file_iter(&cert_pem)?
+            let cert_bytes = read_bounded(&cert_pem, 1024 * 1024)?;
+            let key_bytes = read_bounded(&key_pem, 64 * 1024)?;
+            let certs = rustls_pki_types::CertificateDer::pem_slice_iter(&cert_bytes)
                 .collect::<Result<Vec<_>, _>>()?;
-            let key = rustls_pki_types::PrivateKeyDer::from_pem_file(&key_pem)?;
+            let key = rustls_pki_types::PrivateKeyDer::from_pem_slice(&key_bytes)?;
             let server_config = builder.with_no_client_auth().with_single_cert(certs, key)?;
             TlsConfig::new(https_addr, CertConfig::Manual { server_config })
         }
@@ -167,4 +181,19 @@ fn tls_config(tls: RelayTls) -> anyhow::Result<TlsConfig> {
             )
         }
     })
+}
+
+fn read_bounded(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "relay PEM file exceeds its size limit",
+        ));
+    }
+    Ok(bytes)
 }

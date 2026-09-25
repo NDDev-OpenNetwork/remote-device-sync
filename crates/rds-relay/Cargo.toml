@@ -16,6 +16,7 @@ rds-core.workspace = true
 rds-net = { workspace = true, optional = true }
 rustls.workspace = true
 rustls-pki-types.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -23,7 +24,9 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 noq.workspace = true
 ed25519-dalek.workspace = true
+rcgen.workspace = true
 rds-discovery.workspace = true
+rustix = { workspace = true, features = ["process"] }
 
 [features]
 default = []
