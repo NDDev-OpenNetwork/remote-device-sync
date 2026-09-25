@@ -60,7 +60,8 @@ an immutable per-protocol TLS configuration. A missing protocol fails before
 service use; concurrent requests cannot replace each other's offer.
 
 Owned initial handshakes use a [bounded candidate race](candidate-dialing.md):
-eight direct addresses plus an attached relay, one 15-second deadline, common
+eight direct addresses with fair family selection and canonical mapped aliases,
+plus an attached relay, one 15-second deadline, common
 identity pinning, and one retained winner. This removes first-address blocking;
 relay bootstrap, scoped advertisements and complete path-event recovery remain open.
 

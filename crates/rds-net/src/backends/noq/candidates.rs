@@ -42,7 +42,7 @@ enum Attempt {
     Rejected,
 }
 
-fn canonical(address: SocketAddr) -> SocketAddr {
+pub(super) fn canonical(address: SocketAddr) -> SocketAddr {
     match address {
         SocketAddr::V6(v6) if v6.ip().to_ipv4_mapped().is_some() => {
             SocketAddr::new(v6.ip().to_canonical(), v6.port())

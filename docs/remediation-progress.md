@@ -28,7 +28,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, relay queues and disk cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
-| W3.1 | Partial; initial candidate race | Eight supported direct candidates plus attached relay share a deadline and one authenticated winner. Dual-stack routing and cancellation are checked. Independent relay bootstrap, remote scope/interface discovery and real topology qualification remain open. |
+| W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
 | W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Path-event resynchronization, complete metrics and transport-failure isolation remain open. |
 
@@ -807,4 +807,20 @@ tests** passed. See [contract](path-selection.md) and
 [receipt](reports/rds-path-credit-20260925.md). No dependency or wire version
 changed. Initial family fairness is next; lost path events, metrics, transport
 failure isolation and physical/native-platform qualification remain open.
+No remediation wave is closed.
+
+## Fair direct-candidate family budget
+
+A failing-before real regression confirmed that eight supported silent IPv4
+addresses excluded a healthy IPv6 listener. Canonical per-family selection now
+alternates under the existing cap and fills spare slots, while retaining native
+IPv6 scope IDs. Four unit cases cover selection, aliases and filtering. The
+focused library/candidate/simulation run passed 36 tests.
+
+Final formatting, three Clippy lanes, **356 workspace tests**, **147
+all-feature network/agent/CLI/relay tests** and **43 isolated owned-network
+tests** passed. See [contract](candidate-dialing.md) and
+[receipt](reports/rds-candidate-families-20260925.md). No dependency or wire version
+changed. Relay failure isolation is next; global/progressive dialing, lost path
+events, complete metrics and physical/native-platform qualification stay open.
 No remediation wave is closed.

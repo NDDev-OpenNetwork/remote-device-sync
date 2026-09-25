@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use super::candidates::{Origin, Pending};
+use super::candidates::{Origin, Pending, canonical};
 use iroh::{EndpointAddr, TransportAddr};
 use tokio::time::Instant;
 
@@ -40,7 +40,9 @@ const RESELECT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Extract direct IP candidates from an advertised address.
 ///
-/// Order is deterministic (sorted by addr) so benchmarks reproduce.
+/// Each family is sorted, then the families alternate under the shared cap.
+/// Deterministic ordering keeps benchmarks reproducible without one family
+/// consuming the entire budget. Mapped IPv4 aliases share their native slot.
 /// Relay addresses are skipped here; the endpoint separately adds its attached
 /// relay through the socket mux.
 pub fn ip_candidates(addr: &EndpointAddr) -> Vec<SocketAddr> {
@@ -55,16 +57,34 @@ fn matching_candidates(
     addr: &EndpointAddr,
     supported: impl Fn(SocketAddr) -> bool,
 ) -> Vec<SocketAddr> {
-    let set: BTreeSet<SocketAddr> = addr
-        .addrs
-        .iter()
-        .filter_map(|a| match a {
-            TransportAddr::Ip(sock) if !super::relay::is_synthetic(*sock) => Some(*sock),
-            _ => None,
-        })
-        .filter(|addr| supported(*addr))
-        .collect();
-    set.into_iter().take(MAX_CANDIDATES).collect()
+    let mut families: [BTreeSet<SocketAddr>; 2] = Default::default();
+    for remote in addr.addrs.iter().filter_map(|a| match a {
+        TransportAddr::Ip(sock) => Some(canonical(*sock)),
+        _ => None,
+    }) {
+        if super::relay::is_synthetic(remote) || !supported(remote) {
+            continue;
+        }
+        let family = &mut families[usize::from(remote.is_ipv6())];
+        family.insert(remote);
+        // Keep only the smallest possible winners, so extracting from a large
+        // caller-provided record does not duplicate its entire address set.
+        if family.len() > MAX_CANDIDATES {
+            family.pop_last();
+        }
+    }
+    let [v4, v6] = families;
+    let mut families = [v4.into_iter(), v6.into_iter()];
+    let mut chosen = Vec::with_capacity(MAX_CANDIDATES);
+    for index in 0..MAX_CANDIDATES {
+        let family = index % 2;
+        let next = families[family]
+            .next()
+            .or_else(|| families[1 - family].next());
+        let Some(next) = next else { break };
+        chosen.push(next);
+    }
+    chosen
 }
 
 /// A path needs a locally bound transport of the same family. Synthetic
@@ -329,4 +349,79 @@ fn reselect(
         }
     }
     *selected = Some(choice);
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+    use std::net::{Ipv6Addr, SocketAddrV6};
+    fn target(addresses: impl IntoIterator<Item = SocketAddr>) -> EndpointAddr {
+        EndpointAddr {
+            id: crate::SecretKey::from_bytes(&[114; 32]).public(),
+            addrs: addresses.into_iter().map(TransportAddr::Ip).collect(),
+        }
+    }
+    fn v4(port: u16) -> SocketAddr {
+        ([192, 0, 2, 1], port).into()
+    }
+    fn v6(port: u16) -> SocketAddr {
+        SocketAddr::new("2001:db8::1".parse().unwrap(), port)
+    }
+
+    #[test]
+    fn long_candidate_lists_share_the_budget_between_families() {
+        let input = target((10000..10020).flat_map(|port| [v4(port), v6(port)]));
+        let expected: Vec<_> = (10000..10004)
+            .flat_map(|port| [v4(port), v6(port)])
+            .collect();
+        assert_eq!(ip_candidates(&input), expected);
+    }
+    #[test]
+    fn unused_family_slots_are_filled_by_the_other_family() {
+        for sparse_v4 in [false, true] {
+            let one = if sparse_v4 { v4(9000) } else { v6(9000) };
+            let input = target(
+                std::iter::once(one)
+                    .chain((10000..10020).map(|port| if sparse_v4 { v6(port) } else { v4(port) })),
+            );
+            let selected = ip_candidates(&input);
+            assert_eq!(selected.len(), MAX_CANDIDATES);
+            assert!(selected.contains(&one));
+            assert_eq!(
+                selected.iter().filter(|a| a.is_ipv4() == sparse_v4).count(),
+                1
+            );
+        }
+        let selected = ip_candidates(&target((10000..10020).map(v4)));
+        assert_eq!(selected, (10000..10008).map(v4).collect::<Vec<_>>());
+    }
+    #[test]
+    fn mapped_aliases_share_a_slot_and_native_ipv6_scope_survives() {
+        let ip: Ipv6Addr = "fe80::1".parse().unwrap();
+        let one = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 1));
+        let two = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 2));
+        let selected = ip_candidates(&target([
+            v4(1000),
+            "[::ffff:192.0.2.1]:1000".parse().unwrap(),
+            one,
+            two,
+        ]));
+        assert_eq!(selected.len(), 3);
+        assert!(selected.contains(&v4(1000)));
+        assert!(selected.contains(&one));
+        assert!(selected.contains(&two));
+    }
+    #[test]
+    fn family_filtering_precedes_budget_and_normalizes_mapped_addresses() {
+        let input = target((10000..10020).map(v4).chain([v6(4433)]));
+        assert_eq!(
+            dial_candidates(&input, &["[::1]:0".parse().unwrap()]),
+            vec![v6(4433)]
+        );
+        let mapped = target(["[::ffff:192.0.2.1]:1000".parse().unwrap()]);
+        assert_eq!(
+            dial_candidates(&mapped, &["127.0.0.1:0".parse().unwrap()]),
+            vec![v4(1000)]
+        );
+    }
 }

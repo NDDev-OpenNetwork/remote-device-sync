@@ -277,3 +277,44 @@ async fn unsupported_families_do_not_consume_the_candidate_budget() {
         "unsupported candidates exhausted the dial budget"
     );
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supported_ipv4_candidates_cannot_exclude_a_working_ipv6_listener() {
+    let mut silent = Vec::new();
+    for _ in 0..owned::policy::MAX_CANDIDATES {
+        silent.push(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+    }
+    let server = owned::bind_endpoint(config(
+        "[::1]:0".parse().unwrap(),
+        SecretKey::from_bytes(&[112; 32]),
+    ))
+    .await
+    .unwrap();
+    let mut cc = config(
+        "127.0.0.1:0".parse().unwrap(),
+        SecretKey::from_bytes(&[113; 32]),
+    );
+    cc.bind_addrs.push("[::1]:0".parse().unwrap());
+    let client = owned::bind_endpoint(cc).await.unwrap();
+    let mut target = server.addr();
+    for socket in &silent {
+        target
+            .addrs
+            .insert(TransportAddr::Ip(socket.local_addr().unwrap()));
+    }
+    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+        let (a, b) = tokio::join!(client.connect(target, rds_core::ALPN), async {
+            server.accept().await.unwrap().await
+        });
+        let a = a.unwrap();
+        let b = b.unwrap();
+        a.send_datagram(b"family budget".to_vec().into()).unwrap();
+        assert_eq!(&b.read_datagram().await.unwrap()[..], b"family budget");
+    })
+    .await;
+    client.close().await;
+    server.close().await;
+    assert!(
+        outcome.is_ok(),
+        "supported IPv4 candidates consumed every slot and excluded IPv6"
+    );
+}
