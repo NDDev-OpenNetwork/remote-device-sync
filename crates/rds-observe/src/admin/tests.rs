@@ -181,6 +181,42 @@ async fn ambiguous_framing_never_authorizes_a_metrics_request() {
 }
 
 #[tokio::test]
+async fn response_closes_without_waiting_for_client_fin_or_accepting_another_request() {
+    let fixture = Fixture::new();
+    let calls = Arc::new(AtomicU64::new(0));
+    let count = calls.clone();
+    let mut server = Server::start(Some(fixture.prepared().await), move || {
+        count.fetch_add(1, Ordering::Relaxed);
+        Snapshot::new()
+    });
+    let mut client = TcpStream::connect(server.addr().unwrap()).await.unwrap();
+    client
+        .write_all(fixture.request("/metrics").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(1), client.read_to_string(&mut response))
+        .await
+        .expect("response waited for client FIN")
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    // Keep the client write half open after receiving FIN. Neither silence
+    // nor a further request is allowed to keep the admin slot alive.
+    let _ = client
+        .write_all(fixture.request("/metrics").as_bytes())
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while server.snapshot()["rds_admin_connections_active"] != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("post-response peer retained admin capacity");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn saturation_and_stalled_headers_release_capacity_with_bounded_shutdown() {
     let fixture = Fixture::new();
     let mut server = Server::start(Some(fixture.prepared().await), Snapshot::new);

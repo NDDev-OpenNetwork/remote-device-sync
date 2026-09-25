@@ -1425,3 +1425,16 @@ on a packet or incidental OS wake. All three mux-isolation tests pass locally
 with unchanged deadlines. CI uses `--no-fail-fast` within each test invocation
 to report all failing targets while still returning failure. The final local
 default workspace run passed 535 tests with three opt-in cases ignored.
+
+Both native bundles and complete PR asset assembly subsequently passed. A later
+full macOS test run found two additional issues: wall-clock-only fixture names
+could collide across concurrent tests, and closing an admin TCP socket with
+unread over-limit input could reset the peer before it received the HTTP error.
+Parallel scratch factories now include an atomic sequence and sync tests refuse
+an existing directory. Admin response teardown now half-closes then discards a
+bounded tail (8 KiB / 100 ms within the existing two-second request budget), as
+specified by RFC 9112 §9.6. A regression keeps the client write half open and
+sends another request after response EOF, requiring bounded slot release and
+exactly one source invocation. No extra request is parsed and header/body
+admission limits are unchanged. Final native CI remains required after this
+runtime change.

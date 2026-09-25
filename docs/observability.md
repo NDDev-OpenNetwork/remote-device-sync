@@ -210,6 +210,13 @@ admin exposure no longer share a listener. Directory counter names now use the
 the old scrape-time record inventory are absent. A missing series must not be
 interpreted as zero inventory or zero device activity.
 
+After writing a response the listener half-closes its write side and discards
+at most 8 KiB of trailing bytes for at most 100 ms, within the existing request
+deadline. It never parses a second request. This bounded staged close follows
+[RFC 9112 §9.6](https://www.rfc-editor.org/rfc/rfc9112.html#section-9.6) to avoid
+TCP resets erasing an already-written response when the peer has sent excess
+input. Excess beyond the drain budget can still cause a reset.
+
 Limits: 16 retained requests, 8 KiB headers, 32 header fields, two seconds for
 one read/snapshot/write exchange, 256 numeric samples including admin health,
 and 64 KiB response text. Excess connections close immediately. Metric source

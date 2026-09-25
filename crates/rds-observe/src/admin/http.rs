@@ -10,6 +10,7 @@ use tokio::net::TcpStream;
 use super::{Counters, Source, Token, snapshot};
 
 pub(super) const MAX_HEADER: usize = 8192;
+const CLOSE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 enum Request {
     Metrics,
@@ -137,5 +138,25 @@ pub(super) async fn serve(
     );
     socket.write_all(response.as_bytes()).await?;
     socket.write_all(body.as_bytes()).await?;
-    socket.shutdown().await
+    socket.shutdown().await?;
+    // RFC 9112 §9.6: dropping with unread request bytes can reset TCP and
+    // erase the response before the peer reads it (observed on macOS).
+    // Half-close first, then discard a bounded tail without parsing another
+    // request. An uncooperative peer cannot retain a slot past this deadline
+    // or the enclosing request deadline; server shutdown can still abort us.
+    let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, async {
+        let mut remaining = MAX_HEADER;
+        let mut discard = [0u8; 1024];
+        while remaining != 0 {
+            let limit = remaining.min(discard.len());
+            let read = socket.read(&mut discard[..limit]).await?;
+            if read == 0 {
+                break;
+            }
+            remaining -= read;
+        }
+        Ok::<(), std::io::Error>(())
+    })
+    .await;
+    Ok(())
 }
