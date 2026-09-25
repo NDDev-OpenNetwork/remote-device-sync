@@ -9,11 +9,17 @@ use rds_net::{
     load_or_create_key,
 };
 
+#[cfg(unix)]
+mod logging;
 mod managed;
+mod ssh;
 
 #[derive(Parser)]
 #[command(version, about = "Remote device access for the GDS estate")]
 struct Cli {
+    /// New private log file (8 MiB cap); required for SSH with JSON telemetry.
+    #[arg(long, global = true)]
+    log_file: Option<std::path::PathBuf>,
     /// Use a separate endpoint explicitly; its identity must not be in use.
     #[arg(long, global = true, conflicts_with = "control_dir")]
     direct: bool,
@@ -94,18 +100,11 @@ enum Command {
     },
     /// Print peer metadata (version, services, displays).
     Info { target: String },
-    /// Local port forward to the peer's sshd. Then: `ssh -p PORT localhost`.
+    /// Open a native SSH terminal or execute a command through the agent.
     Ssh {
         target: String,
-        /// Local listen address.
-        #[arg(short = 'L', long, default_value = "127.0.0.1:2222")]
-        bind: SocketAddr,
-        /// Remote sshd address.
-        #[arg(long, default_value = "127.0.0.1:22")]
-        remote: rds_core::TcpTarget,
-        /// Maximum simultaneous local forwarding workers (positive 16-bit).
-        #[arg(long, default_value = "64")]
-        max_connections: std::num::NonZeroU16,
+        #[command(flatten)]
+        options: ssh::Options,
     },
     /// Forward a local port to an arbitrary peer-side TCP target.
     Forward {
@@ -146,8 +145,69 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    use std::io::IsTerminal as _;
     let cli = Cli::parse();
-    rds_observe::run_main(rds_observe::Service::Cli, "warn", run(cli)).await
+    let ssh_command = match &cli.command {
+        Command::Ssh { .. } => true,
+        Command::Session(options) => options.is_ssh(),
+        _ => false,
+    };
+    let terminal_ssh = std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && ssh_command
+        && cli.log_file.is_none();
+    let setup = async {
+        let config = rds_observe::Config::from_env("warn")?;
+        anyhow::ensure!(
+            !ssh_command || config.format() != rds_observe::Format::Json || cli.log_file.is_some(),
+            "SSH JSON telemetry requires --log-file in a private directory; remote stderr must not enter the log collector"
+        );
+        if let Some(path) = cli.log_file.clone() {
+            let file =
+                tokio::task::spawn_blocking(move || logging::PrivateLog::create(&path)).await??;
+            Ok::<_, anyhow::Error>(rds_observe::install_with_writer(
+                rds_observe::Service::Cli,
+                config,
+                file,
+            )?)
+        } else {
+            Ok(rds_observe::install(rds_observe::Service::Cli, config)?)
+        }
+    };
+    let telemetry = match setup.await {
+        Ok(telemetry) => telemetry,
+        Err(error) => {
+            eprintln!("could not initialize RDS logging: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let pause = if terminal_ssh {
+        match telemetry.pause_console().await {
+            Ok(guard) => Some(guard),
+            Err(error) => return telemetry.finish(Err(error)),
+        }
+    } else {
+        None
+    };
+    let mut remote_status = 0;
+    let result = telemetry
+        .run(async {
+            match run(cli).await {
+                Err(error) if error.is::<ssh::ExitStatus>() => {
+                    remote_status = error.downcast_ref::<ssh::ExitStatus>().map_or(255, |e| e.0);
+                    Ok(())
+                }
+                result => result,
+            }
+        })
+        .await;
+    drop(pause);
+    let status = telemetry.finish(result);
+    if status == std::process::ExitCode::SUCCESS {
+        std::process::ExitCode::from(remote_status)
+    } else {
+        status
+    }
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -300,29 +360,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let info = rds_cli::info(&conn).await?;
                 println!("{info:#?}");
             }
-            Command::Ssh {
-                target,
-                bind,
-                remote,
-                max_connections,
-            } => {
-                let conn = Arc::new(
-                    dial(
-                        &endpoint,
-                        resolve(&directory, &target).await?,
-                        grant.clone(),
-                    )
-                    .await?,
-                );
-                let listener = tokio::net::TcpListener::bind(bind).await?;
-                let local = listener.local_addr()?;
-                eprintln!(
-                    "endpoint {} — run: ssh -p {} <user>@{}",
-                    conn.remote_id(),
-                    local.port(),
-                    local.ip()
-                );
-                rds_cli::forward_bound_listener(conn, listener, remote, max_connections).await?;
+            Command::Ssh { target, options } => {
+                let conn = dial(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                )
+                .await?;
+                ssh::direct(&conn, options).await?;
             }
             Command::Forward {
                 target,
@@ -470,12 +515,37 @@ mod config_tests {
     fn tcp_target_flags_reject_invalid_destinations() {
         for command in ["ssh", "forward"] {
             for target in [":22", "host:0", "host:nope", "::1:22", "[::1]22"] {
-                assert!(
-                    Cli::try_parse_from(["rds", command, "unused-peer", "--remote", target])
-                        .is_err(),
-                    "{command}: {target}"
-                );
+                let mut args = vec!["rds", command, "unused-peer", "--remote", target];
+                if command == "ssh" {
+                    args.extend([
+                        "--user",
+                        "fixture",
+                        "--host-key",
+                        "host.pub",
+                        "--identity",
+                        "key",
+                    ]);
+                }
+                assert!(Cli::try_parse_from(args).is_err(), "{command}: {target}");
             }
         }
+    }
+
+    #[test]
+    fn ssh_requires_explicit_trust_and_account_and_has_no_listen_port() {
+        let args = [
+            "rds",
+            "ssh",
+            "peer",
+            "--user",
+            "fixture",
+            "--host-key",
+            "host.pub",
+            "--identity",
+            "key",
+        ];
+        assert!(Cli::try_parse_from(args).is_ok());
+        assert!(Cli::try_parse_from(["rds", "ssh", "peer"]).is_err());
+        assert!(Cli::try_parse_from(args.into_iter().chain(["-L", "127.0.0.1:2222"])).is_err());
     }
 }

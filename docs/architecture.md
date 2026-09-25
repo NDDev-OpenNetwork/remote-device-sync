@@ -204,8 +204,10 @@ Encoding is the latency budget line item that matters: hardware encoders
 - **Input**: Wayland RemoteDesktop portal (libei) via `ashpd`; X11 XTEST
   via `x11rb`; `uinput` as privileged fallback; Win `SendInput`,
   macOS `CGEvent`.
-- **SSH**: do not implement SSH. Forward TCP to the host `sshd` over a QUIC
-  stream — the user's ssh client keeps its own auth, keys, agent.
+- **SSH**: reuse the standard protocol through `russh`, behind `rds-ssh`.
+  The native Rust client uses a pinned RDS TCP stream to the remote SSH server;
+  that server supplies OS account isolation and PTYs. Host trust, local terminal
+  restoration and cancellation are RDS policy. See [SSH](ssh.md).
 
 ## Architecture
 
@@ -213,7 +215,7 @@ Encoding is the latency budget line item that matters: hardware encoders
 ┌──────────┐   direct QUIC (hole-punched)   ┌──────────┐
 │  rds cli │◄──────────────────────────────►│ rds-agent│
 │ (viewer, │   or relayed via the relay     │ (daemon, │
-│  ssh -L) │◄────────────►┌──────────┐◄────►│  host)   │
+│  SSH)    │◄────────────►┌──────────┐◄────►│  host)   │
 └──────────┘              │rds-server│      └────┬─────┘
                           │ relay +  │           │
                           │ directory│      ┌────┴─────┐
@@ -268,9 +270,12 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   overrides its location, and `--no-control` explicitly disables it.
 - **`rds-client`** — shared request/forwarding library and local session
   manager/client; depends on core/net/discovery/observe, never on the CLI.
+- **`rds-ssh`** — bounded SSH session adapter over generic async I/O; depends
+  on russh/Tokio/typed errors, not on RDS endpoints or the CLI. `rds-cli` owns
+  Unix terminal adapters and feeds managed/direct streams into this library.
 - **`rds`** — operator CLI. `rds id`, `rds ticket`, `rds ping`, `rds ssh`,
   `rds forward`, `rds desktop` (feature-gated), single-file `rds send/recv`.
-  `rds session` connects/lists/selects/pings/forwards through the local agent
+  `rds session` connects/lists/selects/pings/opens SSH/forwards through the local agent
   without loading a key or binding a network endpoint.
 
 ### Identity and authorization
@@ -576,7 +581,7 @@ requires a new run for qualification.
 1. **v0.1 (this)**: workspace, rendezvous/relay, auth allowlist, `ping`,
    `ssh`/TCP forward E2E, desktop pipeline traits + X11 capture/encode/
    input behind the `desktop` feature, architecture doc.
-2. **v0.2**: GDS discovery + authz — `iroh-dns-server` on gds-services,
+2. **v0.2**: GDS discovery + authz — `iroh-dns-server` on directory-host,
    `EndpointHooks` allowlist, signed `device_id`↔`EndpointId` registry,
    `rds ssh <device-name>`; damage-driven (VFR) capture replacing the
    fixed-fps loop; wgpu client render.

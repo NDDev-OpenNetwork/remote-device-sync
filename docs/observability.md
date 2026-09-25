@@ -9,6 +9,20 @@ and two 100-probe development ping runs with JSON telemetry enabled.
 
 ## Stack and ownership
 
+The [native SSH client](ssh.md) adds fixed `ssh_connect` and `ssh_session`
+operation names to both the Rust and Vector allowlists. Outcomes/timings contain
+no host, account, command, key or terminal bytes. JSON SSH requires a separate
+`rds --log-file <new-private-path>` sink, capped at 8 MiB; never export its raw
+stdout/stderr, which could contain a forged log envelope from a remote program.
+The collector reads only the dedicated telemetry file. The path is exclusive,
+in a validated private directory; the launcher owns naming and retention.
+A completed session may carry a nonzero remote exit code; it is still a
+completed SSH exchange. Terminal CLI logging without a separate file pauses
+behind an acknowledged output barrier while SSH owns the UI, then resumes
+after termios/descriptor restoration. The existing bounded queue
+and overflow counter apply; long interactive sessions can delay/drop CLI logs.
+Agent source telemetry is independent and continues during terminal use.
+
 The default [local session manager](local-sessions.md) adds authenticated aggregate
 `rds_agent_local_manager_*` gauges for available snapshot, connected/pending
 sessions and capacity. Its weak nonblocking observer contains no peer or session

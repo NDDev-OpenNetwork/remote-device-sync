@@ -15,9 +15,10 @@ through shutdown, including with the explicit server-only `--no-control` flag.
 
 `rds-client` owns outgoing protocol operations and the local manager/client.
 It depends on core/net/discovery/observe. Agent and CLI depend on it; the former
-`rds-cli` library exports remain compatibility re-exports. No new third-party
-dependency or external runtime program was added. Existing Tokio, rustix,
-postcard, BLAKE3 and random-number libraries supply the underlying mechanisms.
+`rds-cli` library exports remain compatibility re-exports. The manager uses
+existing Tokio, rustix, postcard, BLAKE3 and random-number libraries.
+The later [native SSH increment](ssh.md) adds a standard protocol library at
+the CLI stream boundary, without changing manager endpoint ownership.
 
 The default is `<key-file>.control` beside the agent key. CLI derives it from
 the default XDG_CONFIG_HOME/HOME key path, without reading/creating a key.
@@ -38,7 +39,7 @@ rds session --control-dir /absolute/private/rds-control list
 rds session --control-dir /absolute/private/rds-control use <session-id>
 rds session --control-dir /absolute/private/rds-control ping
 rds session --control-dir /absolute/private/rds-control info
-rds session --control-dir /absolute/private/rds-control ssh -L 127.0.0.1:2222
+rds session --control-dir /absolute/private/rds-control ssh --user <account> --host-key /private/device-host.pub --identity /private/operator-key
 rds session --control-dir /absolute/private/rds-control disconnect <session-id>
 ```
 
@@ -85,12 +86,11 @@ Registry trust is distinct from incoming revocation authority. It loads on a
 blocking worker before endpoint bind. The manager inherits the verified
 resolver; unsigned client-supplied name-to-key mappings are not accepted.
 
-SSH currently means an RDS-managed tunnel to the target sshd, used by an SSH
-client at the printed loopback address. **An embedded terminal/PTY is not part
-of this increment.** Listeners reject non-loopback addresses. Other local users
-can reach a local TCP port: account authentication and host-key verification
-remain SSH responsibilities. Unix control-socket UID checks do not authenticate
-clients of the forwarded TCP port.
+SSH now uses an [embedded Rust client](ssh.md) over OpenTcp, with an explicitly
+trusted host public key and standard remote PTY requests. It opens no local
+TCP listener. Existing SSH/TCP port forwarding remains `forward`; its listeners
+reject non-loopback addresses. Other local users can reach a forwarded TCP port:
+Unix control-socket UID checks do not authenticate those TCP clients.
 
 ## Consistency and lifetime
 

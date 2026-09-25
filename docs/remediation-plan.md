@@ -271,8 +271,13 @@ estate configuration and authority material stay outside this repository.
 
 ## W5 — deliver native Rust SSH and terminal access
 
-Proposed gate: `r5-ssh`. Evaluate `russh` as a library, behind an owned service
-interface. Keep the current TCP tunnel as optional compatibility/migration.
+Proposed gate: `r5-ssh`. The [native client increment](ssh.md) selects russh
+0.63.3 and standard OS PTY semantics. `rds ssh` now opens shell/exec sessions;
+the old TCP listener is `rds forward`. The current remote adapter still uses an
+existing SSH server. W5.2 must reuse a library and qualified OS account isolation,
+not invent SSH/PTY or inherit an agent's privileged shell. No W5 gate is closed
+by the client increment; host provisioning, account scopes, broker/reattachment
+and platform/network qualification remain required.
 
 | Task | Work | Acceptance/evidence |
 |---|---|---|

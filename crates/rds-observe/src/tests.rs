@@ -71,6 +71,37 @@ fn json_is_allowlisted_without_invoking_private_formatters() {
     assert!(records[2]["event"].is_null());
 }
 
+#[tokio::test]
+async fn ssh_operations_export_only_fixed_names_and_lifecycle_outcomes() {
+    let capture = Capture::default();
+    let (subscriber, telemetry) = subscriber(
+        Service::Cli,
+        Config::new(Format::Json, "off").unwrap(),
+        capture.clone(),
+    )
+    .unwrap();
+    let _default = tracing::subscriber::set_default(subscriber);
+    let _: Result<(), ()> = observe(Operation::SshConnect, async { Ok(()) }).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            observe(
+                Operation::SshSession,
+                std::future::pending::<Result<(), ()>>()
+            )
+        )
+        .await
+        .is_err()
+    );
+    assert!(telemetry.shutdown().drained);
+    let records = capture.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["operation"], "ssh_connect");
+    assert_eq!(records[0]["outcome"], "ok");
+    assert_eq!(records[1]["operation"], "ssh_session");
+    assert_eq!(records[1]["outcome"], "cancelled");
+}
+
 #[test]
 fn operational_events_and_session_context_survive_diagnostic_filter_off() {
     let capture = Capture::default();

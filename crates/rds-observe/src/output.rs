@@ -71,6 +71,20 @@ pub(super) struct Sink {
 enum Message {
     Record(Buffer),
     Wake,
+    Pause {
+        ready: tokio::sync::oneshot::Sender<()>,
+        resume: mpsc::Receiver<()>,
+    },
+}
+
+/// Holds console output while a terminal UI owns stderr. The existing bounded
+/// queue continues accepting records; overflow increments the usual drop count.
+/// Dropping this guard resumes the worker, including when an async task aborts.
+pub struct ConsolePause(mpsc::SyncSender<()>);
+impl Drop for ConsolePause {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
 }
 
 impl Sink {
@@ -121,6 +135,11 @@ impl Output {
                     let record = match receiver.blocking_recv() {
                         Some(Message::Record(record)) => record,
                         Some(Message::Wake) => continue,
+                        Some(Message::Pause { ready, resume }) => {
+                            let _ = ready.send(());
+                            let _ = resume.recv();
+                            continue;
+                        }
                         None => break,
                     };
                     if writer.write_all(&record.0).is_err() {
@@ -147,6 +166,33 @@ impl Output {
     }
     pub fn health(&self) -> Health {
         self.sink.health()
+    }
+
+    pub async fn pause(&self) -> io::Result<ConsolePause> {
+        let (ready, acknowledged) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = mpsc::sync_channel(1);
+        let guard = ConsolePause(resume);
+        tokio::time::timeout(DRAIN_TIMEOUT, async {
+            self.sink
+                .sender
+                .send(Message::Pause {
+                    ready,
+                    resume: resumed,
+                })
+                .await
+                .map_err(|_| io::Error::other("logging output closed"))?;
+            acknowledged
+                .await
+                .map_err(|_| io::Error::other("logging output closed"))
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "logging output could not yield the terminal",
+            )
+        })??;
+        Ok(guard)
     }
 
     pub fn shutdown(mut self) -> Shutdown {

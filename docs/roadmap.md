@@ -6,6 +6,10 @@ Current execution order and reopened gates are in the
 The milestones below preserve the original direction; historical checkpoint
 completion does not establish that the audited defects or product gaps are closed.
 
+The [native SSH client](ssh.md) now uses russh and standard remote PTY requests
+over managed/direct TCP streams. W5 remains open for host/account enrollment,
+broker/reattachment and macOS/real-network/mixed-load qualification.
+
 The [observability sequence](observability.md) now accompanies remediation:
 shared Rust telemetry, Vector/OpenObserve qualification and authenticated
 aggregate source metrics now have local Linux evidence. Remaining source

@@ -34,7 +34,7 @@ jobs:
       test_matrix_os: '["ubuntu-latest", "macos-latest"]'
       test_command: >-
         cargo test --locked --workspace
-        && cargo test --locked -p rds-net -p rds-agent -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-relay/owned-relay,rds-server/owned-relay
+        && cargo test --locked -p rds-net -p rds-agent -p rds-cli -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay
         && cargo test --locked -p rds-net --features metrics --test metrics
         && { [ "$(uname -s)" != "Linux" ] || cargo test --locked --workspace --features rds-desktop/x11; }
       fmt_command: "cargo fmt --all -- --check"

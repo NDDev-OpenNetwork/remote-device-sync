@@ -54,6 +54,13 @@ negotiate only after both endpoints probe them.
 
 ## cfg conventions
 
+The native [SSH client](ssh.md) shares safe rustix termios/readiness adapters
+between Linux and macOS. Linux fixtures exercise a real OS PTY, terminal and
+descriptor restoration, signals, resize and installed OpenSSH interoperability.
+Native macOS execution and TUI/physical-network qualification remain pending.
+The SSH backend uses the existing ring crypto/native boundary; no external
+client/helper executable is part of the RDS command implementation.
+
 The default local session manager uses filesystem Unix sockets and Tokio
 `peer_cred()` on both supported targets, without custom unsafe code. Both ends
 check effective UID. Directory/socket ownership and mode checks use safe rustix

@@ -147,8 +147,11 @@ key creation. These flags are independent of the transport JSON schema. See
 
 ## Client forwarding options
 
-`rds ssh` and `rds forward` accept `--max-connections N` (1–65535, default 64)
+`rds forward` accepts `--max-connections N` (1–65535, default 64)
 for their local listener's concurrent forwarding workers. This is independent
 of the agent's connection budget. Invalid values fail before identity creation
 or dial; these service options do not extend the endpoint JSON schema. See
 [client lifecycle](client-lifecycle.md) for request deadlines and cancellation.
+
+`rds ssh` opens an [embedded SSH session](ssh.md) on one authorized TCP stream;
+its account/host-key/PTY options are independent of endpoint configuration.

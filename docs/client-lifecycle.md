@@ -48,9 +48,12 @@ owns a worker covering remote open and bidirectional copying. Completed workers
 are reaped. At capacity the listener pauses application acceptance; the OS
 listen backlog and transport buffers are separate from this limit.
 
-`rds ssh` and `rds forward` accept `--max-connections` (1–65535, default 64).
+`rds forward` accepts `--max-connections` (1–65535, default 64).
 Argument parsing rejects invalid values before identity creation or dialing.
 A port-zero bind reports the actual allocated local address.
+
+`rds ssh` now runs an embedded standard SSH client without a local listener.
+Its handshake, PTY, stream and terminal lifetime are specified in [SSH](ssh.md).
 
 Normal QUIC closure drops the listener, cancels and joins all workers, then
 returns. An accept error follows the same cleanup. Canceling the listener future

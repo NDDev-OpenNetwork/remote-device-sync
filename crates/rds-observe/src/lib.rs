@@ -20,7 +20,7 @@ pub mod admin;
 
 mod output;
 use output::{Buffer, Output};
-pub use output::{Health, Shutdown};
+pub use output::{ConsolePause, Health, Shutdown};
 
 const TARGET: &str = "rds_telemetry";
 /// Each queued record, including its newline, is at most this size.
@@ -77,6 +77,9 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn format(&self) -> Format {
+        self.format
+    }
     pub fn new(format: Format, filter: &str) -> Result<Self, InitError> {
         Ok(Self {
             format,
@@ -134,7 +137,17 @@ pub async fn run_main<E: std::fmt::Display>(
 }
 
 pub fn install(service: Service, config: Config) -> Result<Telemetry, InitError> {
-    let (subscriber, telemetry) = subscriber(service, config, std::io::stderr())?;
+    install_with_writer(service, config, std::io::stderr())
+}
+
+/// An explicit owned sink separates protocol/terminal stderr from telemetry.
+/// The same bounded queue, privacy schema and shutdown rules apply.
+pub fn install_with_writer<W: std::io::Write + Send + 'static>(
+    service: Service,
+    config: Config,
+    writer: W,
+) -> Result<Telemetry, InitError> {
+    let (subscriber, telemetry) = subscriber(service, config, writer)?;
     tracing::subscriber::set_global_default(subscriber).map_err(|_| InitError::Subscriber)?;
     Ok(telemetry)
 }
@@ -175,6 +188,12 @@ fn subscriber<W: std::io::Write + Send + 'static>(
 }
 
 impl Telemetry {
+    /// Wait until prior writes finish, then hold console output for an owned
+    /// terminal UI. Drop the guard before finishing/shutting down telemetry.
+    pub async fn pause_console(&self) -> std::io::Result<ConsolePause> {
+        self.output.pause().await
+    }
+
     pub fn health(&self) -> Health {
         self.output.health()
     }
@@ -278,6 +297,8 @@ pub fn emit(event: Event) {
 pub enum Operation {
     Connect,
     ServiceStream,
+    SshConnect,
+    SshSession,
 }
 
 impl Operation {
@@ -285,6 +306,8 @@ impl Operation {
         match self {
             Self::Connect => "connect",
             Self::ServiceStream => "service_stream",
+            Self::SshConnect => "ssh_connect",
+            Self::SshSession => "ssh_session",
         }
     }
 }
@@ -377,6 +400,8 @@ impl Visit for SafeFields {
             ("event", "operation_completed") => self.event = Some("operation_completed"),
             ("operation", "connect") => self.operation = Some("connect"),
             ("operation", "service_stream") => self.operation = Some("service_stream"),
+            ("operation", "ssh_connect") => self.operation = Some("ssh_connect"),
+            ("operation", "ssh_session") => self.operation = Some("ssh_session"),
             ("outcome", "ok") => self.outcome = Some("ok"),
             ("outcome", "error") => self.outcome = Some("error"),
             ("outcome", "cancelled") => self.outcome = Some("cancelled"),

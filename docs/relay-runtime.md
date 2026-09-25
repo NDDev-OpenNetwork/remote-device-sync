@@ -50,8 +50,9 @@ rds --direct --key-file <separate-client-key> --backend noq --owned-relay rds-re
 ```
 
 The two relay commands above are alternatives, not concurrent owners of the
-same role/socket. The example still uses the current TCP bridge to SSH;
-native Rust SSH/PTY is separate W5 work. Private deployment paths and actual
+same role/socket. The example uses the authorized TCP bridge to a remote SSH
+server; the [native Rust client](ssh.md) now speaks SSH over that stream. The
+account broker and reattachment remain W5 work. Private deployment paths and actual
 identity pins belong in the estate. Do not reuse a device key for the relay.
 The directory example binds loopback; remote directory exposure needs its own
 HTTPS configuration and the existing policy/enrollment contracts.

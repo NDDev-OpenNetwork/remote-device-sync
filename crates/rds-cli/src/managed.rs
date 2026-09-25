@@ -12,6 +12,12 @@ pub struct Options {
     command: Action,
 }
 
+impl Options {
+    pub fn is_ssh(&self) -> bool {
+        matches!(self.command, Action::Ssh { .. })
+    }
+}
+
 #[derive(Subcommand)]
 enum Action {
     /// List live connections, pending dials and the selected device.
@@ -41,16 +47,12 @@ enum Action {
         #[arg(long)]
         session: Option<SessionId>,
     },
-    /// Forward a local port to sshd through an existing managed connection.
+    /// Open SSH on the selected or explicitly pinned managed connection.
     Ssh {
         #[arg(long)]
         session: Option<SessionId>,
-        #[arg(short = 'L', long, default_value = "127.0.0.1:2222")]
-        bind: SocketAddr,
-        #[arg(long, default_value = "127.0.0.1:22")]
-        remote: rds_core::TcpTarget,
-        #[arg(long, default_value = "64")]
-        max_connections: std::num::NonZeroU16,
+        #[command(flatten)]
+        options: super::ssh::Options,
     },
     /// Forward to a peer-side TCP target through an existing connection.
     Forward {
@@ -97,13 +99,11 @@ pub async fn run(options: Options, directory: PathBuf) -> anyhow::Result<()> {
         Action::Disconnect { session } => Command::Disconnect { session },
         Action::Ping { session } => Command::Ping { session, nonce: 1 },
         Action::Info { session } => Command::Info { session },
-        Action::Ssh {
-            session,
-            bind,
-            remote,
-            max_connections,
+        Action::Ssh { session, options } => {
+            let session = client.selected(session).await?;
+            return super::ssh::managed(&client, session, options).await;
         }
-        | Action::Forward {
+        Action::Forward {
             session,
             bind,
             remote,
@@ -172,8 +172,10 @@ pub async fn run_default(
             }
             anyhow::bail!("unexpected local ticket response");
         }
-        super::Command::Ping { target, .. } | super::Command::Info { target } => target,
-        super::Command::Ssh { target, bind, .. } | super::Command::Forward { target, bind, .. } => {
+        super::Command::Ping { target, .. }
+        | super::Command::Info { target }
+        | super::Command::Ssh { target, .. } => target,
+        super::Command::Forward { target, bind, .. } => {
             anyhow::ensure!(
                 bind.ip().is_loopback(),
                 "managed forwarding requires a loopback listen address"
@@ -238,13 +240,10 @@ pub async fn run_default(
             anyhow::ensure!(returned == session, "local session mismatch");
             println!("{info:#?}");
         }
-        super::Command::Ssh {
-            bind,
-            remote,
-            max_connections,
-            ..
+        super::Command::Ssh { options, .. } => {
+            super::ssh::managed(&client, session, options).await?
         }
-        | super::Command::Forward {
+        super::Command::Forward {
             bind,
             remote,
             max_connections,

@@ -23,6 +23,61 @@ fn record() -> Buffer {
     record
 }
 
+#[tokio::test]
+async fn console_pause_stops_writes_bounds_backlog_and_resumes_on_drop() {
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let capture = Capture::default();
+    let output = Output::new(capture.clone(), 2).unwrap();
+    output.sink().send(record());
+    let pause = output.pause().await.unwrap();
+    assert_eq!(*capture.0.lock().unwrap(), b"fixture\n");
+    for _ in 0..5 {
+        output.sink().send(record());
+    }
+    assert_eq!(output.health().telemetry_dropped_total, 3);
+    assert_eq!(*capture.0.lock().unwrap(), b"fixture\n");
+    drop(pause);
+    assert!(output.shutdown().drained);
+    assert_eq!(*capture.0.lock().unwrap(), b"fixture\nfixture\nfixture\n");
+}
+
+#[tokio::test]
+async fn cancelled_pause_request_does_not_leave_output_paused() {
+    let (entered, in_write) = mpsc::sync_channel(1);
+    let (release, released) = mpsc::sync_channel(4);
+    let output = Output::new(
+        Blocked {
+            entered,
+            release: released,
+        },
+        4,
+    )
+    .unwrap();
+    output.sink().send(record());
+    in_write.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), output.pause())
+            .await
+            .is_err()
+    );
+    // The queued Pause's receiver is disconnected when the canceled future
+    // drops its guard, so the worker must pass it after the blocked write ends.
+    output.sink().send(record());
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    assert!(output.shutdown().drained);
+}
+
 #[test]
 fn blocked_writer_bounds_queue_and_shutdown_without_blocking_producers() {
     let (entered, in_write) = mpsc::sync_channel(1);

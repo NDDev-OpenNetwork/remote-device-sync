@@ -40,13 +40,14 @@ Neither increment closes these product gaps or any wave.
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
-| W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH-forward commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned forwarding, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer/sync manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
+| W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer/sync manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
 | W3.6 | Partial; validated selection and local child failure isolation | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link route loss and known tunnel closure retire stale relay selection. Mux child send/receive failures are isolated; policy withdraws failed advertisements, excludes failed routes even when last-path close is refused, and closes held connections after all-child loss. Real loopback fixtures preserve open-stream traffic and accept new connections on the surviving child. Policy-observed telemetry exposes sticky event loss and unknown selection. Full path-event resynchronization, lossless retirement metrics, interface/socket recreation, per-service scheduling and physical-network qualification remain open. |
+| W5.1/W5.3/W5.5 | Partial; native SSH client and standard PTY | `rds-ssh` uses russh 0.63.3 over pinned managed/direct streams. Explicit host pins, key/agent authentication, PTY/exec acknowledgements, terminal restoration, resize, cancellation and complete exit/output handling have Linux regression coverage and an OpenSSH interop fixture. SSH-specific fixed telemetry names are accepted by Vector; JSON uses a separate private file and terminal console logging pauses during SSH. GDS host/account provisioning, certificates/MFA, native macOS, broker/reattachment and mixed-load/network qualification remain open. See [contract](ssh.md). |
 | W10.1/W10.2 | Partial; O1 foundation and O2 admin/source increment | Shared bounded Rust telemetry and Vector/OpenObserve pipeline; opt-in authenticated loopback metrics on agent/relay/server, aggregate source observations and old public metrics removal. Durable policy/catalog observations and effective agent revocation revision/lease are implemented. Finer queue/task and upstream adapter coverage, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
 
 ## Authorization change
@@ -1257,3 +1258,42 @@ interactive desktop/input switching, installed-device migration and platform/
 network qualification. GDS lifecycle, recursive sync and O2–O6 observability
 work retain their separate gates. No deployed service or release gate is closed
 by these local code and regression checks.
+
+## 2026-09-25 — native Rust SSH client and standard OS PTY
+
+W5.1/W5.3/W5.5 partial: `rds-ssh` reuses russh 0.63.3 for SSH, while the
+remote server/OS owns account isolation and PTY allocation. Both CLI SSH
+commands now open a native shell/exec session over a pinned managed or explicit
+direct stream. Existing TCP listener behavior is available through `forward`.
+Explicit host pins, a named account and one key/agent identity are required;
+there is no trust-on-first-use, implicit credential fallback or agent forwarding.
+
+Positive channel/PTY/exec acknowledgements, bounded setup and cancellation,
+concurrent input/output, complete exit/output draining, resize and local terminal
+restoration have regression coverage. A tiny-buffer bidirectional deadlock
+reproducer led to a bounded transport bridge sized above the advertised receive
+window. The bridge owns the actual stream independently of upstream task drop.
+No command replay or reconnectable PTY semantics are claimed.
+
+Fixed SSH operation outcomes/timings enter the Rust/Vector schema. Remote stderr
+cannot be trusted as a log envelope: JSON SSH now requires a separate exclusive
+private file, with an 8 MiB process cap. File telemetry remains live during a
+terminal session; console logging uses an acknowledged pause/restoration barrier.
+Tests inject a forged telemetry event and verify it stays only in command output.
+
+See the [contract and migration](ssh.md) and the
+[final validation receipt](reports/rds-ssh-20260925.md), including actual OpenSSH
+interoperability, default/feature-expanded checks and frozen source hashes.
+Final Linux checks pass: formatting; default/X11/all-feature Clippy; 513 default
+and 560 feature-expanded tests (3 ignored each, overlapping); the separately
+invoked OpenSSH test; cargo-deny; Vector validation and seven projection tests.
+All 225 source/configuration hashes remain unchanged across the final sequence.
+The existing remote SSH server is an explicit dependency. The new library reuses
+the existing ring crypto boundary; no all-Rust native-object claim is made.
+
+Next W5 steps, in dependency order: verified GDS host-key provisioning/rotation
+and account/command capabilities; a Rust OS account broker with proven privilege
+separation; authorized PTY survival/reattachment with bounded history; native
+macOS, lease/revocation, impaired-network and mixed SSH/video/sync qualification.
+Viewer/sync manager APIs and the other W0–W10/O2–O6 work retain their gates.
+No wave, deployment or complete-system readiness is closed by this increment.

@@ -10,7 +10,7 @@ and protocol decisions.
 Current readiness: the [2026-09-24 audit](docs/reports/rds-audit-20260924.md)
 identifies authorization, discovery, sync and owned-transport blockers.
 The [remediation plan](docs/remediation-plan.md) defines their fixes and the
-remaining native SSH, interactive desktop and platform work.
+remaining SSH broker/reattachment, interactive desktop and platform work.
 
 ## Layout
 
@@ -25,6 +25,7 @@ crates/
 ├── rds-agent      daemon on a controlled device (ssh forward, desktop)
 ├── rds-cli        `rds` operator CLI
 ├── rds-client     shared client operations and local session manager/IPC
+├── rds-ssh        native SSH engine adapter over managed/direct streams
 ├── rds-observe    bounded process logs and privacy-preserving telemetry
 ├── rds-bench      development measurement/qualification harness
 ├── rds-desktop    capture/codec/input/render traits + platform backends
@@ -54,12 +55,11 @@ rds-agent
 rds id                         # your bare endpoint id (hex) for --allow lists
 rds ticket                     # running local agent's current endpoint ticket
 rds ping <ticket>              # RTT probes through a retained managed session
-rds ssh <ticket> -L 127.0.0.1:2222
-ssh -p 2222 user@127.0.0.1     # reaches the remote sshd over QUIC
+rds ssh <ticket> --user <account> --host-key /private/device-host.pub --identity /private/operator-key
 rds forward <ticket> -L 127.0.0.1:8080 --remote 127.0.0.1:3000
 rds session list
 rds session use <session-id>   # switch defaults; existing streams stay pinned
-rds session ssh               # forward to the selected device
+rds session ssh --user <account> --host-key /private/device-host.pub --identity /private/operator-key
 
 # Sync/desktop still need explicit direct mode and a separately authorized key:
 rds --direct --key-file /private/path/client.key send <ticket> <file>
@@ -82,6 +82,13 @@ rds-server --relay-addr 0.0.0.0:3340 --http-addr 0.0.0.0:3341 \
 rds-agent --directory https://directory.example.com:3341 --registry-key <base32-verifying-key>
 rds ping device-a
 ```
+
+SSH now uses an embedded Rust client and standard remote PTY requests. The
+controlled device still needs an SSH server. Provision its host public key
+through a trusted channel; see [SSH trust, usage and limits](docs/ssh.md).
+The former `ssh -L` command is now `forward ... --remote 127.0.0.1:22`.
+For JSON SSH telemetry, use `--log-file <new-absolute-private-path>`; remote
+stderr must stay separate from the collector's input.
 
 Both relay binaries also support `--relay-backend noq` when built with
 `owned-relay`. This mode requires a separate persistent `--relay-key-file` and

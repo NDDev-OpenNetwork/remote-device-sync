@@ -25,8 +25,10 @@ below was verified against vendored sources or upstream documents on
 The current product-facing increment is the W2.4
 [local session manager](local-sessions.md). Default CLI connectivity and local
 key-inode runtime ownership are implemented. Remaining manager work covers
-viewer/sync APIs and installed-device qualification, alongside native SSH/PTY
-and viewer/input switching. This supplements the complete remediation plan;
+viewer/sync APIs and installed-device qualification. The [native SSH client](ssh.md)
+now covers standard shell/exec/PTY requests; host-key/account enrollment,
+broker/reattachment and real-network/platform qualification remain W5 work,
+alongside viewer/input switching. This supplements the complete remediation plan;
 the manager does not close a wave or replace WS0 acceptance requirements.
 
 - **Harness first**: WS0 builds the measurement rig before any
@@ -112,7 +114,7 @@ A gate id is a promise: wave N+1 must keep wave N's checks green.
 | WS5 | session/media protocol v2 | `rds-core`, `rds-desktop` | C5: latency under loss | C1 |
 | WS6 | sync transfer protocol | `rds-sync`, `rds-cli` | C6: never corrupts | C1 |
 | WS7 | observability surface | `rds-net`, `rds-server`, `rds-agent` | C7: numbers are real | C1–C3 |
-| WS8 | deploy on gds-services + real E2E | estate side | C8: real metal | all |
+| WS8 | deploy on directory-host + real E2E | estate side | C8: real metal | all |
 
 v0.3+ media/platform work (Vulkan Video, KMS, SCK, wgpu render) starts
 only after C1–C3 pass.
@@ -439,17 +441,17 @@ reading metrics — no hand-measured prose.
 
 ## 10. WS8 — deployment
 
-- `rds-server` on `gds-services` (systemd unit, relay + directory).
+- `rds-server` on `directory-host` (systemd unit, relay + directory).
 - Estate side (private repo): device inventory gains `endpoint_key`;
   GDS policy ties allowlists to estate membership.
-- Real-E2E: `rds ssh` between `nddev-amsterdam` and `gds-services`;
+- Real-E2E: `rds ssh` between `device-a` and `directory-host`;
   desktop smoke on attended session; report committed.
 
 **Checkpoint C8** — the system works on real metal, not just in sims:
 
 | Layer | Check |
 | --- | --- |
-| functional | `rds ssh` across real NAT (amsterdam ↔ gds-services): connect, run commands, survive a relay↔direct transition |
+| functional | `rds ssh` across real NAT (device-a ↔ directory-host): connect, run commands, survive a relay↔direct transition |
 | impairment | real-network report: measured RTT/loss/path used, compared against harness predictions — deltas explained |
 | soak | 1-hour real session: reconnects counted, RSS steady on both ends |
 | security | deploy review: systemd sandboxing (ProtectSystem, NoNewPrivileges), key permissions 0600, ports/firewall documented |

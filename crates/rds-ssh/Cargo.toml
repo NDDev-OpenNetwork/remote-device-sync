@@ -1,0 +1,18 @@
+[package]
+name = "rds-ssh"
+description = "Strict SSH client sessions over caller-owned RDS streams"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+russh.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

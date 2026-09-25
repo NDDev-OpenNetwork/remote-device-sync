@@ -177,7 +177,7 @@ The GDS services host carries four roles; three are off-the-shelf iroh
 infrastructure, one is ours:
 
 ```
-gds-services
+directory-host
 ├── iroh-dns-server 1.2.0    pkarr PUT /pkarr + DNS/DoH resolve
 │                            (signed EndpointInfo records; endpoints
 │                             self-publish, key-verified)
@@ -285,9 +285,9 @@ iroh ecosystem gives the whole story on the same endpoint:
 
 1. **Discovery+authz hardening**: `EndpointHooks::after_handshake`
    allowlist (replace stream-level check), `iroh-dns-server` on
-   gds-services, agent publishes EndpointInfo; tickets stay as fallback.
+   directory-host, agent publishes EndpointInfo; tickets stay as fallback.
 2. **GDS directory service**: signed `device_id↔EndpointId` records,
-   `rds ssh nddev-amsterdam` name resolution, audit log.
+   `rds ssh device-a` name resolution, audit log.
 3. **Damage-driven capture**: replace fixed-fps loop with
    damage/change-triggered encode (Sunshine VFR) — biggest real latency
    + bandwidth win available.
@@ -306,6 +306,12 @@ and best practices — not assemble third-party high-level frameworks.
 The correct boundary is therefore *not* "no dependencies" but "we own
 every protocol decision and every data path; dependencies are either
 thin generated bindings to OS/driver APIs or the QUIC engine itself".
+
+2026-09-25 clarification for W5: the owner explicitly prefers established
+SSH/PTY technology where appropriate. The [SSH decision](ssh.md) adds russh
+0.63.3 as the standard SSH engine, just as noq/rustls supply QUIC/TLS. RDS owns
+trust and lifecycle; PTYs remain OS facilities. The current remote OpenSSH
+adapter is explicit, while a scoped Rust account broker remains unimplemented.
 
 ### 9.1 The noq seam — verified in source
 
@@ -411,6 +417,9 @@ interop option, not a dependency.
 
 ### 9.8 The honest boundary — what we do NOT build
 
+- **SSH state machine/key formats** (`russh`) and **PTY kernel semantics**
+  (OS APIs). The Rust client speaks standard SSH over RDS; existing SSH servers
+  own account/session isolation until a separately qualified Rust broker exists.
 - **QUIC/TLS state machine** (noq + rustls). RFC 9000 + extensions is
   a multi-year, security-critical undertaking with no product upside;
   the engine already carries multipath/QNT/QAD. Everything above it —

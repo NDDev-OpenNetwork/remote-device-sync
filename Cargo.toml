@@ -13,6 +13,7 @@ members = [
     "crates/rds-observe",
     "crates/rds-relay",
     "crates/rds-server",
+    "crates/rds-ssh",
     "crates/rds-sync",
 ]
 
@@ -32,6 +33,7 @@ repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
 #   rds-sync      → rds-core, rds-net
 #   rds-desktop   → rds-core, rds-net
 #   rds-client    → rds-core, rds-net, rds-discovery (outgoing sessions and local IPC)
+#   rds-ssh       → standard SSH library and async I/O (no endpoint ownership)
 #   rds-agent     → everything client-facing
 #   rds-cli       → everything user-facing
 #   rds-server    → rds-relay, rds-discovery
@@ -55,6 +57,7 @@ rand = "0.9"
 redb = "4.3"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rustix = { version = "1", features = ["fs"] }
+russh = { version = "=0.63.3", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "logging", "tls12", "ring"] }
 rustls-pki-types = { version = "1", features = ["alloc"] }
 rds-agent = { path = "crates/rds-agent" }
@@ -69,6 +72,7 @@ rds-net = { path = "crates/rds-net" }
 rds-observe = { path = "crates/rds-observe" }
 rds-relay = { path = "crates/rds-relay" }
 rds-sync = { path = "crates/rds-sync" }
+rds-ssh = { path = "crates/rds-ssh" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

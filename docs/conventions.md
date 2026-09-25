@@ -40,9 +40,11 @@ Rules every change follows. CI enforces what it can; the rest is review.
 
 ## Wire protocol
 
-- `rds-core` owns every wire type; postcard + explicit length prefix;
+- `rds-core` owns RDS control wire types; postcard + explicit length prefix;
   64 KiB max frame on control paths. Media streams carry raw codec
   bitstream with a fixed header — no serde in the hot path.
+- Standard SSH framing, key exchange and key formats belong to `russh`, behind
+  `rds-ssh`; do not duplicate them as RDS control messages.
 - Protocol versioning rides the ALPN (`rds/0`, `rds-relay/0`).
 
 ## Platform code
