@@ -16,6 +16,11 @@ research — iroh 1.2/noq internals (multipath, path selectors, hooks),
 capture/codec/input crate matrix, GDS server composition, and the
 updated build order — lives in [research.md](research.md).
 
+Agent local service starts after endpoint bind, independently of external relay
+availability. It does not await iroh's unbounded relay-only `online()` predicate.
+The directory announcer republishes evolving addresses; the printed ticket is
+only a startup snapshot. Local readiness and remote reachability are distinct.
+
 CLI and agent share [versioned endpoint configuration](endpoint-configuration.md)
 with explicit file/flag precedence, backend/relay validation and preflight before
 identity creation. The owned relay uses a separately pinned public identity.
@@ -502,8 +507,9 @@ through `rds-observe`: stderr text for private local debugging or an allowlisted
 schema-1 JSON export. Random process IDs and numeric agent connection IDs
 correlate events without raw peer keys. Vector/OpenObserve configuration,
 log-derived metrics and disabled alert definitions accompany an opt-in real
-pipeline regression. This does not replace source counters or establish a
-secured admin surface, distributed traces, support bundles or estate rollout.
+pipeline regression. Agent/relay/server now expose aggregate source metrics on
+a separate opt-in, authenticated loopback listener. Distributed traces, support
+bundles, complete source coverage and estate rollout remain open.
 
 `rds-net::metrics` gives every endpoint a [`Registry`] of atomic
 counters; a per-connection `ConnSampler` diffs cumulative
@@ -523,11 +529,15 @@ together. See [path observation contract](path-telemetry.md).
 `Registry::render_prometheus` emits text exposition
 behind the `metrics` feature — no prometheus dependency.
 
-`rds-server` serves `GET /v1/metrics` on the directory listener with
-per-endpoint PUT counters labelled by a 16-hex BLAKE3 prefix of the
-writer key — raw keys, peer addresses and content never appear. The
-route answers loopback peers only (everyone else gets 404): remote
-scraping goes over SSH or a local exporter.
+`rds-observe::admin` owns bounded HTTP/1.1 handling, private token-file loading,
+constant-time bearer authentication and numeric Prometheus exposition. Daemon
+startup validates the optional listener before creating identity/catalog state;
+supervision joins its request tasks at shutdown. Component observers retain
+counters or weak references only. The directory's public `/v1/metrics` route
+was removed after a real loopback-proxy regression reproduced exposure. Stable
+writer hash labels are no longer exported. The iroh relay reports unsupported
+source coverage explicitly, rather than supplying zero forwarding counters.
+See [the admin contract](observability.md#authenticated-admin-metrics-o2).
 
 Session logging is structured `tracing`: every agent connection runs
 inside an `rds.conn` span carrying `peer` and a monotonic

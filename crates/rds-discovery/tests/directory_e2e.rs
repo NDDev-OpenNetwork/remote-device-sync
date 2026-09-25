@@ -65,41 +65,61 @@ async fn publish_fetch_roundtrip() {
     client.health().await.unwrap();
 }
 
-/// C7: `/v1/metrics` carries per-endpoint accounting under anonymized
-/// writer labels — never the public key itself.
+/// A loopback reverse proxy must not expose an admin route on the public API.
 #[tokio::test]
-async fn metrics_scrape_has_anonymized_per_endpoint_counts() {
+async fn public_directory_has_no_metrics_even_through_a_loopback_proxy() {
+    let (dir, _) = serve().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let backend = dir.addr();
+    let proxy = tokio::spawn(async move {
+        let (mut incoming, _) = listener.accept().await.unwrap();
+        let mut outgoing = TcpStream::connect(backend).await.unwrap();
+        tokio::io::copy_bidirectional(&mut incoming, &mut outgoing)
+            .await
+            .unwrap();
+    });
+    let mut client = TcpStream::connect(address).await.unwrap();
+    client.write_all(b"GET /v1/metrics HTTP/1.1\r\nHost: fixture.invalid\r\nX-Forwarded-For: 203.0.113.2\r\n\r\n").await.unwrap();
+    client.shutdown().await.unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(2), client.read_to_string(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    proxy.await.unwrap();
+    dir.close().await.unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 404"),
+        "public API exposed metrics: {response}"
+    );
+    assert!(!response.contains("rds_directory_"));
+}
+
+/// Aggregate metrics track real requests without stable per-device labels.
+#[tokio::test]
+async fn aggregate_metrics_count_known_traffic_without_retaining_directory() {
     let (dir, client) = serve().await;
+    let metrics = dir.metrics();
     let k = key(11);
     let rec = record(&k, now_unix().unwrap(), 300);
     client.publish(&rec).await.unwrap();
-
-    // Raw HTTP GET — Client has no metrics helper.
-    let mut sock = TcpStream::connect(dir.addr()).await.unwrap();
-    sock.write_all(b"GET /v1/metrics HTTP/1.0\r\n\r\n")
+    client
+        .fetch(&EndpointKey(k.verifying_key().to_bytes()))
         .await
         .unwrap();
-    let mut body = String::new();
-    sock.read_to_string(&mut body).await.unwrap();
-
-    assert!(body.contains("rds_directory_puts_ok 1"), "{body}");
-    assert!(body.contains("rds_directory_writers_distinct 1"), "{body}");
-    let line = body
-        .lines()
-        .find(|l| l.starts_with("rds_directory_endpoint_puts_total"))
-        .expect("per-endpoint counter missing");
-    // Label is the 16-hex-char blake3 prefix — and the raw verifying
-    // key (base32 or hex) must appear nowhere in the scrape.
-    let label = line.split('"').nth(1).unwrap();
-    assert_eq!(label.len(), 16, "writer label: {label}");
-    let raw_hex: String = k
-        .verifying_key()
-        .to_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    assert!(!body.contains(&raw_hex), "raw endpoint key in scrape");
-    assert!(!body.contains("10.0.0.1"), "peer address in scrape");
+    client.health().await.unwrap();
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot["rds_directory_puts_ok_total"], 1);
+    assert_eq!(snapshot["rds_directory_gets_total"], 1);
+    assert_eq!(snapshot["rds_directory_requests_total"], 3);
+    assert_eq!(snapshot["rds_directory_workers_known"], 1);
+    assert!(snapshot.keys().all(|name| !name.contains('{')));
+    dir.close().await.unwrap();
+    assert_eq!(metrics.snapshot()["rds_directory_connection_tasks"], 0);
+    drop(dir);
+    assert_eq!(metrics.snapshot()["rds_directory_workers_known"], 0);
+    assert_eq!(metrics.snapshot()["rds_directory_puts_ok_total"], 1);
 }
 
 #[tokio::test]

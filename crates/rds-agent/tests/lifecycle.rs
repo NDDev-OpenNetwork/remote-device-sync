@@ -295,3 +295,42 @@ async fn direct_serve_enforces_budget_and_cancellation_releases_it() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_track_real_admission_streams_and_do_not_own_agent_io() {
+    for backend in backends() {
+        let (agent, clients) = fixture(backend, 2, 2).await;
+        let metrics = agent.metrics();
+        let runner = start(&agent);
+        let conn = rds_cli::connect(&clients[0], agent.endpoint.addr())
+            .await
+            .unwrap();
+        rds_cli::ping(&conn, 42).await.unwrap();
+        let (mut stalled, _reply) = conn.open_bi().await.unwrap();
+        stalled.write_all(&[0]).await.unwrap();
+        state(&agent, 1, 1).await;
+        let observed = metrics.snapshot();
+        assert_eq!(observed["rds_agent_connections_active"], 1);
+        assert_eq!(observed["rds_agent_streams_active"], 1);
+        assert_eq!(observed["rds_agent_connections_limit"], 2);
+        assert_eq!(observed["rds_net_connections_accepted_total"], 1);
+        assert_eq!(observed["rds_net_active_connections"], 1);
+        assert_eq!(observed["rds_agent_grants_required"], 0);
+        assert!(!observed.contains_key("rds_agent_revocations_fresh"));
+        // Busy policy accounting is unknown, never a fabricated zero.
+        {
+            let _grants = agent.policy.active_grants.lock().unwrap();
+            let busy = metrics.snapshot();
+            assert_eq!(busy["rds_agent_active_grants_known"], 0);
+            assert!(!busy.contains_key("rds_agent_active_grants"));
+        }
+        stop(&agent, &clients, runner).await;
+        assert_eq!(metrics.snapshot()["rds_agent_connections_active"], 0);
+        assert_eq!(metrics.snapshot()["rds_agent_streams_active"], 0);
+        drop(agent);
+        assert_eq!(
+            metrics.snapshot(),
+            std::collections::BTreeMap::from([("rds_agent_metrics_available", 0)])
+        );
+    }
+}

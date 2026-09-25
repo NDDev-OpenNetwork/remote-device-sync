@@ -82,7 +82,10 @@ newer sampler's selected observation. No stale sample from another connection
 is substituted. One-shot callers must keep the sampler through their scrape.
 The rest of the registry contains independently read counters, not an atomic
 transport-wide transaction. Unknown selection produces zero RTT/cwnd and
-`rds_net_selected_path_known = 0`.
+`rds_net_selected_path_known = 0`. Export uses a try-lock: a busy or poisoned
+selected-sample lock gives the same unknown result for that scrape, without
+waiting for the sampler or clearing its stored observation. Other counters
+remain available.
 
 Additional exported values:
 
@@ -91,7 +94,7 @@ Additional exported values:
 | `rds_net_policy_observed_connections` | gauge | Sampled connections using the policy-observed view |
 | `rds_net_degraded_path_observers` | gauge | Sampled policy views with event loss or a stopped observer |
 | `rds_net_path_events_lost_total` | counter | Observed cumulative lag deltas, counted once by each sampler |
-| `rds_net_selected_path_known` | gauge | Whether the last RTT/cwnd sample had a known selection |
+| `rds_net_selected_path_known` | gauge | Whether a known RTT/cwnd selection can be observed in this scrape |
 
 One sampler per connection is required to avoid double accounting. Coverage
 gauges follow sampler lifetime and return to zero on drop; lost-event totals
@@ -115,8 +118,9 @@ covers both backends, last-handle drop, stream survival, closure with a one-hour
 sampling interval, cancellation, late start and shared selected-gauge ownership.
 
 Full validated-path reconciliation, lossless retirement accounting, per-session
-metrics, admin-surface exposure, native macOS and real network qualification
-remain open. No latency or throughput improvement is
+metrics, native macOS and real network qualification remain open. Aggregate
+endpoint counters now reach the authenticated [admin surface](observability.md);
+this does not resolve their sampling limits. No latency or throughput improvement is
 claimed from these correctness tests.
 
 Historical reports are preserved. Noq path-kind and selected-path evidence

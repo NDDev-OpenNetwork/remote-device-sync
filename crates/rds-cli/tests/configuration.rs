@@ -188,3 +188,28 @@ fn simultaneous_id_commands_share_one_persistent_identity() {
     }
     assert!(!dir.0.join(".rds-key-transaction.pending").exists());
 }
+
+#[test]
+fn admin_token_generation_creates_no_identity_and_never_prints_or_overwrites_secret() {
+    let scratch = Scratch::new();
+    let token = scratch.0.join("admin-token");
+    let token_path = token.to_str().unwrap();
+    let output = run_with_tail(&["admin-token", "--file", token_path], &[], &scratch);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!scratch.0.join("endpoint.key").exists());
+    let credential = std::fs::read_to_string(&token).unwrap();
+    assert_eq!(credential.len(), 64);
+    assert!(rds_observe::admin::Token::load(&token).is_ok());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&credential));
+    assert!(
+        !run_with_tail(&["admin-token", "--file", token_path], &[], &scratch)
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read_to_string(token).unwrap(), credential);
+}

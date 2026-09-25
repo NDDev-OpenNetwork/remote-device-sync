@@ -110,15 +110,15 @@ impl Registry {
     }
 
     /// Counter snapshot keyed by exposition name — what bench reports
-    /// embed and `render_prometheus` serializes.
+    /// embed and `render_prometheus` serializes. A busy selected-path observation
+    /// is unknown for this scrape; export never waits for its sampler's lock.
     pub fn snapshot(&self) -> BTreeMap<&'static str, u64> {
         let c = &*self.inner;
         let selected = c
             .selected_path
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map(|s| (s.rtt_us, s.cwnd_bytes));
+            .try_lock()
+            .ok()
+            .and_then(|sample| sample.as_ref().map(|s| (s.rtt_us, s.cwnd_bytes)));
         BTreeMap::from([
             (
                 "rds_net_connections_opened_total",
@@ -425,5 +425,39 @@ impl Drop for ConnSampler {
             .inner
             .live_paths
             .fetch_sub(self.last_live, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_selected_sample_does_not_block_scrapes_or_clear_the_observation() {
+        let registry = Registry::default();
+        registry.connection_opened();
+        let mut held = registry.inner.selected_path.lock().unwrap();
+        *held = Some(SelectedPathSample {
+            owner: Arc::new(()),
+            rtt_us: 25,
+            cwnd_bytes: 64,
+        });
+        let source = registry.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || send.send(source.snapshot()).unwrap());
+        let observed = receive.recv_timeout(Duration::from_secs(1));
+        // Always release and join, including on the blocking baseline. A failed
+        // regression must not leave a parked worker or hang the suite.
+        drop(held);
+        worker.join().unwrap();
+        let values = observed.expect("snapshot waited for the transport observation lock");
+        assert_eq!(values["rds_net_selected_path_known"], 0);
+        assert_eq!(values["rds_net_rtt_us"], 0);
+        assert_eq!(values["rds_net_cwnd_bytes"], 0);
+        assert_eq!(values["rds_net_connections_opened_total"], 1);
+        let values = registry.snapshot();
+        assert_eq!(values["rds_net_selected_path_known"], 1);
+        assert_eq!(values["rds_net_rtt_us"], 25);
+        assert_eq!(values["rds_net_cwnd_bytes"], 64);
     }
 }

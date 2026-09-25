@@ -7,7 +7,7 @@
 //! - the **discovery directory**: signed `EndpointRecord`s stored on
 //!   disk (`rds-discovery`), served over the directory HTTP API
 //!   (`PUT/GET/DELETE /v1/records`, `GET /v1/names/{name}`,
-//!   `PUT /v1/registry`, health, metrics),
+//!   `PUT /v1/registry`, health),
 //! - the **registry bridge**: a estate-signed name→key snapshot the
 //!   directory verifies against `--registry-key` before serving.
 //!
@@ -34,6 +34,8 @@ use tracing::info;
     args_conflicts_with_subcommands = true
 )]
 struct Cli {
+    #[command(flatten)]
+    admin: rds_observe::admin::Args,
     #[command(subcommand)]
     command: Option<Command>,
     /// Address the relay endpoint binds to.
@@ -107,8 +109,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let prepared_admin = cli.admin.bind().await?;
+
     // Complete read-only configuration checks before identity/catalog creation
-    // or listener startup. Durable authority checks still belong to PolicyStore.
+    // or product listener startup. The reserved admin listener is not serving yet.
+    // Durable authority checks still belong to PolicyStore.
     let enrolled_publishers = cli.directory_allow.len();
     let enrollment = rds_discovery::Enrollment::new(cli.directory_allow)?;
     let relay = cli.relay.prepare()?;
@@ -219,15 +224,30 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             info!(%addr, endpoint_id = %id, "owned relay listening");
         }
     }
+    let relay_metrics = relay.metrics();
+    let directory_metrics = dir.metrics();
+    let mut admin = rds_observe::admin::Server::start(prepared_admin, move || {
+        let mut values = directory_metrics.snapshot();
+        values.extend(relay_metrics.snapshot());
+        values
+    });
+    if let Some(addr) = admin.addr() {
+        info!(%addr, "admin metrics listening");
+    }
     rds_observe::emit(rds_observe::Event::ListenerReady);
     let unexpected = tokio::select! {
         biased;
         _ = relay.stopped() => Some("relay"),
         _ = dir.wait_stopped() => Some("directory"),
+        _ = admin.stopped() => Some("admin metrics"),
         _ = shutdown => None,
     };
-    let (relay_result, directory_result) = tokio::join!(relay.shutdown(), dir.close());
-    check_shutdown(unexpected, relay_result, directory_result)
+    let (relay_result, directory_result, admin_result) =
+        tokio::join!(relay.shutdown(), dir.close(), admin.close());
+    finish_admin(
+        check_shutdown(unexpected, relay_result, directory_result),
+        admin_result,
+    )
 }
 
 fn check_shutdown(
@@ -261,6 +281,20 @@ fn read_config_file(path: &std::path::Path, limit: usize, label: &str) -> anyhow
         .read_to_end(&mut bytes)?;
     anyhow::ensure!(bytes.len() <= limit, "{label} exceeds {limit} bytes");
     Ok(bytes)
+}
+
+fn finish_admin(
+    product: anyhow::Result<()>,
+    admin: Result<(), rds_observe::admin::Error>,
+) -> anyhow::Result<()> {
+    match (product, admin) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Err(error), Err(admin)) => {
+            Err(error.context(format!("admin shutdown also failed: {admin}")))
+        }
+    }
 }
 
 #[cfg(test)]

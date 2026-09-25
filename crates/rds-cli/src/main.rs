@@ -65,6 +65,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create a new private admin scrape credential without endpoint initialization.
+    AdminToken {
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
     /// Print this device's endpoint id.
     Id,
     /// Print this device's dialable ticket.
@@ -136,6 +141,11 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    if let Command::AdminToken { file } = &cli.command {
+        let file = file.clone();
+        tokio::task::spawn_blocking(move || rds_observe::admin::Token::create(&file)).await??;
+        return Ok(());
+    }
     let mut config = cli
         .endpoint_config
         .as_deref()
@@ -206,6 +216,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         })
         .transpose()?;
     match cli.command {
+        Command::AdminToken { .. } => {
+            unreachable!("admin token handled before endpoint initialization")
+        }
         Command::Id => unreachable!("handled before endpoint bind"),
         Command::Ticket => {
             // Bound the wait: an unreachable relay must not hang the

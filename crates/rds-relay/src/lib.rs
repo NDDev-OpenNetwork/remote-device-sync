@@ -13,7 +13,7 @@ pub mod proto;
 mod runtime;
 pub use runtime::{
     PreparedRelay, ReadyRelay, RelayArgs, RelayBackend, RelayBinding, RelayConfigError,
-    RelayRuntimeError, RunningRelay, shutdown_signal,
+    RelayMetrics, RelayRuntimeError, RunningRelay, shutdown_signal,
 };
 #[cfg(feature = "owned-relay")]
 pub mod server;

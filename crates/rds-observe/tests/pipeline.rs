@@ -2,6 +2,11 @@
 //! datasets or human alert destinations. Requires Docker Compose and pre-pulled
 //! pinned images. See docs/observability.md for the two build/run commands.
 
+#![cfg(target_os = "linux")]
+
+#[path = "pipeline/admin.rs"]
+mod admin;
+
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -323,6 +328,8 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
     println!(
         "metrics: remote-write received exact controlled ok/error counters and histogram counts"
     );
+
+    admin::check(&client, &stack, &base).await;
 
     let alerts: Vec<Value> =
         serde_json::from_str(&fs::read_to_string(stack.config.join("alerts.json")).unwrap())

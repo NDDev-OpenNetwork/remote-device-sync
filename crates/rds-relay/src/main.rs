@@ -13,6 +13,8 @@ use rds_relay::{RelayArgs, RelayBinding};
 #[derive(Parser)]
 #[command(version, about = "RDS relay server (iroh HTTP or owned QUIC)")]
 struct Cli {
+    #[command(flatten)]
+    admin: rds_observe::admin::Args,
     /// Relay bind address: HTTP for iroh, UDP for the owned QUIC backend.
     #[arg(long, default_value = "0.0.0.0:3340")]
     addr: SocketAddr,
@@ -27,6 +29,7 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    let prepared_admin = cli.admin.bind().await?;
     let mut server = cli
         .relay
         .prepare()?
@@ -56,13 +59,38 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("relay endpoint id: {id}");
         }
     }
+    let metrics = server.metrics();
+    let mut admin = rds_observe::admin::Server::start(prepared_admin, move || metrics.snapshot());
+    if let Some(addr) = admin.addr() {
+        tracing::info!(%addr, "admin metrics listening");
+    }
     rds_observe::emit(rds_observe::Event::ListenerReady);
     let unexpected = tokio::select! {
         biased;
-        _ = server.stopped() => true,
-        _ = shutdown => false,
+        _ = server.stopped() => Some("relay"),
+        _ = admin.stopped() => Some("admin metrics"),
+        _ = shutdown => None,
     };
-    server.shutdown().await?;
-    anyhow::ensure!(!unexpected, "relay stopped unexpectedly");
-    Ok(())
+    let (product, admin_result) = tokio::join!(server.shutdown(), admin.close());
+    let result = product.map_err(anyhow::Error::from).and_then(|()| {
+        if let Some(service) = unexpected {
+            anyhow::bail!("{service} stopped unexpectedly");
+        }
+        Ok(())
+    });
+    finish_admin(result, admin_result)
+}
+
+fn finish_admin(
+    product: anyhow::Result<()>,
+    admin: Result<(), rds_observe::admin::Error>,
+) -> anyhow::Result<()> {
+    match (product, admin) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Err(error), Err(admin)) => {
+            Err(error.context(format!("admin shutdown also failed: {admin}")))
+        }
+    }
 }

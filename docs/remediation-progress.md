@@ -20,10 +20,10 @@ receiver byte/digest acknowledgment. These implementation gaps remain in
 W5, W6/W7 and W0.2, alongside the other open plan tasks. That Linux
 receipt records 431 workspace, 238 expanded and 2 isolated iroh tests passing;
 those results do not establish missing functionality or native platform/network
-qualification. The observability change below adds a shared process/collector
-foundation; its latest Linux matrix records 444 workspace and 239 expanded
-tests plus the opt-in infrastructure pipeline. It does not close these product
-gaps or any wave.
+qualification. The O1 observability foundation recorded 444 workspace and 239 expanded
+tests plus the opt-in infrastructure pipeline. The subsequent authenticated
+admin/source-metrics increment is described below and in its own receipt.
+Neither increment closes these product gaps or any wave.
 
 | Task | State | Evidence / remaining scope |
 |---|---|---|
@@ -41,12 +41,12 @@ gaps or any wave.
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
-| W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Global timeout classes, retry jitter, startup recovery and desktop/media deadlines remain open. |
+| W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
 | W3.6 | Partial; validated selection and local child failure isolation | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link route loss and known tunnel closure retire stale relay selection. Mux child send/receive failures are isolated; policy withdraws failed advertisements, excludes failed routes even when last-path close is refused, and closes held connections after all-child loss. Real loopback fixtures preserve open-stream traffic and accept new connections on the surviving child. Policy-observed telemetry exposes sticky event loss and unknown selection. Full path-event resynchronization, lossless retirement metrics, interface/socket recreation, per-service scheduling and physical-network qualification remain open. |
-| W10.1/W10.2 | Partial; O1 Linux foundation checked | Shared bounded Rust stderr logging, allowlisted JSON, process/session context, local operation outcomes, Vector/OpenObserve logs and remote-write metrics, disabled alert definitions and a real isolated pipeline regression. Secured source metrics, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
+| W10.1/W10.2 | Partial; O1 foundation and O2 admin/source increment | Shared bounded Rust telemetry and Vector/OpenObserve pipeline; opt-in authenticated loopback metrics on agent/relay/server, aggregate source observations and old public metrics removal. Detailed durable policy/inventory and upstream adapter coverage, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
 
 ## Authorization change
 
@@ -1118,9 +1118,65 @@ A/B overhead study, connection-establishment timing or physical network evidence
 See the [contract and O1–O6 sequence](observability.md) and
 [dated receipt](reports/rds-observability-20260925.md).
 
-W10.1/W10.2 remain partial. Dedicated secured admin/source metrics, detailed
-phase/reason correlation, exact-build diagnostics and redacted bundles, private
-estate rollout, expected-instance monitoring, independent failure probes,
-long-run resource/latency measurement and native macOS checks remain open.
+At the O1 receipt, W10.1/W10.2 remained partial. Secured admin/source metrics
+were the next increment (recorded below); detailed phase/reason correlation,
+exact-build diagnostics and redacted bundles, private estate rollout,
+expected-instance monitoring, independent failure probes, long-run
+resource/latency measurement and native macOS checks remain open.
 Existing SSH/desktop/sync/transport remediation gates are unchanged. No wave
 checkpoint, remote CI run, production activation or release readiness is claimed.
+
+
+## Authenticated source metrics and local agent readiness
+
+O2 adds a disabled-by-default Rust loopback admin listener to agent, relay and
+composed server. Paired address/token flags are validated before product state
+creation. `rds admin-token` creates a private credential without endpoint
+identity or secret output. Only authenticated bounded `GET /metrics` requests
+invoke aggregate source snapshots; proxy headers do not authorize. The old
+public `/v1/metrics` returns 404 even behind a loopback proxy, and stable writer
+hash labels are removed.
+
+Agent, directory and owned relay export admission/task, transport, grant/lease,
+request/publication/GC and forwarding/history observations. Weak references or
+counter-only handles preserve I/O teardown. Busy/unavailable values are explicit;
+upstream-relay forwarding coverage is absent. Transport snapshot export no
+longer waits for its selected-sample lock, demonstrated by a failing-before
+contention regression. The corresponding stored observation survives a busy
+scrape.
+
+Default-backend daemon testing also found an unbounded iroh `online()` wait in
+agent startup with relays disabled. Local service/admin supervision now starts
+after endpoint bind independently of relay availability. A real process with a
+nonresponsive relay serves an allowed direct ping, exports its accepted counter
+and joins SIGTERM shutdown. Directory announcements follow address changes;
+initial tickets and local readiness are not remote reachability guarantees.
+
+The optional Vector fragment loads the private bearer credential from its
+secret directory, disables source proxying and projects only opaque labels.
+Its real fixture queries exact source counters in OpenObserve and verifies an
+owned proxy receives no scrape. Existing logs/metrics/alert/restart checks also
+run. A fixture storage-capacity mismatch was diagnosed and repaired without
+reducing the production buffer limit.
+
+Formatting, default/X11/all-feature workspace Clippy, **466 workspace**,
+**251 expanded all-feature** tests and the **real Vector/OpenObserve pipeline**
+passed. A final workspace rerun and focused observer Clippy followed the
+platform-specific test fixture split. `rds-observe` all targets/features also
+pass an **Apple Silicon cross-check**, without claiming native execution.
+Two 100-probe debug ping measurements completed with JSON telemetry and zero
+observed local loss/error counters. Admin is inactive in those bench worlds;
+these results do not measure admin overhead, setup latency or WAN behavior.
+
+One workspace run timed out in the existing path replacement test, while the
+same binary passed isolated/paired repetitions. The fixture now establishes
+application policy's observed replacement path before closing the primary;
+post-fault budgets are unchanged. No unique root cause or production failover
+fix is claimed. See the [dated receipt](reports/rds-admin-metrics-20260925.md)
+and [contract/remaining sequence](observability.md#next-reviewable-increments).
+
+Detailed durable inventory/policy metrics, finer queue coverage, upstream relay
+observations, phase/reason correlation, support bundles/dashboards, private
+rollout and independent liveness remain O2–O6. Native macOS execution, physical
+network/resource/failure campaigns and all open product/release gates remain.
+No wave closes and no production service was activated.

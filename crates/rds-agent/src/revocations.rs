@@ -24,6 +24,10 @@ pub struct RevocationPolicy {
 }
 
 impl RevocationPolicy {
+    pub(crate) fn is_local(&self) -> bool {
+        self.local
+    }
+
     pub fn len(&self) -> usize {
         self.ids.len()
     }

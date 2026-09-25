@@ -90,6 +90,7 @@ async fn canceled_session_case() {
         admission: std::sync::Arc::new(Semaphore::new(256)),
         rejected: AtomicU64::new(0),
     });
+    let metrics = RelayMetrics(std::sync::Arc::downgrade(&state));
     let worker = tokio::spawn(serve_conn(remote.unwrap(), state.clone()));
     let (mut send, mut recv) = local.open_bi().await.unwrap();
     write_control(&mut send, &RelayControl::Register)
@@ -112,10 +113,27 @@ async fn canceled_session_case() {
     let frame = local.read_datagram().await.unwrap();
     assert_eq!(proto::decode_frame(&frame).unwrap().1, b"history fixture");
     assert_eq!(state.recent.lock().unwrap().len(), 1);
+    let observed = metrics.snapshot();
+    assert_eq!(observed["rds_relay_forwarded_datagrams_total"], 1);
+    assert_eq!(
+        observed["rds_relay_forwarded_bytes_total"],
+        b"history fixture".len() as u64
+    );
+    assert_eq!(observed["rds_relay_endpoints"], 1);
+    assert_eq!(observed["rds_relay_history_edges"], 1);
+    {
+        let _busy = state.recent.lock().unwrap();
+        let observed = metrics.snapshot();
+        assert_eq!(observed["rds_relay_history_known"], 0);
+        assert!(!observed.contains_key("rds_relay_history_edges"));
+    }
     worker.abort();
     assert!(worker.await.unwrap_err().is_cancelled());
     assert!(state.conns.lock().unwrap().is_empty());
     assert!(state.recent.lock().unwrap().is_empty());
+    assert_eq!(metrics.snapshot()["rds_relay_endpoints"], 0);
+    drop(state);
+    assert_eq!(metrics.snapshot()["rds_relay_metrics_available"], 0);
     tokio::time::timeout(Duration::from_secs(1), local.inner().closed())
         .await
         .unwrap();

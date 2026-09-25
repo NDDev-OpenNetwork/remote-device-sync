@@ -16,6 +16,8 @@ use rds_net::{
     about = "RDS agent: serve SSH and desktop sessions to allowed peers"
 )]
 struct Cli {
+    #[command(flatten)]
+    admin: rds_observe::admin::Args,
     /// Path to the endpoint secret key (created if missing).
     #[arg(long)]
     key_file: Option<std::path::PathBuf>,
@@ -104,6 +106,7 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    let prepared_admin = cli.admin.bind().await?;
     let mut config = cli
         .endpoint_config
         .as_deref()
@@ -207,7 +210,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         None
     };
     let endpoint = bind_endpoint(config).await?;
-    endpoint.online().await;
+    // Binding starts local service. iroh's online() waits indefinitely for a
+    // relay, including when relays are disabled or unreachable. Reachability
+    // develops independently; the announcer publishes address changes.
 
     let mut announce = if let (Some(client), Some(issuer)) = (directory.clone(), record_issuer) {
         Some(rds_net::announce(
@@ -226,8 +231,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         None
     };
 
-    let agent = Agent::new(endpoint, policy)
-        .with_limits(AgentLimits::new(cli.max_connections, cli.max_streams));
+    let agent = std::sync::Arc::new(
+        Agent::new(endpoint, policy)
+            .with_limits(AgentLimits::new(cli.max_connections, cli.max_streams)),
+    );
+    let metrics = agent.metrics();
+    let mut admin = rds_observe::admin::Server::start(prepared_admin, move || metrics.snapshot());
+    if let Some(addr) = admin.addr() {
+        tracing::info!(%addr, "admin metrics listening");
+    }
     println!("endpoint id: {}", agent.id());
     println!("ticket: {}", Ticket::of(&agent.endpoint));
     if agent.policy.allow.is_empty() {
@@ -235,6 +247,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
     let result = tokio::select! {
         res = agent.run() => res,
+        res = admin.stopped() => {
+            res.map_err(anyhow::Error::from).and_then(|()| Err(anyhow::anyhow!("admin metrics stopped unexpectedly")))
+        },
         res = async {
             match &mut announce {
                 Some(task) => task.wait().await,
@@ -246,8 +261,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     drop(announce);
     // Close the endpoint so peers get CONNECTION_CLOSE instead of an
     // abrupt socket death (and iroh does not log an ungraceful drop).
-    agent.endpoint.close().await;
-    result
+    let ((), admin_result) = tokio::join!(agent.endpoint.close(), admin.close());
+    finish_admin(result, admin_result)
 }
 
 /// SIGINT on every platform, SIGTERM on unix (systemd stop).
@@ -264,6 +279,20 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn finish_admin(
+    product: anyhow::Result<()>,
+    admin: Result<(), rds_observe::admin::Error>,
+) -> anyhow::Result<()> {
+    match (product, admin) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Err(error), Err(admin)) => {
+            Err(error.context(format!("admin shutdown also failed: {admin}")))
+        }
     }
 }
 

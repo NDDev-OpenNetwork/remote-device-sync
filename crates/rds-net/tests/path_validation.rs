@@ -106,6 +106,24 @@ async fn validated_secondary_carries_data_after_primary_closes() {
     .await
     .unwrap()
     .unwrap();
+    let facade = rds_net::Connection::from(a.clone());
+    // Engine validation can finish before the application driver consumes its
+    // Established event and initial candidate queue. Establish the policy's
+    // replacement-path precondition before injecting primary-path closure.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if facade
+                .path_stats()
+                .iter()
+                .any(|path| path.path_id.to_string() == id.to_string())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("replacement path must be observed by policy before primary closure");
     a.inner().path(noq::PathId::ZERO).unwrap().close().unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while path.status().unwrap() != PathStatus::Available {
@@ -123,7 +141,6 @@ async fn validated_secondary_carries_data_after_primary_closes() {
             .unwrap()[..],
         b"validated replacement"
     );
-    let facade = rds_net::Connection::from(a.clone());
     // Applying engine status and publishing the policy snapshot are separate
     // synchronous steps on another worker; wait for observable convergence.
     let selected = tokio::time::timeout(Duration::from_secs(2), async {

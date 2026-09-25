@@ -13,7 +13,7 @@ desktop = ["dep:rds-desktop", "rds-desktop/x11"]
 transport-noq = ["rds-net/transport-noq"]
 
 [dependencies]
-rds-observe.workspace = true
+rds-observe = { workspace = true, features = ["cli"] }
 anyhow.workspace = true
 blake3.workspace = true
 clap.workspace = true
@@ -28,6 +28,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
 iroh-relay = { workspace = true, features = ["server"] }
 rds-cli = { path = "../rds-cli" }
 

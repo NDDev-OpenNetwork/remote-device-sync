@@ -3,7 +3,7 @@
 Scope: W10.1/W10.2, implemented incrementally alongside correctness work.
 This is not a closure of W10, a production deployment or a distributed tracing
 implementation. See [current remediation state](remediation-progress.md).
-The [2026-09-25 Linux receipt](reports/rds-observability-20260925.md) records
+The [O1 2026-09-25 Linux receipt](reports/rds-observability-20260925.md) records
 444 workspace and 239 expanded tests, the actual collector/backend pipeline,
 and two 100-probe development ping runs with JSON telemetry enabled.
 
@@ -129,8 +129,118 @@ through one hour. Incremental series expire from the collector cache after
 ten idle minutes, so rare operations can restart their observational counter.
 Its loopback-only `127.0.0.1:9598` scrape provides an independent local view during
 backend trouble. Do not expose that listener through a public proxy. Product
-transport counters remain in `rds-net::metrics`; the old directory-listener
-metrics route is **not** the planned dedicated secured admin surface.
+transport counters remain in `rds-net::metrics`; they are now included in the
+agent admin snapshot with their existing observation/coverage limits. The old
+unauthenticated directory-listener metrics route has been removed.
+
+## Authenticated admin metrics (O2)
+
+Agent, standalone relay and composed server accept the same paired flags:
+`--admin-addr 127.0.0.1:3342 --admin-token-file /private/rds-admin-token`.
+The listener is **disabled by default**. Non-loopback and wildcard addresses
+are refused. The token and bind are validated before endpoint identity/catalog
+creation. Agent startup no longer waits for relay connectivity: local service
+and admin supervision start after endpoint bind even with a disabled/unavailable
+relay. Directory announcements update as transport addresses become available;
+the printed startup ticket is only the address snapshot at that moment. Local
+listener readiness does not promise remote reachability.
+
+`:0` selects an ephemeral port for tests; private text diagnostics
+report the bound address. JSON exports deliberately omit addresses.
+
+Create a separate scrape credential with the Rust operator CLI:
+
+```sh
+rds admin-token --file /private/rds-admin-token
+```
+
+The parent directory must already exist and be private. This creates 32 random
+bytes encoded as 64 lowercase hex characters, prints no secret, initializes no
+endpoint and never replaces an existing file. An optional final LF is accepted
+when loading a deployment-provisioned credential. The final entry must be a
+regular file owned by the process's effective user, owner-readable, with no
+execute/group/other permissions or extra hardlinks. Symlinks and special files
+are refused; nonblocking open prevents a FIFO from parking startup. Ancestor
+directories and the local OS identity are trusted. Unsupported platforms fail
+closed. Rotate by provisioning a new credential and restarting the daemon and
+collector; there is no implicit reload or fallback credential.
+
+Only `GET /metrics HTTP/1.1` with a single `Authorization: Bearer <token>`
+returns data. A vetted constant-time primitive compares the credential.
+Forwarded/Proxy-Authorization headers never grant access; ordinary Host values
+are not an authorization boundary. Body framing, duplicate authority/auth
+headers, transfer encodings, upgrades and origins are refused. Already buffered
+trailing bytes are rejected; closing the connection prevents a second request
+even when TCP delivers it later. Every response forbids caching. No token,
+request header or path is echoed or logged by the listener. The old
+`/v1/metrics` route returns 404 even to a loopback reverse proxy: public and
+admin exposure no longer share a listener. Directory counter names now use the
+`_total` suffix; update old queries during migration. Writer-label series and
+the old scrape-time record inventory are absent. A missing series must not be
+interpreted as zero inventory or zero device activity.
+
+Limits: 16 retained requests, 8 KiB headers, 32 header fields, two seconds for
+one read/snapshot/write exchange, 256 numeric samples including admin health,
+and 64 KiB response text. Excess connections close immediately. Metric source
+callbacks are synchronous, bounded in-memory observations: no network/disk I/O
+or long critical sections belong there. Admin request cancellation releases its
+slot; explicit shutdown joins the owned request set, while Drop aborts it.
+Configured admin runner failure is supervised by its daemon. A collector or
+OpenObserve outage has no connection to that supervision and cannot stop RDS.
+
+Source semantics:
+
+- Agent: occupied connection slots and service tasks, configured budgets,
+  grant/revocation state and the existing transport registry. Freshness is
+  omitted when grants are not required; local revocation authority is an
+  explicit separate flag. A busy grant table is unknown, never a zero.
+- Directory: parsed-request/publication/rejection/expiry counters and retained
+  request/worker/maintenance task gauges. Malformed HTTP requests have a separate
+  counter. Completed-but-unreaped handles count
+  against their task budgets. Busy or released groups report `*_known=0` and
+  omit their gauges. Snapshots do not lock/read the durable catalog; record
+  inventory and durable policy revision/lease detail remain further O2 work.
+- Owned relay: actual forwarded/dropped datagrams and payload bytes, admission,
+  attached endpoints and bounded recent-flow history. Its table observations
+  use try-locks with explicit unknown flags. `admission_rejected_total` counts
+  capacity/drain refusals, not every authorization/handshake failure.
+- The iroh relay has no comparable forwarding snapshot in this adapter:
+  `rds_relay_metrics_available=0`; unsupported values are absent. Availability
+  of an observation handle alone is not application readiness.
+
+Observers retain counters or weak references, never a store/connection/task
+owner across an await. These are individual concurrent observations, not a
+transaction across every counter; existing path sampling can miss short-lived
+paths/final increments. Names are fixed product metadata, values are unsigned
+numbers, and only static direct/relay path labels are admitted. Stable writer
+hash labels were removed because they still identify device activity.
+
+For collection, load the optional `ops/observability/vector-admin.toml` fragment
+alongside `vector.toml`. Supply the private `RDS_ADMIN_URL` (including `/metrics`),
+`RDS_ADMIN_SERVICE` (`rds-agent`, `rds-relay` or `rds-server`) and an opaque
+`RDS_OBSERVE_INSTANCE` unique within that node/service. Put the exact credential
+in the collector secret directory as `admin_token`, without a trailing newline.
+If collector and daemon
+use different OS users, provision a separate private collector-owned copy;
+do not weaken the daemon token file's permissions. The existing remote-write
+sink includes the optional admin projection. Source metrics carry only opaque
+node/instance/service and permitted path labels, never the scrape address.
+The scrape source disables HTTP proxies explicitly, including inherited proxy
+settings, so its bearer credential stays on the local connection.
+
+The collector must share the daemon's loopback network namespace. Do not change
+the bind to `0.0.0.0` to make a container bridge work, publish it through WARP/a
+tunnel, or attach its credential to a public reverse proxy. Plain HTTP here is
+restricted to local loopback; remote collection requires a separately designed
+authenticated/TLS or local-IPC boundary. `RDS_VECTOR_LOCAL_METRICS_ADDR` can
+choose another loopback exporter port when the default 9598 is occupied.
+The disposable Linux qualification uses an unprivileged, capability-free Vector
+container sharing host networking solely to reach the synthetic local listener.
+Its ports and credentials are unique to the fixture.
+
+References: [Vector's Prometheus scrape contract](https://vector.dev/docs/reference/configuration/sources/prometheus_scrape/),
+[HTTP message framing](https://www.rfc-editor.org/rfc/rfc9112.html),
+[constant-time equality](https://docs.rs/subtle/2.6.1/subtle/trait.ConstantTimeEq.html).
 
 ## Development qualification
 
@@ -157,9 +267,10 @@ cargo test --locked -p rds-observe --test pipeline -- --ignored --nocapture
 The pipeline regression is opt-in because it starts local infrastructure. It
 checks actual Rust JSON output, clean stdout, collector rejection/projection,
 OpenObserve log search, controlled ok/error counters and histogram units through
-remote write, alert minimum-volume/20-percent/loss predicates, scheduled delivery
-to a local receiver, and log
-recovery after a collector restart while the backend is unavailable. Default
+remote write, authenticated admin scrapes through the merged Vector config,
+exact source counters/labels, disabled scrape proxying, alert
+minimum-volume/20-percent/loss predicates, scheduled delivery to a local
+receiver, and log recovery after a collector restart while the backend is unavailable. Default
 workspace tests exercise redaction, output failure, queue saturation, record
 bounds, filtering, cancellation, heartbeat and bounded shutdown without Docker.
 
@@ -234,11 +345,37 @@ running. A silent alert channel alone proves nothing.
 | Step | Work | Exit evidence |
 | --- | --- | --- |
 | O1 | Shared bounded schema, adapters, collector, basic queries/alerts | Rust and real pipeline regression receipts; this change |
-| O2 | Dedicated authenticated/local-IPC admin surface for agent, relay and directory; source metrics for admission, policy freshness, task/queue counts and path coverage | No public/proxy bypass; controlled traffic reconciles snapshots; unknown/unavailable remains explicit |
+| O2 | Authenticated loopback admin listener and aggregate source metrics implemented; remaining: durable policy/record inventory, finer task/queue coverage and upstream-relay adapter | Proxy rejection, real daemon authentication/shutdown, known traffic and collector receipts; unknown/unavailable remains explicit |
 | O3 | Stable reason codes and phase timing for discovery, grants, dialing, relay migration, SSH, decode/present and durable sync; negotiated operation IDs | Same operation traced across peers without credentials; cancellation/error/remote acknowledgment distinguished; loss/latency tests |
 | O4 | Redacted bounded support bundle, exact build/features/policy digests and GDS status; saved dashboards | Secret-canary tests, bounded archive, actual failure localization; no raw logs by default |
 | O5 | Private estate rollout using existing telemetry/alert channels; rotation, retention, quotas, TLS/roles, expected instances, independent liveness, collector/backend self-monitoring | Real host receipt, outage/recovery and notification delivery checks; no public credentials |
 | O6 | Regression automation, latency/RSS/task overhead, restart/disk-full/power-loss and Linux/macOS qualification | Reproducible rds-bench reports and platform receipts; no W10 closure from a local fixture alone |
+
+### Next reviewable increments
+
+1. Finish O2 durable observations: publish policy epoch/revision, bounded lease
+   freshness and catalog inventory from their existing transaction owners.
+   Scrapes must not perform disk I/O or take store locks. Acceptance: exact
+   changes after successful commits, failed writes and reopen; expired/busy or
+   unsupported state is explicit. Extend the upstream relay adapter only where
+   its API provides a truthful comparable observation.
+2. Add O3 phase/reason contracts in the owning protocol crates, beginning with
+   discovery → policy → connect → service admission. Keep fixed reason enums
+   and separate local completion from peer acknowledgment. Acceptance: paired
+   success, cancellation, timeout, rejection and connection-loss fixtures with
+   bounded labels and no credentials/addresses in exported records.
+3. Build O4 diagnostics from typed snapshots and exact build/config metadata.
+   Bound collection time/archive size, redact secrets by construction and add
+   secret-canary tests. Save dashboards against the tested schema. Raw private
+   debug logs must require a separate explicit operator choice.
+4. Qualify O5 in the private estate: expected daemon inventory, OS-user secret
+   provisioning/rotation, TLS ingestion, retention/quotas and existing alert
+   destinations. Prove missing-daemon and backend/collector outage detection
+   independently of the failed component; record delivered notifications.
+5. Run O6 resource and platform campaigns: concurrent scrape saturation during
+   SSH/desktop/sync, startup/shutdown churn, RSS/FD/task plateaus, release-build
+   latency distributions and native macOS. Report topology and feature profile;
+   same-host ping alone cannot establish observability overhead or WAN latency.
 
 These steps accompany the existing W0–W10 plan. Native SSH/PTY, the desktop
 viewer and platform capture backends, sync completion, transport recovery and

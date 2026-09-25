@@ -105,9 +105,11 @@ Process/session correlation, observed operation latency, loss counters and
 alert definitions have a disposable integration fixture. See the
 [contract, checks and remaining rollout plan](docs/observability.md).
 `rds-net` separately exposes observed path counters and coverage flags, with
-Prometheus rendering behind `metrics`. The directory's loopback-only
-`GET /v1/metrics` serves directory counters; it does not export the transport
-registry or establish a dedicated secured admin surface.
+Prometheus rendering behind `metrics`. Daemons can expose aggregate source
+metrics through a separate authenticated loopback listener, using paired
+`--admin-addr`/`--admin-token-file` flags. Create a credential with
+`rds admin-token --file PATH`. The public `/v1/metrics` route is removed;
+source coverage and unknown values are explicit.
 
 ## Build and test
 

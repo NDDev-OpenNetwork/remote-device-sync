@@ -1,0 +1,638 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-25",
+  "scope": "W10.1/W10.2 O2 admin/source metrics increment; W2.6 local startup; no wave closure",
+  "source_base": "8aefccddc384c1b8884532fd6583b7f401436cb0",
+  "source_identity": "Base commit plus SHA-256 of every changed/new non-documentation input. Benchmark git identifies the base; code was uncommitted during qualification.",
+  "source_files_sha256": {
+    "Cargo.lock": "0145e2e874cf7bccf2725aa4b865644a95ebcf1cf6df6a5e8d0c4ed099bee110",
+    "crates/rds-agent/Cargo.toml": "4f0176bf4f67e061775e6c0f520d30e58e0677663a197c826df7c03e29924749",
+    "crates/rds-agent/src/lib.rs": "4252aa01c1186cdc94f917b7a7d1898ec031b05a531e2604fec801879db11ed7",
+    "crates/rds-agent/src/main.rs": "1ae23c7b3c70e57e2976a7926ffbcb7919237ef410988a7012e52398d539820b",
+    "crates/rds-agent/src/revocations.rs": "f8e8067596a32eeefa5fcda6952e273539adb93fefcde5ac56f6758e3be66282",
+    "crates/rds-agent/tests/admin.rs": "5af1f1f5322bc3aaa0d33783dd8f57d174d447bebb6f2dc751d83641cef4dbc6",
+    "crates/rds-agent/tests/lifecycle.rs": "47868949d909523ecf11b417c36f24a689383e8237356a9af9124b9f301d5588",
+    "crates/rds-cli/src/main.rs": "957acd0be6a202d361305f9304e2ccc4df488f0b274b818187764aa8bc8ab8d5",
+    "crates/rds-cli/tests/configuration.rs": "2b60c862e4787300b6adde498238930096c1d2cfe9e32e41751760cd9d3f603e",
+    "crates/rds-discovery/src/service.rs": "c938facdbfa86970038e2e6ad2716c3f7d436ec2906dd6807dc2ebcc4f19cf35",
+    "crates/rds-discovery/src/service/tasks.rs": "763bf115043dc988b819006429317bf0cd256a443e3172024ad8979e3755f1a1",
+    "crates/rds-discovery/tests/directory_e2e.rs": "6c4646fa60812de19cf086e6b87552638c7369ed7adad735265eae04b7aa41fe",
+    "crates/rds-net/src/metrics.rs": "feb0adbeb88356b19e389ea6a3c96bdc5883a3cba29170b859d2f2a56f271b3a",
+    "crates/rds-net/tests/path_validation.rs": "2b54ed9c18cdbe7d9178ce0908a3222c010cc4e67adfcd5cf328f1bd1670c125",
+    "crates/rds-observe/Cargo.toml": "a0f673185528d9ff2e78aa95f134410cd206dfdf4066ade098997de51797c7e7",
+    "crates/rds-observe/src/admin/http.rs": "10b26ffe7411aa8b4739a7c90d88b5c26f5373bd263c48a31b16af08e0954fe7",
+    "crates/rds-observe/src/admin/mod.rs": "577c41d8c81d2f8fd05a2273d26a4f01a325aeb960d1b4b446789c618feb90e7",
+    "crates/rds-observe/src/admin/snapshot.rs": "2abfe1bd67863c57a11532056a9bf15edf0da54e5939c495b172bf75f00e497d",
+    "crates/rds-observe/src/admin/tests.rs": "ce55d37ffe0e3386ea33e80861f0407b4a9d85ca5ce6af78a89baaa3b0baa8ec",
+    "crates/rds-observe/src/admin/tests/special_file_linux.rs": "2a1faf05c0dc0102b8fefc108235018802e4a488b3e7bb48beda72323ba2ef05",
+    "crates/rds-observe/src/admin/tests/special_file_unix.rs": "5a765c34a550e4a5934ca49f7a4a6273cfcfcd3c6377a164c18dac3c8826c8c1",
+    "crates/rds-observe/src/admin/token.rs": "f45c58be3082fe37e7bf41c014122d1c90f5cc18e0477cb72f9b5020737b3026",
+    "crates/rds-observe/src/lib.rs": "d7b41d44fb6beb64d558bbd9e43c4697fdbc4ac32fc126edf38748d7e9d1fce5",
+    "crates/rds-observe/tests/pipeline.rs": "30935b5192995d9a3cf12aa2ad9d5124fd70c111b8523149c5be818065718ee6",
+    "crates/rds-observe/tests/pipeline/admin.rs": "6c7da8d9471d3e3dc41b241f48578d6d25346c0cf285a28506ffbc0d2e015c47",
+    "crates/rds-relay/Cargo.toml": "ce429f45a07d2d526eabab8a51d4f4306fd6857995728665cc57fd46a2a50848",
+    "crates/rds-relay/src/lib.rs": "c387c34f91606a9b92df05843055a22df98a8429ca4ba92b4256039309baca3d",
+    "crates/rds-relay/src/main.rs": "9a8d5de37a8b33e3b40950dc3ec1f1753e722bb5aaff991d3b024c149f8e0a78",
+    "crates/rds-relay/src/runtime.rs": "828d31ee5321b44e2cf7064044086349a6d4b24c4d9a74feb5b3c154b40b9132",
+    "crates/rds-relay/src/server.rs": "541a235a3dd4a47de2232318a7e3c8fc5047d2f5ab0dcc2239c1a288a1a2b7c9",
+    "crates/rds-relay/src/server/lifecycle_tests.rs": "bc0246c4243bcac92eb9e3ecb2bd2a42a547124d247b55b56843db10ca42e502",
+    "crates/rds-relay/tests/admin.rs": "3078bd07de1617d7db08ab2f47e483e097fb70423874d0d87bcc3b9c9ee7ce5a",
+    "crates/rds-server/Cargo.toml": "8abae5dbfc05d39b497fdba79f3c904f5092caf65d87a53f41363ba37f38175d",
+    "crates/rds-server/src/main.rs": "588f9427323f8f7a6e2ab79589959b624c5e9bfb1a4aa9a7be64a728d6f343a3",
+    "crates/rds-server/tests/admin.rs": "632c069848671732f443a582d4f0a623a3cfe481eb40e5f1947e469cb9d129bd",
+    "ops/observability/vector-admin.toml": "0d2ca5e39b4301ebc922aec9b2c36f46600f321252123f2ae9a777784edf7109",
+    "ops/observability/vector.toml": "7e691b8894626905048d49deb8ba1a1927b48d31505562b6feb1bf93826b8833",
+    "tests/support/admin_cli.rs": "027d42cbf1692109d5e29bd14329d8e5fe128d8b18c5106e785f001772711018"
+  },
+  "initial_checks_source_delta": {
+    "explanation": "Checks 1-11 preceded the test-only portability split. All runtime/config/build inputs are identical to final; the final workspace run, focused observer Clippy and Darwin check cover the split.",
+    "previous_files_sha256": {
+      "crates/rds-observe/src/admin/tests.rs": "95c09f9f7fba596f4dd49d1d0237e2817acf61ca17488c375ba3012e2d7d75d5"
+    },
+    "absent_files": [
+      "crates/rds-observe/src/admin/tests/special_file_linux.rs",
+      "crates/rds-observe/src/admin/tests/special_file_unix.rs"
+    ]
+  },
+  "path_fixture_repetitions": {
+    "before": {
+      "isolated_passed": 10,
+      "paired_passed": 40,
+      "log_sha256": "62e68095bb9787e45aa482569aecd5e0b99d333484b3d1c7f0394d9205aff331"
+    },
+    "after": {
+      "paired_passed": 40,
+      "log_sha256": "5012ecfbd4ade41da03175da11ec43544e95a0076af65ee25165b0244b241417"
+    },
+    "limits": "Two distinct tests per paired iteration; repetitions do not prove a unique cause for the prior single timeout or physical failover readiness."
+  },
+  "platform": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "kernel": "6.8.0-139-generic",
+    "native_macos_executed": false,
+    "macos_cross_check": "rds-observe all targets/features for aarch64-apple-darwin; type checking only, no native execution",
+    "rustc": [
+      "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "binary: rustc",
+      "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985",
+      "commit-date: 2026-09-01",
+      "host: x86_64-unknown-linux-gnu",
+      "release: 1.98.1",
+      "LLVM version: 22.1.8"
+    ],
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "docker": "Docker version 29.8.1, build 4a63305",
+    "compose": "Docker Compose version v5.5.1"
+  },
+  "execution": {
+    "build_profile": "debug",
+    "cargo_build_jobs": 2,
+    "compiler_invocations": "sequential; isolated target outside repository",
+    "remote_ci_executed": false,
+    "production_deployment": false,
+    "cargo_deny": "not installed",
+    "wave_checkpoint": "not run; no wave closed"
+  },
+  "images": {
+    "RDS_VECTOR_IMAGE": "timberio/vector:0.58.0-debian@sha256:1c1ea358c617ea0b23003d5af87f7a678b30f8f7096437e680380c47fc13d2d9",
+    "RDS_OPENOBSERVE_IMAGE": "public.ecr.aws/zinclabs/openobserve:v1.0.4@sha256:d4a878fac1f6c56003764f7f2a1625668917388f167e222c8c810de3f54c56ba"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.996985140023753,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "fmt-shared",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/admin_cli.rs"
+      ],
+      "code": 0,
+      "seconds": 0.0446290971012786,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "clippy-default",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 2.1049971220782027,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "7e7063e0afce3871923ade204f5ed9aedc8e2ec7bc8a5af5c9dbf13365bbfeb3"
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 1.3065279059810564,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "74227194a8d2d9ba3e36f2114a6d81c0f2ad0450a756ef3cb869b6d9b49e24aa"
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 1.210445962031372,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "188091c8b16569703833b3e60a8b5b85144214c50fb9bd509dda62dda3298345"
+    },
+    {
+      "name": "workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 191.56781335303094,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "2560a20c8116a474a9e2547f43d3bca0ea03340f36cd5fa6b0891a0caa315305",
+      "tests": {
+        "passed": 466,
+        "failed": 0,
+        "ignored": 2,
+        "result_targets": 80
+      }
+    },
+    {
+      "name": "expanded",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-server",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 408.93256158404984,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "f9991131aa6e935842e0b6930544253306b4af25f06c28240e74e7eab8d007b8",
+      "tests": {
+        "passed": 251,
+        "failed": 0,
+        "ignored": 0,
+        "result_targets": 48
+      }
+    },
+    {
+      "name": "fixture-build",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "rds-observe",
+        "--example",
+        "fixture"
+      ],
+      "code": 0,
+      "seconds": 0.9219403490424156,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "5198d55901c5c79cd16518e3498e8bb7053e7d1c93ea5bd5c746cbd572e44892"
+    },
+    {
+      "name": "pipeline",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "rds-observe",
+        "--test",
+        "pipeline",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ],
+      "code": 0,
+      "seconds": 51.82700200204272,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "a7a69aa6fea8fffa5c78997045a8945eda80464f23e76baa768f5d725c5cf283",
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "result_targets": 1
+      }
+    },
+    {
+      "name": "bench-iroh",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "rds-bench",
+        "--all-features",
+        "--",
+        "run",
+        "--scenario",
+        "ping",
+        "--backend",
+        "iroh",
+        "--iterations",
+        "100",
+        "--json",
+        "${ARTIFACT_DIR}/bench-iroh.json"
+      ],
+      "code": 0,
+      "seconds": 41.153438145061955,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "74c9305af70ad1c6e10a9faa052a8b9a67fbf6e40fd9f506b7214588e40f3148"
+    },
+    {
+      "name": "bench-noq",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "rds-bench",
+        "--all-features",
+        "--",
+        "run",
+        "--scenario",
+        "ping",
+        "--backend",
+        "noq",
+        "--iterations",
+        "100",
+        "--json",
+        "${ARTIFACT_DIR}/bench-noq.json"
+      ],
+      "code": 0,
+      "seconds": 1.1215954429935664,
+      "source_snapshot": "before_fixture_portability_split",
+      "log_sha256": "6cdba38f435b23b165dd5907f723dc60312686c546787fa44ef211fe1397fe8d"
+    },
+    {
+      "name": "fmt-portable",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.8846048470586538,
+      "source_snapshot": "final",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "clippy-portable",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "rds-observe",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 29.051475389976986,
+      "source_snapshot": "final",
+      "log_sha256": "c50a6ba9348206b2131d6fac570d84fe1e6828a77fba5c50a9872b73e27c182a"
+    },
+    {
+      "name": "darwin-check",
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "-p",
+        "rds-observe",
+        "--all-targets",
+        "--all-features",
+        "--target",
+        "aarch64-apple-darwin"
+      ],
+      "code": 0,
+      "seconds": 2.062317710951902,
+      "source_snapshot": "final",
+      "log_sha256": "8de56188ed2e317f3259e7c16df240fc028dbc9ef50f648e1ee770321839f1f7"
+    },
+    {
+      "name": "workspace-final",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 181.50430086103734,
+      "source_snapshot": "final",
+      "log_sha256": "6484afc1ae29e282ddea0399e716705b625d2dc7bbf920c8f8396f889e0f7de6",
+      "tests": {
+        "passed": 466,
+        "failed": 0,
+        "ignored": 2,
+        "result_targets": 80
+      }
+    }
+  ],
+  "observed_failures_before_fixes": [
+    {
+      "artifact": "baseline-proxy.log",
+      "sha256": "4cf2865d31a2822f6985d54757584b35459904a0801fbef53c49a921cac481f9",
+      "observation": "New reverse-proxy regression failed on base source: public directory returned 200 and exposed metrics to a loopback proxy."
+    },
+    {
+      "artifact": "baseline-blocked-snapshot.log",
+      "sha256": "7a4efa1dc204591d10d1f07e63d06d199c556d9d31021d51f47af5003ed3fb97",
+      "observation": "Contention regression failed before the try-lock fix: snapshot waited for the selected-path observation lock."
+    },
+    {
+      "artifact": "pre-review/workspace.log",
+      "sha256": "5d952344aad3198a84f6e3abb5c87773751a9b7ae20def4fde936931c0d19da4",
+      "observation": "Default workspace exposed agent startup waiting forever for iroh online() with relays disabled; admin readiness missed the 20-second test deadline."
+    },
+    {
+      "artifact": "precondition-review/workspace.log",
+      "sha256": "98dd8361eef4d538b5b4c06e6b113054d66bc6fc2d39bfedd02bac7643903202",
+      "observation": "Existing path replacement fixture timed out waiting for Available; identical binary passed 10 isolated and 40 paired repeats. Added an explicit policy-observation precondition without relaxing post-fault deadlines; unique cause unproven."
+    },
+    {
+      "artifact": "baseline-darwin.log",
+      "sha256": "4e31e41981d51883d86f6069f3cc9fb4da4d44463bc1673da8b2a6d1e3c9317c",
+      "observation": "Apple Silicon cross-check reproduced E0425: rustix mknodat is absent on Apple. Split only the special-file fixture by target; Linux keeps FIFO, other Unix uses a socket entry."
+    },
+    {
+      "artifact": "pipeline-first.log",
+      "sha256": "22bdd58fe35318a55a7e1af945de5f27cff541685fa8a904b386809b5a142486",
+      "observation": "Admin Vector fixture exited; automatic container removal obscured diagnostics."
+    },
+    {
+      "artifact": "pipeline-second.log",
+      "sha256": "f78c9774649f5b01b30f3aa7c426aed97d440bd4db5a86e9504175eebe524e4d",
+      "observation": "Retained Vector logs identified a 512 MiB configured disk buffer exceeding the fixture's 64 MiB tmpfs. Moved state to a private owned disk directory."
+    }
+  ],
+  "pipeline": {
+    "actual_containers": true,
+    "vector_config_validation": true,
+    "embedded_projection_tests_passed": 5,
+    "admin": {
+      "real_rust_listener": true,
+      "unauthenticated_status": 401,
+      "directory_puts_total": 42,
+      "net_bytes_direct": 123,
+      "net_bytes_relay": 456,
+      "upstream_relay_metrics_available": 0,
+      "proxy_disabled_verified_against_owned_listener": true,
+      "projected_labels": [
+        "node",
+        "instance",
+        "service",
+        "via"
+      ]
+    },
+    "alert_delivery": "scheduled synthetic webhook to owned local receiver; no human destination",
+    "outage": "all seven unique records recovered after collector/backend restart; source replay can contribute"
+  },
+  "benchmarks": [
+    {
+      "name": "bench-iroh",
+      "report_sha256": "5204664f21a40cb0f818b1e3d3d6f4672ccfe62aa1ec6ed88d4494c1bc1f3081",
+      "report": {
+        "tool": "rds-bench 0.1.0",
+        "unix_ts": 1790336668,
+        "git": "8aefccd",
+        "reports": [
+          {
+            "meta": {
+              "scenario": "ping",
+              "backend": "iroh",
+              "path": "direct",
+              "impairment": null,
+              "unix_ts": 1790336668,
+              "git": "8aefccd"
+            },
+            "rtt": {
+              "count": 100,
+              "min_ns": 2160077,
+              "p50_ns": 4402193,
+              "p95_ns": 16997744,
+              "p99_ns": 21398795,
+              "max_ns": 25214929,
+              "mean_ns": 6418399.79
+            },
+            "throughput_mib_s": null,
+            "attempts": null,
+            "metrics": {
+              "agent_rds_net_active_connections": 1,
+              "agent_rds_net_bytes_received_total{via=\"direct\"}": 8523,
+              "agent_rds_net_bytes_received_total{via=\"relay\"}": 0,
+              "agent_rds_net_bytes_sent_total{via=\"direct\"}": 7632,
+              "agent_rds_net_bytes_sent_total{via=\"relay\"}": 0,
+              "agent_rds_net_congestion_events_total": 0,
+              "agent_rds_net_connections_accepted_total": 1,
+              "agent_rds_net_connections_opened_total": 0,
+              "agent_rds_net_cwnd_bytes": 17685,
+              "agent_rds_net_datagrams_lost_total{via=\"direct\"}": 0,
+              "agent_rds_net_datagrams_lost_total{via=\"relay\"}": 0,
+              "agent_rds_net_datagrams_sent_total{via=\"direct\"}": 24,
+              "agent_rds_net_datagrams_sent_total{via=\"relay\"}": 0,
+              "agent_rds_net_degraded_path_observers": 0,
+              "agent_rds_net_live_paths": 1,
+              "agent_rds_net_path_events_lost_total": 0,
+              "agent_rds_net_paths_seen_total{via=\"direct\"}": 1,
+              "agent_rds_net_paths_seen_total{via=\"relay\"}": 0,
+              "agent_rds_net_policy_observed_connections": 0,
+              "agent_rds_net_qnt_attempts_total": 0,
+              "agent_rds_net_qnt_success_total": 0,
+              "agent_rds_net_rtt_us": 19099,
+              "agent_rds_net_selected_path_known": 1,
+              "client_rds_net_active_connections": 1,
+              "client_rds_net_bytes_received_total{via=\"direct\"}": 49139,
+              "client_rds_net_bytes_received_total{via=\"relay\"}": 0,
+              "client_rds_net_bytes_sent_total{via=\"direct\"}": 38220,
+              "client_rds_net_bytes_sent_total{via=\"relay\"}": 0,
+              "client_rds_net_congestion_events_total": 0,
+              "client_rds_net_connections_accepted_total": 0,
+              "client_rds_net_connections_opened_total": 1,
+              "client_rds_net_cwnd_bytes": 5808,
+              "client_rds_net_datagrams_lost_total{via=\"direct\"}": 0,
+              "client_rds_net_datagrams_lost_total{via=\"relay\"}": 0,
+              "client_rds_net_datagrams_sent_total{via=\"direct\"}": 270,
+              "client_rds_net_datagrams_sent_total{via=\"relay\"}": 0,
+              "client_rds_net_degraded_path_observers": 0,
+              "client_rds_net_live_paths": 1,
+              "client_rds_net_path_events_lost_total": 0,
+              "client_rds_net_paths_seen_total{via=\"direct\"}": 1,
+              "client_rds_net_paths_seen_total{via=\"relay\"}": 0,
+              "client_rds_net_policy_observed_connections": 0,
+              "client_rds_net_qnt_attempts_total": 0,
+              "client_rds_net_qnt_success_total": 0,
+              "client_rds_net_rtt_us": 1673,
+              "client_rds_net_selected_path_known": 1
+            },
+            "notes": []
+          }
+        ]
+      },
+      "json_records": 117,
+      "telemetry_health_max": {
+        "telemetry_dropped_total": 0,
+        "telemetry_oversize_total": 0,
+        "telemetry_write_errors_total": 0
+      }
+    },
+    {
+      "name": "bench-noq",
+      "report_sha256": "b62db95d10cdc4a9fee0e6ec22e9eb59e74893b0cf5bde26c099ea29f32cea49",
+      "report": {
+        "tool": "rds-bench 0.1.0",
+        "unix_ts": 1790336669,
+        "git": "8aefccd",
+        "reports": [
+          {
+            "meta": {
+              "scenario": "ping",
+              "backend": "noq",
+              "path": "direct",
+              "impairment": null,
+              "unix_ts": 1790336669,
+              "git": "8aefccd"
+            },
+            "rtt": {
+              "count": 100,
+              "min_ns": 1800084,
+              "p50_ns": 4053821,
+              "p95_ns": 7646176,
+              "p99_ns": 9579967,
+              "max_ns": 15102416,
+              "mean_ns": 4466947.65
+            },
+            "throughput_mib_s": null,
+            "attempts": null,
+            "metrics": {
+              "agent_rds_net_active_connections": 1,
+              "agent_rds_net_bytes_received_total{via=\"direct\"}": 4285,
+              "agent_rds_net_bytes_received_total{via=\"relay\"}": 0,
+              "agent_rds_net_bytes_sent_total{via=\"direct\"}": 4170,
+              "agent_rds_net_bytes_sent_total{via=\"relay\"}": 0,
+              "agent_rds_net_congestion_events_total": 0,
+              "agent_rds_net_connections_accepted_total": 1,
+              "agent_rds_net_connections_opened_total": 0,
+              "agent_rds_net_cwnd_bytes": 12146,
+              "agent_rds_net_datagrams_lost_total{via=\"direct\"}": 0,
+              "agent_rds_net_datagrams_lost_total{via=\"relay\"}": 0,
+              "agent_rds_net_datagrams_sent_total{via=\"direct\"}": 7,
+              "agent_rds_net_datagrams_sent_total{via=\"relay\"}": 0,
+              "agent_rds_net_degraded_path_observers": 0,
+              "agent_rds_net_live_paths": 1,
+              "agent_rds_net_path_events_lost_total": 0,
+              "agent_rds_net_paths_seen_total{via=\"direct\"}": 1,
+              "agent_rds_net_paths_seen_total{via=\"relay\"}": 0,
+              "agent_rds_net_policy_observed_connections": 1,
+              "agent_rds_net_qnt_attempts_total": 0,
+              "agent_rds_net_qnt_success_total": 0,
+              "agent_rds_net_rtt_us": 28505,
+              "agent_rds_net_selected_path_known": 1,
+              "client_rds_net_active_connections": 1,
+              "client_rds_net_bytes_received_total{via=\"direct\"}": 23705,
+              "client_rds_net_bytes_received_total{via=\"relay\"}": 0,
+              "client_rds_net_bytes_sent_total{via=\"direct\"}": 27189,
+              "client_rds_net_bytes_sent_total{via=\"relay\"}": 0,
+              "client_rds_net_congestion_events_total": 0,
+              "client_rds_net_connections_accepted_total": 0,
+              "client_rds_net_connections_opened_total": 1,
+              "client_rds_net_cwnd_bytes": 5808,
+              "client_rds_net_datagrams_lost_total{via=\"direct\"}": 0,
+              "client_rds_net_datagrams_lost_total{via=\"relay\"}": 0,
+              "client_rds_net_datagrams_sent_total{via=\"direct\"}": 199,
+              "client_rds_net_datagrams_sent_total{via=\"relay\"}": 0,
+              "client_rds_net_degraded_path_observers": 0,
+              "client_rds_net_live_paths": 2,
+              "client_rds_net_path_events_lost_total": 0,
+              "client_rds_net_paths_seen_total{via=\"direct\"}": 2,
+              "client_rds_net_paths_seen_total{via=\"relay\"}": 0,
+              "client_rds_net_policy_observed_connections": 1,
+              "client_rds_net_qnt_attempts_total": 1,
+              "client_rds_net_qnt_success_total": 1,
+              "client_rds_net_rtt_us": 1374,
+              "client_rds_net_selected_path_known": 1
+            },
+            "notes": []
+          }
+        ]
+      },
+      "json_records": 112,
+      "telemetry_health_max": {
+        "telemetry_dropped_total": 0,
+        "telemetry_oversize_total": 0,
+        "telemetry_write_errors_total": 0
+      }
+    }
+  ],
+  "benchmark_limits": [
+    "100 probes over one established same-host direct connection; five warmups excluded",
+    "debug build, shared host, JSON logging enabled",
+    "admin listener not active in these bench worlds; no admin overhead or setup-latency claim",
+    "loopback preferred by harness, default endpoint discovery retained; not an enforced isolation/WAN/NAT qualification"
+  ],
+  "remaining": [
+    "durable policy and record-inventory observations; upstream relay adapter; finer task and queue coverage",
+    "phase/reason correlation; negotiated operation IDs; exact-build redacted support bundles and dashboards",
+    "private rollout and existing alert delivery; independent liveness, expected instances, retention/TLS/roles/rotation",
+    "resource/overhead/failure campaigns; native macOS, remote CI and real networks",
+    "native SSH/PTY, desktop capture/presentation, sync, transport recovery and release gates"
+  ]
+}

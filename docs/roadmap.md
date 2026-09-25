@@ -7,9 +7,10 @@ The milestones below preserve the original direction; historical checkpoint
 completion does not establish that the audited defects or product gaps are closed.
 
 The [observability sequence](observability.md) now accompanies remediation:
-shared Rust telemetry, Vector/OpenObserve qualification, then secured source
-metrics, diagnostic bundles and private operational rollout. Its first local
-pipeline does not close product or release gates.
+shared Rust telemetry, Vector/OpenObserve qualification and authenticated
+aggregate source metrics now have local Linux evidence. Remaining source
+coverage, diagnostic bundles and private operational rollout retain their
+acceptance gates; the local pipeline does not close product or release gates.
 
 Each workstream ends at a named **checkpoint** — a reproducible
 verification bundle (functional, simulation, impairment, interop,

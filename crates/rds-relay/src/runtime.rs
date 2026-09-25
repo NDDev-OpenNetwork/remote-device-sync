@@ -338,7 +338,39 @@ impl IrohRuntime {
     }
 }
 
+/// Coverage is explicit: the upstream iroh relay has no comparable owned
+/// forwarding snapshot here. Unsupported counters are omitted, never zero-filled.
+#[derive(Clone)]
+pub struct RelayMetrics {
+    #[cfg(feature = "owned-relay")]
+    owned: Option<crate::server::RelayMetrics>,
+}
+impl RelayMetrics {
+    pub fn snapshot(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        #[cfg(feature = "owned-relay")]
+        if let Some(metrics) = &self.owned {
+            let mut values = metrics.snapshot();
+            values.insert("rds_relay_owned_backend", 1);
+            return values;
+        }
+        std::collections::BTreeMap::from([
+            ("rds_relay_metrics_available", 0),
+            ("rds_relay_owned_backend", 0),
+        ])
+    }
+}
+
 impl RunningRelay {
+    pub fn metrics(&self) -> RelayMetrics {
+        RelayMetrics {
+            #[cfg(feature = "owned-relay")]
+            owned: match &self.backend {
+                RunningBackend::Iroh(_) => None,
+                RunningBackend::Noq(relay) => Some(relay.metrics()),
+            },
+        }
+    }
+
     pub fn binding(&self) -> RelayBinding {
         match &self.backend {
             RunningBackend::Iroh(runtime) => RelayBinding::Iroh {

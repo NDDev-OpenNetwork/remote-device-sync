@@ -6,7 +6,12 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+cli = ["dep:clap"]
+
 [dependencies]
+clap = { workspace = true, optional = true }
+httparse = "1"
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -14,6 +19,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+subtle = "2.6"
+zeroize = "1"
 
 [dev-dependencies]
 # Existing lockfile dependency; used only by the opt-in localhost integration.

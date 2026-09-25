@@ -11,7 +11,7 @@
 //! GET    /v1/revocations        estate-signed grant denylist snapshot
 //! PUT    /v1/revocations        replace the denylist snapshot
 //! GET    /v1/health             liveness
-//! GET    /v1/metrics            prometheus text counters (loopback only)
+//! Metrics are exposed only through the separate authenticated admin listener.
 //! ```
 //!
 //! Security posture: membership is configured separately from reachability.
@@ -21,7 +21,7 @@
 //! Connection/body/worker bounds limit pre-authentication work; availability
 //! under arbitrary network flooding is not promised.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -124,40 +124,117 @@ struct Metrics {
     writes_rate_limited: AtomicU64,
     gc_retired: AtomicU64,
     gc_failures: AtomicU64,
-    /// Per-writer PUT counts keyed by an anonymized id —
-    /// `blake3(endpoint_key)[..8]` hex — so the scrape shows
-    /// per-endpoint accounting without disclosing public keys.
-    /// Bounded; writers past the cap fold into `other`.
-    endpoint_puts: Mutex<HashMap<String, u64>>,
+    connections_rejected: AtomicU64,
+    workers_rejected: AtomicU64,
+    requests: AtomicU64,
 }
 
-/// Anonymized per-endpoint label: a truncated BLAKE3 of the public
-/// key. Stable per endpoint, useless for recovering the key.
-fn writer_label(key: &EndpointKey) -> String {
-    hex16(&blake3::hash(&key.0).as_bytes()[..8])
+/// Aggregate counters only; clones retain no store, policy or service tasks.
+#[derive(Clone)]
+pub struct DirectoryMetrics {
+    counters: Arc<Metrics>,
+    connections: std::sync::Weak<TaskGroup>,
+    workers: std::sync::Weak<TaskGroup>,
+    maintenance: std::sync::Weak<TaskGroup>,
 }
 
-fn hex16(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+impl DirectoryMetrics {
+    /// Independent in-memory observations. Task gauges include completed
+    /// handles not yet reaped; a busy/expired group is explicitly unknown.
+    pub fn snapshot(&self) -> BTreeMap<&'static str, u64> {
+        let m = &self.counters;
+        let mut values = BTreeMap::from([
+            (
+                "rds_directory_puts_ok_total",
+                m.puts_ok.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_puts_rejected_total",
+                m.puts_rejected.load(Ordering::Relaxed),
+            ),
+            ("rds_directory_gets_total", m.gets.load(Ordering::Relaxed)),
+            (
+                "rds_directory_deletes_total",
+                m.deletes.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_name_lookups_total",
+                m.name_lookups.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_registry_puts_total",
+                m.registry_puts.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_revocations_puts_total",
+                m.revocations_puts.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_requests_bad_total",
+                m.requests_bad.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_requests_total",
+                m.requests.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_writes_rate_limited_total",
+                m.writes_rate_limited.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_gc_retired_total",
+                m.gc_retired.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_gc_failures_total",
+                m.gc_failures.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_connections_rejected_total",
+                m.connections_rejected.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_workers_rejected_total",
+                m.workers_rejected.load(Ordering::Relaxed),
+            ),
+        ]);
+        for (group, known, tasks, limit) in [
+            (
+                &self.connections,
+                "rds_directory_connections_known",
+                "rds_directory_connection_tasks",
+                "rds_directory_connection_limit",
+            ),
+            (
+                &self.workers,
+                "rds_directory_workers_known",
+                "rds_directory_worker_tasks",
+                "rds_directory_worker_limit",
+            ),
+            (
+                &self.maintenance,
+                "rds_directory_maintenance_known",
+                "rds_directory_maintenance_tasks",
+                "rds_directory_maintenance_limit",
+            ),
+        ] {
+            let observed = group.upgrade().and_then(|group| group.snapshot());
+            values.insert(known, u64::from(observed.is_some()));
+            if let Some((count, max)) = observed {
+                values.insert(tasks, count as u64);
+                values.insert(limit, max as u64);
+            }
+        }
+        values
+    }
 }
-
-/// Lock acquisition that survives a poisoned lock: every lock here
-/// guards plain data (instants, counters, `Option` snapshots) whose
-/// invariants a panic cannot tear, so one panicked holder must not
-/// fail every request the directory serves from then on.
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Cap on distinct writer labels before accounting folds into `other`
-/// — the scrape stays bounded under a writer flood.
-const MAX_WRITER_LABELS: usize = 4096;
 
 /// A running directory service. Drop seals admission and requests cleanup.
 /// Use `close` to join requests and already-started blocking storage work.
 /// Cleanup after Drop needs the Tokio executor to continue running.
 pub struct Directory {
     addr: SocketAddr,
+    metrics: Arc<Metrics>,
     shutdown: watch::Sender<bool>,
     connections: Arc<TaskGroup>,
     workers: Arc<TaskGroup>,
@@ -191,6 +268,15 @@ impl Runner {
 }
 
 impl Directory {
+    pub fn metrics(&self) -> DirectoryMetrics {
+        DirectoryMetrics {
+            counters: self.metrics.clone(),
+            connections: Arc::downgrade(&self.connections),
+            workers: Arc::downgrade(&self.workers),
+            maintenance: Arc::downgrade(&self.maintenance),
+        }
+    }
+
     /// Bound HTTP(S) address, including the assigned port for a `:0` bind.
     pub fn addr(&self) -> SocketAddr {
         self.addr
@@ -245,7 +331,7 @@ struct State {
     limits: Limits,
     limiter: Limiter,
     enrollment: Enrollment,
-    metrics: Metrics,
+    metrics: Arc<Metrics>,
 }
 
 /// Bind `addr` and serve the directory over `store` until the returned
@@ -304,7 +390,7 @@ pub async fn serve(
         limits: config.limits,
         limiter: Limiter::default(),
         enrollment: config.enrollment,
-        metrics: Metrics::default(),
+        metrics: Arc::new(Metrics::default()),
     });
     let connections = Arc::new(TaskGroup::new(state.limits.max_conns));
     let maintenance = Arc::new(TaskGroup::new(1));
@@ -353,7 +439,8 @@ pub async fn serve(
                 // tasks. There is no await between admission and spawn.
                 let state = state.clone();
                 let tls = tls.clone();
-                let _ = connections.spawn(async move {
+                let metrics = state.metrics.clone();
+                if !connections.spawn(async move {
                     let _ = tokio::time::timeout(state.limits.conn_timeout, async {
                         if let Some(tls) = tls {
                             if let Ok(mut stream) = tls.accept(sock).await {
@@ -364,7 +451,9 @@ pub async fn serve(
                         }
                     })
                     .await;
-                });
+                }) {
+                    metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                }
             }
             drop(listener);
             state.workers.seal();
@@ -374,6 +463,7 @@ pub async fn serve(
     });
     Ok(Directory {
         addr: local,
+        metrics: state.metrics.clone(),
         shutdown,
         connections,
         workers: state.workers.clone(),
@@ -392,6 +482,7 @@ async fn serve_request(
 ) {
     let response = match http::read_request(stream).await {
         Ok(Some(req)) => {
+            state.metrics.requests.fetch_add(1, Ordering::Relaxed);
             let is_head = req.method == "HEAD";
             let mut response = match state.workers.request(state.clone(), peer, req) {
                 Some(reply) => reply.await.unwrap_or_else(|_| {
@@ -400,7 +491,13 @@ async fn serve_request(
                         &DiscoveryError::Store("directory worker ended without a response".into()),
                     )
                 }),
-                None => Response::error(429, &DiscoveryError::RateLimited),
+                None => {
+                    state
+                        .metrics
+                        .workers_rejected
+                        .fetch_add(1, Ordering::Relaxed);
+                    Response::error(429, &DiscoveryError::RateLimited)
+                }
             };
             // This also covers worker saturation/failure before routing HEAD.
             if is_head {
@@ -422,7 +519,7 @@ async fn serve_request(
     let _ = tokio::io::AsyncWriteExt::shutdown(stream).await;
 }
 
-fn route(state: &State, peer: SocketAddr, req: &Request) -> Response {
+fn route(state: &State, _peer: SocketAddr, req: &Request) -> Response {
     let segments: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
     match (req.method.as_str(), segments.as_slice()) {
         // HEAD has no representation in this API and must never return a body.
@@ -435,10 +532,8 @@ fn route(state: &State, peer: SocketAddr, req: &Request) -> Response {
         ("GET", ["v1", "revocations"]) => get_revocations(state),
         ("PUT", ["v1", "revocations"]) => put_revocations(state, req),
         ("GET", ["v1", "health"]) => Response::json(200, serde_json::json!({ "ok": true })),
-        // Per-endpoint counters reveal writer activity, so scrapes are
-        // loopback-only; remote monitoring goes over SSH or a local
-        // exporter rather than a public port.
-        ("GET", ["v1", "metrics"]) if peer.ip().is_loopback() => metrics(state),
+        // Metrics never share the public listener, including requests from a
+        // loopback reverse proxy. The host owns authenticated admin export.
         (_, ["v1", ..]) => Response::text(404, "unknown route"),
         _ => Response::text(404, "unknown route"),
     }
@@ -477,13 +572,6 @@ fn put_record(state: &State, req: &Request) -> Response {
     }) {
         Ok(()) => {
             state.metrics.puts_ok.fetch_add(1, Ordering::Relaxed);
-            let mut per = lock(&state.metrics.endpoint_puts);
-            let label = if per.len() >= MAX_WRITER_LABELS {
-                "other".to_string()
-            } else {
-                writer_label(&record.key)
-            };
-            *per.entry(label).or_insert(0) += 1;
             Response::json(200, serde_json::json!({ "stored": true }))
         }
         Err(e) => {
@@ -615,46 +703,6 @@ fn put_revocations(state: &State, req: &Request) -> Response {
         Err(DiscoveryError::NotFound) => Response::error(401, &DiscoveryError::BadSignature),
         Err(e) => Response::error(status_for(&e), &e),
     }
-}
-
-fn metrics(state: &State) -> Response {
-    let m = &state.metrics;
-    let mut body = format!(
-        "rds_directory_records {}\n\
-         rds_directory_puts_ok {}\n\
-         rds_directory_puts_rejected {}\n\
-         rds_directory_gets {}\n\
-         rds_directory_deletes {}\n\
-         rds_directory_name_lookups {}\n\
-         rds_directory_registry_puts {}\n\
-         rds_directory_revocations_puts {}\n\
-         rds_directory_requests_bad {}\n\
-         rds_directory_writes_rate_limited {}\n\
-         rds_directory_gc_retired_total {}\n\
-         rds_directory_gc_failures_total {}\n",
-        state.store.len(),
-        m.puts_ok.load(Ordering::Relaxed),
-        m.puts_rejected.load(Ordering::Relaxed),
-        m.gets.load(Ordering::Relaxed),
-        m.deletes.load(Ordering::Relaxed),
-        m.name_lookups.load(Ordering::Relaxed),
-        m.registry_puts.load(Ordering::Relaxed),
-        m.revocations_puts.load(Ordering::Relaxed),
-        m.requests_bad.load(Ordering::Relaxed),
-        m.writes_rate_limited.load(Ordering::Relaxed),
-        m.gc_retired.load(Ordering::Relaxed),
-        m.gc_failures.load(Ordering::Relaxed),
-    );
-    // Per-endpoint accounting: PUT counts by anonymized writer label
-    // (blake3(key)[..8] — never the key itself; C7 security).
-    let per = lock(&m.endpoint_puts);
-    body.push_str(&format!("rds_directory_writers_distinct {}\n", per.len()));
-    for (writer, count) in per.iter() {
-        body.push_str(&format!(
-            "rds_directory_endpoint_puts_total{{writer=\"{writer}\"}} {count}\n"
-        ));
-    }
-    Response::text(200, body)
 }
 
 fn status_for(e: &DiscoveryError) -> u16 {

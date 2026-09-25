@@ -177,7 +177,59 @@ pub struct Agent {
     stream_counter: limits::StreamCounter,
 }
 
+/// Weak, in-memory observation: keeping an exporter alive never owns agent I/O.
+#[derive(Clone)]
+pub struct AgentMetrics(std::sync::Weak<Agent>);
+
+impl AgentMetrics {
+    pub fn snapshot(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        let Some(agent) = self.0.upgrade() else {
+            return std::collections::BTreeMap::from([("rds_agent_metrics_available", 0)]);
+        };
+        let mut values = agent.endpoint.metrics().snapshot();
+        values.extend([
+            ("rds_agent_metrics_available", 1),
+            (
+                "rds_agent_connections_active",
+                agent.active_connections() as u64,
+            ),
+            (
+                "rds_agent_connections_limit",
+                agent.limits.connections() as u64,
+            ),
+            ("rds_agent_streams_active", agent.active_streams() as u64),
+            (
+                "rds_agent_streams_per_connection_limit",
+                agent.limits.streams() as u64,
+            ),
+            (
+                "rds_agent_grants_required",
+                u64::from(agent.policy.grants_required()),
+            ),
+        ]);
+        let grants = agent.policy.active_grants.try_lock().ok();
+        values.insert("rds_agent_active_grants_known", u64::from(grants.is_some()));
+        if let Some(grants) = grants {
+            values.insert("rds_agent_active_grants", grants.len() as u64);
+        }
+        // Clone the immutable value before checking its lease. No watch borrow
+        // spans a clock read or exporter formatting; no identifiers are copied.
+        let policy = agent.policy.denylist.borrow().clone();
+        values.insert("rds_agent_revoked_grants", policy.len() as u64);
+        // Unmanaged/local policy is explicitly distinct from a fresh GDS lease.
+        values.insert("rds_agent_revocations_local", u64::from(policy.is_local()));
+        if agent.policy.grants_required() {
+            values.insert("rds_agent_revocations_fresh", u64::from(policy.fresh()));
+        }
+        values
+    }
+}
+
 impl Agent {
+    pub fn metrics(self: &Arc<Self>) -> AgentMetrics {
+        AgentMetrics(Arc::downgrade(self))
+    }
+
     pub fn new(endpoint: Endpoint, policy: AgentPolicy) -> Self {
         let limits = AgentLimits::default();
         Self {

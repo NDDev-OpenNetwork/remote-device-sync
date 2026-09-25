@@ -213,7 +213,66 @@ impl State {
     }
 }
 
+/// The observer never retains connection slots or server tasks across a scrape.
+#[derive(Clone)]
+pub struct RelayMetrics(std::sync::Weak<State>);
+impl RelayMetrics {
+    pub fn snapshot(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        let Some(state) = self.0.upgrade() else {
+            return std::collections::BTreeMap::from([("rds_relay_metrics_available", 0)]);
+        };
+        let limit = usize::from(state.limits.max_connections.get());
+        let mut values = std::collections::BTreeMap::from([
+            ("rds_relay_metrics_available", 1),
+            (
+                "rds_relay_accepting",
+                u64::from(!state.draining.load(Ordering::SeqCst)),
+            ),
+            (
+                "rds_relay_forwarded_datagrams_total",
+                state.stats.forwarded.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_relay_dropped_datagrams_total",
+                state.stats.dropped.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_relay_forwarded_bytes_total",
+                state.stats.bytes.load(Ordering::Relaxed),
+            ),
+            ("rds_relay_connections_limit", limit as u64),
+            (
+                "rds_relay_connections_active",
+                (limit - state.admission.available_permits()) as u64,
+            ),
+            (
+                "rds_relay_admission_rejected_total",
+                state.rejected.load(Ordering::Relaxed),
+            ),
+        ]);
+        let endpoints = state.conns.try_lock().ok().map(|map| map.len());
+        values.insert("rds_relay_endpoints_known", u64::from(endpoints.is_some()));
+        if let Some(count) = endpoints {
+            values.insert("rds_relay_endpoints", count as u64);
+        }
+        let history = state.recent.try_lock().ok();
+        values.insert("rds_relay_history_known", u64::from(history.is_some()));
+        if let Some(history) = history {
+            values.insert("rds_relay_history_entries", history.len() as u64);
+            values.insert(
+                "rds_relay_history_edges",
+                history.values().map(|set| set.len() as u64).sum(),
+            );
+        }
+        values
+    }
+}
+
 impl Relay {
+    pub fn metrics(&self) -> RelayMetrics {
+        RelayMetrics(std::sync::Arc::downgrade(&self.state))
+    }
+
     /// Bound socket address of the relay endpoint.
     pub fn local_addr(&self) -> SocketAddr {
         self.endpoint.local_addr()

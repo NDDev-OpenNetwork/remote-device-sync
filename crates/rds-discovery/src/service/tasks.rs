@@ -94,6 +94,10 @@ impl TaskGroup {
         inner.tasks.abort_all();
         self.changed.notify_one();
     }
+    pub(super) fn snapshot(&self) -> Option<(usize, usize)> {
+        let inner = self.inner.try_lock().ok()?;
+        Some((inner.tasks.len(), self.limit))
+    }
     pub(super) fn is_empty(&self) -> bool {
         self.inner
             .lock()
@@ -207,6 +211,7 @@ mod tests {
         let gc_release = block(&maintenance).await;
         let (shutdown, _) = watch::channel(false);
         let directory = Directory {
+            metrics: Default::default(),
             addr: "127.0.0.1:0".parse().unwrap(),
             shutdown,
             connections: connections.clone(),

@@ -1,0 +1,39 @@
+# Optional fragment: load alongside vector.toml on the daemon's loopback
+# network namespace. One daemon per source; keep node/service/instance unique.
+# Use private deployment paths/labels. Never publish the admin listener or
+# inject its token into a public reverse proxy. See docs/observability.md.
+
+[secret.rds_admin]
+type = "directory"
+path = "${RDS_VECTOR_SECRETS}"
+
+[sources.admin_scrape]
+type = "prometheus_scrape"
+endpoints = ["${RDS_ADMIN_URL}"]
+scrape_interval_secs = 15
+scrape_timeout_secs = 1
+auth.strategy = "bearer"
+auth.token = "SECRET[rds_admin.admin_token]"
+# Loopback credentials must never traverse a process/environment proxy.
+proxy.enabled = false
+
+[transforms.admin_metrics]
+type = "remap"
+inputs = ["admin_scrape"]
+drop_on_error = true
+drop_on_abort = true
+source = '''
+# Scrape transport addresses never become backend labels. Reconstruct labels
+# for this single configured source; never merge distinct scraped instances.
+assert!(match(string!(.name), r'^rds_(admin|agent|net|directory|relay)_[a-z0-9_]+$'))
+node = "${RDS_OBSERVE_NODE}"
+instance = "${RDS_OBSERVE_INSTANCE}"
+service = "${RDS_ADMIN_SERVICE}"
+assert!(match(node, r'^[a-zA-Z0-9_-]{1,32}$'))
+assert!(match(instance, r'^[a-zA-Z0-9_-]{1,32}$'))
+assert!(includes(["rds-agent", "rds-relay", "rds-server"], service))
+via = .tags.via
+assert!(includes([null, "direct", "relay"], via))
+.tags = {"node": node, "instance": instance, "service": service}
+if !is_null(via) { .tags.via = via }
+'''

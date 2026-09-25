@@ -16,6 +16,8 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Layer};
 
+pub mod admin;
+
 mod output;
 use output::{Buffer, Output};
 pub use output::{Health, Shutdown};

@@ -289,8 +289,9 @@ selection without dropping live sessions.
 
 - **D1** — `rds-server` HTTP API (or QUIC service stream; pick HTTP for
   ops simplicity): `PUT /v1/records` (verify → store; rate-limited),
-  `GET /v1/records/{key}`, `DELETE`, `GET /v1/health`,
-  `GET /v1/metrics`. Store: `rds_discovery::FileStore`.
+  `GET /v1/records/{key}`, `DELETE`, `GET /v1/health`. Store:
+  `rds_discovery::FileStore`. The original `/v1/metrics` route was removed by
+  remediation O2; metrics use the separate authenticated admin listener.
 - **D2** — agent publish loop (`rds-net` `announce` task): publish on
   start, refresh at `expires_at − TTL/3`, re-publish on
   `PathEvent::ObservedAddr` change.
@@ -409,7 +410,9 @@ random offset) with byte-identical result — run 20×, all pass.
 - `rds-net` metrics: per-path RTT/loss/congestion, path events, QNT
   attempts/success, relay-vs-direct bytes. Facade over
   `iroh-metrics`-style counters; Prometheus export behind feature.
-- `rds-server`: `/v1/metrics` scrape endpoint, per-endpoint accounting.
+- `rds-server`: separate authenticated loopback `GET /metrics`, aggregate
+  accounting. Remediation O2 supersedes the original public-listener route and
+  removes stable per-writer labels; see [current contract](observability.md).
 - Session event log: structured `tracing` spans per session with
   `session_id`, exported for bench reports.
 
@@ -419,7 +422,7 @@ random offset) with byte-identical result — run 20×, all pass.
 | --- | --- |
 | green bars | CI matrix pass |
 | functional | every metric the bench report cites exists in the export; counter accuracy proven by a known-traffic test |
-| security | `/v1/metrics` exposes no keys/secrets/peer content; endpoint list requires auth or is localhost-only — documented |
+| security | admin metrics require a separate loopback listener and bearer authentication; the public listener returns 404 even through a local proxy; no keys/secrets/peer labels/content |
 
 **Gate G7**: every number in `docs/reports/` is produced by the harness
 reading metrics — no hand-measured prose.

@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-rds-observe.workspace = true
+rds-observe = { workspace = true, features = ["cli"] }
 anyhow.workspace = true
 clap.workspace = true
 iroh.workspace = true

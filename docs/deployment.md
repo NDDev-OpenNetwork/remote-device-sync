@@ -44,7 +44,7 @@ alike.
 | --- | --- | --- | --- |
 | 3340 | tcp | relay (iroh relay protocol over HTTP) | public — endpoints behind NAT dial in |
 | 3341 | tcp | discovery HTTP(S) API (`PUT/GET/DELETE /v1/records`, `/v1/registry`, `/v1/revocations`, `/v1/health`) | estate members; configure directory TLS for lookup confidentiality; writes are signature-verified |
-| 3341 | tcp | `GET /v1/metrics` | **loopback only** — the router returns 404 to non-loopback peers; scrape over SSH (`ssh -L`) or a local exporter |
+| operator-selected | tcp | separate authenticated `GET /metrics` | disabled by default; explicit loopback bind and private bearer token; local collector only |
 | — | udp | endpoint QUIC data path + hole-punching | endpoints need outbound UDP; inbound UDP only required to *receive* direct paths (relay fallback covers its absence) |
 
 Minimal nftables for the services host:
@@ -167,9 +167,15 @@ must also use HTTPS with normal certificate validation. The listener uses
 the same connection cap and a 10-second absolute deadline including TLS.
 Provision a renewed certificate and restart the server to load it; directory
 hot reload/ACME is not implemented. Keep the PEM key readable only by the
-service identity. A loopback reverse proxy changes the source address seen by
-the metrics route; if one is introduced, keep `/v1/metrics` private at that
-boundary instead of relying on the directory's peer-IP check.
+service identity. The public directory listener has no metrics route, including
+requests through a loopback reverse proxy. Keep the separate authenticated
+admin listener local; do not forward it through a proxy or tunnel.
+
+Agent startup does not wait for an external relay: after endpoint bind, local
+service and admin supervision start even if the relay is disabled/unreachable.
+Directory announcement follows address changes. The printed startup ticket is a
+point-in-time snapshot and can precede relay availability; listener readiness
+alone is not an end-to-end reachability check.
 
 ## Sandboxing
 
@@ -283,15 +289,17 @@ clock/storage refusal and preserve evidence before repair.
 | `GET /v1/records/<id>` 404 after restart | records expired pre-restart | directory files under `/var/lib/rds/directory` | clients re-announce within TTL; lower `--record-ttl` |
 | `PUT /v1/registry` refused | missing/wrong `--registry-key` | unit `ExecStart` args | install the estate verifying key |
 | service refuses grant-mode streams | denylist stale or clock skew | `journalctl -u rds-agent`, `timedatectl` | fix clock; confirm `--revocations-key` matches estate |
-| `/v1/metrics` 404 from remote host | by design | scrape via `ssh -L 3341:127.0.0.1:3341` | — |
+| `/v1/metrics` returns 404 | public metrics route removed | configure separate admin listener and local authenticated collector | see observability contract |
 | unit fails `ProtectSystem` writes | state dir mis-ownership | `journalctl -u …` shows EROFS/EACCES | `chown -R rds:rds /var/lib/rds` |
 | relay floods under open access | `--allow` unset on public IP | connection count in logs/metrics | set `--allow` to estate EndpointIds |
 
 ### Observability quick reference
 
 ```sh
-# directory counters (loopback only)
-curl -s http://127.0.0.1:3341/v1/metrics
+# Create a NEW private scrape token; no endpoint identity or secret stdout.
+rds admin-token --file /private/rds-admin-token
+# Set paired --admin-addr/--admin-token-file daemon flags, then use Vector
+# with the private token file; avoid placing secrets in curl arguments.
 # With RDS_LOG_FORMAT=json in the unit, substitute the exact run and session.
 journalctl -u rds-agent -o cat | jq -R --arg run '<run-id>' --argjson session 7 \
   'fromjson? | select(.schema_version == 1 and .run_id == $run and .session_id == $session)'
@@ -306,5 +314,6 @@ before collection. Full `text` output is local debugging material and must not
 be treated as a redacted export. No production collector/backend is deployed
 by adding these repository examples; private service capture/rotation,
 ingestion credentials, retention and independent liveness remain deployment
-work. The existing directory-listener metrics route does not satisfy the
-planned dedicated secured admin boundary.
+work. The public directory metrics route is removed, including for loopback
+requests. Migrate scrapers to the opt-in authenticated admin listener and
+keep its token out of public proxy configurations.

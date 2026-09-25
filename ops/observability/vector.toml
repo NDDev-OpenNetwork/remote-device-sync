@@ -142,7 +142,8 @@ tls.verify_hostname = true
 
 [sinks.metrics]
 type = "prometheus_remote_write"
-inputs = ["operation_metrics", "collector_metrics"]
+# The optional vector-admin.toml contributes admin_metrics to the same sink.
+inputs = ["*_metrics"]
 endpoint = "${RDS_OO_URL}/api/${RDS_OO_ORG}/prometheus/api/v1/write"
 expire_metrics_secs = 600
 buckets = [0.00005, 0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 3600.0]
@@ -162,7 +163,7 @@ tls.verify_hostname = true
 [sinks.local_metrics]
 type = "prometheus_exporter"
 inputs = ["collector_metrics"]
-address = "127.0.0.1:9598"
+address = "${RDS_VECTOR_LOCAL_METRICS_ADDR:-127.0.0.1:9598}"
 
 [[tests]]
 name = "private text cannot enter export"
