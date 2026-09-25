@@ -8,7 +8,7 @@
 //! Datagrams carry `[32B dst_key][payload]` client→relay and are
 //! re-emitted as `[32B src_key][payload]` to the destination's own
 //! connection. Unknown destinations and malformed frames are dropped;
-//! per-source token buckets bound flood cost.
+//! per-source token buckets bound admitted parsing/forwarding work.
 //!
 //! [`Relay::drain`] broadcasts bounded, framed notices and refuses new
 //! registrations. Existing tunnels stay usable through the grace period.
@@ -35,11 +35,12 @@ use tracing::debug;
 
 use crate::proto::{self, RelayControl};
 
-/// Per-source datagram rate limit: steady bytes/sec and burst allowance.
-/// Forwarded frames are outer QUIC packets; the cap only bounds abuse —
-/// real paths migrate off the relay once direct paths exist.
-const RATE_BYTES_PER_SEC: f64 = 64.0 * 1024.0 * 1024.0;
-const RATE_BURST: f64 = 4.0 * 1024.0 * 1024.0;
+/// Per-source admission units: larger frames cost their byte length; every
+/// frame has a minimum cost so tiny/malformed input cannot buy free parsing.
+/// This bounds admitted application work, not QUIC ingress/decryption cost.
+const RATE_UNITS_PER_SEC: f64 = 64.0 * 1024.0 * 1024.0;
+const RATE_BURST_UNITS: f64 = 4.0 * 1024.0 * 1024.0;
+const MIN_FRAME_CHARGE: usize = 1024;
 /// How many recent peers to notify on disconnect.
 const MAX_RECENT_PEERS: usize = 64;
 /// Grace between `Drain` broadcast and closing the listener.
@@ -137,7 +138,7 @@ struct ConnSlot {
     bucket: Mutex<Bucket>,
 }
 
-/// Per-source token bucket bounding datagram flood cost.
+/// Per-source admitted datagram work. Charged before frame or key validation.
 struct Bucket {
     tokens: f64,
     last: Instant,
@@ -146,20 +147,24 @@ struct Bucket {
 impl Bucket {
     fn new() -> Self {
         Self {
-            tokens: RATE_BURST,
+            tokens: RATE_BURST_UNITS,
             last: Instant::now(),
         }
     }
 
-    /// Refill to `now`, then take `bytes` if affordable.
+    /// Refill, then charge a raw frame regardless of whether it is valid.
     fn take(&mut self, bytes: usize) -> bool {
-        let now = Instant::now();
+        self.take_at(bytes, Instant::now())
+    }
+
+    fn take_at(&mut self, bytes: usize, now: Instant) -> bool {
         self.tokens = (self.tokens
-            + now.duration_since(self.last).as_secs_f64() * RATE_BYTES_PER_SEC)
-            .min(RATE_BURST);
+            + now.duration_since(self.last).as_secs_f64() * RATE_UNITS_PER_SEC)
+            .min(RATE_BURST_UNITS);
         self.last = now;
-        if self.tokens >= bytes as f64 {
-            self.tokens -= bytes as f64;
+        let charge = bytes.max(MIN_FRAME_CHARGE) as f64;
+        if self.tokens >= charge {
+            self.tokens -= charge;
             true
         } else {
             false
@@ -501,7 +506,7 @@ async fn serve_conn(conn: rds_noq::Connection, state: std::sync::Arc<State>) -> 
     res
 }
 
-/// Move datagrams: decode dst key, rate-limit the source, forward.
+/// Move datagrams: charge raw input, look up an authenticated destination, forward.
 async fn forward_loop(source: &std::sync::Arc<ConnSlot>, state: &State) -> anyhow::Result<()> {
     let conn = &source.conn;
     let src = conn.remote_id();
@@ -513,20 +518,16 @@ async fn forward_loop(source: &std::sync::Arc<ConnSlot>, state: &State) -> anyho
         }
         burst += 1;
         let frame = conn.read_datagram().await?;
-        let Some((dst_raw, payload)) = proto::decode_frame(&frame) else {
-            state.stats.dropped.fetch_add(1, Ordering::Relaxed);
-            continue;
-        };
-        let Ok(dst) = EndpointId::from_bytes(&dst_raw) else {
-            state.stats.dropped.fetch_add(1, Ordering::Relaxed);
-            continue;
-        };
-
+        // Even empty, short or invalid-key frames consume the source's work
+        // budget. Exhaustion skips all frame parsing, key work and routing.
         if !source.bucket.lock().unwrap().take(frame.len()) {
             state.stats.dropped.fetch_add(1, Ordering::Relaxed);
             continue;
         }
-
+        let Some((dst_raw, payload)) = proto::decode_frame(&frame) else {
+            state.stats.dropped.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
         let dst_slot = {
             let conns = state.conns.lock().unwrap();
             // A replaced/detached source cannot repopulate history after its
@@ -538,18 +539,24 @@ async fn forward_loop(source: &std::sync::Arc<ConnSlot>, state: &State) -> anyho
                 state.stats.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            conns.get(&dst).cloned().inspect(|_| {
-                // Use the same lock order as detach: a departed destination
-                // cannot have its recent-flow entry recreated by a late send.
-                let mut recent = state.recent.lock().unwrap();
-                let peers = recent.entry(dst).or_default();
-                if peers.len() < MAX_RECENT_PEERS {
-                    peers.insert(src);
-                }
-            })
+            // Keys in this table were validated by the attachment handshake.
+            // EndpointId borrows its raw bytes for lookup: unknown/invalid keys
+            // miss without curve decompression on each forwarded datagram.
+            conns
+                .get_key_value(&dst_raw)
+                .map(|(dst, slot)| (*dst, slot.clone()))
+                .inspect(|(dst, _)| {
+                    // Use the same lock order as detach: a departed destination
+                    // cannot have its recent-flow entry recreated by a late send.
+                    let mut recent = state.recent.lock().unwrap();
+                    let peers = recent.entry(*dst).or_default();
+                    if peers.len() < MAX_RECENT_PEERS {
+                        peers.insert(src);
+                    }
+                })
         };
-        let Some(slot) = dst_slot else {
-            debug!(%src, %dst, "relay drop: unknown destination");
+        let Some((dst, slot)) = dst_slot else {
+            debug!(%src, "relay drop: unknown destination");
             state.stats.dropped.fetch_add(1, Ordering::Relaxed);
             continue;
         };
@@ -689,6 +696,9 @@ async fn notify_all(slots: Vec<std::sync::Arc<ConnSlot>>, message: RelayControl)
 mod lifecycle_tests;
 
 #[cfg(test)]
+mod accounting_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -740,21 +750,48 @@ mod tests {
     #[test]
     fn bucket_allows_burst_then_limits() {
         let mut bucket = Bucket::new();
+        let now = bucket.last;
         // One full burst is admitted.
-        assert!(bucket.take(RATE_BURST as usize));
+        assert!(bucket.take_at(RATE_BURST_UNITS as usize, now));
         // A second burst is not — the bucket is drained.
-        assert!(!bucket.take(RATE_BURST as usize));
+        assert!(!bucket.take_at(RATE_BURST_UNITS as usize, now));
+        assert_eq!(bucket.tokens, 0.0);
     }
 
     #[test]
     fn bucket_refills_at_steady_rate() {
         let mut bucket = Bucket::new();
-        assert!(bucket.take(RATE_BURST as usize));
-        std::thread::sleep(Duration::from_millis(10));
-        // ~10ms of refill at RATE_BYTES_PER_SEC is admissible again.
-        let refill = (RATE_BYTES_PER_SEC * 0.005) as usize;
-        assert!(bucket.take(refill));
+        let now = bucket.last;
+        assert!(bucket.take_at(RATE_BURST_UNITS as usize, now));
+        let elapsed = Duration::from_millis(10);
+        let refill = (RATE_UNITS_PER_SEC * elapsed.as_secs_f64()) as usize;
+        assert!(bucket.take_at(refill, now + elapsed));
         // But never another full burst.
-        assert!(!bucket.take(RATE_BURST as usize));
+        assert!(!bucket.take_at(RATE_BURST_UNITS as usize, now + elapsed));
+        // A long idle period cannot accumulate more than the burst allowance.
+        assert!(bucket.take_at(RATE_BURST_UNITS as usize, now + Duration::from_secs(60)));
+        assert!(!bucket.take_at(0, now + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn empty_and_tiny_frames_have_a_positive_cost_and_a_finite_burst() {
+        for size in [0, 1, 31, 32, MIN_FRAME_CHARGE - 1, MIN_FRAME_CHARGE] {
+            let mut bucket = Bucket::new();
+            let now = bucket.last;
+            for _ in 0..RATE_BURST_UNITS as usize / MIN_FRAME_CHARGE {
+                assert!(bucket.take_at(size, now));
+            }
+            assert!(!bucket.take_at(size, now));
+            assert_eq!(bucket.tokens, 0.0);
+        }
+    }
+
+    #[test]
+    fn larger_frames_pay_their_actual_size_including_key_header() {
+        let mut bucket = Bucket::new();
+        let now = bucket.last;
+        let size = proto::KEY_HEADER_LEN + proto::MAX_PAYLOAD;
+        assert!(bucket.take_at(size, now));
+        assert_eq!(bucket.tokens, RATE_BURST_UNITS - size as f64);
     }
 }

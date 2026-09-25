@@ -47,6 +47,31 @@ Explicit `RelaySocket::close(&mut self)` aborts and joins the pumps and closes t
 helper endpoint; repeated close is safe. Drop itself cannot synchronously join.
 A retained diagnostic RelayHandle does not retain the socket's I/O tasks.
 
+## Datagram work admission
+
+Every received application datagram consumes source budget before frame
+validation or destination lookup, including empty, short and invalid-key input.
+The cost is `max(raw_frame_bytes, 1024)` units. The existing numeric allowance
+is 64 Mi units/second with a 4 Mi-unit burst per attachment: at most 65,536
+small frames/second in steady state and 4,096 in one full burst. Larger frames
+pay their actual size, including the 32-byte destination header. Exhausted
+frames are dropped; they never wait in another application queue. The existing
+cooperative yield after 64 datagrams remains in place.
+
+Destination lookup borrows raw key bytes from the authenticated attachment
+table. Only keys already validated during their TLS handshake can match;
+unknown/invalid keys are dropped without curve decompression on every packet.
+Source ownership and recent-peer history still use the same synchronized table
+checks and lock order as detachment. No wire encoding or identity changes.
+
+This tightens small-packet admission compared with the old byte-only bucket;
+the old order also let malformed input skip the bucket completely. This is an
+application work budget, not a raw UDP/QUIC ingress, decryption or global CPU
+limit. Reconnection creates a fresh attachment budget. Global fairness,
+reconnect/control-message rate policy, measured throughput, RSS/FD limits and
+physical flood qualification remain open. Unit tests use deterministic refill
+times; a real QUIC fixture checks that each malformed input class is charged.
+
 ## Qualification and remaining work
 
 Real owned-QUIC tests reproduce the missing Drain notice and dropped-socket leak
@@ -166,8 +191,9 @@ full service qualification matrix remain open.
 handshake task and remains held through registration, forwarding and detach
 notification cleanup. Excess incoming attempts are refused without a queued
 application worker. Handshakes have a 15-second budget; registration retains
-its separate 15-second budget. This is library configuration for the owned
-server, not a new CLI option or a change to production allowlist defaults.
+its separate 15-second budget. Both binaries expose the application limit as
+`--relay-max-connections` in owned mode; their production allowlist and explicit
+development-open policy are defined in the [runtime contract](relay-runtime.md).
 
 The accept runner drives a JoinSet shared with the Relay owner, reaps completed
 tasks and seals registration on shutdown. `close()` closes tunnels and the
