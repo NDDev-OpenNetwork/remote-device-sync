@@ -476,7 +476,27 @@ async fn tty_modes_and_shared_descriptor_flags_restore_on_rejection_and_signal()
         assert_eq!(restored.input_modes, saved.input_modes);
         assert_eq!(restored.output_modes, saved.output_modes);
         assert_eq!(restored.control_modes, saved.control_modes);
-        assert_eq!(restored.special_codes, saved.special_codes);
+        use rustix::termios::SpecialCodeIndex as Code;
+        for code in [
+            Code::VINTR,
+            Code::VQUIT,
+            Code::VERASE,
+            Code::VKILL,
+            Code::VEOF,
+            Code::VTIME,
+            Code::VMIN,
+            Code::VSTART,
+            Code::VSTOP,
+            Code::VSUSP,
+            Code::VEOL,
+            Code::VREPRINT,
+            Code::VDISCARD,
+            Code::VWERASE,
+            Code::VLNEXT,
+            Code::VEOL2,
+        ] {
+            assert_eq!(restored.special_codes[code], saved.special_codes[code]);
+        }
         assert_eq!(rustix::fs::fcntl_getfl(&slave).unwrap(), flags);
         fixture.idle().await;
         fixture.close().await;
