@@ -30,7 +30,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
 | W3.1 | Partial; initial candidate race | Eight supported direct candidates plus attached relay share a deadline and one authenticated winner. Dual-stack routing and cancellation are checked. Independent relay bootstrap, remote scope/interface discovery and real topology qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
-| W3.6 | Partial; validated application eligibility | Only the authenticated handshake is seeded; extra/learned paths become eligible on Established and preserve weak task ownership. Credit retry, event-loss resynchronization, complete metrics and transport-failure isolation remain open. |
+| W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Path-event resynchronization, complete metrics and transport-failure isolation remain open. |
 
 ## Authorization change
 
@@ -791,3 +791,20 @@ version changed.
 The next bounded correction is owned retry when extra-path connection IDs have
 not yet arrived. Event loss, complete metrics, physical failover, native macOS
 and service recovery remain open. No remediation wave is closed.
+
+## Bounded retry for delayed path credits
+
+A failing-before simulation proved that the automatic secondary attempt was
+lost while a later manual attempt on the same listener validated. The policy
+now owns bounded credit retry, candidate-address reconciliation and source-aware
+withdrawal without retaining strong I/O handles across awaits. Five queue unit
+cases and two delayed-link regressions cover backoff, bounds, replacement data
+and cancellation. The focused run passed 32 tests.
+
+Final formatting, three Clippy lanes, **351 workspace tests**, **142
+all-feature network/agent/CLI/relay tests** and **32 isolated owned-network
+tests** passed. See [contract](path-selection.md) and
+[receipt](reports/rds-path-credit-20260925.md). No dependency or wire version
+changed. Initial family fairness is next; lost path events, metrics, transport
+failure isolation and physical/native-platform qualification remain open.
+No remediation wave is closed.

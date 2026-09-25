@@ -1,0 +1,180 @@
+{
+  "source_base": "b3b2c09",
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-net/src/backends/noq/candidates.rs": "11b70f6208e72bba28c75223d6c0e3a2a66c212397a60cbf59249c2ec5802726",
+    "crates/rds-net/src/backends/noq/drivers.rs": "a41d9eccf931a2eabb0f28bcdce91384651d199ddc137182e11d6a9a9d0f3a70",
+    "crates/rds-net/src/backends/noq/mod.rs": "5f56bfd3a8ed904d0e07017195b7139f19ac2cff51fccb2e88b7a0050a3a0545",
+    "crates/rds-net/src/backends/noq/policy.rs": "5807c0f9116fcda2caa97e304b0fee26852c8c8048ba6b1dab32ec394d4ac34c",
+    "crates/rds-net/tests/driver_lifecycle.rs": "8d2249ba6f7b26d14d8a0e6e574304d4d399a523b1314a2d504a72c97b53e4c1",
+    "crates/rds-net/tests/turmoil_sim.rs": "e30e7346d902c588cc1acf5bee69d814c40668514a939462e8bb1ae0783b3737"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.6603739730780944,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 20.973364659002982,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 19.44513862999156,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 22.47958188597113,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 391.4584039110923,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-relay",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 249.93714033497963,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-isolated",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "--no-default-features",
+        "--features",
+        "transport-noq",
+        "--lib",
+        "--test",
+        "path_validation",
+        "--test",
+        "turmoil_sim",
+        "--test",
+        "driver_lifecycle"
+      ],
+      "code": 0,
+      "seconds": 36.026913539040834,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "test": {
+      "passed": 351,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 62
+    },
+    "test-owned": {
+      "passed": 142,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 33
+    },
+    "test-isolated": {
+      "passed": 32,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 4
+    }
+  },
+  "before_fix_failures": [
+    "Delayed-credit simulation: automatic retry missing; same unadvertised secondary validates when retried manually after credits arrive."
+  ],
+  "queue": {
+    "max_pending": 41,
+    "work_batch": 8,
+    "lifetime_seconds": 15,
+    "first_backoff_ms": 25,
+    "max_backoff_ms": 400,
+    "retryable_errors": [
+      "RemoteCidsExhausted",
+      "MaxPathIdReached"
+    ]
+  },
+  "focused": {
+    "passed": 32,
+    "targets": 4
+  },
+  "simulation": {
+    "one_way_delay_ms": 200,
+    "assertions": [
+      "Immediate secondary open has no ID and returns typed credit exhaustion",
+      "Automatic secondary validates before four-second test deadline",
+      "Secondary carries datagram after logical primary close",
+      "Last I/O drop during pending credit retry ends policy task while endpoint stays alive"
+    ]
+  },
+  "limits": [
+    "Candidate address snapshots do not reconcile lost path validation events",
+    "Queue allocation retry does not retry failed path validation or application requests",
+    "New advertisements may start another bounded admission; global churn/jitter remain open",
+    "Simulation is not physical interface/NAT failover or production resource qualification",
+    "No native macOS, production deployment or wave closure"
+  ]
+}

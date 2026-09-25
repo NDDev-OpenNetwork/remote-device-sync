@@ -18,6 +18,7 @@
 //! Until this backend reaches parity (same-harness benchmarks vs the
 //! iroh backend), `iroh` remains the default selected at bind time.
 
+mod candidates;
 mod dial;
 mod drivers;
 mod hmac;
@@ -331,12 +332,7 @@ impl Endpoint {
 
         // Subscribe before any additional path can finish validation. Only
         // the completed handshake is initially eligible for path selection.
-        self.wire_connection(&conn)?;
-        policy::open_extra_paths(&conn, &candidates);
-        if let Some(syn) = relay_remote {
-            // Dedupe preserves an already established primary relay path.
-            let _open = conn.open_path_ensure(syn, noq::PathStatus::Backup);
-        }
+        self.wire_connection(&conn, attempts)?;
 
         Ok(Connection {
             inner: conn,
@@ -394,13 +390,17 @@ impl Endpoint {
     /// opens paths to its in-band advertised candidates and keeps the
     /// best validated path selected. Subscribe before QNT or extra path opens;
     /// only the authenticated handshake path is seeded.
-    fn wire_connection(&self, conn: &noq::Connection) -> anyhow::Result<()> {
+    fn wire_connection(
+        &self,
+        conn: &noq::Connection,
+        candidates: Vec<SocketAddr>,
+    ) -> anyhow::Result<()> {
         let mut ours = self.advertised_socket_addrs();
         if self.relay.is_some() {
             ours.push(relay::synthetic_for(&self.id));
         }
         self.drivers
-            .spawn(conn, self.metrics.clone(), ours.clone())?;
+            .spawn(conn, self.metrics.clone(), ours.clone(), candidates)?;
         policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn, &self.metrics);
         Ok(())
@@ -485,7 +485,12 @@ impl Future for Incoming {
                     Ok(inner) => match peer_endpoint_id(&inner) {
                         Some(remote_id) => self
                             .drivers
-                            .spawn(&inner, self.metrics.clone(), self.our_addrs.clone())
+                            .spawn(
+                                &inner,
+                                self.metrics.clone(),
+                                self.our_addrs.clone(),
+                                Vec::new(),
+                            )
                             .map(|()| {
                                 if let Some(handle) = &self.relay {
                                     handle.register_peer(remote_id);

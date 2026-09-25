@@ -51,8 +51,9 @@ owns a bounded worker group with connection-close joins and cancellation cleanup
 
 Owned path policy now uses [validated eligibility](path-selection.md): only the
 handshake path is seeded; application-opened candidates stay Backup until an
-Established event. Event-loss reconciliation and candidate-credit retry remain
-open, as do physical failover and complete path metrics.
+Established event. An owned bounded queue retries temporary path-credit
+exhaustion and reconciles candidate advertisements. Path-event reconciliation,
+physical failover and complete path metrics remain open.
 
 Owned requests also [pin the exact requested ALPN](protocol-negotiation.md) in
 an immutable per-protocol TLS configuration. A missing protocol fails before
@@ -61,7 +62,7 @@ service use; concurrent requests cannot replace each other's offer.
 Owned initial handshakes use a [bounded candidate race](candidate-dialing.md):
 eight direct addresses plus an attached relay, one 15-second deadline, common
 identity pinning, and one retained winner. This removes first-address blocking;
-relay bootstrap, scoped advertisements and validated path selection remain open.
+relay bootstrap, scoped advertisements and complete path-event recovery remain open.
 
 Owned relay client/server share [bounded control framing](relay-control.md).
 Drain and PeerGone use the same exact codec as registration and liveness. Drain

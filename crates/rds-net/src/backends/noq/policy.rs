@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use super::candidates::{Origin, Pending};
 use iroh::{EndpointAddr, TransportAddr};
+use tokio::time::Instant;
 
 /// Maximum address candidates considered per connect.
 ///
@@ -154,6 +156,7 @@ pub async fn connection_driver(
     mut path_events: noq::PathEvents,
     metrics: crate::metrics::Registry,
     local_addrs: Vec<SocketAddr>,
+    initial_candidates: Vec<SocketAddr>,
 ) {
     use tokio_stream::StreamExt;
 
@@ -174,29 +177,39 @@ pub async fn connection_driver(
         paths.insert(noq::PathId::ZERO, path.weak_handle());
     }
 
+    let mut pending = Pending::default();
+    for address in initial_candidates {
+        if supports_candidate(&local_addrs, address) {
+            pending.offer(address, Origin::Ticket, Instant::now());
+        }
+    }
+    // Subscriptions were created by the caller before this snapshot. Reconcile
+    // addresses learned during TLS as well as later broadcast updates.
+    reconcile_candidates(&conn, &local_addrs, &mut pending);
+
     let mut qnt_open = true;
     let mut events_open = true;
     let mut tick = tokio::time::interval(RESELECT_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        let wake = pending.next_wake();
         tokio::select! {
             _ = &mut closed => break,
+            _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {},
             event = qnt.next(), if qnt_open => match event {
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressAdded(addr))) => {
-                    if supports_candidate(&local_addrs, addr)
-                        && let Some(id) = open_learned_path(&conn, addr)
-                        && !paths.contains_key(&id)
-                        && qnt_paths.insert(id)
-                    {
-                        metrics.qnt_attempt();
+                    if supports_candidate(&local_addrs, addr) {
+                        pending.offer(addr, Origin::Advertisement, Instant::now());
                     }
                 }
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressRemoved(addr))) => {
+                    pending.withdraw(addr);
                     tracing::debug!(%addr, "peer withdrew candidate");
                 }
                 Some(Err(lagged)) => {
-                    tracing::warn!("QNT update stream lagged by {}", lagged.0)
+                    tracing::warn!("QNT update stream lagged by {}", lagged.0);
+                    reconcile_candidates(&conn, &local_addrs, &mut pending);
                 }
                 None => qnt_open = false,
             },
@@ -234,6 +247,11 @@ pub async fn connection_driver(
         let Some(owner) = conn.upgrade() else {
             break;
         };
+        for opened in pending.open_due(&owner, Instant::now()) {
+            if opened.learned && !paths.contains_key(&opened.id) && qnt_paths.insert(opened.id) {
+                metrics.qnt_attempt();
+            }
+        }
         // Lost/lagged path events cannot accumulate stale QNT history.
         qnt_paths.retain(|id| owner.path(*id).is_some());
         drop(owner);
@@ -241,20 +259,23 @@ pub async fn connection_driver(
     }
 }
 
-/// Attempt a path to a peer-advertised address and track it. Returns
-/// the `PathId` when the open was accepted so the caller can count the
-/// attempt and match its Established event as a QNT success.
-fn open_learned_path(conn: &noq::WeakConnectionHandle, addr: SocketAddr) -> Option<noq::PathId> {
-    let conn = conn.upgrade()?;
-    let open = conn.open_path_ensure(addr, noq::PathStatus::Backup);
-    let Some(id) = open.path_id() else {
-        tracing::debug!(%addr, "QNT-learned candidate path rejected");
-        return None;
-    };
-    // `open` is dropped without awaiting: dropping does not cancel the
-    // attempt — the Established event arrives on the path stream.
-    tracing::debug!(%addr, ?id, "opening path to QNT-learned candidate");
-    Some(id)
+/// Snapshot only candidate advertisements, never infer path validation from
+/// address presence. The current noq API has no validated-path snapshot.
+fn reconcile_candidates(
+    conn: &noq::WeakConnectionHandle,
+    local_addrs: &[SocketAddr],
+    pending: &mut Pending,
+) {
+    if let Some(owner) = conn.upgrade()
+        && let Ok(addresses) = owner.get_remote_nat_traversal_addresses()
+    {
+        pending.reconcile(
+            addresses
+                .into_iter()
+                .filter(|addr| supports_candidate(local_addrs, *addr)),
+            Instant::now(),
+        );
+    }
 }
 
 /// Apply the biased-RTT selection: the lowest-RTT path becomes

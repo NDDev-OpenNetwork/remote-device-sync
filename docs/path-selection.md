@@ -31,16 +31,48 @@ primary logical path and verifies datagram delivery through the replacement.
 A deterministic simulation adds a silent candidate beside a slow working path
 and checks that the pending default RTT does not win application preference.
 
-Tests that open additional paths wait for their actual creation within a bounded
-budget: TLS completion can precede receipt of spare peer connection IDs. That
-fixture retry is not a production retry guarantee. Production one-shot opens
-can still be rejected before credits arrive; owned retry/backoff is further
-W3.6 work. Path event lag and peer-created events preceding subscription lack a
-complete state-resynchronization API in the current noq surface. This increment
-does not establish complete tracking of every path after lost events.
+TLS completion can precede receipt of spare peer connection IDs. Production
+candidate opens now use the bounded queue described below; test helpers that
+explicitly call `open_extra_paths` remain one-shot. Path event lag and peer-created
+events preceding subscription lack a complete state-resynchronization API in the
+current noq surface. Candidate-address reconciliation is not path-validation
+reconciliation and does not establish complete tracking after lost path events.
 
 Logical path closure is not physical NIC/NAT failure. Native macOS, interface
 changes, relay failure isolation, global resource/churn bounds and service
 interruption budgets remain open. Facade metrics still require full path
 enumeration and correct selected/relay attribution. No remediation wave or
 owned-backend promotion is closed by these checks.
+
+## Temporary path-credit exhaustion
+
+The existing policy task owns pending initial direct/attached-relay candidates
+and QNT advertisements. `RemoteCidsExhausted` and `MaxPathIdReached` defer path
+allocation instead of silently losing the candidate. Each queued address has a
+15-second absolute lifetime, retries after 25, 50, 100, 200 and then at most
+400 ms, and is removed after allocation or permanent rejection. There are at
+most 41 queued addresses (eight initial direct, one relay, 32 advertisements),
+with at most eight due opens per loop iteration. Idle queues have no retry timer.
+
+Mapped IPv4 addresses share one entry with their native representation. Duplicate
+queued advertisements do not reset backoff or extend the original lifetime. A
+withdrawal removes a queued advertisement but preserves an independently supplied
+ticket address. Subscription precedes the initial advertisement snapshot; a
+lagged QNT address stream triggers another bounded snapshot. Withdrawal does not
+close an already allocated path. Expiry limits one queue admission; a subsequent
+new advertisement can admit the address again, so this is not a connection-wide
+or peer-wide churn budget.
+
+Allocation still does not imply validation: only Established makes an extra path
+eligible for selection. No retry owns a strong connection across an await or
+spawns another task. A 200 ms one-way simulation asserts immediate typed credit
+exhaustion, automatic later validation of an unadvertised second listener, and
+datagram delivery after logical primary close. Before the fix, automatic opening
+failed while the same manual open succeeded once credits arrived. A companion
+simulation drops the last connection during backoff and checks that its policy
+task exits while the endpoint remains alive.
+
+This queue retries local allocation refusal, not failed path validation, session
+reconnection or application requests. It does not provide global connection
+admission, reconnect jitter, transport-failure isolation, complete path event
+recovery or real-network performance qualification.

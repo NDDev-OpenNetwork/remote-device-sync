@@ -356,3 +356,156 @@ fn slow_primary_remains_preferred_over_an_unvalidated_candidate() -> turmoil::Re
     });
     sim.run()
 }
+
+/// TLS completes before post-handshake spare CIDs cross the delayed link.
+/// The second ticket address is not advertised over QNT, so only the owned
+/// candidate queue can retry it after those credits arrive.
+#[test]
+fn initial_candidate_retries_after_delayed_path_credit() -> turmoil::Result {
+    delayed_path_credit(false)
+}
+
+#[test]
+fn pending_path_credit_retry_does_not_retain_connection() -> turmoil::Result {
+    delayed_path_credit(true)
+}
+
+fn delayed_path_credit(drop_pending: bool) -> turmoil::Result {
+    use tokio_stream::StreamExt;
+    let key = SecretKey::from_bytes(&[110; 32]);
+    let id = key.public();
+    let mut sim = turmoil::Builder::new()
+        .min_message_latency(Duration::from_millis(200))
+        .max_message_latency(Duration::from_millis(200))
+        .simulation_duration(Duration::from_secs(30))
+        .build();
+    sim.host("server", move || {
+        let key = key.clone();
+        async move {
+            let one = SimSocket::bind("0.0.0.0:4433".parse().unwrap()).await?;
+            let two = SimSocket::bind("0.0.0.0:4434".parse().unwrap()).await?;
+            let mux = rds_noq::socket::Mux::new(vec![Box::new(one), Box::new(two)])?;
+            let ep = rds_noq::bind_with_socket(
+                EndpointConfig {
+                    secret_key: Some(key),
+                    ..Default::default()
+                },
+                Box::new(mux),
+                vec![SocketAddr::new(turmoil::lookup("server"), 4433)],
+                Arc::new(noq::TokioRuntime),
+                None,
+            )
+            .await?;
+            let mut tasks = tokio::task::JoinSet::new();
+            while let Some(incoming) = ep.accept().await {
+                tasks.spawn(async move {
+                    if let Ok(conn) = incoming.await {
+                        while let Ok(payload) = conn.read_datagram().await {
+                            if conn.send_datagram(payload).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            Ok(())
+        }
+    });
+    sim.client("client", async move {
+        let ep = sim_endpoint(
+            "0.0.0.0:0".parse().unwrap(),
+            "client",
+            SecretKey::from_bytes(&[111; 32]),
+        )
+        .await?;
+        let server_ip = turmoil::lookup("server");
+        let mut target = target_of(id, SocketAddr::new(server_ip, 4433));
+        target
+            .addrs
+            .insert(TransportAddr::Ip(SocketAddr::new(server_ip, 4434)));
+        let conn = timeout(Duration::from_secs(10), ep.connect(target, rds_core::ALPN)).await??;
+        // Check the fixture really reaches temporary credit exhaustion,
+        // rather than merely observing that no secondary path exists yet.
+        assert_eq!(
+            conn.remote_address(),
+            Some(SocketAddr::new(server_ip, 4433))
+        );
+        let rejected = conn
+            .inner()
+            .open_path_ensure(SocketAddr::new(server_ip, 4434), noq::PathStatus::Backup);
+        assert!(
+            rejected.path_id().is_none(),
+            "fixture already had spare path credit"
+        );
+        let error = rejected.await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                noq::PathError::RemoteCidsExhausted | noq::PathError::MaxPathIdReached
+            ),
+            "unexpected path refusal: {error:?}"
+        );
+        assert!(conn.inner().path(noq::PathId::from(1u32)).is_none());
+        if drop_pending {
+            // Let the policy attempt once and enter backoff, before spare
+            // connection IDs can traverse this 200 ms one-way link.
+            sleep(Duration::from_millis(30)).await;
+            assert!(conn.inner().path(noq::PathId::from(1u32)).is_none());
+            assert_eq!(ep.active_path_drivers(), 1);
+            drop(conn);
+            timeout(Duration::from_secs(1), async {
+                while ep.active_path_drivers() != 0 {
+                    sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("pending retry retained the last connection handle");
+            ep.close().await;
+            return Ok(());
+        }
+        let mut events = conn.inner().path_events();
+        let validated = timeout(Duration::from_secs(4), async {
+            loop {
+                match events.next().await {
+                    Some(Ok(noq::PathEvent::Established { id, .. })) if id != noq::PathId::ZERO => {
+                        break id;
+                    }
+                    Some(Ok(_)) => {}
+                    other => panic!("unexpected path event while waiting for retry: {other:?}"),
+                }
+            }
+        })
+        .await;
+        if validated.is_err() {
+            // Prove credits and the listener are now usable. The defect is
+            // losing the automatic attempt, not an unavailable remote path.
+            let manual = timeout(
+                Duration::from_secs(3),
+                conn.inner()
+                    .open_path_ensure(SocketAddr::new(server_ip, 4434), noq::PathStatus::Backup),
+            )
+            .await
+            .expect("manual retry validation timed out")
+            .expect("manual retry still refused after credits");
+            assert_eq!(manual.remote_address()?, SocketAddr::new(server_ip, 4434));
+            panic!("automatic retry was lost; the same path now validates when opened manually");
+        }
+        let validated = validated.unwrap();
+        let replacement = conn.inner().path(validated).unwrap();
+        assert_eq!(
+            replacement.remote_address()?,
+            SocketAddr::new(server_ip, 4434)
+        );
+        conn.inner().path(noq::PathId::ZERO).unwrap().close()?;
+        conn.send_datagram(b"after delayed credit".to_vec().into())?;
+        assert_eq!(
+            &timeout(Duration::from_secs(3), conn.read_datagram()).await??[..],
+            b"after delayed credit"
+        );
+        ep.close().await;
+        Ok(())
+    });
+    sim.run()
+}
