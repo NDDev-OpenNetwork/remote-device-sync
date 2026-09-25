@@ -20,6 +20,7 @@ impl Drivers {
         metrics: crate::metrics::Registry,
         local_addrs: Vec<std::net::SocketAddr>,
         candidates: Vec<std::net::SocketAddr>,
+        peer_lease: Option<super::relay::PeerLease>,
     ) -> anyhow::Result<()> {
         let _guard = self.admission.lock().unwrap_or_else(|p| p.into_inner());
         if self.tasks.is_closed() {
@@ -38,6 +39,9 @@ impl Drivers {
             candidates,
         );
         self.tasks.spawn(async move {
+            // Streams may outlive the Connection facade. The weak policy
+            // lifetime, not facade drop, owns this metadata-only route lease.
+            let _peer_lease = peer_lease;
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {

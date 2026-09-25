@@ -63,7 +63,7 @@ pub use announce::{Announce, AnnounceConfig, announce};
 pub use backends::iroh::{
     Ticket, default_key_path, load_or_create_key, parse_target, relay_url_of,
 };
-pub use config::{ConfigError, EndpointOverrides, EndpointSettings, RelaySettings};
+pub use config::{ConfigError, EndpointOverrides, EndpointSettings, RelayLimits, RelaySettings};
 pub use resolve::resolve_target;
 
 /// Which transport substrate an endpoint binds.
@@ -113,6 +113,9 @@ pub struct EndpointConfig {
     /// relayed paths that migrate like any other QUIC path.
     #[cfg(feature = "transport-noq")]
     pub relay_endpoint: Option<EndpointAddr>,
+    /// Per-tunnel peer/queue limits and unpinned mapping retirement.
+    #[cfg(feature = "transport-noq")]
+    pub relay_limits: RelayLimits,
     /// QUIC ALPN protocol ids. Defaults to `rds/0`.
     pub alpns: Vec<Vec<u8>>,
 }
@@ -128,6 +131,8 @@ impl Default for EndpointConfig {
             max_multipath_paths: None,
             #[cfg(feature = "transport-noq")]
             relay_endpoint: None,
+            #[cfg(feature = "transport-noq")]
+            relay_limits: RelayLimits::default(),
             alpns: vec![rds_core::ALPN.to_vec()],
         }
     }

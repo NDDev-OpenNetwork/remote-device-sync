@@ -857,3 +857,19 @@ tests** passed. See [contract](path-selection.md) and
 [receipt](reports/rds-failed-driver-shutdown-20260925.md). Generic transport
 recovery, relay queue/peer ownership, global resource bounds and physical/native
 platform qualification remain open. No remediation wave is closed.
+
+## Bounded client relay state
+
+A real before-fix synthetic alias collision redirected a raw transport fixture
+to the second identity. Registration now refuses collision and preserves the
+first owner. Positive configurable peer/queue limits, metadata leases through
+last-stream lifetime and whole-packet drops bound client relay state. Full peer
+tables preserve direct dialing and acceptance; relay-only admission fails fast.
+The focused run passed 52 tests across seven targets.
+
+Final formatting, three Clippy lanes, **364 workspace tests**, **161
+all-feature network/agent/CLI/relay tests** and **52 isolated network/relay
+tests** passed. See [contract](relay-control.md) and
+[receipt](reports/rds-relay-bounds-20260925.md). Server task ownership/admission,
+global resource qualification, warm replacement and physical/native-platform
+acceptance remain open. No remediation wave is closed.

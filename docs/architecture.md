@@ -74,6 +74,13 @@ cannot invalidate a replacement. Relay-link send failures and missing peer mappi
 are route loss rather than fatal I/O for the shared QUIC connection; a weak handle
 reports local tunnel availability. Warm relay migration remains unqualified.
 
+Client relay queues and peer metadata have positive per-tunnel limits. Active
+connection policy tasks own metadata-only peer leases; source learning cannot
+overwrite a live synthetic alias and capacity pressure evicts only unpinned
+entries. Queue overflow loses whole datagrams with counters. Diagnostic handles
+do not retain queued payloads or I/O. See [relay ownership](relay-control.md#client-peer-ownership-and-receive-bounds).
+Server task ownership and global resource qualification remain open.
+
 ## Research summary
 
 ### Connectivity models surveyed

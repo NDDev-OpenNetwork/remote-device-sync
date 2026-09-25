@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::net::SocketAddr;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -42,6 +43,32 @@ impl FromStr for Backend {
     }
 }
 
+/// Positive per-tunnel resource limits. These bound application queues and
+/// peer mappings, not the QUIC engine's buffers or global endpoint resources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RelayLimits {
+    pub max_peers: NonZeroU16,
+    pub datagram_queue: NonZeroU16,
+    /// Unpinned entries expire after inactivity; capacity pressure may evict
+    /// them earlier. Active connection leases are never evicted.
+    pub peer_grace_secs: NonZeroU32,
+}
+impl Default for RelayLimits {
+    fn default() -> Self {
+        Self {
+            max_peers: NonZeroU16::new(1024).expect("positive limit"),
+            datagram_queue: NonZeroU16::new(128).expect("positive limit"),
+            peer_grace_secs: NonZeroU32::new(30).expect("positive grace"),
+        }
+    }
+}
+impl RelayLimits {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Explicit reachability preset. Custom relays disable public lookup.
 /// Empty struct variants also reject unknown fields during deserialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +81,11 @@ pub enum RelaySettings {
     /// Iroh protocol relay origins; no public lookup services.
     Iroh { urls: Vec<RelayUrl> },
     /// Key-pinned owned relay locator: `rds-relay://PUBLIC_HEX_KEY@IP:PORT`.
-    Owned { route: String },
+    Owned {
+        route: String,
+        #[serde(default, skip_serializing_if = "RelayLimits::is_default")]
+        limits: RelayLimits,
+    },
 }
 
 impl Default for RelaySettings {
@@ -162,7 +193,11 @@ impl EndpointSettings {
                     .collect::<Result<_, _>>()?,
             };
         } else if let Some(route) = flags.owned_relay {
-            self.relay = RelaySettings::Owned { route };
+            let limits = match &self.relay {
+                RelaySettings::Owned { limits, .. } => *limits,
+                _ => RelayLimits::default(),
+            };
+            self.relay = RelaySettings::Owned { route, limits };
         } else if flags.no_relay {
             self.relay = RelaySettings::Disabled {};
         }
@@ -193,7 +228,7 @@ impl EndpointSettings {
                 config.relays = urls;
                 config.discovery = false;
             }
-            RelaySettings::Owned { route } => set_owned_relay(&mut config, &route)?,
+            RelaySettings::Owned { route, limits } => set_owned_relay(&mut config, &route, limits)?,
         }
         config.validate()?;
         Ok(config)
@@ -201,19 +236,28 @@ impl EndpointSettings {
 }
 
 #[cfg(feature = "transport-noq")]
-fn set_owned_relay(config: &mut EndpointConfig, route: &str) -> Result<(), ConfigError> {
+fn set_owned_relay(
+    config: &mut EndpointConfig,
+    route: &str,
+    limits: RelayLimits,
+) -> Result<(), ConfigError> {
     let route: rds_discovery::OwnedRelayRoute = route
         .parse()
         .map_err(|_| ConfigError::Invalid("invalid owned relay locator"))?;
     let id = crate::EndpointId::from_bytes(&route.key.0)
         .map_err(|_| ConfigError::Invalid("invalid owned relay identity"))?;
     config.relay_endpoint = Some(crate::EndpointAddr::new(id).with_ip_addr(route.addr));
+    config.relay_limits = limits;
     config.discovery = false;
     Ok(())
 }
 
 #[cfg(not(feature = "transport-noq"))]
-fn set_owned_relay(_config: &mut EndpointConfig, _route: &str) -> Result<(), ConfigError> {
+fn set_owned_relay(
+    _config: &mut EndpointConfig,
+    _route: &str,
+    _limits: RelayLimits,
+) -> Result<(), ConfigError> {
     Err(ConfigError::Invalid(
         "owned relay requires the transport-noq feature",
     ))
@@ -286,6 +330,13 @@ impl EndpointConfig {
         if backend == Backend::Noq && !self.relays.is_empty() {
             return Err(ConfigError::Invalid(
                 "noq cannot use iroh relay URLs; configure an owned relay",
+            ));
+        }
+        if self.relay_limits != RelayLimits::default()
+            && (backend != Backend::Noq || self.relay_endpoint.is_none())
+        {
+            return Err(ConfigError::Invalid(
+                "custom owned-relay limits require an owned relay",
             ));
         }
         if let Some(relay) = &self.relay_endpoint {

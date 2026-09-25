@@ -45,7 +45,7 @@ must supply an attached relay handle consistent with their relay configuration.
 | `default` | Iroh public relay and public address lookup preset; owned transport is direct-only |
 | `disabled` | Direct-only, with no backend public relay or public lookup |
 | `iroh` | `urls`: 1–8 distinct HTTP(S) relay origins; public address lookup disabled |
-| `owned` | `route`: one key-pinned owned relay locator; requires noq; public lookup disabled |
+| `owned` | `route`: one key-pinned owned relay locator; optional `limits` below; requires noq; public lookup disabled |
 
 Iroh origins have no credentials, non-root path, query or fragment and are at
 most 512 bytes each. Owned relay locators use
@@ -65,9 +65,28 @@ when `--no-relay` is used.
 The owned relay's outer connection binds an independent ephemeral port on the
 primary interface. It must not rebind the already-owned primary UDP port. A
 configured fixed primary port therefore remains usable with an owned relay.
-Relay startup retry, address-family selection, cross-relay reachability, queue
-ownership and TCP/443 fallback remain later work. The owned transport is not
+Relay startup retry, address-family selection, cross-relay reachability and
+TCP/443 fallback remain later work. The owned transport is not
 promoted to the default by adding its configuration surface.
+
+Owned mode accepts a strict optional `limits` object:
+
+| Field | Default | Accepted values |
+|---|---|---|
+| `max_peers` | 1024 | 1–65535 |
+| `datagram_queue` | 128 | 1–65535 |
+| `peer_grace_secs` | 30 | 1–4294967295 |
+
+For example, `"limits":{"max_peers":256,"datagram_queue":64}` changes two
+budgets and preserves default grace. These are per attached client tunnel;
+they do not configure the relay server or all underlying QUIC buffers.
+See [peer ownership and receive bounds](relay-control.md#client-peer-ownership-and-receive-bounds).
+Changing only `--owned-relay` preserves file limits. Selecting another relay mode
+removes the inapplicable limits. Runtime custom limits without an owned relay
+are rejected. Old version-1 files remain valid, and default limits are omitted
+when serialized; old binaries with strict schemas reject explicit new fields.
+This additive file setting changes neither the relay wire format nor the default
+transport backend.
 
 ## Examples
 

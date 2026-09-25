@@ -202,8 +202,8 @@ async fn drain_grace_keeps_actual_socket_datagrams_flowing() {
         RelaySocket::connect(relay.endpoint_addr(), kb, "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
-    ah.register_peer(bid);
-    bh.register_peer(aid);
+    let _ah_route = ah.register_peer(bid).unwrap();
+    let _bh_route = bh.register_peer(aid).unwrap();
     let (_, traffic) = tokio::join!(
         relay.drain(),
         tokio::time::timeout(Duration::from_secs(1), async {

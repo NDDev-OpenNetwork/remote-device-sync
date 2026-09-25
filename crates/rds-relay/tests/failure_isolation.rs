@@ -63,8 +63,8 @@ async fn failure_case() {
     .unwrap();
     let (a, ah) = fixture_endpoint(115, relay.endpoint_addr()).await;
     let (b, bh) = fixture_endpoint(116, relay.endpoint_addr()).await;
-    ah.register_peer(b.id());
-    bh.register_peer(a.id());
+    let _ah_route = ah.register_peer(b.id()).unwrap();
+    let _bh_route = bh.register_peer(a.id()).unwrap();
     let (ca, cb) = tokio::time::timeout(Duration::from_secs(3), async {
         let (a, b) = tokio::join!(a.connect(b.addr(), rds_core::ALPN), async {
             b.accept().await.unwrap().await
@@ -169,7 +169,7 @@ async fn missing_mapping_case() {
     let (b, bh) = fixture_endpoint(118, relay.endpoint_addr()).await;
     // Only the return route is known. No relay advertisement or received
     // relay frame can teach A about B before the explicit registration below.
-    bh.register_peer(a.id());
+    let _bh_route = bh.register_peer(a.id()).unwrap();
     let (ca, cb) = tokio::time::timeout(Duration::from_secs(3), async {
         let (a, b) = tokio::join!(a.connect(b.addr(), rds_core::ALPN), async {
             b.accept().await.unwrap().await
@@ -221,7 +221,7 @@ async fn missing_mapping_case() {
         0,
         "unknown relay route unexpectedly forwarded traffic"
     );
-    ah.register_peer(b.id());
+    let _ah_route = ah.register_peer(b.id()).unwrap();
     let validated = tokio::time::timeout(
         Duration::from_secs(3),
         ca.inner().open_path_ensure(remote, PathStatus::Backup),

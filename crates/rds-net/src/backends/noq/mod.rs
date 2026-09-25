@@ -107,8 +107,13 @@ pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<
             // The primary socket already owns its configured port. The outer
             // relay connection needs a separate ephemeral port on that interface.
             let relay_bind = SocketAddr::new(binds[0].ip(), 0);
-            let (socket, handle) =
-                relay::RelaySocket::connect(relay_addr.clone(), key, relay_bind).await?;
+            let (socket, handle) = relay::RelaySocket::connect_with_limits(
+                relay_addr.clone(),
+                key,
+                relay_bind,
+                config.relay_limits,
+            )
+            .await?;
             sockets.push(Box::new(socket));
             Some(handle)
         }
@@ -309,7 +314,21 @@ impl Endpoint {
         let candidates = policy::dial_candidates(&target, &self.local_addrs);
         // A relayed path is usable when the peer's advertised relay is
         // the one we are attached to; it becomes the synthetic remote.
-        let relay_remote = self.relay_remote(&target);
+        // Reserve before dialing; cancellation releases to bounded grace.
+        // Direct-only tickets also need a lease for later learned relay paths.
+        let (peer_lease, relay_error) = match self
+            .relay
+            .as_ref()
+            .map(|handle| handle.register_peer(remote_id))
+            .transpose()
+        {
+            Ok(lease) => (lease, None),
+            Err(error) => {
+                tracing::debug!(%remote_id, %error, "relay peer registration refused; direct candidates remain usable");
+                (None, Some(error))
+            }
+        };
+        let relay_remote = self.relay_remote(&target).filter(|_| peer_lease.is_some());
         let mut attempts = candidates.clone();
         if let Some(relay) = relay_remote
             && !attempts.contains(&relay)
@@ -317,12 +336,10 @@ impl Endpoint {
             attempts.push(relay);
         }
         if attempts.is_empty() {
+            if let Some(error) = relay_error {
+                return Err(error).context("relay-only dial could not reserve the peer route");
+            }
             bail!("no reachable addresses for {remote_id}");
-        }
-        if relay_remote.is_some()
-            && let Some(handle) = &self.relay
-        {
-            handle.register_peer(remote_id);
         }
 
         let server_name = tls::name::encode(remote_id);
@@ -332,7 +349,7 @@ impl Endpoint {
 
         // Subscribe before any additional path can finish validation. Only
         // the completed handshake is initially eligible for path selection.
-        self.wire_connection(&conn, attempts)?;
+        self.wire_connection(&conn, attempts, peer_lease)?;
 
         Ok(Connection {
             inner: conn,
@@ -394,13 +411,19 @@ impl Endpoint {
         &self,
         conn: &noq::Connection,
         candidates: Vec<SocketAddr>,
+        peer_lease: Option<relay::PeerLease>,
     ) -> anyhow::Result<()> {
         let mut ours = self.advertised_socket_addrs();
-        if self.relay.is_some() {
+        if peer_lease.is_some() {
             ours.push(relay::synthetic_for(&self.id));
         }
-        self.drivers
-            .spawn(conn, self.metrics.clone(), ours.clone(), candidates)?;
+        self.drivers.spawn(
+            conn,
+            self.metrics.clone(),
+            ours.clone(),
+            candidates,
+            peer_lease,
+        )?;
         policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn, &self.metrics);
         Ok(())
@@ -483,22 +506,45 @@ impl Future for Incoming {
                 return Poll::Ready(match res {
                     Err(e) => Err(e.into()),
                     Ok(inner) => match peer_endpoint_id(&inner) {
-                        Some(remote_id) => self
-                            .drivers
-                            .spawn(
-                                &inner,
-                                self.metrics.clone(),
-                                self.our_addrs.clone(),
-                                Vec::new(),
-                            )
-                            .map(|()| {
-                                if let Some(handle) = &self.relay {
-                                    handle.register_peer(remote_id);
+                        Some(remote_id) => {
+                            let registration = self
+                                .relay
+                                .as_ref()
+                                .map(|handle| handle.register_peer(remote_id))
+                                .transpose();
+                            let lease = match registration {
+                                Ok(lease) => lease,
+                                Err(error) => {
+                                    tracing::debug!(%remote_id, %error, "incoming relay registration refused");
+                                    let arrived_over_relay = inner
+                                        .path(noq::PathId::ZERO)
+                                        .and_then(|path| path.remote_address().ok())
+                                        .is_some_and(relay::is_synthetic);
+                                    if arrived_over_relay {
+                                        inner.close(0u32.into(), b"relay peer route unavailable");
+                                        return Poll::Ready(Err(error.into()));
+                                    }
+                                    None
                                 }
-                                policy::advertise_addrs(&inner, &self.our_addrs);
-                                policy::initiate_traversal_round(&inner, &self.metrics);
-                                Connection { inner, remote_id }
-                            }),
+                            };
+                            let mut ours = self.our_addrs.clone();
+                            if lease.is_none() {
+                                ours.retain(|address| !relay::is_synthetic(*address));
+                            }
+                            self.drivers
+                                .spawn(
+                                    &inner,
+                                    self.metrics.clone(),
+                                    ours.clone(),
+                                    Vec::new(),
+                                    lease,
+                                )
+                                .map(|()| {
+                                    policy::advertise_addrs(&inner, &ours);
+                                    policy::initiate_traversal_round(&inner, &self.metrics);
+                                    Connection { inner, remote_id }
+                                })
+                        }
                         None => Err(anyhow::anyhow!("peer presented no identity")),
                     },
                 });

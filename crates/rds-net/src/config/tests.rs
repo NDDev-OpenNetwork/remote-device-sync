@@ -227,3 +227,65 @@ fn owned_relay_and_endpoint_identity_are_not_interchangeable() {
         assert!(invalid.validate().is_err());
     }
 }
+
+#[test]
+fn owned_relay_limits_are_positive_strict_and_preserved_when_only_route_changes() {
+    let defaults = RelayLimits::default();
+    for field in ["max_peers", "datagram_queue", "peer_grace_secs"] {
+        let json = format!(
+            r#"{{"schema_version":1,"relay":{{"mode":"owned","route":"placeholder","limits":{{"{field}":0}}}}}}"#
+        );
+        assert!(EndpointSettings::from_json(json.as_bytes()).is_err());
+    }
+    assert!(EndpointSettings::from_json(br#"{"schema_version":1,"relay":{"mode":"owned","route":"placeholder","limits":{"unknown":1}}}"#).is_err());
+    let settings=EndpointSettings::from_json(br#"{"schema_version":1,"relay":{"mode":"owned","route":"old","limits":{"max_peers":7,"datagram_queue":3}}}"#).unwrap();
+    let changed = settings
+        .apply(EndpointOverrides {
+            owned_relay: Some("new".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let RelaySettings::Owned { route, limits } = changed.relay else {
+        panic!("owned relay mode lost")
+    };
+    assert_eq!(route, "new");
+    assert_eq!(limits.max_peers.get(), 7);
+    assert_eq!(limits.datagram_queue.get(), 3);
+    assert_eq!(limits.peer_grace_secs, defaults.peer_grace_secs);
+    let old = EndpointSettings::from_json(
+        br#"{"schema_version":1,"relay":{"mode":"owned","route":"placeholder"}}"#,
+    )
+    .unwrap();
+    assert!(!serde_json::to_string(&old).unwrap().contains("limits"));
+}
+
+#[cfg(feature = "transport-noq")]
+#[test]
+fn owned_limits_lower_into_runtime_and_cannot_be_silently_ignored() {
+    let mut json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../../../examples/endpoint-owned.json")).unwrap();
+    json["relay"]["limits"] = serde_json::json!({
+        "max_peers": 5, "datagram_queue": 3, "peer_grace_secs": 2
+    });
+    let settings = EndpointSettings::from_json(&serde_json::to_vec(&json).unwrap()).unwrap();
+    let config = settings.clone().into_endpoint().unwrap();
+    assert_eq!(config.relay_limits.max_peers.get(), 5);
+    assert_eq!(config.relay_limits.datagram_queue.get(), 3);
+    assert_eq!(config.relay_limits.peer_grace_secs.get(), 2);
+    let mut absent = config.clone();
+    absent.relay_endpoint = None;
+    assert!(absent.validate().is_err());
+    let mut incompatible = config;
+    incompatible.backend = Backend::Iroh;
+    assert!(incompatible.validate().is_err());
+    let disabled = settings
+        .apply(EndpointOverrides {
+            no_relay: true,
+            ..Default::default()
+        })
+        .unwrap()
+        .into_endpoint()
+        .unwrap();
+    assert!(disabled.relay_endpoint.is_none());
+    assert_eq!(disabled.relay_limits, RelayLimits::default());
+}
