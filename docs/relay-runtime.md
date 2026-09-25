@@ -46,7 +46,7 @@ rds-relay --relay-backend noq --addr 0.0.0.0:3340 \
 # Use the relay endpoint ID printed at readiness and its reachable socket.
 rds-agent --backend noq --owned-relay rds-relay://<relay-id>@<ip>:3340 \
     --allow <operator-id> --ssh 127.0.0.1:22
-rds --backend noq --owned-relay rds-relay://<relay-id>@<ip>:3340 ping <device-ticket>
+rds --direct --key-file <separate-client-key> --backend noq --owned-relay rds-relay://<relay-id>@<ip>:3340 ping <device-ticket>
 ```
 
 The two relay commands above are alternatives, not concurrent owners of the

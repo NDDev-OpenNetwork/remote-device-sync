@@ -14,7 +14,7 @@ use rustix::fs::{
     unlinkat,
 };
 
-use super::KeyStoreError;
+use super::{KeyOwner, KeyStoreError};
 use crate::SecretKey;
 
 const LOCK_NAME: &str = ".rds-key-transaction.lock";
@@ -42,10 +42,26 @@ pub(super) fn load_or_create(path: &Path) -> Result<SecretKey, KeyStoreError> {
     transaction(path, |_| Ok(()))
 }
 
+pub(super) fn acquire(path: &Path) -> Result<KeyOwner, KeyStoreError> {
+    let (key, file) = transaction_file(path, |_| Ok(()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(KeyOwner { key, file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(KeyStoreError::InUse),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 fn transaction(
     path: &Path,
-    mut checkpoint: impl FnMut(Phase) -> Result<(), KeyStoreError>,
+    checkpoint: impl FnMut(Phase) -> Result<(), KeyStoreError>,
 ) -> Result<SecretKey, KeyStoreError> {
+    transaction_file(path, checkpoint).map(|(key, _file)| key)
+}
+
+fn transaction_file(
+    path: &Path,
+    mut checkpoint: impl FnMut(Phase) -> Result<(), KeyStoreError>,
+) -> Result<(SecretKey, File), KeyStoreError> {
     let state = Transaction::open_checked(path, &mut checkpoint)?;
     state.recover_pending()?;
     if let Some(key) = state.read_key()? {
@@ -90,7 +106,7 @@ fn transaction(
         Ok(()) => {
             staged.live = false;
             checkpoint(Phase::AfterPublish)?;
-            key
+            (key, file)
         }
         // A legacy/noncooperating creator can win despite our advisory lock.
         // Never replace it; validate and reuse that key, or return its error.
@@ -261,7 +277,7 @@ impl Transaction {
         Ok(())
     }
 
-    fn read_key(&self) -> Result<Option<SecretKey>, KeyStoreError> {
+    fn read_key(&self) -> Result<Option<(SecretKey, File)>, KeyStoreError> {
         let Some(file) = open_optional(&self.directory, &self.key)? else {
             return Ok(None);
         };
@@ -271,7 +287,7 @@ impl Transaction {
         (&file).take(33).read_to_end(&mut bytes)?;
         let seed: [u8; 32] = bytes.try_into().map_err(|_| KeyStoreError::InvalidLength)?;
         file.sync_all()?;
-        Ok(Some(SecretKey::from_bytes(&seed)))
+        Ok(Some((SecretKey::from_bytes(&seed), file)))
     }
 
     fn reject_internal_key_alias(&self) -> Result<(), KeyStoreError> {

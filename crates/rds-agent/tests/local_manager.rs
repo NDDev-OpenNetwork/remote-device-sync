@@ -16,11 +16,14 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "rds-local-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let root = std::path::Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!(
+                "rds-local-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -572,8 +575,8 @@ async fn real_agent_control_preflight_and_signal_shutdown_preserve_shared_identi
         }
     }
     let root = Scratch::new();
-    let path = root.0.join("control");
-    let key = root.0.join("agent.key");
+    let key = root.0.join("fresh/agent.key");
+    let path = rds_client::local::control_dir_for_key(&key).unwrap();
     let invalid = root.0.join("not-a-directory");
     std::fs::write(&invalid, b"unrelated").unwrap();
     let command = || {
@@ -594,8 +597,6 @@ async fn real_agent_control_preflight_and_signal_shutdown_preserve_shared_identi
     assert!(!key.exists());
     let mut child = Child(
         command()
-            .arg("--control-dir")
-            .arg(&path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -618,6 +619,57 @@ async fn real_agent_control_preflight_and_signal_shutdown_preserve_shared_identi
         snapshot.endpoint,
         rds_net::SecretKey::from_bytes(&seed).public().to_string()
     );
+    // A different control directory cannot bypass ownership of the seed.
+    for args in [vec!["--control-dir"], vec!["--no-control"]] {
+        let mut second = command();
+        second.args(&args);
+        if args[0] == "--control-dir" {
+            second.arg(root.0.join("second"));
+        }
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::process::Command::from(second)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "second agent announced an endpoint"
+        );
+    }
+    assert!(matches!(
+        rds_net::acquire_key(&key),
+        Err(rds_net::KeyStoreError::InUse)
+    ));
+    // SIGKILL leaves a stale socket but releases OS key/directory locks.
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    assert!(path.join("control.sock").exists());
+    child = Child(
+        command()
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let restarted = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            assert!(child.0.try_wait().unwrap().is_none());
+            if let Ok(snapshot) = client.snapshot().await {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_ne!(restarted.instance, snapshot.instance);
+    assert_eq!(restarted.endpoint, snapshot.endpoint);
+    assert!(restarted.sessions.is_empty());
     let remote = bind_endpoint(config(Backend::Iroh)).await.unwrap();
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
     policy.allow.insert(snapshot.endpoint.parse().unwrap());
@@ -651,6 +703,14 @@ async fn real_agent_control_preflight_and_signal_shutdown_preserve_shared_identi
     assert!(status.success());
     assert!(!path.join("control.sock").exists());
     assert_eq!(std::fs::read(&key).unwrap(), seed);
+    assert_eq!(
+        rds_net::acquire_key(&key)
+            .unwrap()
+            .secret_key()
+            .public()
+            .to_string(),
+        snapshot.endpoint
+    );
     remote.close().await;
     runner.await.unwrap();
 }

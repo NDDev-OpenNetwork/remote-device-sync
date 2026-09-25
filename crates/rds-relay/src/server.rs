@@ -200,6 +200,9 @@ struct State {
     limits: ServerLimits,
     admission: std::sync::Arc<Semaphore>,
     rejected: AtomicU64,
+    // Runner and connection tasks keep runtime ownership through cancellation
+    // and asynchronous cleanup after the public Relay handle is dropped.
+    _identity: Option<rds_net::KeyOwner>,
 }
 
 impl State {
@@ -385,6 +388,25 @@ pub async fn serve_with_limits(
     allow: Vec<EndpointId>,
     limits: ServerLimits,
 ) -> anyhow::Result<Relay> {
+    serve_inner(config, allow, limits, None).await
+}
+
+pub(crate) async fn serve_persistent(
+    mut config: EndpointConfig,
+    allow: Vec<EndpointId>,
+    limits: ServerLimits,
+    identity: rds_net::KeyOwner,
+) -> anyhow::Result<Relay> {
+    config.secret_key = Some(identity.secret_key().clone());
+    serve_inner(config, allow, limits, Some(identity)).await
+}
+
+async fn serve_inner(
+    config: EndpointConfig,
+    allow: Vec<EndpointId>,
+    limits: ServerLimits,
+    identity: Option<rds_net::KeyOwner>,
+) -> anyhow::Result<Relay> {
     let mut config = config;
     config.alpns = vec![proto::RELAY_ALPN.to_vec()];
     let endpoint = rds_noq::bind_endpoint(config).await?;
@@ -398,6 +420,7 @@ pub async fn serve_with_limits(
         limits,
         admission: std::sync::Arc::new(Semaphore::new(usize::from(limits.max_connections.get()))),
         rejected: AtomicU64::new(0),
+        _identity: identity,
     });
 
     let (shutdown, receiver) = watch::channel(Shutdown::Running);

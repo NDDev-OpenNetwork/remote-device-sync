@@ -1,7 +1,7 @@
 //! Versioned local control protocol. This is not a remote service ALPN.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const MAX_SESSIONS: usize = 32;
 pub const TCP_CHUNK: usize = 16 * 1024;
 
@@ -93,6 +93,8 @@ pub enum Command {
         session: Option<SessionId>,
         target: crate::TcpTarget,
     },
+    /// Current addresses of the already-bound agent endpoint; no relay wait.
+    Ticket,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +139,7 @@ pub enum Reply {
         info: crate::AgentInfo,
     },
     Opened(SessionId),
+    Ticket(String),
 }
 
 /// Stable reasons, with no upstream error, address, path or credential payload.

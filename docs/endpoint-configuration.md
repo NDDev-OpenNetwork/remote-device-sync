@@ -6,6 +6,12 @@ grant issuer, registry/revocation authority, directory credentials or service
 policy; their existing provisioning options remain separate. Unified role-level
 policy and negotiated session-budget configuration is still W2.1 work.
 
+Connectivity commands now use the local agent by default. Put transport/directory
+configuration on that agent; managed CLI commands reject those flags. Explicit
+`rds --direct` commands retain this endpoint configuration surface and require
+an unused persisted identity. `rds id` remains an offline configuration/key
+reader. See [local manager migration](local-sessions.md).
+
 ## Precedence and validation
 
 Precedence is built-in defaults, then an explicitly selected file, then explicitly

@@ -221,7 +221,7 @@ enum ReadyBackend {
     #[cfg(feature = "owned-relay")]
     Noq {
         allow: Vec<EndpointId>,
-        key: Box<rds_net::SecretKey>,
+        key: Box<rds_net::KeyOwner>,
         limits: crate::server::ServerLimits,
     },
 }
@@ -239,8 +239,7 @@ impl PreparedRelay {
                 limits,
             } => {
                 let key =
-                    tokio::task::spawn_blocking(move || rds_net::load_or_create_key(&key_file))
-                        .await??;
+                    tokio::task::spawn_blocking(move || rds_net::acquire_key(&key_file)).await??;
                 ReadyBackend::Noq {
                     allow,
                     key: Box::new(key),
@@ -264,16 +263,16 @@ impl ReadyRelay {
             }),
             #[cfg(feature = "owned-relay")]
             ReadyBackend::Noq { allow, key, limits } => RunningBackend::Noq(
-                crate::server::serve_with_limits(
+                crate::server::serve_persistent(
                     rds_net::EndpointConfig {
                         backend: rds_net::Backend::Noq,
-                        secret_key: Some(*key),
                         bind_addrs: vec![addr],
                         discovery: false,
                         ..Default::default()
                     },
                     allow,
                     limits,
+                    *key,
                 )
                 .await
                 .map_err(RelayRuntimeError::Startup)?,
@@ -493,6 +492,73 @@ mod tests {
         let error = runtime.shutdown().await.unwrap_err();
         assert_eq!(before, error.to_string());
         assert!(matches!(error, RelayRuntimeError::IrohShutdown(_)));
+    }
+
+    #[cfg(feature = "owned-relay")]
+    #[tokio::test]
+    async fn persistent_relay_keeps_identity_during_canceled_shutdown_and_drop_cleanup() {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = std::env::temp_dir().join(format!("rds-relay-owner-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let path = root.join("relay.key");
+        let ready = || PreparedRelay {
+            backend: PreparedBackend::Noq {
+                allow: vec![],
+                key_file: path.clone(),
+                limits: crate::server::ServerLimits::default(),
+            },
+        };
+        let initialized = ready().initialize().await.unwrap();
+        assert!(matches!(
+            ready().initialize().await,
+            Err(RelayRuntimeError::Identity(rds_net::KeyStoreError::InUse))
+        ));
+        drop(initialized);
+        let running = ready()
+            .initialize()
+            .await
+            .unwrap()
+            .bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let RelayBinding::Noq { id, .. } = running.binding() else {
+            panic!("wrong backend");
+        };
+        // Consuming shutdown is canceled during the owned grace window. Its
+        // runner must retain the key until that cleanup has actually completed.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), running.shutdown())
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            rds_net::acquire_key(&path),
+            Err(rds_net::KeyStoreError::InUse)
+        ));
+        let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                match rds_net::acquire_key(&path) {
+                    Ok(owner) => break owner,
+                    Err(rds_net::KeyStoreError::InUse) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await
+                    }
+                    Err(error) => panic!("unexpected identity error: {error}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(recovered.secret_key().public(), id);
     }
 
     #[cfg(feature = "owned-relay")]

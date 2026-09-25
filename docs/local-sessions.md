@@ -1,14 +1,17 @@
 # Local device connections and session ownership
 
-Status: opt-in manager implemented, **W2.4 partial**. This does not close W2,
-W5 or W6. See the [Linux receipt](reports/rds-local-sessions-20260925.md).
+Status: manager enabled by default for connectivity commands, **W2.4 partial**.
+This does not close W2, W5 or W6. See the [initial Linux receipt](reports/rds-local-sessions-20260925.md)
+and [ownership/migration receipt](reports/rds-identity-migration-20260925.md).
 
 ## Ownership and use
 
-`rds-agent --control-dir <private-absolute-directory>` hosts outgoing sessions
+`rds-agent` hosts outgoing sessions
 beside inbound service. Both use clones of the **same bound endpoint**, identity,
 relay registration and metrics registry. The manager never reads a key or binds
-another UDP endpoint. The agent supervises and closes both services.
+another UDP endpoint. The agent supervises and closes both services. It holds
+the [exclusive persisted-key owner](identity-storage.md#runtime-ownership)
+through shutdown, including with the explicit server-only `--no-control` flag.
 
 `rds-client` owns outgoing protocol operations and the local manager/client.
 It depends on core/net/discovery/observe. Agent and CLI depend on it; the former
@@ -16,8 +19,11 @@ It depends on core/net/discovery/observe. Agent and CLI depend on it; the former
 dependency or external runtime program was added. Existing Tokio, rustix,
 postcard, BLAKE3 and random-number libraries supply the underlying mechanisms.
 
-Use a dedicated absolute control directory under private user state. Its parent
-must exist; the leaf is created with mode 0700 when absent. Components must be
+The default is `<key-file>.control` beside the agent key. CLI derives it from
+the default XDG_CONFIG_HOME/HOME key path, without reading/creating a key.
+An agent with a custom key/control path needs the corresponding CLI
+`--control-dir <private-absolute-directory>`. Missing directory components are
+created with mode 0700 by the agent only, after validating each parent. Components must be
 real directories owned by this user or root, without other-user write access.
 A root-owned sticky ancestor such as `/tmp` is allowed. On macOS use canonical
 paths, such as `/private/tmp` instead of the `/tmp` symlink.
@@ -35,6 +41,34 @@ rds session --control-dir /absolute/private/rds-control info
 rds session --control-dir /absolute/private/rds-control ssh -L 127.0.0.1:2222
 rds session --control-dir /absolute/private/rds-control disconnect <session-id>
 ```
+
+With the default path, omit every `--control-dir` above. Ordinary
+`rds ticket`, `rds ping <target>`, `rds info <target>`, `rds ssh <target>` and
+`rds forward <target>` now use the same manager. Target commands connect/reuse
+a session, then pin its handle; they never disconnect another CLI's
+operation on exit. The session remains visible in `session list` until explicit
+disconnect, peer loss or agent restart. `ticket` returns current addresses
+immediately and does not await relay readiness. It is still an address snapshot,
+not proof of reachability. `rds id` remains an offline key reader/creator.
+
+There is **no direct fallback** when the manager is missing or rejects a request.
+Transport, key and directory options belong on the agent; passing them to managed
+commands returns an actionable error instead of silently ignoring them. The
+global `--grant` remains supported on target commands. `session connect` uses
+`--grant-file`. Both cap the file at 64 KiB and leave remote authorization to
+the existing admission protocol. Grant inputs must be regular files; final
+symlinks and special files are refused using nonblocking, no-follow opens, so
+a FIFO cannot hang startup. The CLI uses the existing rustix library directly
+for this boundary; no package/version or external helper was added.
+
+Compatibility: `rds --direct --key-file <separate-key> ...` explicitly binds
+an independent endpoint and acquires the same exclusive key owner as the agent.
+An occupied key is an error. Direct mode requires a persisted key path; there is
+no accidental ephemeral-identity fallback. `desktop`, `send` and `recv` currently
+require this explicit mode because their manager APIs remain unimplemented.
+The local wire version is now **2** (adds current ticket retrieval); upgrade CLI
+and agent together. Old/new local versions fail without mutating session state.
+The remote RDS and relay protocol versions have not changed.
 
 `list --json` returns instance ID, generation, endpoint, selected handle and
 entries. Handles print as 32 hexadecimal characters. `ping`, `info`, `ssh` and
@@ -140,11 +174,10 @@ production deployment is implied.
 
 ## Remaining sequence and exit checks
 
-1. **W2.4 migration:** manager by default for CLI/viewer/sync, compatibility
-   migration, and exclusive runtime ownership even for independently launched
-   processes using the same key. Direct commands still bind independently:
-   do not run them with the manager identity. Qualify native macOS credentials,
-   actual distinct-user rejection, relay-registration reuse, crash/restart,
+1. **W2.4 migration:** viewer/sync manager APIs and coordinated installed-binary
+   migration remain. CLI connectivity defaults and cooperative same-key-inode
+   runtime ownership are implemented. Qualify native macOS credentials,
+   actual distinct-user rejection, relay-registration reuse,
    FD/RSS budgets and manager service APIs for media/sync.
 2. **W5 SSH:** maintained Rust SSH library behind an owned interface; host-key
    pinning/known-hosts, credentials/agent policy, raw-mode restoration, PTY

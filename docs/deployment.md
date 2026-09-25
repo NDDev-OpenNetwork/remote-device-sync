@@ -30,13 +30,20 @@ The agent creates `endpoint.key` on first start (`0600`, enforced by
 that key — keep it across reinstalls or the device's identity changes.
 `rds id` prints the bare hex id needed for `--allow` lists.
 
-**One key, one role.** Never let an agent and an operator CLI share a
-key file: two live endpoints with the same EndpointId make the relay
-disconnect the earlier session ("Another endpoint connected"). Give
-operator CLIs their own key (`rds --key-file ~/.config/remote-device-sync/cli.key …`)
-and list their ids in the agent's `--allow` too. The relay's `--allow`
-covers every endpoint that may *use* the relay — servers and clients
-alike.
+**One runtime owner per key.** Ordinary CLI connectivity uses the same-UID
+local agent's endpoint through its private manager socket; it does not load a
+second copy of that identity. The default directory is `<agent-key-file>.control`.
+Use `--control-dir` for a custom location. A system service under another UID
+is not an operator-user broker: run the operator's own user agent. Do not loosen
+socket permissions to bridge that boundary.
+
+Explicit `rds --direct --key-file ~/.config/remote-device-sync/cli.key …` retains
+independent operation for diagnostics and the unfinished desktop/sync manager
+APIs. Give it a separate authorized key. Updated agent, direct CLI and owned
+relay binaries refuse a seed inode already in use before binding. Upgrade all
+local binaries together; old binaries and copied/manual-replaced keys are outside
+this cooperative guarantee. See [migration and ownership](local-sessions.md).
+The relay's `--allow` covers every endpoint that may use the relay.
 
 ## Ports and firewall
 
@@ -121,9 +128,9 @@ rds-server --http-addr 0.0.0.0:3341 \
   --directory-allow <base32-device-key> \
   --directory-tls-cert /etc/rds/directory-chain.pem \
   --directory-tls-key /etc/rds/directory-key.pem
-rds --server https://directory.example.com:3341 \
-  --registry-key <base32-verifying-key> ping device-a
-rds-agent --directory https://directory.example.com:3341 <agent-policy-flags>
+rds-agent --directory https://directory.example.com:3341 \
+  --registry-key <base32-verifying-key> <agent-policy-flags>
+rds ping device-a
 ```
 
 The certificate must cover the configured hostname (or IP SAN for an IP URL).
@@ -218,7 +225,8 @@ and hyphens (1–63 bytes); snapshots have at most 256 names and must fit the
 clients need synchronized clocks (`issued_at <= now < expires_at`).
 
 ```sh
-rds --server 127.0.0.1:3341 --registry-key <base32-verifying-key> ping device-a
+rds-agent --directory 127.0.0.1:3341 --registry-key <base32-verifying-key>
+rds ping device-a
 ```
 
 New clients refuse missing anchors and unsigned legacy responses. Existing

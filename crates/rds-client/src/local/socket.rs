@@ -23,7 +23,7 @@ pub(super) fn directory(path: &Path, create: bool) -> Result<File, Error> {
             return Err(Error::UnsafeDirectory);
         };
         let last = i + 1 == parts.len();
-        if last && create {
+        if create {
             match rustix::fs::mkdirat(&current, *name, Mode::RWXU) {
                 Ok(()) | Err(rustix::io::Errno::EXIST) => {}
                 Err(e) => return Err(std::io::Error::from(e).into()),

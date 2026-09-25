@@ -40,7 +40,7 @@ Neither increment closes these product gaps or any wave.
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
-| W2.4 | Partial; opt-in local manager | `rds-agent --control-dir` shares its endpoint with keyless `rds session` connect/list/use/disconnect/ping/info/SSH-forward commands. Same-UID Unix IPC, bounded tasks and sessions, pinned forwarding, cancellation and aggregate admin metrics are implemented. Direct-command migration, exclusive runtime identity ownership, viewer/sync APIs, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [receipt](reports/rds-local-sessions-20260925.md). |
+| W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH-forward commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned forwarding, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer/sync manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
@@ -1230,3 +1230,30 @@ See [contract and remaining sequence](local-sessions.md) and
 [receipt](reports/rds-local-sessions-20260925.md). No wave is closed. Default
 identity ownership/migration, native SSH/PTY, desktop rendering/input switching,
 GDS lifecycle and real device/network/operational qualification remain open.
+
+## 2026-09-25 — default managed connectivity and runtime identity ownership
+
+Ordinary CLI ticket/ping/info/SSH-forward commands now use the running local
+agent. Agent control defaults to a dedicated directory beside its key; explicit
+paths and server-only `--no-control` remain available. Managed commands never
+fall back to an independently bound endpoint. Existing sessions stay pinned and
+are reused by concurrent CLI processes. Local IPC is version 2; remote protocols
+and the iroh default are unchanged.
+
+Agent, explicit direct CLI and owned relay acquire the validated seed inode's
+exclusive runtime owner before network bind. Pure identity readers still work.
+The guard survives awaited shutdown, operation failures and owned-relay canceled
+drain cleanup; SIGKILL recovery uses OS lock release and existing stale-socket
+recovery. This is a cooperative inode guarantee, not fencing of copied keys or
+old binaries. Direct mode remains necessary for unfinished viewer/sync APIs.
+
+Shared grant-file loading also now uses nonblocking no-follow regular-file
+validation, closing a reproduced FIFO startup hang. The CLI adds a direct
+dependency on the existing locked rustix library; no package/version was added.
+
+See the [receipt and final source/check evidence](reports/rds-identity-migration-20260925.md).
+W2.4 remains partial. Next: viewer/sync manager APIs, maintained Rust SSH/PTY,
+interactive desktop/input switching, installed-device migration and platform/
+network qualification. GDS lifecycle, recursive sync and O2–O6 observability
+work retain their separate gates. No deployed service or release gate is closed
+by these local code and regression checks.

@@ -17,6 +17,10 @@ pub enum KeyStoreError {
     InvalidLength,
     #[error("identity creation is busy; bounded lock wait expired")]
     Busy,
+    #[error(
+        "identity is already in use; use the running agent's local manager or a separate identity"
+    )]
+    InUse,
     #[error("identity transaction marker or pending state is invalid; left unchanged")]
     InvalidState,
     #[error("persistent identity storage is not implemented for this platform")]
@@ -42,6 +46,42 @@ pub fn load_or_create_key(path: &Path) -> Result<SecretKey, KeyStoreError> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn load_or_create_key(_path: &Path) -> Result<SecretKey, KeyStoreError> {
+    Err(KeyStoreError::Unsupported)
+}
+
+/// Exclusive runtime ownership of a validated seed inode. Keep this guard alive
+/// until every endpoint using `secret_key()` has closed. Readers such as `rds id`
+/// remain allowed. This cooperative lock does not cover copied seeds or manual
+/// replacement/unlink of an active key; see `docs/identity-storage.md`.
+///
+/// Not Clone or Debug; the descriptor and seed never leave this owner together.
+pub struct KeyOwner {
+    key: SecretKey,
+    file: std::fs::File,
+}
+
+impl KeyOwner {
+    pub fn secret_key(&self) -> &SecretKey {
+        &self.key
+    }
+}
+
+impl Drop for KeyOwner {
+    fn drop(&mut self) {
+        // Release this ownership even if an incidental fork inherited the fd.
+        let _ = self.file.unlock();
+    }
+}
+
+/// Durably load/create the identity and acquire its nonblocking exclusive
+/// runtime lock before binding a transport. Run on a blocking worker.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn acquire_key(path: &Path) -> Result<KeyOwner, KeyStoreError> {
+    unix::acquire(path)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn acquire_key(_path: &Path) -> Result<KeyOwner, KeyStoreError> {
     Err(KeyStoreError::Unsupported)
 }
 

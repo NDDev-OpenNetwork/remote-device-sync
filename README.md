@@ -38,30 +38,39 @@ Docs: [architecture](docs/architecture.md) · [deep research](docs/research.md)
 
 ## Usage
 
-For multiple persistent device connections, enable the agent's opt-in
-[local session manager](docs/local-sessions.md). `rds session` lists/selects
-devices and opens SSH/TCP forwards through the running agent's shared endpoint.
-The direct compatibility commands below still create independent endpoints.
+The agent's [local session manager](docs/local-sessions.md) is enabled by default.
+Connectivity commands and `rds session` reuse its identity and endpoint. Start
+an agent on the operator device as well; an empty inbound allowlist is suitable
+for an outgoing-only operator. Missing manager access fails without binding
+another endpoint. Custom control paths use `--control-dir` on both binaries.
 
 ```sh
-# On the controlled device: run the agent (key persisted under ~/.config/rds)
+# On the controlled device (key under ~/.config/remote-device-sync/endpoint.key):
 rds-agent --allow <peer-endpoint-id> --ssh 127.0.0.1:22
 
-# From the operator device, using the agent's printed ticket:
+# On the operator device, start its own local agent in another terminal/service:
+rds-agent
+# Then use the controlled device's ticket:
 rds id                         # your bare endpoint id (hex) for --allow lists
-rds ticket                     # your own endpoint ticket
-rds ping <ticket>              # RTT probes + per-path stats
+rds ticket                     # running local agent's current endpoint ticket
+rds ping <ticket>              # RTT probes through a retained managed session
 rds ssh <ticket> -L 127.0.0.1:2222
 ssh -p 2222 user@127.0.0.1     # reaches the remote sshd over QUIC
 rds forward <ticket> -L 127.0.0.1:8080 --remote 127.0.0.1:3000
-rds send <ticket> <file>       # resumable content-addressed push (agent --sync-dir)
-rds recv <ticket> <name>       # pull a file back out of the sync dir
-rds desktop <ticket>           # headless decode/stats; --features desktop on both ends
+rds session list
+rds session use <session-id>   # switch defaults; existing streams stay pinned
+rds session ssh               # forward to the selected device
+
+# Sync/desktop still need explicit direct mode and a separately authorized key:
+rds --direct --key-file /private/path/client.key send <ticket> <file>
+rds --direct --key-file /private/path/client.key recv <ticket> <name>
+rds --direct --key-file /private/path/client.key desktop <ticket>
+# desktop is currently headless decode/stats; build both ends with --features desktop
 
 # Self-hosted relay instead of the public n0 relays:
 rds-relay --addr 0.0.0.0:3340
 rds-agent --relay http://relay.host:3340 ...
-rds --relay http://relay.host:3340 ...
+# Configure relay settings on the operator agent too.
 
 # rds-server composes relay + signed discovery directory on one host
 # (see docs/deployment.md for the systemd units and firewall rules):
@@ -70,7 +79,8 @@ rds-server --relay-addr 0.0.0.0:3340 --http-addr 0.0.0.0:3341 \
     --directory-allow <base32-device-key>
 
 # Name lookup requires a registry key provisioned through GDS/configuration:
-rds --server https://directory.example.com:3341 --registry-key <base32-verifying-key> ping device-a
+rds-agent --directory https://directory.example.com:3341 --registry-key <base32-verifying-key>
+rds ping device-a
 ```
 
 Both relay binaries also support `--relay-backend noq` when built with

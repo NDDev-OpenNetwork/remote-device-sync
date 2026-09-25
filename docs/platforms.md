@@ -54,7 +54,7 @@ negotiate only after both endpoints probe them.
 
 ## cfg conventions
 
-The opt-in local session manager uses filesystem Unix sockets and Tokio
+The default local session manager uses filesystem Unix sockets and Tokio
 `peer_cred()` on both supported targets, without custom unsafe code. Both ends
 check effective UID. Directory/socket ownership and mode checks use safe rustix
 and standard-library APIs. Paths reject symlink components; macOS callers must

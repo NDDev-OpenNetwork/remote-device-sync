@@ -64,7 +64,7 @@ pub use iroh::endpoint::{
 pub use announce::{Announce, AnnounceConfig, announce};
 pub use backends::iroh::{Ticket, parse_target, relay_url_of};
 pub use config::{ConfigError, EndpointOverrides, EndpointSettings, RelayLimits, RelaySettings};
-pub use identity::{KeyStoreError, default_key_path, load_or_create_key};
+pub use identity::{KeyOwner, KeyStoreError, acquire_key, default_key_path, load_or_create_key};
 pub use resolve::resolve_target;
 
 /// Which transport substrate an endpoint binds.

@@ -35,6 +35,12 @@ or media request handling.
 
 ## Local TCP listeners
 
+Ordinary CLI connectivity now uses the [local manager](local-sessions.md).
+The low-level forwarding APIs below remain available to explicit `--direct`
+commands and embedding callers. Direct CLI endpoints also acquire the persisted
+key's lifetime owner, and await endpoint shutdown on failed as well as successful
+operations. Managed CLI processes do not own or close the shared agent endpoint.
+
 `forward_listener` keeps its existing signature and uses a 64-worker default.
 `forward_bound_listener` accepts a pre-bound Tokio listener, a validated
 `TcpTarget`, and a positive 16-bit worker budget. Each accepted local TCP socket

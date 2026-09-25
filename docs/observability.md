@@ -9,7 +9,7 @@ and two 100-probe development ping runs with JSON telemetry enabled.
 
 ## Stack and ownership
 
-The opt-in [local session manager](local-sessions.md) adds authenticated aggregate
+The default [local session manager](local-sessions.md) adds authenticated aggregate
 `rds_agent_local_manager_*` gauges for available snapshot, connected/pending
 sessions and capacity. Its weak nonblocking observer contains no peer or session
 labels; outgoing samplers use the existing agent network metrics registry.

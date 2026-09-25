@@ -1,16 +1,50 @@
 # Persistent endpoint identity
 
-Scope: W2.4 stable local identity and the W3.2 prerequisite for a persistent
-owned-relay identity. This does not implement the local IPC manager, enrollment,
-key rotation, revocation or the owned relay command-line mode.
+Scope: W2.4 stable local identity/runtime ownership and the W3.2 persistent
+owned-relay identity. See [local sessions](local-sessions.md) for manager use
+and [relay runtime](relay-runtime.md) for relay composition. Enrollment and key
+rotation remain separate work.
 
 `rds-net::load_or_create_key` is shared by both transport backends. The former
 `backends::iroh` path remains a re-export. The raw **32-byte Ed25519 seed format**
 and default `XDG_CONFIG_HOME`/`HOME` path are unchanged. The return error is now
 the public typed `KeyStoreError`, rather than `anyhow::Error`; callers using
 `?` into anyhow still work, but callers naming the old result type must adapt.
-The CLI and agent run this synchronous transaction with `spawn_blocking` after
-endpoint configuration preflight.
+The pure local `rds id` command uses this reader. Network-owning binaries use
+`acquire_key` on a blocking worker after endpoint configuration preflight.
+
+## Runtime ownership
+
+`acquire_key` keeps the validated seed descriptor from the same creation/read
+transaction and takes a **nonblocking exclusive lock on that file inode**.
+Contention returns typed `KeyStoreError::InUse`, before network bind. The
+`KeyOwner` guard retains the descriptor and key until shutdown. It is neither
+Clone nor Debug. Read-only `0400` seeds remain supported and unchanged. Pure
+readers do not take the runtime lock, so `rds id` works while the agent runs.
+Different keys in the same parent can have independent runtime owners: the
+short creation lock still belongs to the parent directory, while the lifetime
+lock belongs to each seed. No PID file, stale lock deletion or helper process
+is needed. OS process termination releases the lock, including SIGKILL.
+
+The agent retains its owner through endpoint/control/admin shutdown. Explicit
+direct CLI commands do likewise and now await endpoint close on operation
+errors as well as success. The owned relay acquires ownership during initialize
+and transfers it to state retained by its runner and connection tasks; canceling
+a consuming shutdown cannot release the key ahead of asynchronous cleanup.
+Library callers using `KeyOwner::secret_key()` must retain the owner until all
+derived endpoints close. Low-level in-memory-key bind APIs remain available for
+fixtures and embedding; they do not implicitly open or own a key file.
+
+This is a cooperative **local inode** guarantee, not distributed identity
+fencing. All runtime binaries must be upgraded; old binaries do not participate.
+Copying a seed to another file/host, manually replacing/unlinking an active key,
+or using a lock-unaware library consumer is outside the guarantee. Parent aliases
+that resolve to the same validated inode still contend; hardlinked key files are
+refused by storage validation. Do not rotate identity by editing a running key.
+Network filesystems, ACLs and native macOS need separate qualification.
+
+The primitive follows [Rust File::try_lock](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock)
+and [Apple flock](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/man/man2/flock.2).
 
 ## Trust and file acceptance
 

@@ -34,7 +34,7 @@ impl Fixture {
         let mut cmd = Command::new(BINARY);
         match ROLE {
             "agent" => {
-                cmd.args(["--bind-address", "127.0.0.1:0", "--key-file"])
+                cmd.args(["--no-control", "--bind-address", "127.0.0.1:0", "--key-file"])
                     .arg(self.0.join("identity"));
                 match unavailable_relay {
                     Some(addr) => {

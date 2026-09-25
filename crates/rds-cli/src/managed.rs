@@ -8,9 +8,6 @@ use rds_core::local::{Command, Reply, SessionId};
 
 #[derive(Args)]
 pub struct Options {
-    /// Private control directory configured on the local rds-agent.
-    #[arg(long)]
-    control_dir: PathBuf,
     #[command(subcommand)]
     command: Action,
 }
@@ -68,8 +65,8 @@ enum Action {
     },
 }
 
-pub async fn run(options: Options) -> anyhow::Result<()> {
-    let client = Client::new(options.control_dir);
+pub async fn run(options: Options, directory: PathBuf) -> anyhow::Result<()> {
+    let client = Client::new(directory);
     let command = match options.command {
         Action::List { json } => {
             let snapshot = client.snapshot().await?;
@@ -93,21 +90,7 @@ pub async fn run(options: Options) -> anyhow::Result<()> {
             return Ok(());
         }
         Action::Connect { target, grant_file } => {
-            let grant = match grant_file {
-                Some(path) => Some(Box::new(
-                    tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-                        use std::io::Read;
-                        let mut bytes = Vec::new();
-                        std::fs::File::open(path)?
-                            .take(65537)
-                            .read_to_end(&mut bytes)?;
-                        anyhow::ensure!(bytes.len() <= 65536, "grant file exceeds 64 KiB");
-                        Ok(serde_json::from_slice::<rds_core::grant::Grant>(&bytes)?)
-                    })
-                    .await??,
-                )),
-                None => None,
-            };
+            let grant = read_grant(grant_file).await?;
             Command::Connect { target, grant }
         }
         Action::Use { session } => Command::Select { session },
@@ -131,15 +114,7 @@ pub async fn run(options: Options) -> anyhow::Result<()> {
                 "managed forwarding requires a loopback listen address"
             );
             let session = client.selected(session).await?;
-            let listener = tokio::net::TcpListener::bind(bind).await?;
-            eprintln!(
-                "session {session}: listening on {} -> {remote}",
-                listener.local_addr()?
-            );
-            return tokio::select! {
-                result = client.forward(session, listener, remote, max_connections) => result.map_err(Into::into),
-                result = tokio::signal::ctrl_c() => result.map_err(Into::into),
-            };
+            return forward(&client, session, bind, remote, max_connections).await;
         }
     };
     match client.request(command).await? {
@@ -148,4 +123,154 @@ pub async fn run(options: Options) -> anyhow::Result<()> {
         reply => println!("{}", serde_json::to_string_pretty(&reply)?),
     }
     Ok(())
+}
+
+pub async fn read_grant(
+    path: Option<PathBuf>,
+) -> anyhow::Result<Option<Box<rds_core::grant::Grant>>> {
+    match path {
+        Some(path) => Ok(Some(Box::new(
+            tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                use rustix::fs::{Mode, OFlags};
+                use std::io::Read;
+                let file = std::fs::File::from(rustix::fs::open(
+                    &path,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?);
+                anyhow::ensure!(file.metadata()?.is_file(), "grant must be a regular file");
+                let mut bytes = Vec::new();
+                file.take(65537).read_to_end(&mut bytes)?;
+                anyhow::ensure!(bytes.len() <= 65536, "grant file exceeds 64 KiB");
+                Ok(serde_json::from_slice(&bytes)?)
+            })
+            .await??,
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Ordinary connectivity commands share agent sessions. No key load, endpoint
+/// bind or direct fallback is permitted when the manager cannot be reached.
+pub async fn run_default(
+    command: super::Command,
+    directory: PathBuf,
+    grant: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let client = Client::new(directory);
+    let target = match &command {
+        super::Command::Ticket => {
+            anyhow::ensure!(grant.is_none(), "ticket does not accept a grant");
+            if let Reply::Ticket(ticket) = client
+                .request(Command::Ticket)
+                .await
+                .context("cannot reach local agent; start rds-agent or set --control-dir")?
+            {
+                println!("{ticket}");
+                return Ok(());
+            }
+            anyhow::bail!("unexpected local ticket response");
+        }
+        super::Command::Ping { target, .. } | super::Command::Info { target } => target,
+        super::Command::Ssh { target, bind, .. } | super::Command::Forward { target, bind, .. } => {
+            anyhow::ensure!(
+                bind.ip().is_loopback(),
+                "managed forwarding requires a loopback listen address"
+            );
+            target
+        }
+        super::Command::Desktop { .. }
+        | super::Command::Send { .. }
+        | super::Command::Recv { .. } => {
+            anyhow::bail!(
+                "desktop and file transfer do not yet have manager APIs; use --direct with a separate --key-file"
+            );
+        }
+        _ => anyhow::bail!("unsupported managed command"),
+    };
+    let grant = read_grant(grant).await?;
+    let reply = client
+        .request(Command::Connect {
+            target: target.clone(),
+            grant,
+        })
+        .await
+        .context(
+            "managed connection failed; ensure rds-agent is running and configured for this peer",
+        )?;
+    let Reply::Connected(session) = reply else {
+        anyhow::bail!("unexpected local connection response");
+    };
+    match command {
+        super::Command::Ping { count, .. } => {
+            for nonce in 0..count {
+                let reply = client
+                    .request(Command::Ping {
+                        session: Some(session),
+                        nonce: nonce.into(),
+                    })
+                    .await?;
+                let Reply::Pong {
+                    session: returned,
+                    micros,
+                } = reply
+                else {
+                    anyhow::bail!("unexpected local ping response");
+                };
+                anyhow::ensure!(returned == session, "local session mismatch");
+                println!("pong seq={nonce} rtt={:.1}ms", micros as f64 / 1000.0);
+            }
+        }
+        super::Command::Info { .. } => {
+            let reply = client
+                .request(Command::Info {
+                    session: Some(session),
+                })
+                .await?;
+            let Reply::Info {
+                session: returned,
+                info,
+            } = reply
+            else {
+                anyhow::bail!("unexpected local info response");
+            };
+            anyhow::ensure!(returned == session, "local session mismatch");
+            println!("{info:#?}");
+        }
+        super::Command::Ssh {
+            bind,
+            remote,
+            max_connections,
+            ..
+        }
+        | super::Command::Forward {
+            bind,
+            remote,
+            max_connections,
+            ..
+        } => {
+            forward(&client, session, bind, remote, max_connections).await?;
+        }
+        _ => anyhow::bail!("unsupported managed command"),
+    }
+    Ok(())
+}
+
+async fn forward(
+    client: &Client,
+    session: SessionId,
+    bind: SocketAddr,
+    remote: rds_core::TcpTarget,
+    max_connections: std::num::NonZeroU16,
+) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    eprintln!(
+        "session {session}: listening on {} -> {remote}",
+        listener.local_addr()?
+    );
+    tokio::select! {
+        result = client.forward(session, listener, remote, max_connections) => result.map_err(Into::into),
+        result = tokio::signal::ctrl_c() => result.map_err(Into::into),
+    }
 }

@@ -6,8 +6,7 @@ use clap::Parser;
 use rds_agent::{Agent, AgentLimits, AgentPolicy};
 use rds_net::EndpointId;
 use rds_net::{
-    EndpointOverrides, EndpointSettings, Ticket, bind_endpoint, default_key_path,
-    load_or_create_key,
+    EndpointOverrides, EndpointSettings, Ticket, acquire_key, bind_endpoint, default_key_path,
 };
 
 #[derive(Parser)]
@@ -16,9 +15,12 @@ use rds_net::{
     about = "RDS agent: serve SSH and desktop sessions to allowed peers"
 )]
 struct Cli {
-    /// Enable same-UID local session control in a dedicated private directory.
-    #[arg(long)]
+    /// Local session directory; default is <key-file>.control.
+    #[arg(long, conflicts_with = "no_control")]
     control_dir: Option<std::path::PathBuf>,
+    /// Disable local session control (explicit server-only operation).
+    #[arg(long, conflicts_with = "registry_key")]
+    no_control: bool,
     #[command(flatten)]
     admin: rds_observe::admin::Args,
     /// Path to the endpoint secret key (created if missing).
@@ -67,7 +69,7 @@ struct Cli {
     #[arg(long, requires = "directory")]
     directory_ca: Option<std::path::PathBuf>,
     /// Trusted registry authority for local-manager device-name resolution.
-    #[arg(long, requires_all = ["directory", "control_dir"])]
+    #[arg(long, requires = "directory")]
     registry_key: Option<String>,
     /// Bootstrap registry authority epoch.
     #[arg(long, default_value = "1")]
@@ -122,10 +124,6 @@ async fn main() -> std::process::ExitCode {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let prepared_admin = cli.admin.bind().await?;
-    let prepared_control = match &cli.control_dir {
-        Some(path) => Some(rds_client::local::Prepared::bind(path).await?),
-        None => None,
-    };
     let mut config = cli
         .endpoint_config
         .as_deref()
@@ -145,9 +143,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         .key_file
         .or_else(default_key_path)
         .ok_or_else(|| anyhow::anyhow!("no --key-file and no config dir"))?;
+    let prepared_control = if cli.no_control {
+        None
+    } else {
+        let path = match cli.control_dir {
+            Some(path) => path,
+            None => rds_client::local::control_dir_for_key(&key_path)?,
+        };
+        Some(rds_client::local::Prepared::bind(path).await?)
+    };
     let key_load_path = key_path.clone();
-    let secret_key =
-        tokio::task::spawn_blocking(move || load_or_create_key(&key_load_path)).await??;
+    // Retained through endpoint and service shutdown, including startup errors.
+    let identity = tokio::task::spawn_blocking(move || acquire_key(&key_load_path)).await??;
+    let secret_key = identity.secret_key().clone();
 
     let (ssh_host, ssh_port) = cli.ssh.into_parts();
 
@@ -252,7 +260,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // develops independently; the announcer publishes address changes.
 
     let mut announce = if let (Some(client), Some(issuer)) = (directory.clone(), record_issuer) {
-        Some(rds_net::announce(
+        let announced = rds_net::announce(
             endpoint.clone(),
             rds_net::AnnounceConfig {
                 issuer,
@@ -263,7 +271,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 ],
                 ttl: std::time::Duration::from_secs(cli.record_ttl),
             },
-        )?)
+        );
+        match announced {
+            Ok(task) => Some(task),
+            Err(error) => {
+                endpoint.close().await;
+                return Err(error.into());
+            }
+        }
     } else {
         None
     };

@@ -32,11 +32,12 @@ The shared [identity store](identity-storage.md) preserves the raw seed format
 and serializes creation under a directory lock. It publishes only a complete,
 synchronized seed with no replacement, refuses unsafe existing files and
 recovers its bounded pending state after a process exits.
-The opt-in [local session manager](local-sessions.md) now reuses the running
+The default [local session manager](local-sessions.md) now reuses the running
 agent's endpoint through same-UID Unix IPC. It owns outgoing connections,
-selection, bounded requests and TCP streams. Direct compatibility commands
-still bind independently; migration and exclusive runtime identity ownership
-remain W2.4 work.
+selection, bounded requests and TCP streams. Ordinary connectivity commands use
+it without loading a key. Explicit `--direct` commands, the agent and the owned
+relay acquire cooperative exclusive ownership of the validated seed inode.
+Viewer/sync manager APIs and installed-binary/platform qualification remain W2.4.
 TCP service flags, client requests and agent policy use the same canonical
 `rds-core::TcpTarget`; IPv6 spelling and IPv4-mapped addresses normalize before
 policy comparison and dialing. Parsing has no DNS or socket side effects.
@@ -262,8 +263,9 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   estate state, presence and audit. Sees only encrypted traffic.
 - **`rds-agent`** — daemon on each controlled device. Binds the endpoint
   (Ed25519 identity persisted), connects to its home relay, accepts
-  `rds/0` connections, serves streams to an allowlist of peers. Optional
-  `--control-dir` hosts outgoing sessions on that same endpoint.
+  `rds/0` connections, serves streams to an allowlist of peers. The default local
+  control service hosts outgoing sessions on that same endpoint; `--control-dir`
+  overrides its location, and `--no-control` explicitly disables it.
 - **`rds-client`** — shared request/forwarding library and local session
   manager/client; depends on core/net/discovery/observe, never on the CLI.
 - **`rds`** — operator CLI. `rds id`, `rds ticket`, `rds ping`, `rds ssh`,
@@ -297,7 +299,8 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   by the registry issuer over `rds/name-binding/v2\0` plus the postcard
   payload `{stamp, registry_digest, version, name, key, issued_at, expires_at}`.
   The client requires
-  an independently provisioned trust anchor (`rds --registry-key <base32>`),
+  an independently provisioned trust anchor (`rds-agent --registry-key <base32>`
+  for managed clients, or `rds --direct --registry-key <base32>`),
   verifies the exact requested name and validity, then verifies the endpoint
   record against that key. No unsigned-name fallback or HTTP redirect is
   followed. The response contains no other inventory entries.

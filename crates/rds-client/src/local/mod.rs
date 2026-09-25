@@ -51,6 +51,19 @@ pub enum Error {
     Protocol,
 }
 
+/// Dedicated control directory beside a key, without reading or creating it.
+/// Explicit control paths still take precedence. The resulting path must pass
+/// the same owner/ancestor checks as any other local socket directory.
+pub fn control_dir_for_key(key: &Path) -> Result<PathBuf, Error> {
+    let key = std::path::absolute(key)?;
+    let mut name = key
+        .file_name()
+        .ok_or(Error::UnsafeDirectory)?
+        .to_os_string();
+    name.push(".control");
+    Ok(key.with_file_name(name))
+}
+
 /// Bind and validate before loading the agent's key or contacting the network.
 pub struct Prepared {
     listener: UnixListener,
@@ -278,6 +291,9 @@ async fn execute(
     streams: Arc<Semaphore>,
 ) -> Result<Output, ErrorCode> {
     match command {
+        Command::Ticket => Ok(Output::reply(Reply::Ticket(
+            rds_net::Ticket::of(endpoint).to_string(),
+        ))),
         Command::List => Ok(Output::reply(Reply::Snapshot(
             state::lock(shared)?.snapshot(),
         ))),

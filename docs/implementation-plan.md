@@ -23,10 +23,11 @@ below was verified against vendored sources or upstream documents on
 ## 0. Doctrine
 
 The current product-facing increment is the W2.4
-[local session manager](local-sessions.md). Its remaining sequence puts default
-ownership/migration before native SSH/PTY, viewer/input switching and full
-device qualification. This supplements the complete remediation plan; the opt-in
-manager does not close a wave or replace WS0 acceptance requirements.
+[local session manager](local-sessions.md). Default CLI connectivity and local
+key-inode runtime ownership are implemented. Remaining manager work covers
+viewer/sync APIs and installed-device qualification, alongside native SSH/PTY
+and viewer/input switching. This supplements the complete remediation plan;
+the manager does not close a wave or replace WS0 acceptance requirements.
 
 - **Harness first**: WS0 builds the measurement rig before any
   transport code, so every later change is measured, not argued.

@@ -81,6 +81,7 @@ async fn canceled_session_case() {
     });
     let local = local.unwrap();
     let state = std::sync::Arc::new(State {
+        _identity: None,
         conns: Mutex::new(HashMap::new()),
         recent: Mutex::new(HashMap::new()),
         allow: None,
