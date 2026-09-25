@@ -177,6 +177,7 @@ pub async fn connection_driver(
     metrics: crate::metrics::Registry,
     local_addrs: Vec<SocketAddr>,
     initial_candidates: Vec<SocketAddr>,
+    relay: Option<super::relay::RelayHandle>,
 ) {
     use tokio_stream::StreamExt;
 
@@ -185,6 +186,16 @@ pub async fn connection_driver(
         return;
     };
     tokio::pin!(closed);
+    let mut relay_down = relay.as_ref().is_some_and(|handle| !handle.is_available());
+    let health = relay.clone();
+    let relay_unavailable = async move {
+        match health {
+            Some(mut handle) => handle.unavailable().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(relay_unavailable);
+    let mut relay_withdrawn = false;
 
     let mut paths: HashMap<noq::PathId, noq::WeakPathHandle> = HashMap::new();
     // Paths opened to QNT-learned candidates — an Established event on
@@ -216,6 +227,7 @@ pub async fn connection_driver(
         let wake = pending.next_wake();
         tokio::select! {
             _ = &mut closed => break,
+            _ = &mut relay_unavailable, if !relay_down => { relay_down = true; },
             _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {},
             event = qnt.next(), if qnt_open => match event {
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressAdded(addr))) => {
@@ -267,6 +279,17 @@ pub async fn connection_driver(
         let Some(owner) = conn.upgrade() else {
             break;
         };
+        if relay_down {
+            pending.retain(|address| !super::relay::is_synthetic(address));
+            if !relay_withdrawn {
+                for address in &local_addrs {
+                    if super::relay::is_synthetic(*address) {
+                        let _ = owner.remove_nat_traversal_address(*address);
+                    }
+                }
+                relay_withdrawn = true;
+            }
+        }
         for opened in pending.open_due(&owner, Instant::now()) {
             if opened.learned && !paths.contains_key(&opened.id) && qnt_paths.insert(opened.id) {
                 metrics.qnt_attempt();
@@ -275,7 +298,7 @@ pub async fn connection_driver(
         // Lost/lagged path events cannot accumulate stale QNT history.
         qnt_paths.retain(|id| owner.path(*id).is_some());
         drop(owner);
-        reselect(&conn, &mut paths, &mut selected);
+        reselect(&conn, &mut paths, &mut selected, relay_down);
     }
 }
 
@@ -305,6 +328,7 @@ fn reselect(
     conn: &noq::WeakConnectionHandle,
     paths: &mut HashMap<noq::PathId, noq::WeakPathHandle>,
     selected: &mut Option<noq::PathId>,
+    relay_down: bool,
 ) {
     if !conn.is_alive() {
         return;
@@ -312,6 +336,20 @@ fn reselect(
     // A WeakPathHandle can upgrade even after its path closes: it retains
     // final statistics until dropped. Upgrade alone is not a liveness check.
     paths.retain(|_, weak| weak.upgrade().is_some_and(|path| path.status().is_ok()));
+    // Tunnel loss is authoritative local link state; stale RTT must not keep
+    // a dead relay selected over a validated direct path. Close only known
+    // validated paths here; unobserved engine/QNT paths remain its responsibility.
+    if relay_down {
+        for weak in paths.values() {
+            if let Some(path) = weak.upgrade()
+                && path.remote_address().is_ok_and(super::relay::is_synthetic)
+            {
+                let _ = path.set_status(noq::PathStatus::Backup);
+                let _ = path.close();
+            }
+        }
+        paths.retain(|_, weak| weak.upgrade().is_some_and(|path| path.status().is_ok()));
+    }
     if paths.is_empty() {
         *selected = None;
         return;
@@ -319,9 +357,16 @@ fn reselect(
 
     let rtts: Vec<(noq::PathId, Duration)> = paths
         .iter()
-        .filter_map(|(id, weak)| weak.upgrade().map(|path| (*id, path.stats().rtt)))
+        .filter_map(|(id, weak)| {
+            let path = weak.upgrade()?;
+            if relay_down && path.remote_address().is_ok_and(super::relay::is_synthetic) {
+                return None;
+            }
+            Some((*id, path.stats().rtt))
+        })
         .collect();
     let Some((mut choice, best_rtt)) = rtts.iter().min_by_key(|(_, rtt)| *rtt).copied() else {
+        *selected = None;
         return;
     };
 

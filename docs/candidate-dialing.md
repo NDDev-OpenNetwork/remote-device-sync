@@ -77,3 +77,9 @@ subset can still omit a working later address, including within either family
 when both have many candidates. Progressive probing and route history require
 a separate connection-wide work budget. Current candidates race concurrently; interleaving is a selection rule,
 not an RFC 8305 staggered connection algorithm or an IPv6 preference promise.
+
+An attached tunnel known locally unavailable is omitted from fresh relay
+advertisements and dial attempts. A stale relay-only ticket then fails without
+waiting for a new handshake timeout. Synthetic mux-local IPs are never published
+as direct candidates. This does not solve independent bootstrap, interface scope
+or automatic relay replacement; see [relay health](relay-control.md#tunnel-loss-and-path-eligibility).

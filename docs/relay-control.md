@@ -19,8 +19,8 @@ under the attachment-table lock prevents registration already in flight from
 inserting a slot after the drain snapshot. Up to 16 notice writers run at once;
 each has a one-second budget covering the writer lock and complete frame write.
 Error, timeout or cancellation closes that recipient connection so a partial
-frame cannot be followed by another writer's bytes. Notice tasks belong to the
-broadcast future. Notices are best effort within the existing two-second drain
+frame cannot be followed by another writer's bytes. Notice futures are polled
+inline by their owner, with no spawned writer tasks. Notices are best effort within the existing two-second drain
 budget; this is not a delivery acknowledgement protocol.
 
 A socket records the actual Drain notice but keeps sending and receiving through
@@ -56,10 +56,10 @@ registration replies, writer-lock deadline and early cancellation. Codec tests
 cover all control variants, fragmentation, coalescing, truncation and bad lengths.
 
 This does not establish a warm secondary relay, physical failover, SSH/video/sync
-interruption budgets, TCP/443 fallback, global attachment limits or RSS/FD bounds.
-Client receive-queue and peer-map limits are defined below. Accept-task ownership
-and fully joined server shutdown remain W2.5 work. The notice group limit is per broadcast, not a
-global limit across every concurrent detach. The two registration deadlines are
+interruption budgets, TCP/443 fallback or process RSS/FD bounds.
+Client and server application limits are defined below. The notice group limit
+is per broadcast, not a single shared limit across every concurrent detach.
+The two registration deadlines are
 not a separate long-stall campaign. Native macOS and deployed service acceptance
 remain open. See the [receipt](reports/rds-relay-control-20260925.md).
 
@@ -91,8 +91,8 @@ also failed with its original error-return behavior.
 This does not implement warm relay replacement, relay-only session continuity,
 generic socket failure isolation or all-path failure recovery. A QUIC connection
 that has no working route still depends on transport timeout; dropped unreliable
-datagrams are not replayed by the application. Full server task ownership and
-global budgets remain open. These loopback tests do not establish physical network or service
+datagrams are not replayed by the application. Global budgets across components
+remain open. These loopback tests do not establish physical network or service
 interruption budgets.
 
 ## Client peer ownership and receive bounds
@@ -147,5 +147,73 @@ counts and queue-full, rejected-peer and oversized-receive counters. Fields are
 individual concurrent snapshots. The diagnostic handle retains bounded metadata
 and weak I/O references; destroying the socket releases queued payloads even
 while a handle survives. These limits do not bound the QUIC engine, allocator
-overhead, server tasks or global process RSS. Warm relay replacement and the
+overhead or global process RSS. Warm relay replacement and the
 full service qualification matrix remain open.
+
+## Server task ownership
+
+`server::serve_with_limits` accepts positive `ServerLimits::max_connections`
+(1–65535, default 256 via `serve`). A permit is reserved before spawning a
+handshake task and remains held through registration, forwarding and detach
+notification cleanup. Excess incoming attempts are refused without a queued
+application worker. Handshakes have a 15-second budget; registration retains
+its separate 15-second budget. This is library configuration for the owned
+server, not a new CLI option or a change to production allowlist defaults.
+
+The accept runner owns a JoinSet, reaps completed tasks and seals registration
+on shutdown. `close()` closes tunnels and the endpoint, allows connection
+workers five seconds to finish, then aborts and joins remaining workers.
+Concurrent and repeated callers join the same runner. Its stored JoinHandle
+survives cancellation of a caller waiting for shutdown. Drop seals registration,
+closes current tunnels and signals the runner to finish cleanup; Drop cannot
+synchronously join and requires the runtime to continue polling.
+
+Drain grace and notices also belong to the runner. Canceling a `drain()` caller
+does not cancel the requested drain, repeated calls wait for completion, and an
+explicit close takes precedence. This fixes observed live tunnels after Relay
+Drop and an observed server left draining indefinitely after caller cancellation.
+The two-second grace still carries ordinary traffic; notices do not promise a
+warm replacement path.
+
+An attachment guard removes only its current slot and recent-flow references
+when a session future is canceled. Old replacement owners cannot remove new
+registrations, append flow history after removal or spend a successor's rate
+bucket. Forwarding yields every 64 frames. Notices use at most 16 inline futures
+per broadcast; active session broadcasts are bounded by the admission budget,
+plus the runner's single drain broadcast. At most 64 recent sources are retained
+per attached destination. These are application object/work bounds, not a
+measurement of total process memory or lower-layer handshake allocation.
+
+`Relay::lifecycle_stats()` reports configured/occupied connection slots, refused
+attempts and flow-history occupancy. Fields are individual concurrent snapshots.
+Real tests cover silent registration admission/refusal/reuse, cancellation after
+actual forwarding history exists, concurrent close/drain and canceled callers.
+Full network impairment, long-stall, resource soak and native-platform/service
+qualification remain separate work.
+
+## Tunnel loss and path eligibility
+
+Dropping a tunnel or ending either pump publishes unavailable state through a
+shared watch channel. Connection policies observe that channel without owning
+I/O and without accumulating one-shot subscribers on a long-lived tunnel.
+Drain notices alone keep the tunnel available during grace.
+
+Upon known local tunnel loss, a managed endpoint withdraws its synthetic QNT
+advertisement, removes pending synthetic candidates and stops advertising or
+dialing that relay. Known validated relay paths become ineligible regardless of
+their old RTT; closable paths are abandoned and an eligible direct path becomes
+Available. A failed last path cannot be closed by Noq's path API: it remains
+Backup and outside policy selection while transport timeout/recovery applies.
+Late Established events on failed relay paths receive the same treatment.
+Unobserved engine paths, remote-only relay failures and arbitrary direct-link
+failures still need broader reconciliation and recovery work. Injected raw
+sockets without an attached RelayHandle do not provide this health signal.
+
+The prior failure fixture intermittently retained a dead relay as Available
+while its direct path was Backup: the first request reached the peer, but its
+reply went over the failed relay. The managed regression now proves actual
+STREAM transmission over the relay before failure, checks retirement/direct
+selection within a bounded interval, then exchanges 25 direct datagram
+roundtrips. It also checks removal of the failed relay from fresh addresses and
+prompt refusal of a stale relay-only ticket. Transition-time datagrams remain
+unreliable; this is not application replay or an interruption-free handover claim.

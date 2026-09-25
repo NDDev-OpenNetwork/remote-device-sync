@@ -292,9 +292,13 @@ impl Endpoint {
     pub fn addr(&self) -> EndpointAddr {
         let mut addrs = std::collections::BTreeSet::new();
         for local in &self.local_addrs {
-            addrs.extend(advertised_addrs(*local));
+            if !relay::is_synthetic(*local) {
+                addrs.extend(advertised_addrs(*local));
+            }
         }
-        if let Some(handle) = &self.relay {
+        if let Some(handle) = &self.relay
+            && handle.is_available()
+        {
             addrs.insert(TransportAddr::Relay(handle.url.clone()));
         }
         EndpointAddr { id: self.id, addrs }
@@ -361,7 +365,11 @@ impl Endpoint {
     pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
         let accept = self.inner.accept();
         let mut our_addrs = self.advertised_socket_addrs();
-        if self.relay.is_some() {
+        if self
+            .relay
+            .as_ref()
+            .is_some_and(relay::RelayHandle::is_available)
+        {
             our_addrs.push(relay::synthetic_for(&self.id));
         }
         let relay = self.relay.clone();
@@ -378,6 +386,9 @@ impl Endpoint {
     /// we are attached to.
     fn relay_remote(&self, target: &EndpointAddr) -> Option<SocketAddr> {
         let handle = self.relay.as_ref()?;
+        if !handle.is_available() {
+            return None;
+        }
         target.addrs.iter().find_map(|a| match a {
             TransportAddr::Relay(url) => relay::parse_relay_url(url)
                 .filter(|(rid, _)| *rid == handle.relay_id)
@@ -414,7 +425,12 @@ impl Endpoint {
         peer_lease: Option<relay::PeerLease>,
     ) -> anyhow::Result<()> {
         let mut ours = self.advertised_socket_addrs();
-        if peer_lease.is_some() {
+        if peer_lease.is_some()
+            && self
+                .relay
+                .as_ref()
+                .is_some_and(relay::RelayHandle::is_available)
+        {
             ours.push(relay::synthetic_for(&self.id));
         }
         self.drivers.spawn(
@@ -423,6 +439,7 @@ impl Endpoint {
             ours.clone(),
             candidates,
             peer_lease,
+            self.relay.clone(),
         )?;
         policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn, &self.metrics);
@@ -528,7 +545,12 @@ impl Future for Incoming {
                                 }
                             };
                             let mut ours = self.our_addrs.clone();
-                            if lease.is_none() {
+                            if lease.is_none()
+                                || self
+                                    .relay
+                                    .as_ref()
+                                    .is_some_and(|handle| !handle.is_available())
+                            {
                                 ours.retain(|address| !relay::is_synthetic(*address));
                             }
                             self.drivers
@@ -538,6 +560,7 @@ impl Future for Incoming {
                                     ours.clone(),
                                     Vec::new(),
                                     lease,
+                                    self.relay.clone(),
                                 )
                                 .map(|()| {
                                     policy::advertise_addrs(&inner, &ours);

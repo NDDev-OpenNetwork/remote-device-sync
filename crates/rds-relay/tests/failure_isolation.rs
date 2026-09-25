@@ -8,17 +8,18 @@ use rds_net::backends::noq::{
 use rds_net::{Backend, EndpointConfig, SecretKey};
 use std::{sync::Arc, time::Duration};
 
-// Hide relay advertisements to make the test, rather than QNT, create the
-// additional relay path with an explicit validation watcher. This is the socket injection seam,
-// with real UDP, real relay registration and the same endpoint key throughout.
+// The managed variant wires tunnel health and QNT exactly as an attached
+// endpoint. The raw variant hides registration for the missing-mapping case.
 async fn fixture_endpoint(
     seed: u8,
     relay: rds_net::EndpointAddr,
+    managed: bool,
 ) -> (owned::Endpoint, RelayHandle) {
     let key = SecretKey::from_bytes(&[seed; 32]);
-    let (socket, handle) = RelaySocket::connect(relay, key.clone(), "127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let (socket, handle) =
+        RelaySocket::connect(relay.clone(), key.clone(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
     let runtime = Arc::new(noq::TokioRuntime);
     let direct = runtime
         .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
@@ -30,12 +31,13 @@ async fn fixture_endpoint(
             backend: Backend::Noq,
             secret_key: Some(key),
             discovery: false,
+            relay_endpoint: managed.then_some(relay),
             ..Default::default()
         },
         Box::new(mux),
         locals,
         runtime,
-        None,
+        managed.then(|| handle.clone()),
     )
     .await
     .unwrap();
@@ -61,12 +63,22 @@ async fn failure_case() {
     )
     .await
     .unwrap();
-    let (a, ah) = fixture_endpoint(115, relay.endpoint_addr()).await;
-    let (b, bh) = fixture_endpoint(116, relay.endpoint_addr()).await;
+    let (a, ah) = fixture_endpoint(115, relay.endpoint_addr(), true).await;
+    let (b, bh) = fixture_endpoint(116, relay.endpoint_addr(), true).await;
+    for endpoint in [&a, &b] {
+        assert!(endpoint.addr().addrs.iter().all(|address| match address {
+            rds_net::TransportAddr::Ip(ip) => !owned::relay::is_synthetic(*ip),
+            _ => true,
+        }));
+    }
     let _ah_route = ah.register_peer(b.id()).unwrap();
     let _bh_route = bh.register_peer(a.id()).unwrap();
     let (ca, cb) = tokio::time::timeout(Duration::from_secs(3), async {
-        let (a, b) = tokio::join!(a.connect(b.addr(), rds_core::ALPN), async {
+        let mut direct = b.addr();
+        direct
+            .addrs
+            .retain(|address| matches!(address, rds_net::TransportAddr::Ip(_)));
+        let (a, b) = tokio::join!(a.connect(direct, rds_core::ALPN), async {
             b.accept().await.unwrap().await
         });
         (a.unwrap(), b.unwrap())
@@ -96,8 +108,8 @@ async fn failure_case() {
     .await
     .unwrap();
     assert_ne!(id, noq::PathId::ZERO);
-    // This explicit open installed the validation watcher; no QNT advertisement
-    // in this fixture could have created it without that watcher.
+    // QNT may already have opened this path. Awaiting an existing OpenPath is
+    // not validation proof; actual STREAM frames on it below are required.
     let path = tokio::time::timeout(
         Duration::from_secs(3),
         ca.inner().open_path_ensure(remote, PathStatus::Backup),
@@ -106,8 +118,33 @@ async fn failure_case() {
     .unwrap()
     .unwrap();
     assert_eq!(path.remote_address().unwrap(), remote);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (mut send, _recv) = ca.open_bi().await.unwrap();
+        let direct = ca.inner().path(noq::PathId::ZERO).unwrap();
+        direct.set_status(PathStatus::Backup).unwrap();
+        path.set_status(PathStatus::Available).unwrap();
+        send.write_all(b"v").await.unwrap();
+        let (_return_send, mut receive) = cb.accept_bi().await.unwrap();
+        let mut byte = [0; 1];
+        receive.read_exact(&mut byte).await.unwrap();
+        while path.stats().frame_tx.stream == 0 {
+            direct.set_status(PathStatus::Backup).unwrap();
+            path.set_status(PathStatus::Available).unwrap();
+            send.write_all(b"v").await.unwrap();
+            receive.read_exact(&mut byte).await.unwrap();
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(&byte, b"v");
+    })
+    .await
+    .expect("no application stream frame crossed the relay path");
     assert!(relay.stats().0 > 0);
     assert!(ah.is_available() && bh.is_available());
+    let mut relay_only = b.addr();
+    relay_only
+        .addrs
+        .retain(|address| matches!(address, rds_net::TransportAddr::Relay(_)));
+    assert!(!relay_only.addrs.is_empty());
     tokio::time::timeout(Duration::from_secs(3), relay.close())
         .await
         .expect("relay close stalled");
@@ -118,23 +155,75 @@ async fn failure_case() {
     })
     .await
     .expect("relay closure was not observed");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let direct_ready = [&ca, &cb].iter().all(|conn| {
+                conn.inner().path(noq::PathId::ZERO).unwrap().status().ok()
+                    == Some(PathStatus::Available)
+            });
+            if direct_ready && path.status().is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("failed tunnel remained eligible over a validated direct path");
+    for endpoint in [&a, &b] {
+        assert!(
+            !endpoint
+                .addr()
+                .addrs
+                .iter()
+                .any(|address| matches!(address, rds_net::TransportAddr::Relay(_)))
+        );
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            a.connect(relay_only, rds_core::ALPN)
+        )
+        .await
+        .expect("known failed relay entered a new handshake wait")
+        .is_err()
+    );
+    let mut progress = (0u8, 0u8, 0u8);
     let traffic = tokio::time::timeout(Duration::from_secs(3), async {
         for seq in 0u8..25 {
             // A dead path may be abandoned normally; the direct connection must survive.
             let _ = path.ping();
             ca.send_datagram(vec![seq].into())?;
+            progress.0 += 1;
             let body = cb.read_datagram().await?;
+            progress.1 += 1;
             anyhow::ensure!(body.as_ref() == [seq].as_slice(), "direct datagram changed");
             cb.send_datagram(body)?;
             anyhow::ensure!(
                 ca.read_datagram().await?.as_ref() == [seq].as_slice(),
                 "direct reply changed"
             );
+            progress.2 += 1;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         Ok::<_, anyhow::Error>(())
     })
     .await;
+    if !matches!(&traffic, Ok(Ok(()))) {
+        eprintln!("traffic progress sent/received/replied: {progress:?}");
+        for (label, conn) in [("a", &ca), ("b", &cb)] {
+            eprintln!("{label} closed: {:?}", conn.inner().close_reason());
+            for raw in 0u32..8 {
+                if let Some(path) = conn.inner().path(noq::PathId::from(raw)) {
+                    eprintln!(
+                        "{label} path {raw}: remote={:?} status={:?} stats={:?}",
+                        path.remote_address(),
+                        path.status(),
+                        path.stats()
+                    );
+                }
+            }
+        }
+    }
     let cleanup = tokio::time::timeout(Duration::from_secs(3), async {
         tokio::join!(a.close(), b.close());
     })
@@ -165,8 +254,8 @@ async fn missing_mapping_case() {
     )
     .await
     .unwrap();
-    let (a, ah) = fixture_endpoint(117, relay.endpoint_addr()).await;
-    let (b, bh) = fixture_endpoint(118, relay.endpoint_addr()).await;
+    let (a, ah) = fixture_endpoint(117, relay.endpoint_addr(), false).await;
+    let (b, bh) = fixture_endpoint(118, relay.endpoint_addr(), false).await;
     // Only the return route is known. No relay advertisement or received
     // relay frame can teach A about B before the explicit registration below.
     let _bh_route = bh.register_peer(a.id()).unwrap();

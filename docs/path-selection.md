@@ -99,3 +99,21 @@ peer notification, or proof that every underlying QUIC packet/history entry has
 drained. In-flight handshakes and service/relay task groups retain their separate
 ownership and timeout contracts. Connection-state mutex work and OS/runtime
 scheduling are not given a hard real-time bound by this test.
+
+## Known local relay loss
+
+An attached managed relay supplies a shared availability watch to the existing
+policy task. Neither that watch nor its wait retains I/O. Pump termination or
+socket close/drop wakes the policy; Drain alone preserves availability through
+grace. A failed tunnel's old low RTT cannot keep a synthetic path selected over
+a validated direct path. Known validated synthetic paths become Backup and are
+closed when the Noq path API permits; all remain outside selection while the
+tunnel is down. A failed last-open path is retained for later closure rather
+than losing its weak reference. Pending synthetic candidates are filtered and
+the local synthetic QNT advertisement is withdrawn once.
+
+Late Established events receive the same health check. This does not infer
+validation, enumerate lost/unobserved engine paths or detect every remote-side
+failure. Raw injected sockets without RelayHandle have no such signal. Shared
+watch state avoids accumulating one-shot subscribers on a long-lived outer
+tunnel across many short inner sessions. See [relay lifecycle and evidence](relay-control.md#tunnel-loss-and-path-eligibility).

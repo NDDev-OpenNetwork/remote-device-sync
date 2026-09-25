@@ -52,6 +52,10 @@ pub(super) fn canonical(address: SocketAddr) -> SocketAddr {
 }
 
 impl Pending {
+    pub fn retain(&mut self, keep: impl Fn(SocketAddr) -> bool) {
+        self.entries.retain(|address, _| keep(*address));
+    }
+
     pub fn offer(&mut self, address: SocketAddr, origin: Origin, now: Instant) {
         let address = canonical(address);
         if let Some(entry) = self.entries.get_mut(&address) {

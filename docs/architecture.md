@@ -79,7 +79,11 @@ connection policy tasks own metadata-only peer leases; source learning cannot
 overwrite a live synthetic alias and capacity pressure evicts only unpinned
 entries. Queue overflow loses whole datagrams with counters. Diagnostic handles
 do not retain queued payloads or I/O. See [relay ownership](relay-control.md#client-peer-ownership-and-receive-bounds).
-Server task ownership and global resource qualification remain open.
+The owned server bounds admitted handshakes/sessions, owns their task group and
+joins shutdown; canceled drain callers cannot cancel server cleanup. Tunnel
+health wakes attached connection policy so stale relay RTT cannot keep a failed
+link selected over a validated direct path. Global resource and physical-network
+qualification remain open.
 
 ## Research summary
 

@@ -16,7 +16,10 @@
 //! work; a notice alone cannot keep a relay-only session alive after shutdown.
 
 use std::collections::{HashMap, HashSet};
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
+use std::num::NonZeroU16;
+use std::pin::Pin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -26,6 +29,7 @@ use iroh::EndpointId;
 use rds_net::backends::noq as rds_noq;
 use rds_net::relay_control::{read_control, write_control};
 use rds_net::{EndpointConfig, SendStream};
+use tokio::sync::{Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::debug;
 
@@ -44,15 +48,51 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// parks a task otherwise — bounded, like the agent's stream hello.
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
-const MAX_NOTICE_TASKS: usize = 16;
+const MAX_NOTICE_WRITES: usize = 16;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A running owned relay. Dropping it leaves tasks detached; call
-/// [`Relay::close`] for a clean stop or [`Relay::drain`] for a graceful
-/// handover.
+/// Per-server application admission budget, including handshakes, registration
+/// and final notification cleanup. Underlying QUIC buffers are separate.
+#[derive(Debug, Clone, Copy)]
+pub struct ServerLimits {
+    pub max_connections: NonZeroU16,
+}
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: NonZeroU16::new(256).expect("positive limit"),
+        }
+    }
+}
+
+/// Individual concurrent snapshots of application admission and history.
+#[derive(Debug, Clone, Copy)]
+pub struct LifecycleStats {
+    pub connection_limit: usize,
+    pub active_connections: usize,
+    pub rejected_connections: u64,
+    pub history_entries: usize,
+    pub history_edges: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shutdown {
+    Running,
+    Drain,
+    Stop,
+}
+
+/// A running owned relay. Drop requests shutdown and closes attached tunnels;
+/// [`Relay::close`] also joins the server runner and its child tasks. Use
+/// [`Relay::drain`] to preserve a bounded grace period before shutdown.
 pub struct Relay {
     endpoint: rds_noq::Endpoint,
     state: std::sync::Arc<State>,
-    accept_task: JoinHandle<()>,
+    shutdown: watch::Sender<Shutdown>,
+    // Keep the handle stored while awaiting: canceling close must not lose
+    // ownership or prevent another caller from joining the same runner.
+    accept_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 /// Live counters, cheap to snapshot for health/metrics.
@@ -111,6 +151,20 @@ struct State {
     allow: Option<HashSet<EndpointId>>,
     draining: AtomicBool,
     stats: Stats,
+    limits: ServerLimits,
+    admission: std::sync::Arc<Semaphore>,
+    rejected: AtomicU64,
+}
+
+impl State {
+    fn stop(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+        let mut conns = self.conns.lock().unwrap();
+        for (_, slot) in conns.drain() {
+            slot.conn.close(0u32.into(), b"relay closed");
+        }
+        self.recent.lock().unwrap().clear();
+    }
 }
 
 impl Relay {
@@ -143,27 +197,61 @@ impl Relay {
         self.state.conns.lock().unwrap().len()
     }
 
+    pub fn lifecycle_stats(&self) -> LifecycleStats {
+        let history = self.state.recent.lock().unwrap();
+        let limit = usize::from(self.state.limits.max_connections.get());
+        LifecycleStats {
+            connection_limit: limit,
+            active_connections: limit - self.state.admission.available_permits(),
+            rejected_connections: self.state.rejected.load(Ordering::Relaxed),
+            history_entries: history.len(),
+            history_edges: history.values().map(HashSet::len).sum(),
+        }
+    }
+
     /// Graceful drain: tell every client to migrate, refuse new
     /// registrations, then close after [`DRAIN_GRACE`].
     pub async fn drain(&self) {
-        if self.state.draining.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let deadline = tokio::time::Instant::now() + DRAIN_GRACE;
-        let conns: Vec<std::sync::Arc<ConnSlot>> =
-            self.state.conns.lock().unwrap().values().cloned().collect();
-        let _ = tokio::time::timeout_at(deadline, notify_all(conns, RelayControl::Drain)).await;
-        tokio::time::sleep_until(deadline).await;
-        self.close().await;
+        self.state.draining.store(true, Ordering::SeqCst);
+        self.shutdown.send_if_modified(|phase| {
+            if *phase == Shutdown::Running {
+                *phase = Shutdown::Drain;
+                true
+            } else {
+                false
+            }
+        });
+        self.join_runner().await;
     }
 
-    /// Stop the relay: close all connections and the listener.
+    /// Stop and join all server-owned tasks. Concurrent/repeated callers join
+    /// the same runner. Canceling one caller does not cancel server cleanup.
     pub async fn close(&self) {
-        for (_, slot) in self.state.conns.lock().unwrap().drain() {
-            slot.conn.close(0u32.into(), b"relay closed");
+        self.request_shutdown();
+        self.join_runner().await;
+    }
+
+    async fn join_runner(&self) {
+        let mut runner = self.accept_task.lock().await;
+        if let Some(task) = runner.as_mut() {
+            if let Err(error) = task.await {
+                debug!(%error, "relay runner ended");
+            }
+            *runner = None;
         }
+        // Also handles a runner that panicked before its normal cleanup.
         self.endpoint.close().await;
-        self.accept_task.abort();
+    }
+
+    fn request_shutdown(&self) {
+        self.state.stop();
+        self.shutdown.send_replace(Shutdown::Stop);
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.request_shutdown();
     }
 }
 
@@ -173,6 +261,15 @@ impl Relay {
 /// The relay sees only `EndpointId`s and byte counts — payload is
 /// end-to-end encrypted QUIC it cannot read.
 pub async fn serve(config: EndpointConfig, allow: Vec<EndpointId>) -> anyhow::Result<Relay> {
+    serve_with_limits(config, allow, ServerLimits::default()).await
+}
+
+/// Bind with an explicit positive application connection budget.
+pub async fn serve_with_limits(
+    config: EndpointConfig,
+    allow: Vec<EndpointId>,
+    limits: ServerLimits,
+) -> anyhow::Result<Relay> {
     let mut config = config;
     config.alpns = vec![proto::RELAY_ALPN.to_vec()];
     let endpoint = rds_noq::bind_endpoint(config).await?;
@@ -183,30 +280,97 @@ pub async fn serve(config: EndpointConfig, allow: Vec<EndpointId>) -> anyhow::Re
         allow: (!allow.is_empty()).then(|| allow.into_iter().collect()),
         draining: AtomicBool::new(false),
         stats: Stats::default(),
+        limits,
+        admission: std::sync::Arc::new(Semaphore::new(usize::from(limits.max_connections.get()))),
+        rejected: AtomicU64::new(0),
     });
 
-    let accept_task = tokio::spawn(accept_loop(endpoint.clone(), state.clone()));
+    let (shutdown, receiver) = watch::channel(Shutdown::Running);
+    let accept_task = tokio::spawn(accept_loop(endpoint.clone(), state.clone(), receiver));
     Ok(Relay {
         endpoint,
         state,
-        accept_task,
+        shutdown,
+        accept_task: tokio::sync::Mutex::new(Some(accept_task)),
     })
 }
 
-async fn accept_loop(endpoint: rds_noq::Endpoint, state: std::sync::Arc<State>) {
-    while let Some(incoming) = endpoint.accept().await {
-        let state = state.clone();
-        tokio::spawn(async move {
-            match incoming.await {
-                Ok(conn) => {
-                    if let Err(e) = serve_conn(conn, state).await {
-                        debug!("relay conn ended: {e:#}");
+async fn accept_loop(
+    endpoint: rds_noq::Endpoint,
+    state: std::sync::Arc<State>,
+    mut shutdown: watch::Receiver<Shutdown>,
+) {
+    let mut connections = JoinSet::new();
+    // The runner owns grace and notice I/O even if a drain caller is canceled.
+    let mut drain: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(std::future::pending());
+    loop {
+        tokio::select! {
+            biased;
+            change = shutdown.changed() => {
+                if change.is_err() { break; }
+                match *shutdown.borrow_and_update() {
+                    Shutdown::Stop => break,
+                    Shutdown::Drain => {
+                        let deadline = tokio::time::Instant::now() + DRAIN_GRACE;
+                        let conns = state.conns.lock().unwrap().values().cloned().collect();
+                        drain = Box::pin(async move {
+                            let _ = tokio::time::timeout_at(deadline, notify_all(conns, RelayControl::Drain)).await;
+                            tokio::time::sleep_until(deadline).await;
+                        });
                     }
+                    Shutdown::Running => {}
                 }
-                Err(e) => debug!("relay handshake failed: {e:#}"),
             }
-        });
+            _ = &mut drain => break,
+            result = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = result {
+                    debug!(%error, "relay connection task ended");
+                }
+            }
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else { break; };
+                if state.draining.load(Ordering::SeqCst) {
+                    drop(incoming);
+                    state.rejected.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let Ok(permit) = state.admission.clone().try_acquire_owned() else {
+                    drop(incoming);
+                    state.rejected.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let state = state.clone();
+                connections.spawn(async move {
+                    let _permit = permit;
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
+                        Ok(Ok(conn)) => {
+                            if let Err(error) = serve_conn(conn, state).await {
+                                debug!(%error, "relay connection ended");
+                            }
+                        }
+                        Ok(Err(error)) => debug!(%error, "relay handshake failed"),
+                        Err(_) => debug!("relay handshake timed out"),
+                    }
+                });
+            }
+        }
     }
+    drop(drain);
+    state.stop();
+    endpoint.close().await;
+    if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                debug!(%error, "relay connection task ended during shutdown");
+            }
+        }
+    })
+    .await
+    .is_err()
+    {
+        connections.shutdown().await;
+    }
+    state.stop();
 }
 
 /// One attached endpoint: control handshake, then the datagram loop.
@@ -255,12 +419,17 @@ async fn serve_conn(conn: rds_noq::Connection, state: std::sync::Arc<State>) -> 
             old.conn.close(0u32.into(), b"replaced");
         }
     }
+    let _registration = Registration {
+        id,
+        slot: slot.clone(),
+        state: state.clone(),
+    };
     debug!(%id, "endpoint attached");
 
     // Control and forwarding share this connection future. Neither survives
     // the other or leaves a detached reader retaining the control writer.
     let res = tokio::select! {
-        result = forward_loop(&conn, &state) => result,
+        result = forward_loop(&slot, &state) => result,
         result = async {
             loop {
                 match read_control(&mut ctrl_recv).await? {
@@ -281,9 +450,16 @@ async fn serve_conn(conn: rds_noq::Connection, state: std::sync::Arc<State>) -> 
 }
 
 /// Move datagrams: decode dst key, rate-limit the source, forward.
-async fn forward_loop(conn: &rds_noq::Connection, state: &State) -> anyhow::Result<()> {
+async fn forward_loop(source: &std::sync::Arc<ConnSlot>, state: &State) -> anyhow::Result<()> {
+    let conn = &source.conn;
     let src = conn.remote_id();
+    let mut burst = 0usize;
     loop {
+        if burst == 64 {
+            tokio::task::yield_now().await;
+            burst = 0;
+        }
+        burst += 1;
         let frame = conn.read_datagram().await?;
         let Some((dst_raw, payload)) = proto::decode_frame(&frame) else {
             state.stats.dropped.fetch_add(1, Ordering::Relaxed);
@@ -294,13 +470,22 @@ async fn forward_loop(conn: &rds_noq::Connection, state: &State) -> anyhow::Resu
             continue;
         };
 
-        if !rate_ok(state, &src, frame.len()) {
+        if !source.bucket.lock().unwrap().take(frame.len()) {
             state.stats.dropped.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
         let dst_slot = {
             let conns = state.conns.lock().unwrap();
+            // A replaced/detached source cannot repopulate history after its
+            // cleanup or borrow the successor's forwarding budget.
+            if !conns
+                .get(&src)
+                .is_some_and(|current| std::sync::Arc::ptr_eq(current, source))
+            {
+                state.stats.dropped.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             conns.get(&dst).cloned().inspect(|_| {
                 // Use the same lock order as detach: a departed destination
                 // cannot have its recent-flow entry recreated by a late send.
@@ -334,35 +519,12 @@ async fn forward_loop(conn: &rds_noq::Connection, state: &State) -> anyhow::Resu
     }
 }
 
-/// Token-bucket admission for one source.
-fn rate_ok(state: &State, src: &EndpointId, bytes: usize) -> bool {
-    let Some(slot) = state.conns.lock().unwrap().get(src).cloned() else {
-        return false;
-    };
-    slot.bucket.lock().unwrap().take(bytes)
-}
-
 /// Remove a detached endpoint — only if the stored slot is still the
 /// one this connection owned — and notify peers that talked to it. A
 /// re-registered replacement must not be evicted by the stale conn's
 /// cleanup.
 async fn detach(id: EndpointId, slot: &std::sync::Arc<ConnSlot>, state: &State) {
-    let recipients = {
-        let mut conns = state.conns.lock().unwrap();
-        if !conns
-            .get(&id)
-            .is_some_and(|stored| std::sync::Arc::ptr_eq(stored, slot))
-        {
-            // A stale owner cannot erase successor history or emit PeerGone.
-            return;
-        }
-        conns.remove(&id);
-        let peers = state.recent.lock().unwrap().remove(&id).unwrap_or_default();
-        peers
-            .into_iter()
-            .filter_map(|peer| conns.get(&peer).cloned())
-            .collect()
-    };
+    let recipients = remove_registration(id, slot, state);
     notify_all(
         recipients,
         RelayControl::PeerGone {
@@ -371,6 +533,44 @@ async fn detach(id: EndpointId, slot: &std::sync::Arc<ConnSlot>, state: &State) 
     )
     .await;
     debug!(%id, "endpoint detached");
+}
+
+struct Registration {
+    id: EndpointId,
+    slot: std::sync::Arc<ConnSlot>,
+    state: std::sync::Arc<State>,
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        // Cancellation cannot await notices, but must unlink owned state.
+        remove_registration(self.id, &self.slot, &self.state);
+    }
+}
+
+fn remove_registration(
+    id: EndpointId,
+    slot: &std::sync::Arc<ConnSlot>,
+    state: &State,
+) -> Vec<std::sync::Arc<ConnSlot>> {
+    let mut conns = state.conns.lock().unwrap();
+    if !conns
+        .get(&id)
+        .is_some_and(|stored| std::sync::Arc::ptr_eq(stored, slot))
+    {
+        // A stale owner cannot erase successor history or emit PeerGone.
+        return Vec::new();
+    }
+    conns.remove(&id);
+    let mut recent = state.recent.lock().unwrap();
+    let peers = recent.remove(&id).unwrap_or_default();
+    recent.retain(|_, sources| {
+        sources.remove(&id);
+        !sources.is_empty()
+    });
+    peers
+        .into_iter()
+        .filter_map(|peer| conns.get(&peer).cloned())
+        .collect()
 }
 
 /// Close on cancellation/error so a partial control frame is never followed by
@@ -399,26 +599,42 @@ async fn write_notice(slot: &ConnSlot, message: &RelayControl) -> bool {
     }
 }
 
-/// Bound concurrent notices and own their cancellation; no detached writes.
+/// Poll at most 16 notice futures inline. Dropping this future destroys every
+/// writer immediately; there are no separately spawned tasks to outlive it.
 async fn notify_all(slots: Vec<std::sync::Arc<ConnSlot>>, message: RelayControl) {
     let mut remaining = slots.into_iter();
-    let mut writes = JoinSet::new();
+    let mut writes = Vec::new();
     loop {
-        while writes.len() < MAX_NOTICE_TASKS {
+        while writes.len() < MAX_NOTICE_WRITES {
             let Some(slot) = remaining.next() else {
                 break;
             };
             let message = message.clone();
-            writes.spawn(async move { write_notice(&slot, &message).await });
+            writes.push(Box::pin(async move { write_notice(&slot, &message).await }));
         }
         if writes.is_empty() {
             break;
         }
-        if let Some(Err(error)) = writes.join_next().await {
-            debug!(%error, "relay notice task ended");
-        }
+        poll_fn(|cx| {
+            let mut completed = false;
+            for index in (0..writes.len()).rev() {
+                if writes[index].as_mut().poll(cx).is_ready() {
+                    drop(writes.swap_remove(index));
+                    completed = true;
+                }
+            }
+            if completed {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

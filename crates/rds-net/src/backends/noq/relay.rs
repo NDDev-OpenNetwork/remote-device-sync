@@ -31,7 +31,7 @@ use noq::udp::{RecvMeta, Transmit};
 use noq::{AsyncUdpSocket, Runtime, UdpSender};
 use rds_core::relay::{self, RelayControl};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
@@ -41,6 +41,15 @@ use peers::PeerRegistry;
 pub use peers::{PeerLease, PeerRegistrationError};
 
 type Datagram = (bytes::Bytes, SocketAddr);
+
+// A shared watch does not accumulate one-shot subscribers across connection
+// churn on a long-lived tunnel. This guard also signals on pump cancellation.
+struct LinkLifetime(watch::Sender<bool>);
+impl Drop for LinkLifetime {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
+}
 
 #[derive(Default)]
 struct DropCounters {
@@ -130,6 +139,7 @@ pub struct RelayHandle {
     drained: Arc<AtomicBool>,
     /// Observability must not keep the socket's helper connection alive.
     connection: noq::WeakConnectionHandle,
+    available: watch::Receiver<bool>,
     queue: mpsc::WeakSender<Datagram>,
     queue_capacity: usize,
     drops: Arc<DropCounters>,
@@ -165,9 +175,14 @@ impl RelayHandle {
     /// This does not promise that any particular peer is attached or reachable.
     /// Drain remains available during its usable grace period.
     pub fn is_available(&self) -> bool {
-        self.connection
-            .upgrade()
-            .is_some_and(|conn| conn.close_reason().is_none() && conn.max_datagram_size().is_some())
+        *self.available.borrow()
+            && self.connection.upgrade().is_some_and(|conn| {
+                conn.close_reason().is_none() && conn.max_datagram_size().is_some()
+            })
+    }
+
+    pub(super) async fn unavailable(&mut self) {
+        let _ = self.available.wait_for(|available| !*available).await;
     }
 
     /// Whether the relay announced it is draining.
@@ -188,6 +203,7 @@ pub struct RelaySocket {
     // permits exact bounded occupancy queries via a weak sender after pump exit.
     _queue_owner: mpsc::Sender<Datagram>,
     drops: Arc<DropCounters>,
+    available: watch::Sender<bool>,
     tasks: Option<(JoinHandle<()>, JoinHandle<()>)>,
 }
 
@@ -265,13 +281,16 @@ impl RelaySocket {
         let queue_capacity = usize::from(limits.datagram_queue.get());
         let (tx, rx) = mpsc::channel(queue_capacity);
         let queue_owner = tx.clone();
+        let (available, availability) = watch::channel(conn.inner().max_datagram_size().is_some());
 
         // Datagram pump: relay → synthetic-addressed receives.
         let dgram_pump = tokio::spawn({
             let conn = conn.clone();
             let peers = peers.clone();
             let drops = drops.clone();
+            let lifetime = LinkLifetime(available.clone());
             async move {
+                let _lifetime = lifetime;
                 let mut burst = 0usize;
                 loop {
                     if burst == 64 {
@@ -312,7 +331,9 @@ impl RelaySocket {
         let ctrl_pump = tokio::spawn({
             let drained = drained.clone();
             let conn = conn.clone();
+            let lifetime = LinkLifetime(available.clone());
             async move {
+                let _lifetime = lifetime;
                 let mut ctrl_send = ctrl_send;
                 loop {
                     match read_control(&mut ctrl_recv).await {
@@ -355,6 +376,7 @@ impl RelaySocket {
             peers: peers.clone(),
             drained: drained.clone(),
             connection: conn.inner().weak_handle(),
+            available: availability,
             queue: queue_owner.downgrade(),
             queue_capacity,
             drops: drops.clone(),
@@ -368,6 +390,7 @@ impl RelaySocket {
                 rx,
                 _queue_owner: queue_owner,
                 drops,
+                available,
                 tasks: Some((dgram_pump, ctrl_pump)),
             },
             handle,
@@ -379,6 +402,7 @@ impl RelaySocket {
     /// Close the tunnel and join its pumps. Socket destruction is the fallback:
     /// it closes transport and requests abort, but cannot join from Drop.
     pub async fn close(&mut self) {
+        self.available.send_replace(false);
         self.conn.close(0u32.into(), b"relay socket closed");
         if let Some((datagrams, control)) = self.tasks.take() {
             datagrams.abort();
@@ -391,6 +415,7 @@ impl RelaySocket {
 
 impl Drop for RelaySocket {
     fn drop(&mut self) {
+        self.available.send_replace(false);
         self.conn.close(0u32.into(), b"relay socket dropped");
         if let Some((datagrams, control)) = &self.tasks {
             datagrams.abort();

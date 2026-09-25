@@ -21,6 +21,7 @@ impl Drivers {
         local_addrs: Vec<std::net::SocketAddr>,
         candidates: Vec<std::net::SocketAddr>,
         peer_lease: Option<super::relay::PeerLease>,
+        relay: Option<super::relay::RelayHandle>,
     ) -> anyhow::Result<()> {
         let _guard = self.admission.lock().unwrap_or_else(|p| p.into_inner());
         if self.tasks.is_closed() {
@@ -37,6 +38,7 @@ impl Drivers {
             metrics,
             local_addrs,
             candidates,
+            relay,
         );
         self.tasks.spawn(async move {
             // Streams may outlive the Connection facade. The weak policy

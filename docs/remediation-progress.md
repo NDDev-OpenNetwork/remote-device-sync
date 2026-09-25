@@ -26,11 +26,11 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
-| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Global RSS/FD bounds, per-service fairness, relay queues and disk cancellation remain open. |
-| W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Initial agent handshake/shutdown budgets exist. Global timeout classes, retry jitter, startup/relay and desktop/media deadlines remain open. |
+| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
+| W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Global timeout classes, retry jitter, startup recovery and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
-| W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link send failure and unknown mapping are now route loss; path-event resynchronization, complete metrics and generic child failure isolation remain open. |
+| W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link send failure and unknown mapping are route loss; known tunnel closure also retires stale relay selection and promotes eligible direct paths. Path-event resynchronization, complete metrics and generic child failure isolation remain open. |
 
 ## Authorization change
 
@@ -872,4 +872,22 @@ all-feature network/agent/CLI/relay tests** and **52 isolated network/relay
 tests** passed. See [contract](relay-control.md) and
 [receipt](reports/rds-relay-bounds-20260925.md). Server task ownership/admission,
 global resource qualification, warm replacement and physical/native-platform
+acceptance remain open. No remediation wave is closed.
+
+## Owned relay lifecycle and tunnel health
+
+Real before-fix cases showed live tunnels after Relay Drop and an indefinitely
+draining server after caller cancellation. The owned runner now bounds admission,
+owns and joins session workers and keeps drain cleanup independent of callers.
+Registration guards clean canceled sessions and history; notice futures are inline.
+The shutdown campaign also reproduced stale RTT selecting a dead relay over a
+working direct path. A shared availability watch now retires known failed relay
+paths and withdraws failed advertisements/candidates without retaining I/O.
+
+The focused run passed 73 tests. Final formatting, three Clippy lanes,
+**364 workspace tests**, **167 all-feature network/agent/CLI/relay tests**,
+**73 isolated network/relay tests** and **30 failure-isolation repetitions
+(60 test executions)** passed. See [contract](relay-control.md) and
+[receipt](reports/rds-relay-lifecycle-20260925.md). Owned server CLI integration,
+global resource qualification, full path recovery and real service/platform
 acceptance remain open. No remediation wave is closed.
