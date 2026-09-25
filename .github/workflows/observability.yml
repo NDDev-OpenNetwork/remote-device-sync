@@ -31,7 +31,7 @@ jobs:
     uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-ci.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
     with:
       runner: ubuntu-latest
-      toolchain: stable
+      toolchain: "1.98.1"
       components: "clippy,rustfmt"
       build_command: "cargo build --locked -p rds-observe --example fixture"
       test_matrix_os: '["ubuntu-latest"]'

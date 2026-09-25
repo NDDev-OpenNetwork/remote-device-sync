@@ -10,7 +10,8 @@ on:
 #
 # The build/test/lint jobs are the pinned `rust-ci` reusable from
 # NDDev-OpenNetwork/ci-workflows; one pin per repository (see
-# supply-chain.yml, codeql.yml, release.yml — same SHA).
+# supply-chain.yml and codeql.yml — same SHA). Native release packaging
+# runs separately in release.yml using pinned official actions.
 
 permissions: {}
 
@@ -26,7 +27,7 @@ jobs:
     uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-ci.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
     with:
       runner: ubuntu-latest
-      toolchain: stable
+      toolchain: "1.98.1"
       components: "clippy,rustfmt"
       build_command: "cargo build --locked --workspace --all-targets"
       # Tests run per-OS. The noq/owned-relay and metrics lanes run on both

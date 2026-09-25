@@ -12,6 +12,11 @@ identifies authorization, discovery, sync and owned-transport blockers.
 The [remediation plan](docs/remediation-plan.md) defines their fixes and the
 remaining SSH broker/reattachment, interactive desktop and platform work.
 
+The `0.1.0` [engineering preview](docs/releases.md) packages native SSH,
+agent, relay and directory binaries for Linux x86_64 and macOS arm64. Desktop
+features are excluded from those binaries. Read the verification, compatibility
+and remaining-qualification notes before evaluating the release.
+
 ## Layout
 
 ```text

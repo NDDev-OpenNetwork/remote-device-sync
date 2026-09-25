@@ -1377,3 +1377,31 @@ GDS issuance, durable renewal and desired-policy reconciliation; managed
 viewer/sync integration; native platform and real network/resource acceptance.
 This is a partial W2.3/W4.4, W2.5 and W6.4 increment. All waves remain open;
 no installed process, issuer or deployment was changed.
+
+## Native preview packaging — 2026-09-26
+
+Partial W10.3/W10.6 increment. Release assembly now builds four Rust binaries
+on Ubuntu 24.04 x86_64 and macOS 15 arm64 in PRs and on `main`, before the tag
+publication path. Compiler `1.98.1`, Cargo.lock, features, source commit, target
+and binary digests are bound; tracked source includes `ops/observability`.
+Twelve synthetic positive/negative contract tests cover drift, wrong tags,
+missing/extra assets, special files, tampered bytes and empty source SBOMs.
+The CLI identifies itself as `rds` in `--version`, matching its installed name.
+
+Real macOS CI found an unguarded Linux-only FIFO fixture in the SSH test.
+Special-file refusal now runs with a Unix socket on both platforms and a FIFO
+on Linux. The next macOS run exposed XNU's kernel-managed `PENDIN` flag on
+canonical-mode restoration: the test now compares all configurable modes and
+control characters, excluding only that transient macOS queue-state bit.
+See [XNU ttioctl](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c).
+The local six active SSH integration tests pass. A new native CI run
+is required to establish macOS acceptance, rather than assuming portability.
+
+The [release contract](releases.md) declares an engineering preview with no
+desktop features in the packaged executables. Publication requires exact-commit
+default-branch checks, complete packages and official artifact attestations;
+source SPDX coverage is not presented as a complete native binary/OS SBOM.
+No installed process or consumer pin is changed. W10.3 remains partial until
+actual published-asset verification and clean-machine qualification; automatic
+activation/rollback, Apple signing/notarization and W10.8 GDS metadata/provider
+integration remain open.

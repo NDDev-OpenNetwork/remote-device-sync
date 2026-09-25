@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-26
+
+**Engineering preview.** This first published workspace release is for explicit
+evaluation and integration, not production readiness or an in-place upgrade of
+earlier development state. Native Linux x86_64 and macOS arm64 bundles contain
+`rds`, `rds-agent`, `rds-relay` and `rds-server`, with both transport backends and
+the owned relay. Desktop capture/rendering is not enabled in these binaries.
+See [release instructions](docs/releases.md) for verification and limitations.
+
+- Native SSH uses the standard SSH protocol through `russh`, OS PTYs, explicit
+  host-key pins and private-key/SSH-agent authentication. A shared Rust session
+  manager owns connections and supports explicit device/session selection.
+- Grant v2 binds audience, session identity, monotonic renewal and directional
+  sync/view/control scopes. Local IPC is version 3. Renewals currently require
+  an explicit caller; GDS automatic issuance/renewal is not shipped.
+- Bounded file sync, signed discovery, durable policy/record state and protected
+  metrics/logging have regression and fault-injection coverage. Vector and
+  OpenObserve configurations are included in the source archive under `ops/`.
+- Previous development wire formats and policy snapshots are not automatically
+  migrated. Re-enroll/re-sign and provision fresh isolated state for evaluation;
+  preserve old keys/data until a reviewed migration exists.
+- Interactive desktop presentation, native macOS/Wayland desktop backends,
+  platform packaging/notarization, automatic updates/rollback, broad NAT/WAN and
+  physical-device qualification remain open. W0–W10 are not closed by this tag.
+
+Development history included in this release:
+
 - Add a Rust directory-capacity scenario to `rds-bench`, using shared production
   bounds and fresh synthetic state. Measure full-catalog renewal, deletion,
   reactivation and reopen; retain machine-readable evidence for 4096 identities.

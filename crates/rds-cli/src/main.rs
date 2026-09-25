@@ -15,7 +15,11 @@ mod managed;
 mod ssh;
 
 #[derive(Parser)]
-#[command(version, about = "Remote device access for the GDS estate")]
+#[command(
+    name = "rds",
+    version,
+    about = "Remote device access for the GDS estate"
+)]
 struct Cli {
     /// New private log file (8 MiB cap); required for SSH with JSON telemetry.
     #[arg(long, global = true)]

@@ -282,8 +282,8 @@ mod tests {
 
     fn entries() -> BTreeMap<String, EndpointKey> {
         BTreeMap::from([
-            ("amsterdam".to_string(), EndpointKey([1; 32])),
-            ("gds-services".to_string(), EndpointKey([2; 32])),
+            ("device-alpha".to_string(), EndpointKey([1; 32])),
+            ("device-beta".to_string(), EndpointKey([2; 32])),
         ])
     }
 
@@ -296,7 +296,7 @@ mod tests {
         let payload = snap
             .verify_fresh(&key.verifying_key(), None)
             .expect("fresh snapshot verifies");
-        assert_eq!(payload.entries["amsterdam"], EndpointKey([1; 32]));
+        assert_eq!(payload.entries["device-alpha"], EndpointKey([1; 32]));
     }
 
     #[test]

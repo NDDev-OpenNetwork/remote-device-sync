@@ -1,97 +1,266 @@
 name: release
 
-# Tag-driven immutable release: push a signed tag `X.Y.Z` where VERSION and
-# the CHANGELOG `## [X.Y.Z]` heading match, and the pinned supply-chain
-# reusable publishes one GitHub Release carrying a deterministic source
-# archive, an SPDX SBOM of it, release notes, a manifest and SHA256SUMS —
-# plus SLSA build-provenance and SBOM attestations (public repo: artifact
-# attestations are included on every plan).
-#
-# Graph: resolve (read-only) → authorize (the `release` environment is the
-# authority seam — add a required reviewer in Settings → Environments to
-# make it a human gate) → publish (the only job holding write scopes).
-#
-# workflow_dispatch must run from the tag ref: the reusable fails closed
-# when the checked-out HEAD is not the tagged commit.
-
+# Build the same native packages in PRs, on main and from an annotated numeric
+# tag. Only the tag path can obtain publication credentials. All assets are
+# attached in one release creation; an existing release is never modified.
 on:
+  pull_request:
   push:
-    tags:
-      - "[0-9]+.[0-9]+.[0-9]+"
+    branches: [main]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release. Run from the tag ref; must equal VERSION and the tag."
+        description: "Numeric version; dispatch must use the matching annotated tag"
         required: true
         type: string
 
 permissions: {}
-
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_BUILD_JOBS: "2"
+  RELEASE_FEATURES: rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay
+
 jobs:
-  resolve:
-    name: Resolve release version
-    runs-on: ubuntu-latest
+  contract:
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
-      version: ${{ steps.v.outputs.version }}
+      version: ${{ steps.check.outputs.version }}
     steps:
-      - name: Resolve and shape-check the version
-        id: v
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test release contract and bind source
+        id: check
         env:
           INPUT_VERSION: ${{ inputs.version }}
           EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="$REF_NAME"
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            version="$INPUT_VERSION"
+          python3 scripts/test_release.py
+          version="$(cat VERSION)"
+          tagged=()
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tagged=(--tagged); fi
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            test "$GITHUB_REF" = "refs/tags/$INPUT_VERSION"
+            test "$version" = "$INPUT_VERSION"
           fi
-          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "release: version must be numeric SemVer X.Y.Z" >&2
-            exit 1
-          fi
+          python3 scripts/release.py check --version "$version" "${tagged[@]}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  authorize:
-    name: Authorize release
-    needs: resolve
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: release
-    permissions: {}
+  native:
+    needs: contract
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
-      - name: Record the authorized candidate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: "1.98.1"
+          cache: false
+      - name: Build native Rust executables
         env:
-          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          {
-            echo "### Release authorized"
-            echo
-            echo "- version: \`${RELEASE_VERSION}\`"
-            echo "- approver: recorded by the \`release\` environment"
-          } >> "$GITHUB_STEP_SUMMARY"
+          cargo build --locked --release --target "$TARGET"             -p rds-cli -p rds-agent -p rds-relay -p rds-server --bins             --features "$RELEASE_FEATURES"
+      - name: Smoke and assemble native bundle
+        env:
+          VERSION: ${{ needs.contract.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          tagged=()
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tagged=(--tagged); fi
+          python3 scripts/release.py binary --version "$VERSION" --target "$TARGET"             --binary-dir "target/$TARGET/release" --out "$RUNNER_TEMP/native" "${tagged[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-${{ matrix.target }}
+          path: ${{ runner.temp }}/native/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  source:
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive exact tracked source including observability
+        env:
+          VERSION: ${{ needs.contract.outputs.version }}
+        run: |
+          set -euo pipefail
+          tagged=()
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tagged=(--tagged); fi
+          python3 scripts/release.py source --version "$VERSION" --out "$RUNNER_TEMP/source-bundle" "${tagged[@]}"
+      - name: Source SPDX SBOM with verified Syft
+        env:
+          VERSION: ${{ needs.contract.outputs.version }}
+          SYFT_CHECK_FOR_APP_UPDATE: "false"
+        run: |
+          set -euo pipefail
+          umask 077
+          archive="$RUNNER_TEMP/syft.tar.gz"
+          directory="$RUNNER_TEMP/syft-bin"
+          mkdir "$directory"
+          curl --disable --fail --show-error --silent --location             --proto '=https' --proto-redir '=https' --tlsv1.2             --max-time 120 --max-filesize 29289629 --output "$archive"             https://github.com/anchore/syft/releases/download/v1.52.0/syft_1.52.0_linux_amd64.tar.gz
+          test "$(wc -c < "$archive" | tr -d '[:space:]')" = 29289629
+          printf '%s  %s\n' caeedb81fb0491615f1ebd1761e4145d41ee86dd2cc7bf80669f9f5ad9d6133d "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$directory" -- syft
+          test -f "$directory/syft" && test ! -L "$directory/syft" && test -x "$directory/syft"
+          test "$("$directory/syft" version -o json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["version"])')" = 1.52.0
+          "$directory/syft" scan "dir:$RUNNER_TEMP/source-bundle/source"             --source-name remote-device-sync --source-version "$VERSION"             --output "spdx-json=$RUNNER_TEMP/source-bundle/source-sbom.spdx.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source
+          path: |
+            ${{ runner.temp }}/source-bundle/*.tar.gz
+            ${{ runner.temp }}/source-bundle/source-sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  assemble:
+    needs: [contract, native, source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/incoming
+          digest-mismatch: error
+      - name: Verify complete asset inventory and bind manifests
+        env:
+          VERSION: ${{ needs.contract.outputs.version }}
+        run: |
+          set -euo pipefail
+          tagged=()
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tagged=(--tagged); fi
+          python3 scripts/release.py finalize --version "$VERSION"             --incoming "$RUNNER_TEMP/incoming" --out "$RUNNER_TEMP/dist" "${tagged[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
   publish:
-    name: Build and publish release
-    needs: [resolve, authorize]
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [contract, assemble]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
     permissions:
-      contents: write         # create the GitHub Release and upload assets
-      id-token: write         # OIDC identity for SLSA build provenance
-      attestations: write     # attest the SBOM and the release archive
-      artifact-metadata: write # actions/attest artifact storage record
-    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/release-supply-chain.yml@a7b90bdf1ac12465cbd07072e3360442cfc8eec6 # 0.1.26
-    with:
-      runner: ubuntu-latest
-      version: ${{ needs.resolve.outputs.version }}
-      package_name: remote-device-sync
-      archive_paths: >-
-        README.md LICENSE VERSION CHANGELOG.md AGENTS.md deny.toml
-        rust-toolchain.toml Cargo.toml Cargo.lock crates deploy docs
-        scripts .github
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      VERSION: ${{ needs.contract.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/dist
+          digest-mismatch: error
+      - name: Recheck source, exact-commit CI and immutable publication preconditions
+        run: |
+          set -euo pipefail
+          python3 scripts/release.py check --version "$VERSION" --tagged
+          commit="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$commit" origin/main
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.sha)" = "$(git rev-parse "refs/tags/$VERSION")"
+          # Required product/supply-chain evidence is from the default branch,
+          # on this exact source commit. Missing, ambiguous or failed runs stop.
+          gh api --method GET "repos/$GH_REPO/actions/runs" -f head_sha="$commit" -f per_page=100 > "$RUNNER_TEMP/checks.json"
+          python3 - "$RUNNER_TEMP/checks.json" "$commit" <<'PY'
+          import json, sys
+          runs = json.load(open(sys.argv[1]))["workflow_runs"]
+          for workflow in ("ci.yml", "supply-chain.yml", "codeql.yml"):
+              matches = [r for r in runs if r["path"] == ".github/workflows/" + workflow
+                         and r["head_sha"] == sys.argv[2] and r["event"] == "push" and r["head_branch"] == "main"]
+              if len(matches) != 1 or matches[0]["status"] != "completed" or matches[0]["conclusion"] != "success":
+                  raise SystemExit("missing/ambiguous/unsuccessful exact-commit workflow: " + workflow)
+          PY
+          # Do not mistake an authentication/network error for a missing release.
+          code="$(curl --disable --silent --show-error --output "$RUNNER_TEMP/preflight.json" --write-out '%{http_code}'             --proto '=https' --tlsv1.2 --max-time 60             -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json'             "https://api.github.com/repos/$GH_REPO/releases/tags/$VERSION")"
+          test "$code" = 404
+          (cd "$RUNNER_TEMP/dist" && sha256sum -c SHA256SUMS)
+      - name: Attest archives, inventory and checksums
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/dist/*.tar.gz
+            ${{ runner.temp }}/dist/release-manifest.json
+            ${{ runner.temp }}/dist/SHA256SUMS
+      - name: Attest source SBOM (source archive only)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/remote-device-sync-${{ needs.contract.outputs.version }}-source.tar.gz
+          sbom-path: ${{ runner.temp }}/dist/source-sbom.spdx.json
+      - name: Publish complete engineering preview
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.sha)" = "$(git rev-parse "refs/tags/$VERSION")"
+          gh release create "$VERSION" --verify-tag --prerelease --latest=false             --title "RDS $VERSION — engineering preview"             --notes-file "$RUNNER_TEMP/dist/release-notes.md" "$RUNNER_TEMP/dist/"*
+      - name: Verify published bytes and provenance
+        run: |
+          set -euo pipefail
+          gh release view "$VERSION" --json tagName,isDraft,isPrerelease,assets > "$RUNNER_TEMP/published.json"
+          python3 - "$RUNNER_TEMP/published.json" "$RUNNER_TEMP/dist" "$VERSION" <<'PY'
+          import json, pathlib, sys
+          release = json.load(open(sys.argv[1]))
+          assert release["tagName"] == sys.argv[3] and release["isPrerelease"] and not release["isDraft"]
+          assert sorted(a["name"] for a in release["assets"]) == sorted(p.name for p in pathlib.Path(sys.argv[2]).iterdir())
+          PY
+          gh release download "$VERSION" --dir "$RUNNER_TEMP/downloaded"
+          cmp "$RUNNER_TEMP/dist/SHA256SUMS" "$RUNNER_TEMP/downloaded/SHA256SUMS"
+          (cd "$RUNNER_TEMP/downloaded" && sha256sum -c SHA256SUMS)
+          for asset in "$RUNNER_TEMP/downloaded/"*.tar.gz "$RUNNER_TEMP/downloaded/release-manifest.json" "$RUNNER_TEMP/downloaded/SHA256SUMS"; do
+            gh attestation verify "$asset" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml"               --source-ref "$GITHUB_REF" --source-digest "$(git rev-parse HEAD)" --deny-self-hosted-runners
+          done
