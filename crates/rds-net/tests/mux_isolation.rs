@@ -12,10 +12,10 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -24,6 +24,20 @@ struct Fault {
     enabled: AtomicBool,
     hits: AtomicUsize,
     recv: AtomicBool,
+    recv_waker: Mutex<Option<Waker>>,
+}
+impl Fault {
+    fn enable(&self) {
+        self.enabled.store(true, Ordering::Release);
+        // Changing a pending socket's outcome must wake its reader. A QUIC
+        // ping may use a different validated path and cannot do this for us.
+        if self.recv.load(Ordering::Acquire) {
+            let waker = self.recv_waker.lock().unwrap().take();
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
 }
 #[derive(Debug)]
 struct Socket {
@@ -48,12 +62,17 @@ impl AsyncUdpSocket for Socket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        if self.fault.enabled.load(Ordering::Acquire) && self.fault.recv.load(Ordering::Acquire) {
-            self.fault.hits.fetch_add(1, Ordering::AcqRel);
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "injected receive failure",
-            )));
+        // Register before checking the fault, so enable cannot race with
+        // registration and leave an already-pending read asleep.
+        if self.fault.recv.load(Ordering::Acquire) {
+            *self.fault.recv_waker.lock().unwrap() = Some(cx.waker().clone());
+            if self.fault.enabled.load(Ordering::Acquire) {
+                self.fault.hits.fetch_add(1, Ordering::AcqRel);
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "injected receive failure",
+                )));
+            }
         }
         self.inner.poll_recv(cx, bufs, meta)
     }
@@ -134,7 +153,7 @@ async fn failed_last_path_is_not_selected_while_another_socket_lives() {
         });
         let (a, b) = (a.unwrap(), b.unwrap());
         let facade = rds_net::Connection::from(b.clone());
-        fault.enabled.store(true, Ordering::Release);
+        fault.enable();
         b.inner().path(noq::PathId::ZERO).unwrap().ping().unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while fault.hits.load(Ordering::Acquire) == 0 || facade.current_path_stats().is_some() {
@@ -247,9 +266,11 @@ async fn exercise(receive: bool) {
         })
         .await
         .expect("fixture did not receive the original advertisement");
-        fault.enabled.store(true, Ordering::Release);
-        b.inner().path(noq::PathId::ZERO).unwrap().ping().unwrap();
-        a.inner().path(noq::PathId::ZERO).unwrap().ping().unwrap();
+        fault.enable();
+        if !receive {
+            b.inner().path(noq::PathId::ZERO).unwrap().ping().unwrap();
+            a.inner().path(noq::PathId::ZERO).unwrap().ping().unwrap();
+        }
         tokio::time::timeout(Duration::from_secs(2), async {
             while fault.hits.load(Ordering::Acquire) == 0 {
                 tokio::task::yield_now().await;
@@ -337,7 +358,7 @@ async fn exercise(receive: bool) {
         // Loss of the last socket must close held Connection/Path/Stream I/O
         // without waiting for an explicit endpoint.close or application drop.
         let held_path = b.inner().path(extra.id()).unwrap();
-        secondary_fault.enabled.store(true, Ordering::Release);
+        secondary_fault.enable();
         held_path.ping().unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while !health.all_failed() || !facade.is_closed() || server.active_path_drivers() != 0 {

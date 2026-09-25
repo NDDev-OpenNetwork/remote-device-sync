@@ -1415,3 +1415,13 @@ generated policy content did not change. GDS `complete` still cannot integrate
 GitHub PRs, so that route remains `NOT_PROVEN`; ordinary GitHub PR integration
 and the checked-in publication workflow retain their separate evidence.
 Estate CI-feedback reconciliation and the rest of W10.8 remain open.
+
+The native macOS default workspace subsequently passed. Its additional owned
+transport lane exposed a missing wake in the socket-fault fixture: changing a
+pending receive into an error did not notify its task, and a QUIC ping could
+travel on the healthy sibling instead. The fixture now registers before checking
+fault state and wakes when enabling receive failure; the test no longer relies
+on a packet or incidental OS wake. All three mux-isolation tests pass locally
+with unchanged deadlines. CI uses `--no-fail-fast` within each test invocation
+to report all failing targets while still returning failure. The final local
+default workspace run passed 535 tests with three opt-in cases ignored.
