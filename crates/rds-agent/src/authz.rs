@@ -336,15 +336,24 @@ impl ConnAuthz {
         self.service_slots.clone().try_acquire_owned().ok()
     }
 
-    pub(crate) fn try_sync_slot(&self) -> bool {
-        !self
+    pub(crate) fn try_sync_slot(&self) -> Option<SyncSlot<'_>> {
+        if self
             .sync_busy
             .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            None
+        } else {
+            Some(SyncSlot(&self.sync_busy))
+        }
     }
+}
 
-    pub(crate) fn release_sync_slot(&self) {
-        self.sync_busy
-            .store(false, std::sync::atomic::Ordering::Release);
+/// Release on every exit, including a failed hello ACK or task cancellation.
+pub(crate) struct SyncSlot<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for SyncSlot<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -528,6 +537,35 @@ async fn watch_grant(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn sync_slot_is_exclusive_and_released_on_error_and_cancellation() {
+        let authz = Arc::new(ConnAuthz::new(false, [0; 32], 8));
+        let slot = authz.try_sync_slot().unwrap();
+        assert!(authz.try_sync_slot().is_none());
+        assert!(
+            authz.try_sync_slot().is_none(),
+            "a refused acquisition must not release the owner"
+        );
+        drop(slot);
+        let fail = || -> Result<(), ()> {
+            let _slot = authz.try_sync_slot().unwrap();
+            Err(())?;
+            Ok(())
+        };
+        assert!(fail().is_err());
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let shared = authz.clone();
+        let task = tokio::spawn(async move {
+            let _slot = shared.try_sync_slot().unwrap();
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        assert!(authz.try_sync_slot().is_none());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(authz.try_sync_slot().is_some());
+    }
     use super::*;
 
     async fn connection_pair() -> (rds_net::Endpoint, rds_net::Endpoint, Connection, Connection) {

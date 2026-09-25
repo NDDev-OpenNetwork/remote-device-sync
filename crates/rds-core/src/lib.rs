@@ -108,6 +108,14 @@ pub enum ServiceKind {
     Sync,
     /// Audio forwarding (v0.3 codec; wire shape reserved in v2).
     Audio,
+    /// Download files from the agent's configured sync root.
+    SyncRead,
+    /// Upload files to the agent's configured sync root.
+    SyncWrite,
+    /// View a desktop without injecting input.
+    DesktopView,
+    /// Input modifier: requires `DesktopView` to open a session.
+    DesktopControl,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +302,42 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_wire_tags_are_append_only_and_old_decoders_refuse_new_scopes() {
+        use super::ServiceKind::*;
+        #[derive(serde::Deserialize)]
+        enum LegacyService {
+            Ping,
+            Info,
+            Tcp,
+            Desktop,
+            Sync,
+            Audio,
+        }
+        for (tag, kind) in [
+            Ping,
+            Info,
+            Tcp,
+            Desktop,
+            Sync,
+            Audio,
+            SyncRead,
+            SyncWrite,
+            DesktopView,
+            DesktopControl,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = postcard::to_stdvec(&kind).unwrap();
+            assert_eq!(bytes, vec![tag as u8]);
+            assert_eq!(postcard::from_bytes::<ServiceKind>(&bytes).unwrap(), kind);
+            assert_eq!(
+                postcard::from_bytes::<LegacyService>(&bytes).is_ok(),
+                tag < 6
+            );
+        }
+    }
     use super::*;
 
     #[tokio::test]

@@ -30,6 +30,52 @@ registry epoch, tenant identifier or estate policy revision.
 Use the existing ed25519-dalek and BLAKE3 libraries. No new cryptography library,
 external executable, key store, dependency or unsafe block is introduced.
 
+## Directional service permissions
+
+The 2026-09-26 increment adds fine capabilities to the signed `services` list:
+
+| Capability | Agent-side permission |
+|---|---|
+| `SyncRead` | Download from the configured sync root (`Request`). |
+| `SyncWrite` | Upload to the configured sync root (`Offer`). |
+| `DesktopView` | Open a desktop session, receive frames, steer the encoder and exchange heartbeats. No input injection. |
+| `DesktopControl` | Input modifier; requires `DesktopView` to open a session. |
+| Legacy `Sync` | Both read and write, preserving its original meaning. |
+| Legacy `Desktop` | Both view and input, preserving its original meaning. |
+
+Prefer narrow capabilities when issuing new grants. Permissions are additive:
+adding `SyncRead` to a legacy `Sync` grant does **not** remove write permission.
+`DesktopControl` alone grants neither viewing nor input. Existing display/port
+constraints still apply. These are whole-root sync permissions, not per-path
+ACLs; account, tenant and policy-revision binding remain open.
+
+The sync handler checks direction immediately after decoding the first bounded
+message, before path validation, metadata reads, manifests, journals or writes.
+A denial emits a fixed `SyncMsg::Refuse` without filesystem details. A scoped
+connection remains usable. Its exclusive sync slot is RAII-owned across the
+hello ACK and body, including failed writes and cancellation.
+
+View-only sessions never create an input worker or invoke a sink. Controlling
+sessions lazily create one bounded worker, reuse its backend and run blocking
+native calls outside Tokio's async executor. The existing session-display check
+precedes dispatch. `InputAck` is emitted only after the sink returns success;
+denied, unavailable or failed input gets no ACK. The current wire has no typed
+input-rejection event; a heartbeat response is not an input acknowledgment.
+An ACK means backend acceptance, not proof that a target application reacted.
+Cancellation discards queued input; a native call already in progress cannot
+be undone. Physical desktop/input and stuck-syscall qualification remain open.
+The wire display-ID check is not a native seat/focus isolation boundary. X11
+screen selection, focus, key/button mapping and held-key release remain W6.4;
+the synthetic sink tests do not qualify those behaviors.
+
+New `ServiceKind` tags are appended as 6–9; tags 0–5, grant payload version 2,
+local IPC version 3, `StreamHello` and service framing are unchanged. Agents
+continue advertising coarse services in `AgentInfo`. Old decoders reject a
+grant containing an unknown fine capability; no automatic fallback to a broad
+grant is permitted. Upgrade agents before issuing these scopes. General
+capability negotiation remains W2.2. Renewal still requires the exact same
+service list: adding, removing or reordering capabilities needs a new session.
+
 ## Renewal and cancellation
 
 `StreamHello::RenewAuthz` operates on the already authenticated connection.
@@ -116,7 +162,7 @@ existing private-data rules. Upgrade the Vector projection with the binaries;
 older operation allowlists drop these new records. No live collector/sink or
 alert route is changed.
 
-Required next: tenant/policy binding, read/write/view/control and account scopes;
+Required next: tenant/policy binding, per-path and account scopes;
 automatic GDS issuance/renewal and policy reconciliation; viewer/sync manager
 integration; native macOS and suspend tests; mixed SSH/video/sync, physical
 WAN/NAT/relay and long-running resource/latency acceptance. Loopback tests and

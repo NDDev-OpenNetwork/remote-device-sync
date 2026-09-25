@@ -343,10 +343,16 @@ resolve→connect→first byte ≤ 300 ms on LAN, measured by the harness.
   verifies signature + expiry + service scope before opening service
   streams. Connection-level rejection = close before any stream
   service (same effect as `EndpointHooks::after_handshake`).
+- Directional permissions: `SyncRead`/`SyncWrite` are checked before any
+  filesystem access. `DesktopView` needs `DesktopControl` for input; view-only
+  never invokes the sink. Legacy broad capabilities retain their meaning.
+  Appended tags fail closed on older decoders. See the [2026-09-26
+  receipt](reports/rds-service-scopes-20260926.md); account/tenant and per-path
+  policy, native screen/seat isolation and consent remain open.
 - Revocation: short TTL (minutes) + GDS denylist channel — the server
   publishes signed stable grant-ID snapshots polled by agents; agents also
   close expired connections. Explicit client/managed renewal preserves streams;
-  automatic issuance/renewal and finer policy scopes remain W2.3/W4.2.
+  automatic issuance/renewal and resource policy integration remain W2.3/W4.2.
 - Tests: expired grant rejected; wrong-service grant rejected;
   revoked grant rejected after denylist push.
 

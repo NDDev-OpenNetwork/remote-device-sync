@@ -303,8 +303,11 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   watchers; service admission rechecks revocation and expiry directly.
   Renewal preserves the stable revocation ID and exact scope, atomically extends
   a wall/continuous-clock lease before response FIN, and keeps one watchdog.
-  One task slot is reserved from service bodies in grant mode. Issuer automation,
-  tenant/policy binding and finer scopes remain open; see [contract](grant-leases.md).
+  One task slot is reserved from service bodies in grant mode. `SyncRead` and
+  `SyncWrite` are enforced before filesystem access; `DesktopView` needs the
+  additional `DesktopControl` capability for input. Legacy `Sync`/`Desktop`
+  retain their broad permissions. Issuer automation, tenant/policy binding,
+  per-path and account scopes remain open; see [contract](grant-leases.md).
 - GDS names: `GET /v1/names/{name}` returns one `SignedNameBinding`, signed
   by the registry issuer over `rds/name-binding/v2\0` plus the postcard
   payload `{stamp, registry_digest, version, name, key, issued_at, expires_at}`.

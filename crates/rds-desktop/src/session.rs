@@ -102,6 +102,12 @@ pub struct SessionConfig {
     /// Hard ceiling for encoder bitrate — the grant's `max_bps`
     /// constraint lands here when the connection is grant-authorized.
     pub bitrate_ceiling: Option<u64>,
+    /// Deny input even when a backend is available. Encoder steering and
+    /// heartbeats remain usable. The agent derives this from verified grants.
+    pub view_only: bool,
+    /// Input backend override. `None` lazily probes on the input worker.
+    /// Synthetic sessions should supply a synthetic sink, never the host's.
+    pub input_sink: Option<Box<dyn crate::InputSink>>,
     /// Frame source override; `None` uses the platform capture backend.
     /// Synthetic sources are how tests pressurize the pipeline.
     pub producer: Option<Box<dyn FrameProducer>>,
@@ -219,6 +225,10 @@ pub async fn serve_desktop_with(
     let acks = hello.input_acks;
     let ceiling = config.bitrate_ceiling.unwrap_or(8_000_000).max(100_000);
     let controls = ProducerControls::new(4_000_000_u64.min(ceiling));
+    // No backend is opened for a view-only session. Blocking platform calls
+    // run on one bounded, session-owned worker, outside the async executor.
+    let mut input = None;
+    let mut input_sink = config.input_sink;
 
     // Capture+encode runs on a blocking thread; frames flow to the writer.
     let (tx, mut rx) = mpsc::channel::<Produced>(2);
@@ -369,6 +379,10 @@ pub async fn serve_desktop_with(
         loop {
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
+                    if config.view_only {
+                        tracing::debug!("view-only input dropped");
+                        continue;
+                    }
                     // The grant/display constraint was scoped to the
                     // hello's display — an event targeting another
                     // display is out of scope. Skip it (and don't ack:
@@ -381,15 +395,17 @@ pub async fn serve_desktop_with(
                         );
                         continue;
                     }
-                    #[cfg(all(target_os = "linux", feature = "x11"))]
-                    if let Err(e) = crate::input::x11::inject(&ev) {
+                    let input = input.get_or_insert_with(|| {
+                        super::input::worker::InputWorker::new(input_sink.take())
+                    });
+                    let seq = ev.seq;
+                    if let Err(e) = input.inject(ev).await {
                         tracing::warn!("input injection failed: {e}");
+                        continue;
                     }
-                    #[cfg(not(all(target_os = "linux", feature = "x11")))]
-                    let _ = &ev;
                     if acks {
                         let ack = DesktopEvent::InputAck {
-                            seq: ev.seq,
+                            seq,
                             handled_ts_ms: send_clock.now_ms(),
                         };
                         if write_frame(&mut send, &ack).await.is_err() {

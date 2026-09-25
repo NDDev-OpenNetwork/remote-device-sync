@@ -149,6 +149,33 @@ impl VerifiedGrant {
         self.payload.services.contains(&service)
     }
 
+    /// Stream admission; narrow capabilities never imply a broad grant.
+    /// Per-operation checks must still run inside sync and desktop handlers.
+    pub fn permits_service(&self, service: ServiceKind) -> bool {
+        match service {
+            ServiceKind::Sync => self.permits_sync_read() || self.permits_sync_write(),
+            ServiceKind::Desktop => self.permits_desktop_view(),
+            other => self.permits(other),
+        }
+    }
+
+    pub fn permits_sync_read(&self) -> bool {
+        self.permits(ServiceKind::Sync) || self.permits(ServiceKind::SyncRead)
+    }
+
+    pub fn permits_sync_write(&self) -> bool {
+        self.permits(ServiceKind::Sync) || self.permits(ServiceKind::SyncWrite)
+    }
+
+    pub fn permits_desktop_view(&self) -> bool {
+        self.permits(ServiceKind::Desktop) || self.permits(ServiceKind::DesktopView)
+    }
+
+    pub fn permits_desktop_control(&self) -> bool {
+        self.permits(ServiceKind::Desktop)
+            || (self.permits(ServiceKind::DesktopView) && self.permits(ServiceKind::DesktopControl))
+    }
+
     /// Whether a TCP target port is inside `constraints.tcp_ports`
     /// (`None` means the grant does not constrain ports).
     pub fn permits_port(&self, port: u16) -> bool {
@@ -359,6 +386,87 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directional_capabilities_preserve_legacy_scope_without_escalation() {
+        use ServiceKind::*;
+        let key = issuer();
+        // Every combination, including control without view and empty scope.
+        let capabilities = [
+            Sync,
+            SyncRead,
+            SyncWrite,
+            Desktop,
+            DesktopView,
+            DesktopControl,
+        ];
+        for mask in 0..(1 << capabilities.len()) {
+            let services: Vec<_> = capabilities
+                .iter()
+                .enumerate()
+                .filter_map(|(bit, kind)| (mask & (1 << bit) != 0).then_some(*kind))
+                .collect();
+            let has = |kind| services.contains(&kind);
+            let signed = Grant::issue(
+                &key,
+                [7; 32],
+                [8; 32],
+                [1; 16],
+                services.clone(),
+                Duration::from_secs(300),
+                Default::default(),
+            );
+            let grant = signed
+                .verify(
+                    &issuers(&key),
+                    &[7; 32],
+                    &[8; 32],
+                    Duration::from_secs(600),
+                    now_unix(),
+                )
+                .unwrap();
+            assert_eq!(grant.permits_sync_read(), has(Sync) || has(SyncRead));
+            assert_eq!(grant.permits_sync_write(), has(Sync) || has(SyncWrite));
+            assert_eq!(
+                grant.permits_service(Sync),
+                has(Sync) || has(SyncRead) || has(SyncWrite)
+            );
+            assert_eq!(
+                grant.permits_service(Desktop),
+                has(Desktop) || has(DesktopView)
+            );
+            assert_eq!(
+                grant.permits_desktop_control(),
+                has(Desktop) || (has(DesktopView) && has(DesktopControl))
+            );
+            assert_eq!(grant.permits(Sync), has(Sync));
+            assert_eq!(grant.permits(Desktop), has(Desktop));
+            assert!(!grant.permits_service(Tcp));
+            for kind in capabilities {
+                let mut payload = grant.payload.clone();
+                payload.revision += 1;
+                payload.expires_at += 60;
+                if has(kind) {
+                    payload.services.retain(|s| *s != kind);
+                } else {
+                    payload.services.push(kind);
+                }
+                let next = Grant::issue_at(&key, payload)
+                    .verify(
+                        &issuers(&key),
+                        &[7; 32],
+                        &[8; 32],
+                        Duration::from_secs(600),
+                        now_unix(),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    grant.permits_renewal(&next),
+                    Err(GrantError::InvalidRenewal)
+                ));
+            }
+        }
+    }
 
     fn issuer() -> SigningKey {
         SigningKey::from_bytes(&[42u8; 32])

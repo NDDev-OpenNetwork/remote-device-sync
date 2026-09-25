@@ -593,6 +593,9 @@ async fn serve_stream(
                                 hello,
                                 rds_desktop::SessionConfig {
                                     bitrate_ceiling: max_bps,
+                                    view_only: grant
+                                        .as_ref()
+                                        .is_some_and(|g| !g.permits_desktop_control()),
                                     ..Default::default()
                                 },
                             )
@@ -644,7 +647,7 @@ async fn serve_stream(
                     .await?;
                     anyhow::bail!("sync service not configured");
                 };
-                if !authz.try_sync_slot() {
+                let Some(_sync_slot) = authz.try_sync_slot() else {
                     write_frame(
                         &mut send,
                         &HelloAck::Error {
@@ -653,11 +656,25 @@ async fn serve_stream(
                     )
                     .await?;
                     anyhow::bail!("concurrent sync session refused");
-                }
+                };
                 write_frame(&mut send, &HelloAck::Ok).await?;
-                let res = rds_sync::engine::serve(conn, send, recv, dir).await;
-                authz.release_sync_slot();
-                res?;
+                let access = grant
+                    .as_ref()
+                    .map_or(rds_sync::engine::Access::READ_WRITE, |g| {
+                        rds_sync::engine::Access {
+                            read: g.permits_sync_read(),
+                            write: g.permits_sync_write(),
+                        }
+                    });
+                rds_sync::engine::serve_with_access(
+                    conn,
+                    send,
+                    recv,
+                    dir,
+                    access,
+                    rds_sync::engine::TRANSFER_TIMEOUT,
+                )
+                .await?;
             }
             StreamHello::Audio(_) => {
                 // Wire shape landed in protocol v2; capture/codec support
@@ -720,7 +737,7 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
     let Some(kind) = service_kind(hello) else {
         return Err("authz is not a service".into());
     };
-    if !grant.permits(kind) {
+    if !grant.permits_service(kind) {
         return Err(format!("service {kind:?} not granted"));
     }
     Ok(())

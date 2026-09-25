@@ -39,6 +39,22 @@ const READ_STALL: Duration = Duration::from_secs(300);
 /// Call the `*_with_timeout` entry points to select a shorter or longer budget.
 pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// Agent-side permissions, checked before any path or filesystem operation.
+/// Read means download from the agent; write means upload to the agent.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Access {
+    pub read: bool,
+    pub write: bool,
+}
+
+impl Access {
+    /// Compatibility policy for callers that already authorize both directions.
+    pub const READ_WRITE: Self = Self {
+        read: true,
+        write: true,
+    };
+}
+
 /// Progress/counters a completed (or interrupted) transfer reports.
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -72,7 +88,20 @@ pub async fn serve_with_timeout(
     dir: PathBuf,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    session(timeout, serve_inner(conn, send, recv, dir)).await
+    serve_with_access(conn, send, recv, dir, Access::READ_WRITE, timeout).await
+}
+
+/// Serve an authorized connection with explicit directional permissions and
+/// an absolute transfer budget. A refusal does not touch the sync root.
+pub async fn serve_with_access(
+    conn: Connection,
+    send: SendStream,
+    recv: RecvStream,
+    dir: PathBuf,
+    access: Access,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    session(timeout, serve_inner(conn, send, recv, dir, access)).await
 }
 
 async fn serve_inner(
@@ -80,6 +109,7 @@ async fn serve_inner(
     mut send: SendStream,
     mut recv: RecvStream,
     dir: PathBuf,
+    access: Access,
 ) -> anyhow::Result<()> {
     let first = read_timed::<_, SyncMsg>(&mut recv).await?;
     match first {
@@ -89,6 +119,10 @@ async fn serve_inner(
             root,
             chunk_count,
         } => {
+            if !access.write {
+                refuse(&mut send, "sync write not granted").await?;
+                bail!("sync write not granted");
+            }
             let rel = match check_rel_path(&rel_path) {
                 Ok(r) => r,
                 Err(e) => {
@@ -135,6 +169,10 @@ async fn serve_inner(
             Ok(())
         }
         SyncMsg::Request { rel_path } => {
+            if !access.read {
+                refuse(&mut send, "sync read not granted").await?;
+                bail!("sync read not granted");
+            }
             let rel = match check_rel_path(&rel_path) {
                 Ok(r) => r,
                 Err(e) => {

@@ -21,6 +21,26 @@ use rds_desktop::client::{DesktopSession, SessionOpts};
 use rds_desktop::{SessionClock, SessionConfig, SyntheticProducer, serve_desktop_with};
 use rds_net::{Endpoint, EndpointAddr, EndpointConfig, bind_noq_with_socket};
 
+#[derive(Clone, Default)]
+struct TestInput {
+    view_only: bool,
+    fail: bool,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl rds_desktop::InputSink for TestInput {
+    fn inject(&mut self, _: &rds_core::InputEvent) -> Result<(), rds_desktop::DesktopError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail {
+            Err(rds_desktop::DesktopError::Input(
+                "synthetic injection failure".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// One endpoint pair with a synthetic desktop session live.
 struct Harness {
     session: DesktopSession,
@@ -92,6 +112,7 @@ async fn spawn_serving(
     frame_bytes: usize,
     keyframe_every: u64,
     clock: SessionClock,
+    input: TestInput,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let conn = server_ep.accept().await.unwrap().await.unwrap();
@@ -113,6 +134,8 @@ async fn spawn_serving(
                     recv,
                     hello,
                     SessionConfig {
+                        view_only: input.view_only,
+                        input_sink: Some(Box::new(input)),
                         producer: Some(Box::new(
                             SyntheticProducer::new(fps, 640, 480, frame_bytes)
                                 .keyframe_every(keyframe_every),
@@ -136,6 +159,25 @@ async fn harness(
     impair: Option<Impairment>,
     input_acks: bool,
 ) -> Harness {
+    harness_with_input(
+        fps,
+        frame_bytes,
+        keyframe_every,
+        impair,
+        input_acks,
+        TestInput::default(),
+    )
+    .await
+}
+
+async fn harness_with_input(
+    fps: u32,
+    frame_bytes: usize,
+    keyframe_every: u64,
+    impair: Option<Impairment>,
+    input_acks: bool,
+    input: TestInput,
+) -> Harness {
     let clock = SessionClock::default();
     let (server_ep, client_ep, impair_stats, target) = endpoints(impair).await;
     let server_task = spawn_serving(
@@ -144,6 +186,7 @@ async fn harness(
         frame_bytes,
         keyframe_every,
         clock.clone(),
+        input,
     )
     .await;
     let conn = client_ep.connect(target, rds_core::ALPN).await.unwrap();
@@ -277,7 +320,9 @@ async fn bounded_queue_newest_wins() {
 /// C5: heartbeat + input acks — server-side measurement mode round-trips.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn input_acks_and_heartbeat_roundtrip() {
-    let mut h = harness(30, 1024, 60, None, true).await;
+    let input = TestInput::default();
+    let calls = input.calls.clone();
+    let mut h = harness_with_input(30, 1024, 60, None, true, input).await;
 
     let seq = h
         .session
@@ -300,9 +345,50 @@ async fn input_acks_and_heartbeat_roundtrip() {
         }
     }
     assert!(got_ack, "no input ack received");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(got_hb, "no heartbeat echo received");
     assert!(h.session.control_rtt().is_some(), "heartbeat rtt measured");
     h.server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn view_only_and_failed_injection_never_ack_but_keep_control_alive() {
+    for impair in [None, Some(Impairment::clean())] {
+        for view_only in [true, false] {
+            let input = TestInput {
+                view_only,
+                fail: !view_only,
+                ..Default::default()
+            };
+            let calls = input.calls.clone();
+            let mut h = harness_with_input(30, 1024, 60, impair, true, input).await;
+            for _ in 0..2 {
+                h.session
+                    .send_input(rds_core::InputKind::PointerMotion { dx: 3.0, dy: -2.0 })
+                    .await
+                    .unwrap();
+            }
+            h.session.heartbeat().await.unwrap();
+            // The reliable control stream processes both inputs before this
+            // heartbeat. Any false success ACK would arrive first.
+            let event = tokio::time::timeout(Duration::from_secs(5), h.session.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(event, DesktopEvent::Heartbeat { .. }),
+                "unexpected {event:?}"
+            );
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                if view_only { 0 } else { 2 }
+            );
+            h.server_task.abort();
+            let _ = h.server_task.await;
+            h._client_ep.close().await;
+            h._server_ep.close().await;
+        }
+    }
 }
 
 /// C5 impairment + G5 latency gate: 5% loss + 30 ms jitter on a 50 ms

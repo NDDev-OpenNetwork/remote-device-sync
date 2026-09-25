@@ -41,7 +41,7 @@ Neither increment closes these product gaps or any wave.
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
-| W2.3 | Partial; destination-bound renewable grants | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. Tenant/policy binding, finer scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
+| W2.3 | Partial; destination-bound renewable grants and directional scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Tenant/policy binding, per-path/account scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
 | W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer/sync manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
@@ -49,7 +49,9 @@ Neither increment closes these product gaps or any wave.
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
 | W3.6 | Partial; validated selection and local child failure isolation | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link route loss and known tunnel closure retire stale relay selection. Mux child send/receive failures are isolated; policy withdraws failed advertisements, excludes failed routes even when last-path close is refused, and closes held connections after all-child loss. Real loopback fixtures preserve open-stream traffic and accept new connections on the surviving child. Policy-observed telemetry exposes sticky event loss and unknown selection. Full path-event resynchronization, lossless retirement metrics, interface/socket recreation, per-service scheduling and physical-network qualification remain open. |
+| W4.4 | Partial; directional service boundaries | Real iroh/noq agents refuse writes with `SyncRead` and reads with `SyncWrite`, permit authorized transfers, and remain usable after refusal/cancellation. A view-only desktop never calls its input sink; failed injection never emits a success ACK. Linux/macOS account isolation, per-path policy, native seat/focus boundaries, consent and concurrent-role qualification remain open. See [receipt](reports/rds-service-scopes-20260926.md). |
 | W5.1/W5.3/W5.5 | Partial; native SSH client and standard PTY | `rds-ssh` uses russh 0.63.3 over pinned managed/direct streams. Explicit host pins, key/agent authentication, PTY/exec acknowledgements, terminal restoration, resize, cancellation and complete exit/output handling have Linux regression coverage and an OpenSSH interop fixture. SSH-specific fixed telemetry names are accepted by Vector; JSON uses a separate private file and terminal console logging pauses during SSH. GDS host/account provisioning, certificates/MFA, native macOS, broker/reattachment and mixed-load/network qualification remain open. See [contract](ssh.md). |
+| W6.4 | Partial; input ACK semantics | Input ACK follows a successful sink result; unavailable/failed/denied input has no ACK. One lazily created bounded worker reuses the sink outside Tokio's async executor and drops queued work on cancellation. Real evdev/X11 mapping, screen/seat/focus targeting, held-key release and input-to-visible qualification remain open. |
 | W10.1/W10.2 | Partial; O1 foundation and O2 admin/source increment | Shared bounded Rust telemetry and Vector/OpenObserve pipeline; opt-in authenticated loopback metrics on agent/relay/server, aggregate source observations and old public metrics removal. Durable policy/catalog observations and effective agent revocation revision/lease are implemented. Finer queue/task and upstream adapter coverage, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
 
 ## Authorization change
@@ -1346,3 +1348,32 @@ network and mixed-load acceptance. Existing W0–W10 and O2–O6 tasks remain op
 Scope reductions require explicit revocation and new authorization today. No
 wave-close, benchmark latency result, installed-agent update or deployment is
 claimed by this increment.
+
+## Directional grants and truthful input acknowledgment — 2026-09-26
+
+Baseline `a3cdbd036b54d4cd2d4c1d17fd3ca59a38f5288c`. The
+[scope increment](reports/rds-service-scopes-20260926.md) implements `SyncRead`
+and `SyncWrite` before filesystem access, and `DesktopView` plus the optional
+`DesktopControl` input modifier. Legacy broad grants retain their semantics.
+Tags 6–9 are appended; grant v2 and IPC v3 stay unchanged. Old decoders reject
+unsupported scopes, and renewal cannot change the signed service list.
+
+Sync admission now owns its exclusive slot across the hello ACK and body;
+early errors and cancellation cannot leave a live connection permanently busy.
+View-only never invokes an input sink. Controlling sessions create one lazy,
+bounded blocking worker, reuse its backend and acknowledge only successful
+injection results. Dropping it discards queued input and releases the sink after
+any in-progress native call returns; it cannot undo that call. Native
+screen/seat/focus isolation, key mapping and held-key release remain W6.4.
+
+Linux validation passed fmt, default/X11/all-feature Clippy, **535 default** and
+**585 all-feature** tests, an explicit OpenSSH interoperability test and
+cargo-deny. Both workspace runs have three opt-in cases ignored; OpenSSH was
+run separately. The 228 source/configuration hashes stayed fixed. No Vector
+configuration changed and the full ingestion/alert pipeline was not rerun.
+
+Next: tenant/policy revision and per-path/account scope binding; authenticated
+GDS issuance, durable renewal and desired-policy reconciliation; managed
+viewer/sync integration; native platform and real network/resource acceptance.
+This is a partial W2.3/W4.4, W2.5 and W6.4 increment. All waves remain open;
+no installed process, issuer or deployment was changed.

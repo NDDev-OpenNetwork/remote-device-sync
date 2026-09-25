@@ -235,8 +235,16 @@ new Rust modules only where a real ownership boundary is needed.
 W2.3 implementation update (2026-09-25): [grant v2 and explicit renewal](grant-leases.md)
 bind subject/audience/session, preserve stable-ID revocation and continuous-clock
 expiry, and serialize managed renewal. Scope reductions currently require revoke
-and fresh authorization; tenant/policy binding, finer service scopes and automatic
+and fresh authorization; tenant/policy binding, per-path/account scopes and automatic
 issuer renewal remain open. This is not the `r2-session-core` wave-close gate.
+
+W2.3/W4.4 implementation update (2026-09-26): directional `SyncRead`/`SyncWrite`
+and desktop `DesktopView`/`DesktopControl` capabilities are enforced at operation
+boundaries. Legacy broad permissions retain their meaning, unknown appended
+tags fail closed, and renewals cannot change scope. Sync admission now owns its
+slot across ACK failures/cancellation; input ACKs require backend success.
+See the [contract](grant-leases.md) and [Linux receipt](reports/rds-service-scopes-20260926.md).
+This does not close enrollment, account/tenant isolation or native platform gates.
 
 ## W3 — complete owned connectivity and recovery
 
