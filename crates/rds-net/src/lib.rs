@@ -518,75 +518,73 @@ impl Connection {
         self.inner.closed().await;
     }
 
-    /// Snapshot of every live path's transport counters, normalized
-    /// across backends. Used by media pacing (WS5) and metrics (WS7).
+    /// Counters for currently observed live paths. Noq observations contain
+    /// only the handshake path and subsequently consumed Established events.
+    /// Use [`Self::path_stats_snapshot`] when coverage matters.
     pub fn path_stats(&self) -> Vec<PathStats> {
+        self.path_stats_snapshot().paths
+    }
+
+    /// Path counters with their observation scope. This is not an atomic
+    /// connection-wide engine snapshot on Noq, even before event loss.
+    pub fn path_stats_snapshot(&self) -> PathStatsSnapshot {
         match &self.inner {
-            ConnectionInner::Iroh(c) => c
-                .paths()
-                .iter()
-                .map(|p| {
-                    let s = p.stats();
-                    PathStats {
-                        path_id: path_id_u64(p.id()),
-                        rtt: s.rtt,
-                        cwnd: s.cwnd,
-                        sent: s.udp_tx.datagrams,
-                        lost: s.lost_packets,
-                        sent_bytes: s.udp_tx.bytes,
-                        recv_bytes: s.udp_rx.bytes,
-                        congestion_events: s.congestion_events,
-                        selected: p.is_selected(),
-                        via_relay: p.is_relay(),
-                    }
-                })
-                .collect(),
+            ConnectionInner::Iroh(c) => PathStatsSnapshot {
+                paths: c
+                    .paths()
+                    .iter()
+                    .map(|p| {
+                        let s = p.stats();
+                        PathStats {
+                            path_id: path_id_u64(p.id()),
+                            rtt: s.rtt,
+                            cwnd: s.cwnd,
+                            sent: s.udp_tx.datagrams,
+                            lost: s.lost_packets,
+                            sent_bytes: s.udp_tx.bytes,
+                            recv_bytes: s.udp_rx.bytes,
+                            congestion_events: s.congestion_events,
+                            selected: p.is_selected(),
+                            via_relay: p.is_relay(),
+                        }
+                    })
+                    .collect(),
+                coverage: PathStatsCoverage::BackendSnapshot,
+            },
             #[cfg(feature = "transport-noq")]
-            ConnectionInner::Noq(c) => {
-                // PathIds are sequential from ZERO; probe until a run of
-                // misses marks the end of the live set.
-                let mut out = Vec::new();
-                let mut misses = 0u32;
-                for raw in 0..64u32 {
-                    match c.inner().path_stats(noq::PathId::from(raw)) {
-                        Some(s) => {
-                            misses = 0;
-                            out.push(PathStats {
-                                path_id: u64::from(raw),
-                                rtt: s.rtt,
-                                cwnd: s.cwnd,
-                                sent: s.udp_tx.datagrams,
-                                lost: s.lost_packets,
-                                sent_bytes: s.udp_tx.bytes,
-                                recv_bytes: s.udp_rx.bytes,
-                                congestion_events: s.congestion_events,
-                                selected: raw == 0,
-                                via_relay: false,
-                            });
-                        }
-                        None => {
-                            misses += 1;
-                            if misses >= 8 {
-                                break;
-                            }
-                        }
-                    }
-                }
-                out
-            }
+            ConnectionInner::Noq(c) => c.path_stats_snapshot(),
         }
     }
 
-    /// Stats of the path currently selected for transmission — the one
-    /// media pacing should react to. `None` before the first path exists.
+    /// Stats of the observed selected path, for media pacing. Returns None
+    /// when selection is unknown, closed, or Noq path events have been lost;
+    /// historical traffic volume is not evidence of current selection.
     pub fn current_path_stats(&self) -> Option<PathStats> {
-        let paths = self.path_stats();
-        paths
-            .iter()
-            .find(|p| p.selected)
-            .copied()
-            .or_else(|| paths.into_iter().max_by_key(|p| p.sent))
+        self.path_stats().into_iter().find(|p| p.selected)
     }
+}
+
+/// Scope of the accompanying path observation, not a delivery guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStatsCoverage {
+    /// Snapshot exposed by the backend's own path manager (iroh).
+    BackendSnapshot,
+    /// Noq paths whose validation the RDS policy has observed. Events may be
+    /// queued, and additional engine paths are not inferred from addresses.
+    PolicyObserved {
+        /// Cumulative broadcast events lost. Never reset without a complete
+        /// validated-path reconciliation; currently no such engine API exists.
+        lost_events: u64,
+        /// Whether the observer and connection are still running.
+        driver_running: bool,
+    },
+}
+
+/// Current observed paths, with an explicit coverage contract.
+#[derive(Debug, Clone)]
+pub struct PathStatsSnapshot {
+    pub paths: Vec<PathStats>,
+    pub coverage: PathStatsCoverage,
 }
 
 /// Per-path transport counters, backend-normalized. All fields are
@@ -609,15 +607,17 @@ pub struct PathStats {
     pub recv_bytes: u64,
     /// Congestion events signalled on this path.
     pub congestion_events: u64,
-    /// Whether the connection currently transmits on this path.
+    /// Observed preferred path: iroh selection, or the last successfully
+    /// applied Noq policy choice that is still Available. Not per-packet proof.
     pub selected: bool,
     /// Whether this path traverses a relay (vs a direct address).
     pub via_relay: bool,
 }
 
 fn path_id_u64(id: iroh::endpoint::PathId) -> u64 {
-    // PathId's inner u32 is crate-private; its Display prints the number.
-    id.to_string().parse().unwrap_or(u64::MAX)
+    // Invariant of the pinned noq-proto PathId shared by both backends:
+    // Display delegates to its inner u32. Never fabricate a colliding ID.
+    id.to_string().parse().expect("PathId Display is a u32")
 }
 
 impl fmt::Debug for Connection {

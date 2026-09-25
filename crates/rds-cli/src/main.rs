@@ -232,9 +232,9 @@ async fn main() -> anyhow::Result<()> {
                 let rtt = rds_cli::ping(&conn, i as u64).await?;
                 println!("pong seq={i} rtt={:.1}ms", rtt.as_secs_f64() * 1000.0);
             }
-            // Path evidence for ops/reports: which transport path the
-            // connection actually selected, with its smoothed RTT.
-            for p in conn.path_stats() {
+            let snapshot = conn.path_stats_snapshot();
+            println!("path coverage={:?}", snapshot.coverage);
+            for p in snapshot.paths {
                 println!(
                     "path id={} via={} selected={} rtt={:.1}ms sent={} lost={} cwnd={}",
                     p.path_id,

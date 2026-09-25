@@ -561,9 +561,14 @@ async fn owned_binary_forwards_encrypted_traffic_and_reuses_identity_after_resta
                 assert_eq!(recv.read_to_end(8).await?, b"response");
                 local.send_datagram(b"datagram".to_vec().into())?;
                 assert_eq!(&remote.read_datagram().await?[..], b"datagram");
+                let paths = [local.path_stats(), remote.path_stats()];
+                let registry = a.metrics();
+                let mut sampler = registry.sampler(local.clone());
+                sampler.sample();
+                let counters = registry.snapshot();
                 local.close(0u32.into(), b"fixture complete");
                 remote.close(0u32.into(), b"fixture complete");
-                Ok::<_, anyhow::Error>(())
+                Ok::<_, anyhow::Error>((paths, counters))
             })
             .await;
             tokio::time::timeout(Duration::from_secs(3), async {
@@ -573,9 +578,23 @@ async fn owned_binary_forwards_encrypted_traffic_and_reuses_identity_after_resta
             .unwrap();
             process.stop().await;
             assert!(
-                matches!(&traffic, Ok(Ok(()))),
+                matches!(&traffic, Ok(Ok(_))),
                 "relay traffic failed: {traffic:?}"
             );
+            let (paths, counters) = traffic.unwrap().unwrap();
+            assert_eq!(counters["rds_net_bytes_sent_total{via=\"direct\"}"], 0);
+            assert_eq!(counters["rds_net_bytes_received_total{via=\"direct\"}"], 0);
+            assert!(counters["rds_net_bytes_sent_total{via=\"relay\"}"] > 0);
+            assert!(counters["rds_net_bytes_received_total{via=\"relay\"}"] > 0);
+            assert_eq!(counters["rds_net_policy_observed_connections"], 1);
+            assert_eq!(counters["rds_net_degraded_path_observers"], 0);
+            assert_eq!(counters["rds_net_selected_path_known"], 1);
+            for paths in paths {
+                assert_eq!(paths.len(), 1, "single-path fixture");
+                assert!(paths[0].via_relay, "relay traffic was labeled direct");
+                assert!(paths[0].selected);
+                assert!(paths[0].sent_bytes > 0 && paths[0].recv_bytes > 0);
+            }
             let _rebound = std::net::UdpSocket::bind(ready.addr).unwrap();
         }
     })

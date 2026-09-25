@@ -77,12 +77,18 @@ async fn silent_additional_path_starts_as_backup() {
     let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let id = open_extra_when_ready(&a, silent.local_addr().unwrap()).await;
     let status = a.inner().path(id).unwrap().status().unwrap();
+    let paths = rds_net::Connection::from(a.clone()).path_stats();
     client.close().await;
     server.close().await;
     assert_eq!(
         status,
         PathStatus::Backup,
         "pending path was made preferred before validation"
+    );
+    assert!(
+        paths
+            .iter()
+            .all(|path| path.path_id.to_string() != id.to_string())
     );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -117,6 +123,25 @@ async fn validated_secondary_carries_data_after_primary_closes() {
             .unwrap()[..],
         b"validated replacement"
     );
+    let facade = rds_net::Connection::from(a.clone());
+    // Applying engine status and publishing the policy snapshot are separate
+    // synchronous steps on another worker; wait for observable convergence.
+    let selected = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(path) = facade.current_path_stats()
+                && path.path_id.to_string() == id.to_string()
+            {
+                break path;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
     client.close().await;
     server.close().await;
+    assert_eq!(
+        selected.map(|path| path.path_id.to_string()).ok(),
+        Some(id.to_string()),
+        "telemetry must follow the validated replacement"
+    );
 }

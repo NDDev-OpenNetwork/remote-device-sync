@@ -31,7 +31,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
-| W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link send failure and unknown mapping are route loss; known tunnel closure also retires stale relay selection and promotes eligible direct paths. Path-event resynchronization, complete metrics and generic child failure isolation remain open. |
+| W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link send failure and unknown mapping are route loss; known tunnel closure also retires stale relay selection and promotes eligible direct paths. Policy-observed telemetry now follows live validated paths without an ID scan, classifies relay addresses, and exposes sticky event loss and unknown selection. Full path-event resynchronization, lossless retirement metrics and generic child failure isolation remain open. |
 
 ## Authorization change
 
@@ -1011,3 +1011,23 @@ iroh supervisor-error path. See [contract](relay-runtime.md) and
 [receipt](reports/rds-runtime-supervision-20260925.md). Hung-task detection,
 automatic recovery, kernel-I/O shutdown deadlines and platform/network/service
 qualification remain open. No wave closes.
+
+
+## Observed path telemetry
+
+Real regressions reproduced stale path-zero selection after migration and direct
+labels on relay-only traffic. Noq policy now shares validated weak path metadata
+with the facade, without guessed ID scans. The API and CLI expose observation
+coverage, sticky event loss and observer liveness; unknown selection does not
+fall back to historical traffic. Metrics keep RTT/cwnd/validity together, expose
+coverage, and retire path baselines with observed paths.
+
+A 70-path actual transport campaign covers high IDs, migration and real bounded
+broadcast overflow. Both owned binary restart fixtures check relay-only byte
+buckets. Formatting, three Clippy lanes, **419 workspace** and
+**226 expanded all-feature tests** passed using fresh isolated build
+artifacts after a build-directory interruption. See [contract](path-telemetry.md)
+and [receipt](reports/rds-path-telemetry-20260925.md). Full validated inventory
+reconciliation, lossless retirement metrics, weak sampler ownership, generic
+socket failure isolation and platform/network qualification remain open. No
+wave closes and no throughput/latency improvement is claimed.

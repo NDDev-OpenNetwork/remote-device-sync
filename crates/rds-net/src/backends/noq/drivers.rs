@@ -1,6 +1,6 @@
 //! Endpoint-owned policy tasks. Completed tasks release storage immediately.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -22,7 +22,7 @@ impl Drivers {
         candidates: Vec<std::net::SocketAddr>,
         peer_lease: Option<super::relay::PeerLease>,
         relay: Option<super::relay::RelayHandle>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Arc<super::telemetry::Telemetry>> {
         let _guard = self.admission.lock().unwrap_or_else(|p| p.into_inner());
         if self.tasks.is_closed() {
             conn.close(0u32.into(), b"endpoint closed");
@@ -31,10 +31,17 @@ impl Drivers {
         let weak = conn.weak_handle();
         let shutdown = self.shutdown.clone();
         // Subscribe before spawning, preserving the validation-event boundary.
-        let policy = super::policy::connection_driver(
+        let events = conn.path_events();
+        let telemetry = super::telemetry::Telemetry::new(conn);
+        let observer = super::policy::Observer {
+            events,
+            telemetry: telemetry.clone(),
+        };
+        let guard = telemetry.guard();
+        let policy = super::policy::connection_driver_observed(
             weak.clone(),
             conn.nat_traversal_updates(),
-            conn.path_events(),
+            observer,
             metrics,
             local_addrs,
             candidates,
@@ -44,6 +51,7 @@ impl Drivers {
             // Streams may outlive the Connection facade. The weak policy
             // lifetime, not facade drop, owns this metadata-only route lease.
             let _peer_lease = peer_lease;
+            let _observer_guard = guard;
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
@@ -57,7 +65,7 @@ impl Drivers {
                 _ = policy => {}
             }
         });
-        Ok(())
+        Ok(telemetry)
     }
 
     pub fn close_admission(&self) {

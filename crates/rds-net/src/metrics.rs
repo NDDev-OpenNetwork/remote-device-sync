@@ -3,8 +3,9 @@
 //!
 //! The model is deliberately small: an endpoint owns one [`Registry`]
 //! of atomics; a [`ConnSampler`] diffs a connection's cumulative
-//! `path_stats()` into it so relay-vs-direct accounting is exact even
-//! when paths migrate. QNT attempt/success counters are driven by the
+//! observed path counters into direct/relay buckets. Sampling can miss short
+//! paths and final increments after retirement; these are observed totals,
+//! not lossless accounting. Noq coverage and event loss are explicit. QNT attempt/success counters are driven by the
 //! noq policy driver — on iroh they stay zero (`paths_seen{via=direct}`
 //! appearing after a relay-only start is the equivalent signal).
 //!
@@ -13,11 +14,11 @@
 //! dependency, just the counter names the bench reports cite.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{Connection, PathStats};
+use crate::{Connection, PathStats, PathStatsCoverage};
 
 /// Shared counter set for one endpoint. Clone to share; every clone
 /// writes the same counters.
@@ -45,12 +46,22 @@ struct Counters {
     qnt_success: AtomicU64,
     /// Gauge: connections with a live sampler.
     active_connections: AtomicU64,
-    /// Gauge: last-sampled selected-path RTT, microseconds.
-    rtt_us: AtomicU64,
-    /// Gauge: last-sampled selected-path congestion window, bytes.
-    cwnd_bytes: AtomicU64,
+    /// Last-sampled selected-path RTT/cwnd and validity are one observation.
+    /// A scrape must not combine different samplers' values.
+    selected_path: Mutex<Option<SelectedPathSample>>,
     /// Gauge: live paths across sampled connections.
     live_paths: AtomicU64,
+    /// Connections sampled through an event-driven (not full snapshot) view.
+    policy_observed_connections: AtomicU64,
+    /// Policy views with lost events or a stopped observer.
+    degraded_path_observers: AtomicU64,
+    path_events_lost: AtomicU64,
+}
+
+#[derive(Clone, Copy)]
+struct SelectedPathSample {
+    rtt_us: u64,
+    cwnd_bytes: u64,
 }
 
 impl Registry {
@@ -90,6 +101,9 @@ impl Registry {
             conn,
             seen: HashMap::new(),
             last_live: 0,
+            last_policy: 0,
+            last_degraded: 0,
+            last_lost_events: 0,
         }
     }
 
@@ -97,6 +111,7 @@ impl Registry {
     /// embed and `render_prometheus` serializes.
     pub fn snapshot(&self) -> BTreeMap<&'static str, u64> {
         let c = &*self.inner;
+        let selected = *c.selected_path.lock().unwrap_or_else(|p| p.into_inner());
         BTreeMap::from([
             (
                 "rds_net_connections_opened_total",
@@ -162,9 +177,22 @@ impl Registry {
                 "rds_net_active_connections",
                 c.active_connections.load(Ordering::Relaxed),
             ),
-            ("rds_net_rtt_us", c.rtt_us.load(Ordering::Relaxed)),
-            ("rds_net_cwnd_bytes", c.cwnd_bytes.load(Ordering::Relaxed)),
+            ("rds_net_rtt_us", selected.map_or(0, |s| s.rtt_us)),
+            ("rds_net_cwnd_bytes", selected.map_or(0, |s| s.cwnd_bytes)),
             ("rds_net_live_paths", c.live_paths.load(Ordering::Relaxed)),
+            (
+                "rds_net_policy_observed_connections",
+                c.policy_observed_connections.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_net_degraded_path_observers",
+                c.degraded_path_observers.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_net_path_events_lost_total",
+                c.path_events_lost.load(Ordering::Relaxed),
+            ),
+            ("rds_net_selected_path_known", u64::from(selected.is_some())),
         ])
     }
 
@@ -177,6 +205,9 @@ impl Registry {
             "rds_net_rtt_us",
             "rds_net_cwnd_bytes",
             "rds_net_live_paths",
+            "rds_net_policy_observed_connections",
+            "rds_net_degraded_path_observers",
+            "rds_net_selected_path_known",
         ];
         let mut out = String::new();
         for (name, value) in self.snapshot() {
@@ -195,7 +226,8 @@ impl Registry {
 /// Folds one connection's cumulative per-path counters into a
 /// [`Registry`]. `sample()` is cheap (a `path_stats()` snapshot plus a
 /// diff); `run()` samples on an interval until the connection closes
-/// and emits a final sample so nothing is lost at teardown.
+/// and attempts a final sample. Paths retired between samples (including
+/// teardown) and their final increments can be missed.
 pub struct ConnSampler {
     registry: Registry,
     conn: Connection,
@@ -203,13 +235,22 @@ pub struct ConnSampler {
     /// at the last sample.
     seen: HashMap<u64, (u64, u64, u64, u64, u64)>,
     last_live: u64,
+    last_policy: u64,
+    last_degraded: u64,
+    last_lost_events: u64,
 }
 
 impl ConnSampler {
     /// Fold current `path_stats` into the registry. Safe to call any
     /// number of times — only deltas count.
     pub fn sample(&mut self) {
-        let paths = self.conn.path_stats();
+        let snapshot = self.conn.path_stats_snapshot();
+        self.observe_coverage(snapshot.coverage);
+        let paths = snapshot.paths;
+        // A retired path ID is never reused by either pinned backend. Keep
+        // only live baselines, bounding storage by concurrent observed paths.
+        self.seen
+            .retain(|id, _| paths.iter().any(|path| path.path_id == *id));
         let mut live = 0u64;
         for p in &paths {
             live += 1;
@@ -237,16 +278,16 @@ impl ConnSampler {
                 ),
             );
         }
-        if let Some(sel) = paths.iter().find(|p| p.selected).or(paths.first()) {
-            self.registry
-                .inner
-                .rtt_us
-                .store(sel.rtt.as_micros() as u64, Ordering::Relaxed);
-            self.registry
-                .inner
-                .cwnd_bytes
-                .store(sel.cwnd, Ordering::Relaxed);
-        }
+        let selected = paths.iter().find(|p| p.selected);
+        *self
+            .registry
+            .inner
+            .selected_path
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = selected.map(|sel| SelectedPathSample {
+            rtt_us: sel.rtt.as_micros().min(u64::MAX.into()) as u64,
+            cwnd_bytes: sel.cwnd,
+        });
         self.registry
             .inner
             .live_paths
@@ -256,6 +297,40 @@ impl ConnSampler {
             .live_paths
             .fetch_add(live, Ordering::Relaxed);
         self.last_live = live;
+    }
+
+    fn observe_coverage(&mut self, coverage: PathStatsCoverage) {
+        let (policy, degraded, lost) = match coverage {
+            PathStatsCoverage::BackendSnapshot => (0, 0, 0),
+            PathStatsCoverage::PolicyObserved {
+                lost_events,
+                driver_running,
+            } => (
+                1,
+                u64::from(lost_events != 0 || !driver_running),
+                lost_events,
+            ),
+        };
+        let counters = &self.registry.inner;
+        counters
+            .policy_observed_connections
+            .fetch_sub(self.last_policy, Ordering::Relaxed);
+        counters
+            .policy_observed_connections
+            .fetch_add(policy, Ordering::Relaxed);
+        counters
+            .degraded_path_observers
+            .fetch_sub(self.last_degraded, Ordering::Relaxed);
+        counters
+            .degraded_path_observers
+            .fetch_add(degraded, Ordering::Relaxed);
+        counters.path_events_lost.fetch_add(
+            lost.saturating_sub(self.last_lost_events),
+            Ordering::Relaxed,
+        );
+        self.last_policy = policy;
+        self.last_degraded = degraded;
+        self.last_lost_events = lost;
     }
 
     /// Sample every `interval` until the connection closes, with a
@@ -305,6 +380,14 @@ impl ConnSampler {
 
 impl Drop for ConnSampler {
     fn drop(&mut self) {
+        self.registry
+            .inner
+            .policy_observed_connections
+            .fetch_sub(self.last_policy, Ordering::Relaxed);
+        self.registry
+            .inner
+            .degraded_path_observers
+            .fetch_sub(self.last_degraded, Ordering::Relaxed);
         self.registry
             .inner
             .active_connections

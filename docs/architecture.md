@@ -479,14 +479,20 @@ changed with this filesystem adapter.
 
 `rds-net::metrics` gives every endpoint a [`Registry`] of atomic
 counters; a per-connection `ConnSampler` diffs cumulative
-`path_stats()` into it, so the `via="direct"`/`via="relay"` split stays
-exact across path migration. Counters: connections opened/accepted,
+observed path counters into direct/relay buckets. Noq uses shared weak metadata
+from the validated-path policy, with explicit event-loss and observer-liveness
+coverage; it never scans a guessed numeric ID range. Sampling can miss short
+paths and final retired-path increments. Counters: connections opened/accepted,
 datagrams and bytes sent/lost per path kind, congestion events, paths
 seen, QNT attempts/success (driven by the noq policy driver — iroh
 does not expose its hole-punch attempts, where
 `paths_seen{via="direct"}` appearing after a relay-only start is the
 equivalent signal). Gauges: active connections, selected-path RTT,
-cwnd, live paths. `Registry::render_prometheus` emits text exposition
+cwnd, observed live paths, policy-observed/degraded connections and selection
+validity; lost path events are cumulative. Unknown selection does not substitute
+a historical or arbitrary path. The last sample's RTT/cwnd/validity are stored
+together. See [path observation contract](path-telemetry.md).
+`Registry::render_prometheus` emits text exposition
 behind the `metrics` feature — no prometheus dependency.
 
 `rds-server` serves `GET /v1/metrics` on the directory listener with
@@ -501,8 +507,10 @@ inside an `rds.conn` span carrying `peer` and a monotonic
 under it, and the sync engine logs accept/complete events with byte
 and chunk counts, so `session_id` filters a whole session across
 services. Bench reports embed the endpoint registry snapshot they ran
-against (`metrics:` block, `client_`/`agent_` prefixed) — every number
-in `docs/reports/` comes from the harness reading these counters.
+against (`metrics:` block, `client_`/`agent_` prefixed). Each report states its
+measurement or regression-test scope; sampled counters do not prove complete
+wire accounting. Historical Noq path evidence predating the telemetry fix
+requires a new run for qualification.
 
 ## Milestones
 

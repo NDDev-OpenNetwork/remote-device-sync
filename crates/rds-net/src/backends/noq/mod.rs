@@ -25,6 +25,9 @@ mod hmac;
 pub mod policy;
 pub mod relay;
 pub mod socket;
+mod telemetry;
+#[cfg(test)]
+mod telemetry_tests;
 mod tls;
 
 use std::fmt;
@@ -353,11 +356,12 @@ impl Endpoint {
 
         // Subscribe before any additional path can finish validation. Only
         // the completed handshake is initially eligible for path selection.
-        self.wire_connection(&conn, attempts, peer_lease)?;
+        let telemetry = self.wire_connection(&conn, attempts, peer_lease)?;
 
         Ok(Connection {
             inner: conn,
             remote_id,
+            telemetry,
         })
     }
 
@@ -423,7 +427,7 @@ impl Endpoint {
         conn: &noq::Connection,
         candidates: Vec<SocketAddr>,
         peer_lease: Option<relay::PeerLease>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Arc<telemetry::Telemetry>> {
         let mut ours = self.advertised_socket_addrs();
         if peer_lease.is_some()
             && self
@@ -433,7 +437,7 @@ impl Endpoint {
         {
             ours.push(relay::synthetic_for(&self.id));
         }
-        self.drivers.spawn(
+        let telemetry = self.drivers.spawn(
             conn,
             self.metrics.clone(),
             ours.clone(),
@@ -443,7 +447,7 @@ impl Endpoint {
         )?;
         policy::advertise_addrs(conn, &ours);
         policy::initiate_traversal_round(conn, &self.metrics);
-        Ok(())
+        Ok(telemetry)
     }
 
     /// Close all connections and wait for this endpoint's policy tasks.
@@ -562,10 +566,14 @@ impl Future for Incoming {
                                     lease,
                                     self.relay.clone(),
                                 )
-                                .map(|()| {
+                                .map(|telemetry| {
                                     policy::advertise_addrs(&inner, &ours);
                                     policy::initiate_traversal_round(&inner, &self.metrics);
-                                    Connection { inner, remote_id }
+                                    Connection {
+                                        inner,
+                                        remote_id,
+                                        telemetry,
+                                    }
                                 })
                         }
                         None => Err(anyhow::anyhow!("peer presented no identity")),
@@ -591,6 +599,7 @@ impl Future for Incoming {
 pub struct Connection {
     inner: noq::Connection,
     remote_id: EndpointId,
+    telemetry: Arc<telemetry::Telemetry>,
 }
 
 impl fmt::Debug for Connection {
@@ -603,6 +612,10 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
+    pub(crate) fn path_stats_snapshot(&self) -> crate::PathStatsSnapshot {
+        self.telemetry.snapshot(self.inner.close_reason().is_some())
+    }
+
     /// Verified peer identity (from the TLS raw public key).
     pub fn remote_id(&self) -> EndpointId {
         self.remote_id

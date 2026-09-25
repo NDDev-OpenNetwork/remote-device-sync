@@ -172,14 +172,51 @@ pub fn initiate_traversal_round(conn: &noq::Connection, metrics: &crate::metrics
 /// The caller must subscribe before opening additional paths or starting QNT.
 pub async fn connection_driver(
     conn: noq::WeakConnectionHandle,
+    qnt: noq::NatTraversalUpdates,
+    path_events: noq::PathEvents,
+    metrics: crate::metrics::Registry,
+    local_addrs: Vec<SocketAddr>,
+    initial_candidates: Vec<SocketAddr>,
+    relay: Option<super::relay::RelayHandle>,
+) {
+    let Some(telemetry) = conn.upgrade().map(|c| super::telemetry::Telemetry::new(&c)) else {
+        return;
+    };
+    let _guard = telemetry.guard();
+    connection_driver_observed(
+        conn,
+        qnt,
+        Observer {
+            events: path_events,
+            telemetry,
+        },
+        metrics,
+        local_addrs,
+        initial_candidates,
+        relay,
+    )
+    .await;
+}
+
+pub(super) struct Observer {
+    pub events: noq::PathEvents,
+    pub telemetry: std::sync::Arc<super::telemetry::Telemetry>,
+}
+
+pub(super) async fn connection_driver_observed(
+    conn: noq::WeakConnectionHandle,
     mut qnt: noq::NatTraversalUpdates,
-    mut path_events: noq::PathEvents,
+    observer: Observer,
     metrics: crate::metrics::Registry,
     local_addrs: Vec<SocketAddr>,
     initial_candidates: Vec<SocketAddr>,
     relay: Option<super::relay::RelayHandle>,
 ) {
     use tokio_stream::StreamExt;
+    let Observer {
+        events: mut path_events,
+        telemetry,
+    } = observer;
 
     // Register without retaining a strong Connection across any await.
     let Some(closed) = conn.upgrade().map(|owner| owner.on_closed()) else {
@@ -197,16 +234,11 @@ pub async fn connection_driver(
     tokio::pin!(relay_unavailable);
     let mut relay_withdrawn = false;
 
-    let mut paths: HashMap<noq::PathId, noq::WeakPathHandle> = HashMap::new();
+    let mut paths = telemetry.paths();
     // Paths opened to QNT-learned candidates — an Established event on
     // one of these is a QNT success.
     let mut qnt_paths: std::collections::HashSet<noq::PathId> = std::collections::HashSet::new();
     let mut selected: Option<noq::PathId> = None;
-    if let Some(conn) = conn.upgrade()
-        && let Some(path) = conn.path(noq::PathId::ZERO)
-    {
-        paths.insert(noq::PathId::ZERO, path.weak_handle());
-    }
 
     let mut pending = Pending::default();
     for address in initial_candidates {
@@ -266,6 +298,7 @@ pub async fn connection_driver(
                 }
                 Some(Ok(_)) => {}
                 Some(Err(lagged)) => {
+                    telemetry.lagged(lagged.0);
                     tracing::warn!("path event stream lagged by {}", lagged.0)
                 }
                 None => events_open = false,
@@ -299,6 +332,7 @@ pub async fn connection_driver(
         qnt_paths.retain(|id| owner.path(*id).is_some());
         drop(owner);
         reselect(&conn, &mut paths, &mut selected, relay_down);
+        telemetry.publish(&paths, selected);
     }
 }
 
@@ -393,7 +427,13 @@ fn reselect(
             tracing::debug!(?id, ?want, "path status applied");
         }
     }
-    *selected = Some(choice);
+    // A close or engine error can race selection. Publish only a successfully
+    // applied choice, never an attempted set_status.
+    *selected = paths
+        .get(&choice)
+        .and_then(|weak| weak.upgrade())
+        .filter(|path| path.status().ok() == Some(noq::PathStatus::Available))
+        .map(|_| choice);
 }
 
 #[cfg(test)]
