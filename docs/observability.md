@@ -9,6 +9,13 @@ and two 100-probe development ping runs with JSON telemetry enabled.
 
 ## Stack and ownership
 
+The opt-in [local session manager](local-sessions.md) adds authenticated aggregate
+`rds_agent_local_manager_*` gauges for available snapshot, connected/pending
+sessions and capacity. Its weak nonblocking observer contains no peer or session
+labels; outgoing samplers use the existing agent network metrics registry.
+These names fit the existing Vector admin allowlist. Local tests do not imply a
+fresh collector/backend run or operational alert rollout for this increment.
+
 Use **Vector + OpenObserve**, as requested by the owner. Both are replaceable
 infrastructure outside the Rust product data path. RDS depends on neither
 backend availability nor vendor SDKs. The shared Rust `rds-observe` crate uses

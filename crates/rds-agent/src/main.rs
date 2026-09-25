@@ -16,6 +16,9 @@ use rds_net::{
     about = "RDS agent: serve SSH and desktop sessions to allowed peers"
 )]
 struct Cli {
+    /// Enable same-UID local session control in a dedicated private directory.
+    #[arg(long)]
+    control_dir: Option<std::path::PathBuf>,
     #[command(flatten)]
     admin: rds_observe::admin::Args,
     /// Path to the endpoint secret key (created if missing).
@@ -63,6 +66,18 @@ struct Cli {
     /// PEM CA bundle for directory HTTPS; replaces the public root store.
     #[arg(long, requires = "directory")]
     directory_ca: Option<std::path::PathBuf>,
+    /// Trusted registry authority for local-manager device-name resolution.
+    #[arg(long, requires_all = ["directory", "control_dir"])]
+    registry_key: Option<String>,
+    /// Bootstrap registry authority epoch.
+    #[arg(long, default_value = "1")]
+    registry_epoch: u64,
+    /// Durable name-trust state; default is beside --key-file.
+    #[arg(long, requires = "registry_key")]
+    registry_state: Option<std::path::PathBuf>,
+    /// Registry authority rotation receipt; repeat in epoch order.
+    #[arg(long, requires = "registry_key")]
+    registry_rotation: Vec<std::path::PathBuf>,
     /// Record TTL when `--directory` is set.
     #[arg(long, default_value = "300")]
     record_ttl: u64,
@@ -107,6 +122,10 @@ async fn main() -> std::process::ExitCode {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let prepared_admin = cli.admin.bind().await?;
+    let prepared_control = match &cli.control_dir {
+        Some(path) => Some(rds_client::local::Prepared::bind(path).await?),
+        None => None,
+    };
     let mut config = cli
         .endpoint_config
         .as_deref()
@@ -151,7 +170,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
     config.secret_key = Some(secret_key.clone());
 
-    let directory = cli
+    let mut directory = cli
         .directory
         .as_deref()
         .map(|origin| -> anyhow::Result<_> {
@@ -162,6 +181,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(client)
         })
         .transpose()?;
+    if let Some(key) = cli.registry_key {
+        let client = directory
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("registry trust requires --directory"))?;
+        let path = cli
+            .registry_state
+            .unwrap_or_else(|| key_path.with_extension("registry-state"));
+        let epoch = cli.registry_epoch;
+        let rotations = cli.registry_rotation;
+        directory = Some(
+            tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let authority = rds_discovery::authority::Authority::from_base32(&key, epoch)?;
+                let rotations = rds_discovery::policy::read_rotations(&rotations)?;
+                Ok(client.with_registry_store(authority, path, rotations)?)
+            })
+            .await??,
+        );
+    }
     if !policy.issuers.is_empty() && cli.revocations_key.is_none() {
         anyhow::bail!("managed grants require --directory and --revocations-key");
     }
@@ -236,7 +273,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             .with_limits(AgentLimits::new(cli.max_connections, cli.max_streams)),
     );
     let metrics = agent.metrics();
-    let mut admin = rds_observe::admin::Server::start(prepared_admin, move || metrics.snapshot());
+    let mut control =
+        rds_client::local::Server::start(prepared_control, agent.endpoint.clone(), directory);
+    let control_metrics = control.take_observer();
+    let mut admin = rds_observe::admin::Server::start(prepared_admin, move || {
+        let mut snapshot = metrics.snapshot();
+        if let Some(control) = &control_metrics {
+            snapshot.extend(control.snapshot());
+        }
+        snapshot
+    });
     if let Some(addr) = admin.addr() {
         tracing::info!(%addr, "admin metrics listening");
     }
@@ -247,6 +293,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
     let result = tokio::select! {
         res = agent.run() => res,
+        res = control.stopped() => {
+            res.map_err(anyhow::Error::from).and_then(|()| Err(anyhow::anyhow!("local session manager stopped unexpectedly")))
+        },
         res = admin.stopped() => {
             res.map_err(anyhow::Error::from).and_then(|()| Err(anyhow::anyhow!("admin metrics stopped unexpectedly")))
         },
@@ -261,8 +310,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     drop(announce);
     // Close the endpoint so peers get CONNECTION_CLOSE instead of an
     // abrupt socket death (and iroh does not log an ungraceful drop).
-    let ((), admin_result) = tokio::join!(agent.endpoint.close(), admin.close());
-    finish_admin(result, admin_result)
+    let ((), admin_result, control_result) =
+        tokio::join!(agent.endpoint.close(), admin.close(), control.close());
+    let result = finish_admin(result, admin_result);
+    match (result, control_result) {
+        (result, Ok(())) => result,
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Err(error), Err(control)) => {
+            Err(error.context(format!("local manager shutdown also failed: {control}")))
+        }
+    }
 }
 
 /// SIGINT on every platform, SIGTERM on unix (systemd stop).

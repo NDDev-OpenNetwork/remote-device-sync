@@ -5,6 +5,7 @@ members = [
     "crates/rds-bench",
     "crates/rds-audio",
     "crates/rds-cli",
+    "crates/rds-client",
     "crates/rds-core",
     "crates/rds-desktop",
     "crates/rds-discovery",
@@ -30,6 +31,7 @@ repository = "https://github.com/NDDev-OpenNetwork/remote-device-sync"
 #   rds-audio     → rds-core
 #   rds-sync      → rds-core, rds-net
 #   rds-desktop   → rds-core, rds-net
+#   rds-client    → rds-core, rds-net, rds-discovery (outgoing sessions and local IPC)
 #   rds-agent     → everything client-facing
 #   rds-cli       → everything user-facing
 #   rds-server    → rds-relay, rds-discovery
@@ -59,6 +61,7 @@ rds-agent = { path = "crates/rds-agent" }
 rds-audio = { path = "crates/rds-audio" }
 rds-bench = { path = "crates/rds-bench" }
 rds-cli = { path = "crates/rds-cli" }
+rds-client = { path = "crates/rds-client" }
 rds-core = { path = "crates/rds-core" }
 rds-desktop = { path = "crates/rds-desktop" }
 rds-discovery = { path = "crates/rds-discovery" }

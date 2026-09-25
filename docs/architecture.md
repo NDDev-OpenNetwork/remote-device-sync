@@ -31,8 +31,12 @@ that ownership. The server awaits directory and relay shutdown together.
 The shared [identity store](identity-storage.md) preserves the raw seed format
 and serializes creation under a directory lock. It publishes only a complete,
 synchronized seed with no replacement, refuses unsafe existing files and
-recovers its bounded pending state after a process exits. It is a prerequisite
-for stable identity ownership, not the W2.4 local IPC manager.
+recovers its bounded pending state after a process exits.
+The opt-in [local session manager](local-sessions.md) now reuses the running
+agent's endpoint through same-UID Unix IPC. It owns outgoing connections,
+selection, bounded requests and TCP streams. Direct compatibility commands
+still bind independently; migration and exclusive runtime identity ownership
+remain W2.4 work.
 TCP service flags, client requests and agent policy use the same canonical
 `rds-core::TcpTarget`; IPv6 spelling and IPv4-mapped addresses normalize before
 policy comparison and dialing. Parsing has no DNS or socket side effects.
@@ -246,6 +250,8 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
                        ▼
         ┌──────────────────────────────┐
         ▼                              ▼
+   rds-client — outgoing requests, manager and local IPC
+        │                              │
    rds-agent (daemon)            rds-cli (operator)
                        ▼
    rds-server — GDS services host: relay + discovery + registry
@@ -256,10 +262,14 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   estate state, presence and audit. Sees only encrypted traffic.
 - **`rds-agent`** — daemon on each controlled device. Binds the endpoint
   (Ed25519 identity persisted), connects to its home relay, accepts
-  `rds/0` connections, serves streams to an allowlist of peers.
+  `rds/0` connections, serves streams to an allowlist of peers. Optional
+  `--control-dir` hosts outgoing sessions on that same endpoint.
+- **`rds-client`** — shared request/forwarding library and local session
+  manager/client; depends on core/net/discovery/observe, never on the CLI.
 - **`rds`** — operator CLI. `rds id`, `rds ticket`, `rds ping`, `rds ssh`,
-  `rds forward`, `rds desktop` (feature-gated); `rds send/recv` planned
-  on the sync engine.
+  `rds forward`, `rds desktop` (feature-gated), single-file `rds send/recv`.
+  `rds session` connects/lists/selects/pings/forwards through the local agent
+  without loading a key or binding a network endpoint.
 
 ### Identity and authorization
 

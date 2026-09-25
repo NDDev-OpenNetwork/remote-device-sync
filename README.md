@@ -24,6 +24,7 @@ crates/
 ├── rds-server     GDS services host: relay + discovery + registry
 ├── rds-agent      daemon on a controlled device (ssh forward, desktop)
 ├── rds-cli        `rds` operator CLI
+├── rds-client     shared client operations and local session manager/IPC
 ├── rds-observe    bounded process logs and privacy-preserving telemetry
 ├── rds-bench      development measurement/qualification harness
 ├── rds-desktop    capture/codec/input/render traits + platform backends
@@ -36,6 +37,11 @@ Docs: [architecture](docs/architecture.md) · [deep research](docs/research.md)
 [roadmap](docs/roadmap.md).
 
 ## Usage
+
+For multiple persistent device connections, enable the agent's opt-in
+[local session manager](docs/local-sessions.md). `rds session` lists/selects
+devices and opens SSH/TCP forwards through the running agent's shared endpoint.
+The direct compatibility commands below still create independent endpoints.
 
 ```sh
 # On the controlled device: run the agent (key persisted under ~/.config/rds)

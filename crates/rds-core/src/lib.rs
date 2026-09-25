@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Capability grants (WS4): signed service-scope tokens presented on
 /// the connection's first stream.
 pub mod grant;
+pub mod local;
 /// Owned relay protocol wire types (ALPN `rds-relay/0`).
 pub mod relay;
 mod tcp_target;

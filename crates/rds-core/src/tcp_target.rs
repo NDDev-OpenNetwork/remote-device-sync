@@ -5,7 +5,8 @@ use std::fmt;
 use std::net::{IpAddr, Ipv6Addr};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct TcpTarget {
     host: String,
     port: u16,
@@ -108,6 +109,19 @@ impl FromStr for TcpTarget {
             .parse()
             .map_err(|_| TcpTargetError("TCP destination port must be 1..65535"))?;
         Self::new(host, port)
+    }
+}
+
+impl TryFrom<String> for TcpTarget {
+    type Error = TcpTargetError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<TcpTarget> for String {
+    fn from(value: TcpTarget) -> Self {
+        value.to_string()
     }
 }
 

@@ -22,6 +22,12 @@ below was verified against vendored sources or upstream documents on
 
 ## 0. Doctrine
 
+The current product-facing increment is the W2.4
+[local session manager](local-sessions.md). Its remaining sequence puts default
+ownership/migration before native SSH/PTY, viewer/input switching and full
+device qualification. This supplements the complete remediation plan; the opt-in
+manager does not close a wave or replace WS0 acceptance requirements.
+
 - **Harness first**: WS0 builds the measurement rig before any
   transport code, so every later change is measured, not argued.
 - **No big-bang**: the iroh backend stays default until the noq backend

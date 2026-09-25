@@ -1,5 +1,9 @@
 # Client request and forwarding lifetime
 
+These shared operations now live in `rds-client`; `rds-cli` re-exports them for
+compatibility. The agent-owned [local manager](local-sessions.md) layers bounded
+same-UID IPC and session selection above the same request/stream guards.
+
 Client request preludes have one 15-second deadline covering QUIC stream-credit
 wait, framed request write, acknowledgement and any fixed response payload. This
 applies to Authz, Ping, Info, TCP open and Sync open. Ping's echo uses the same

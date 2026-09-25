@@ -40,6 +40,7 @@ Neither increment closes these product gaps or any wave.
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
 | W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
+| W2.4 | Partial; opt-in local manager | `rds-agent --control-dir` shares its endpoint with keyless `rds session` connect/list/use/disconnect/ping/info/SSH-forward commands. Same-UID Unix IPC, bounded tasks and sessions, pinned forwarding, cancellation and aggregate admin metrics are implemented. Direct-command migration, exclusive runtime identity ownership, viewer/sync APIs, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [receipt](reports/rds-local-sessions-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
@@ -1209,3 +1210,23 @@ independent delivered alerts (O5), platform/resource/latency campaigns (O6).
 Native SSH/PTY, desktop capture/viewer, sync completion, transport recovery and
 release qualification retain their W0–W10 gates. This increment does not establish
 complete product readiness or connection latency improvement.
+
+## 2026-09-25 — agent-owned local device sessions
+
+W2.4 partial: a new shared Rust client crate hosts an opt-in local manager on the
+agent's existing endpoint. Keyless CLI commands connect/list/select/disconnect,
+Ping/Info and forward SSH/TCP without another identity or UDP bind. Same-UID IPC,
+private socket ownership, bounded reservations/workers, credential-aware reuse,
+pinned forwarding and authenticated aggregate metrics have regression coverage.
+
+Two failure cases drove explicit TCP direction-FIN framing: abandoned silent
+bodies exhausted all slots, and an OS-readiness workaround lost a late upload
+after reverse half-close. The final adapter preserves both half-close directions,
+queued data and drop cancellation with bounded buffers and owned tasks.
+
+Final Linux checks: formatting; default/X11/all-feature Clippy; 484 workspace
+tests (2 ignored); 96 expanded tests (0 ignored, overlapping).
+See [contract and remaining sequence](local-sessions.md) and
+[receipt](reports/rds-local-sessions-20260925.md). No wave is closed. Default
+identity ownership/migration, native SSH/PTY, desktop rendering/input switching,
+GDS lifecycle and real device/network/operational qualification remain open.

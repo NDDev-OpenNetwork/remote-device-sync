@@ -9,6 +9,8 @@ use rds_net::{
     load_or_create_key,
 };
 
+mod managed;
+
 #[derive(Parser)]
 #[command(version, about = "Remote device access for the GDS estate")]
 struct Cli {
@@ -65,6 +67,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage connections through the local agent; no key loading or UDP bind.
+    Session(managed::Options),
     /// Create a new private admin scrape credential without endpoint initialization.
     AdminToken {
         #[arg(long)]
@@ -141,6 +145,28 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    if matches!(cli.command, Command::Session(_)) {
+        anyhow::ensure!(
+            cli.key_file.is_none()
+                && cli.relay.is_empty()
+                && cli.backend.is_none()
+                && cli.endpoint_config.is_none()
+                && cli.owned_relay.is_none()
+                && !cli.no_relay
+                && cli.bind_address.is_empty()
+                && cli.server.is_none()
+                && cli.directory_ca.is_none()
+                && cli.registry_key.is_none()
+                && cli.registry_epoch == 1
+                && cli.registry_state.is_none()
+                && cli.authority_rotation.is_empty()
+                && cli.grant.is_none(),
+            "session commands use agent configuration; omit direct endpoint/directory/grant options"
+        );
+        if let Command::Session(options) = cli.command {
+            return managed::run(options).await;
+        }
+    }
     if let Command::AdminToken { file } = &cli.command {
         let file = file.clone();
         tokio::task::spawn_blocking(move || rds_observe::admin::Token::create(&file)).await??;
@@ -216,6 +242,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         })
         .transpose()?;
     match cli.command {
+        Command::Session(_) => unreachable!("local session handled before endpoint initialization"),
         Command::AdminToken { .. } => {
             unreachable!("admin token handled before endpoint initialization")
         }

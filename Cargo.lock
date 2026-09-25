@@ -2839,6 +2839,7 @@ dependencies = [
  "ed25519-dalek",
  "iroh-relay",
  "rds-cli",
+ "rds-client",
  "rds-core",
  "rds-desktop",
  "rds-discovery",
@@ -2883,6 +2884,7 @@ dependencies = [
  "anyhow",
  "clap",
  "iroh",
+ "rds-client",
  "rds-core",
  "rds-desktop",
  "rds-discovery",
@@ -2891,6 +2893,25 @@ dependencies = [
  "rds-sync",
  "serde_json",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rds-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "postcard",
+ "rand 0.9.5",
+ "rds-core",
+ "rds-discovery",
+ "rds-net",
+ "rds-observe",
+ "rustix",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 

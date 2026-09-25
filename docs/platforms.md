@@ -54,6 +54,13 @@ negotiate only after both endpoints probe them.
 
 ## cfg conventions
 
+The opt-in local session manager uses filesystem Unix sockets and Tokio
+`peer_cred()` on both supported targets, without custom unsafe code. Both ends
+check effective UID. Directory/socket ownership and mode checks use safe rustix
+and standard-library APIs. Paths reject symlink components; macOS callers must
+use canonical paths. Linux integration evidence is recorded separately from
+the still-required native macOS and distinct-user qualification.
+
 Policy and endpoint-record leases use safe `rustix::time::clock_gettime`: `CLOCK_BOOTTIME` on Linux
 and `CLOCK_MONOTONIC` on Darwin, both including suspend. These clocks have
 different semantics across platforms; do not substitute Rust `Instant` for the
