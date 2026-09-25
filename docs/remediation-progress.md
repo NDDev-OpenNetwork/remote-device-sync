@@ -940,3 +940,20 @@ and **194 all-feature net/relay/agent/CLI tests** passed. See
 [contract](directory-lifecycle.md). Started filesystem calls remain nonpreemptible;
 startup cancellation, full server preflight, owned CLI runtime and platform
 qualification remain open. No remediation wave is closed.
+
+## Checked owned relay shutdown
+
+Owned Relay close/drain now return a typed retained runner failure after cleanup,
+rather than only logging it. The Relay shares its connection task set with the
+runner, so abnormal exit preserves join ownership. Saved outcomes and serialized
+fallback remain valid after canceled, concurrent and repeated close calls.
+The existing admission and five-second connection cleanup grace are unchanged.
+
+A real attached-tunnel fixture checks runner failure, two fallback cancellation
+points, child release, identical retained failure and zero occupied cleanup
+state. Existing owned-relay tests now inspect shutdown results. Formatting,
+three Clippy lanes, **400 workspace** and **195 all-feature
+net/relay/agent/CLI tests** passed. See the
+[receipt](reports/rds-relay-checked-shutdown-20260925.md). This is an explicit
+library API change and a runtime-composition prerequisite. Owned binary
+integration, platform and operational qualification remain open. No wave closes.

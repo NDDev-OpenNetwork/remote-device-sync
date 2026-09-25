@@ -90,11 +90,11 @@ async fn concurrent_drain_case() {
     while relay.endpoints() == 0 {
         tokio::task::yield_now().await;
     }
-    tokio::join!(relay.drain(), async {
+    let (drained, ()) = tokio::join!(relay.drain(), async {
         while !handle.drained() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        relay.drain().await;
+        relay.drain().await.unwrap();
         assert_eq!(
             relay.endpoints(),
             0,
@@ -102,6 +102,7 @@ async fn concurrent_drain_case() {
         );
         assert_eq!(relay.lifecycle_stats().active_connections, 0);
     });
+    drained.unwrap();
     assert_eq!(relay.endpoint.active_path_drivers(), 0);
     socket.close().await;
 }
@@ -194,7 +195,8 @@ async fn canceled_drain_still_finishes_server_shutdown() {
     })
     .await;
     tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::join!(socket.close(), relay.close());
+        let (_, closed_1) = tokio::join!(socket.close(), relay.close());
+        closed_1.unwrap();
     })
     .await
     .expect("canceled drain fixture cleanup stalled");
@@ -263,7 +265,9 @@ async fn admission_case() {
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
-        tokio::join!(relay.close(), relay.close());
+        let (closed_0, closed_1) = tokio::join!(relay.close(), relay.close());
+        closed_0.unwrap();
+        closed_1.unwrap();
     })
     .await
     .unwrap();
@@ -304,7 +308,9 @@ async fn canceled_close_preserves_the_runner_for_other_waiters() {
     );
     drop(held);
     tokio::time::timeout(Duration::from_secs(2), async {
-        tokio::join!(relay.close(), relay.close());
+        let (closed_0, closed_1) = tokio::join!(relay.close(), relay.close());
+        closed_0.unwrap();
+        closed_1.unwrap();
         socket.close().await;
     })
     .await
@@ -313,4 +319,113 @@ async fn canceled_close_preserves_the_runner_for_other_waiters() {
     assert_eq!(relay.endpoint.active_path_drivers(), 0);
     assert_eq!(relay.endpoints(), 0);
     assert!(!handle.is_available());
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_runner_keeps_children_and_failure_across_canceled_close() {
+    tokio::time::timeout(Duration::from_secs(12), failed_runner_case())
+        .await
+        .unwrap();
+}
+async fn failed_runner_case() {
+    let relay = serve(
+        EndpointConfig {
+            backend: rds_net::Backend::Noq,
+            discovery: false,
+            bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+            ..Default::default()
+        },
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let relay = std::sync::Arc::new(relay);
+    let (mut socket, handle) = rds_noq::relay::RelaySocket::connect(
+        relay.endpoint_addr(),
+        rds_net::SecretKey::from_bytes(&[138; 32]),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .await
+    .unwrap();
+    while relay.endpoints() == 0 {
+        tokio::task::yield_now().await;
+    }
+    {
+        let runner = relay.accept_task.lock().await;
+        runner.task.as_ref().unwrap().abort();
+        while !runner.task.as_ref().unwrap().is_finished() {
+            tokio::task::yield_now().await;
+        }
+    }
+    // The actual accept runner is gone. Its registered connection handles
+    // must remain available for fallback, along with a controlled async job.
+    let mut children = relay.connections.lock().await;
+    assert!(!children.is_empty());
+    let owner = std::sync::Arc::new(());
+    let weak = std::sync::Arc::downgrade(&owner);
+    let (release, waiting) = tokio::sync::oneshot::channel();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    children.spawn(async move {
+        let _owner = owner;
+        let _ = entered.send(());
+        let _ = waiting.await;
+    });
+    ready.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), relay.close())
+            .await
+            .is_err()
+    );
+    {
+        let runner = relay.accept_task.lock().await;
+        assert!(
+            runner.task.is_none(),
+            "completed runner handle was retained for repoll"
+        );
+        assert!(runner.outcome.as_ref().unwrap().is_err());
+    }
+    drop(children);
+    let closing = tokio::spawn({
+        let relay = relay.clone();
+        async move { relay.close().await }
+    });
+    // The failed runner is finished. Only this close waiter can now hold the
+    // shared child-set lock, so cancellation occurs during its actual join.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while relay.connections.try_lock().is_ok() {
+            assert!(
+                !closing.is_finished(),
+                "close skipped the pending child join"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    closing.abort();
+    assert!(closing.await.unwrap_err().is_cancelled());
+    assert!(
+        weak.upgrade().is_some(),
+        "fallback detached the controlled child"
+    );
+    release.send(()).unwrap();
+    let (one, two) = tokio::join!(relay.close(), relay.close());
+    let one = one.unwrap_err();
+    let two = two.unwrap_err();
+    assert!(one.0.is_cancelled());
+    assert!(std::sync::Arc::ptr_eq(&one.0, &two.0));
+    assert!(relay.close().await.is_err());
+    assert!(relay.connections.lock().await.is_empty());
+    assert!(weak.upgrade().is_none());
+    assert_eq!(relay.lifecycle_stats().active_connections, 0);
+    assert_eq!(relay.lifecycle_stats().history_entries, 0);
+    assert_eq!(relay.endpoint.active_path_drivers(), 0);
+    assert_eq!(relay.endpoints(), 0);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while handle.is_available() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    socket.close().await;
 }

@@ -92,7 +92,30 @@ pub struct Relay {
     shutdown: watch::Sender<Shutdown>,
     // Keep the handle stored while awaiting: canceling close must not lose
     // ownership or prevent another caller from joining the same runner.
-    accept_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    accept_task: tokio::sync::Mutex<Runner>,
+    connections: ConnectionTasks,
+}
+
+type ConnectionTasks = std::sync::Arc<tokio::sync::Mutex<JoinSet<()>>>;
+
+struct Runner {
+    task: Option<JoinHandle<()>>,
+    outcome: Option<Result<(), ShutdownError>>,
+}
+
+/// The owned relay runner failed; cleanup still joins its retained children.
+#[derive(Debug, Clone)]
+pub struct ShutdownError(std::sync::Arc<tokio::task::JoinError>);
+
+impl std::fmt::Display for ShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "owned relay runner failed: {}", self.0)
+    }
+}
+impl std::error::Error for ShutdownError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
 }
 
 /// Live counters, cheap to snapshot for health/metrics.
@@ -211,7 +234,7 @@ impl Relay {
 
     /// Graceful drain: tell every client to migrate, refuse new
     /// registrations, then close after [`DRAIN_GRACE`].
-    pub async fn drain(&self) {
+    pub async fn drain(&self) -> Result<(), ShutdownError> {
         self.state.draining.store(true, Ordering::SeqCst);
         self.shutdown.send_if_modified(|phase| {
             if *phase == Shutdown::Running {
@@ -221,26 +244,40 @@ impl Relay {
                 false
             }
         });
-        self.join_runner().await;
+        self.join_runner().await
     }
 
     /// Stop and join all server-owned tasks. Concurrent/repeated callers join
-    /// the same runner. Canceling one caller does not cancel server cleanup.
-    pub async fn close(&self) {
+    /// the same runner. Cancellation retains ownership; the normal runner
+    /// continues cleanup, and another caller can resume a failed runner's
+    /// fallback join. Runner failure is returned after child cleanup.
+    pub async fn close(&self) -> Result<(), ShutdownError> {
         self.request_shutdown();
-        self.join_runner().await;
+        self.join_runner().await
     }
 
-    async fn join_runner(&self) {
+    async fn join_runner(&self) -> Result<(), ShutdownError> {
         let mut runner = self.accept_task.lock().await;
-        if let Some(task) = runner.as_mut() {
-            if let Err(error) = task.await {
-                debug!(%error, "relay runner ended");
-            }
-            *runner = None;
+        if let Some(task) = runner.task.as_mut() {
+            let outcome = task
+                .await
+                .map_err(|error| ShutdownError(std::sync::Arc::new(error)));
+            // Save this before fallback awaits: a canceled waiter must never
+            // poll the already-consumed JoinHandle again.
+            runner.task = None;
+            runner.outcome = Some(outcome);
         }
-        // Also handles a runner that panicked before its normal cleanup.
+        self.state.stop();
         self.endpoint.close().await;
+        let mut connections = self.connections.lock().await;
+        finish_connections(&mut connections).await;
+        self.state.stop();
+        // Construction starts with a handle. Taking it always saves an outcome
+        // before another await; this invariant is private to this type.
+        runner
+            .outcome
+            .clone()
+            .expect("runner outcome saved before fallback")
     }
 
     fn request_shutdown(&self) {
@@ -286,12 +323,22 @@ pub async fn serve_with_limits(
     });
 
     let (shutdown, receiver) = watch::channel(Shutdown::Running);
-    let accept_task = tokio::spawn(accept_loop(endpoint.clone(), state.clone(), receiver));
+    let connections = std::sync::Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
+    let accept_task = tokio::spawn(accept_loop(
+        endpoint.clone(),
+        state.clone(),
+        receiver,
+        connections.clone(),
+    ));
     Ok(Relay {
         endpoint,
         state,
         shutdown,
-        accept_task: tokio::sync::Mutex::new(Some(accept_task)),
+        accept_task: tokio::sync::Mutex::new(Runner {
+            task: Some(accept_task),
+            outcome: None,
+        }),
+        connections,
     })
 }
 
@@ -299,8 +346,9 @@ async fn accept_loop(
     endpoint: rds_noq::Endpoint,
     state: std::sync::Arc<State>,
     mut shutdown: watch::Receiver<Shutdown>,
+    connections: ConnectionTasks,
 ) {
-    let mut connections = JoinSet::new();
+    let mut connections = connections.lock().await;
     // The runner owns grace and notice I/O even if a drain caller is canceled.
     let mut drain: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(std::future::pending());
     loop {
@@ -358,6 +406,11 @@ async fn accept_loop(
     drop(drain);
     state.stop();
     endpoint.close().await;
+    finish_connections(&mut connections).await;
+    state.stop();
+}
+
+async fn finish_connections(connections: &mut JoinSet<()>) {
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
         while let Some(result) = connections.join_next().await {
             if let Err(error) = result {
@@ -370,7 +423,6 @@ async fn accept_loop(
     {
         connections.shutdown().await;
     }
-    state.stop();
 }
 
 /// One attached endpoint: control handshake, then the datagram loop.

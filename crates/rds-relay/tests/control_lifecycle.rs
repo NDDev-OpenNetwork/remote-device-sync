@@ -31,7 +31,7 @@ async fn socket_client_observes_drain_before_tunnel_closes() {
     })
     .await
     .unwrap();
-    let (_, observed) = tokio::join!(
+    let (drained, observed) = tokio::join!(
         relay.drain(),
         tokio::time::timeout(Duration::from_secs(1), async {
             while !handle.drained() {
@@ -39,6 +39,7 @@ async fn socket_client_observes_drain_before_tunnel_closes() {
             }
         })
     );
+    drained.unwrap();
     drop(socket);
     assert!(observed.is_ok(), "client never decoded the Drain notice");
 }
@@ -79,7 +80,7 @@ async fn dropping_socket_releases_its_relay_attachment() {
         }
     })
     .await;
-    relay.close().await;
+    relay.close().await.unwrap();
     assert!(
         detached.is_ok(),
         "socket pumps retained the attachment after drop"
@@ -179,7 +180,7 @@ async fn replacement_preserves_peer_history_and_actual_detach_sends_framed_notic
     a.close().await;
     b.close().await;
     b2.close().await;
-    relay.close().await;
+    relay.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -204,7 +205,7 @@ async fn drain_grace_keeps_actual_socket_datagrams_flowing() {
             .unwrap();
     let _ah_route = ah.register_peer(bid).unwrap();
     let _bh_route = bh.register_peer(aid).unwrap();
-    let (_, traffic) = tokio::join!(
+    let (drained, traffic) = tokio::join!(
         relay.drain(),
         tokio::time::timeout(Duration::from_secs(1), async {
             while !ah.drained() || !bh.drained() {
@@ -238,6 +239,7 @@ async fn drain_grace_keeps_actual_socket_datagrams_flowing() {
             assert_eq!(&bytes[..meta[0].len], b"during grace");
         })
     );
+    drained.unwrap();
     a.close().await;
     b.close().await;
     assert!(

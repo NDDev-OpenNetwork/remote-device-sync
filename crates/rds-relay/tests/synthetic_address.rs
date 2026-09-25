@@ -98,7 +98,8 @@ async fn exercise() {
     })
     .await;
     tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::join!(a.close(), b.close(), relay.close());
+        let (_, _, closed_2) = tokio::join!(a.close(), b.close(), relay.close());
+        closed_2.unwrap();
     })
     .await
     .expect("zero-port fixture cleanup stalled");

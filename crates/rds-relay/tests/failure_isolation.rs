@@ -147,7 +147,8 @@ async fn failure_case() {
     assert!(!relay_only.addrs.is_empty());
     tokio::time::timeout(Duration::from_secs(3), relay.close())
         .await
-        .expect("relay close stalled");
+        .expect("relay close stalled")
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while ah.is_available() || bh.is_available() {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -299,7 +300,8 @@ async fn missing_mapping_case() {
     .await;
     if !matches!(&traffic, Ok(Ok(()))) {
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            tokio::join!(a.close(), b.close(), relay.close());
+            let (_, _, closed_2) = tokio::join!(a.close(), b.close(), relay.close());
+            closed_2.unwrap();
         })
         .await;
         panic!("unknown relay destination poisoned direct traffic: {traffic:?}");
@@ -324,7 +326,8 @@ async fn missing_mapping_case() {
         "later registration did not enable relay traffic"
     );
     tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::join!(a.close(), b.close(), relay.close());
+        let (_, _, closed_2) = tokio::join!(a.close(), b.close(), relay.close());
+        closed_2.unwrap();
     })
     .await
     .expect("fixture cleanup stalled");

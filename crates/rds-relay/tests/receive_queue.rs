@@ -151,7 +151,8 @@ async fn exercise() {
     .expect("diagnostic handle retained queued payloads");
     assert!(!ah.is_available());
     tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::join!(b.close(), relay.close());
+        let (_, closed_1) = tokio::join!(b.close(), relay.close());
+        closed_1.unwrap();
     })
     .await
     .expect("queue fixture cleanup stalled");

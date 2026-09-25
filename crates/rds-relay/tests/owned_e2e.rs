@@ -43,7 +43,7 @@ async fn configured_owned_relay_preserves_a_fixed_primary_bind_port() {
     assert!(endpoint.addr().addrs.contains(&TransportAddr::Ip(bind)));
     assert_eq!(relay.endpoints(), 1);
     endpoint.close().await;
-    relay.close().await;
+    relay.close().await.unwrap();
 }
 
 fn key(seed: u8) -> SecretKey {
@@ -140,7 +140,7 @@ async fn attached_relay_after_silent_direct(dual_stack: bool) {
     let forwarded = relay.stats().0;
     a.close().await;
     b.close().await;
-    relay.close().await;
+    relay.close().await.unwrap();
     assert!(
         result.is_ok(),
         "silent direct candidate blocked the attached relay"
@@ -244,7 +244,7 @@ async fn relay_forwards_handshake_and_datagrams() {
 
     a.close().await;
     b.close().await;
-    relay.close().await;
+    relay.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -267,7 +267,7 @@ async fn reattach_replaces_stale_slot() {
     let _a2 = endpoint(1, relay.endpoint_addr()).await;
     assert_eq!(relay.endpoints(), 1, "re-attach must replace the slot");
 
-    relay.close().await;
+    relay.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -293,7 +293,7 @@ async fn drain_evicts_and_refuses_new_attachments() {
     let _a = endpoint(1, relay_addr.clone()).await;
     assert_eq!(relay.endpoints(), 1);
 
-    relay.drain().await;
+    relay.drain().await.unwrap();
     assert_eq!(relay.endpoints(), 0, "drain closes all slots");
 
     // New attachments after drain cannot complete registration.

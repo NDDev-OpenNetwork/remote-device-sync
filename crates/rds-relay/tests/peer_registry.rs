@@ -94,7 +94,8 @@ async fn collision_case() {
         tokio::time::timeout(Duration::from_secs(1), received(&mut b))
     );
     tokio::time::timeout(Duration::from_secs(2), async {
-        tokio::join!(a.close(), b.close(), c.close(), relay.close());
+        let (_, _, _, closed_3) = tokio::join!(a.close(), b.close(), c.close(), relay.close());
+        closed_3.unwrap();
     })
     .await
     .expect("collision fixture cleanup stalled");
@@ -175,7 +176,8 @@ async fn lease_lifetime_case() {
     let _successor = handle.register_peer(other).unwrap();
     assert_eq!(handle.stats().peer_entries, 1);
     tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::join!(a.close(), b.close(), relay.close());
+        let (_, _, closed_2) = tokio::join!(a.close(), b.close(), relay.close());
+        closed_2.unwrap();
     })
     .await
     .expect("lease fixture cleanup stalled");
@@ -297,7 +299,8 @@ async fn capacity_case() {
         assert_eq!(handle.stats().pinned_peers, 1);
     }
     tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::join!(a.close(), b.close(), relay.close());
+        let (_, _, closed_2) = tokio::join!(a.close(), b.close(), relay.close());
+        closed_2.unwrap();
     })
     .await
     .expect("capacity fixture cleanup stalled");

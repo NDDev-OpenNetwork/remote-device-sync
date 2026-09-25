@@ -169,13 +169,21 @@ application worker. Handshakes have a 15-second budget; registration retains
 its separate 15-second budget. This is library configuration for the owned
 server, not a new CLI option or a change to production allowlist defaults.
 
-The accept runner owns a JoinSet, reaps completed tasks and seals registration
-on shutdown. `close()` closes tunnels and the endpoint, allows connection
-workers five seconds to finish, then aborts and joins remaining workers.
-Concurrent and repeated callers join the same runner. Its stored JoinHandle
-survives cancellation of a caller waiting for shutdown. Drop seals registration,
-closes current tunnels and signals the runner to finish cleanup; Drop cannot
-synchronously join and requires the runtime to continue polling.
+The accept runner drives a JoinSet shared with the Relay owner, reaps completed
+tasks and seals registration on shutdown. `close()` closes tunnels and the
+endpoint, allows connection workers five seconds to finish, then aborts and
+joins remaining workers. If the runner fails, the retained child set is still
+joined by the close fallback. Concurrent and repeated callers share the stored
+runner result. It is saved before fallback awaits, so canceling a waiter cannot
+repoll a consumed JoinHandle or lose child handles. Normal runner cleanup
+continues independently; another close caller can resume a canceled fallback.
+
+Both `close()` and `drain()` now return `Result<(), ShutdownError>`. This is a
+library API change: callers must inspect the result. Previously a runner failure
+was only logged and appeared as successful unit completion. A failure is now
+retained and returned after cleanup, including on repeated calls. Drop seals
+registration, closes current tunnels and requests runner cleanup; it cannot
+synchronously join and requires the executor to continue polling.
 
 Drain grace and notices also belong to the runner. Canceling a `drain()` caller
 does not cancel the requested drain, repeated calls wait for completion, and an
@@ -197,6 +205,9 @@ measurement of total process memory or lower-layer handshake allocation.
 attempts and flow-history occupancy. Fields are individual concurrent snapshots.
 Real tests cover silent registration admission/refusal/reuse, cancellation after
 actual forwarding history exists, concurrent close/drain and canceled callers.
+A real attached-tunnel fixture also aborts the accept runner, cancels two close
+waiters during fallback, then requires the same retained error, joined children,
+released admission/history and zero live endpoint path drivers.
 Full network impairment, long-stall, resource soak and native-platform/service
 qualification remain separate work.
 
