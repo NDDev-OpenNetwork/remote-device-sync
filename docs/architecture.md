@@ -19,6 +19,10 @@ updated build order — lives in [research.md](research.md).
 CLI and agent share [versioned endpoint configuration](endpoint-configuration.md)
 with explicit file/flag precedence, backend/relay validation and preflight before
 identity creation. The owned relay uses a separately pinned public identity.
+The [directory lifecycle](directory-lifecycle.md) owns bounded connection,
+request-worker and maintenance task groups. Explicit close seals admission and
+joins all three groups; canceled close waiters and an abnormal runner exit retain
+that ownership. The server awaits directory and relay shutdown together.
 The shared [identity store](identity-storage.md) preserves the raw seed format
 and serializes creation under a directory lock. It publishes only a complete,
 synchronized seed with no replacement, refuses unsafe existing files and
@@ -278,8 +282,10 @@ same layer. `docs/conventions.md` holds the enforceable rules.
   reserves its connection budget before spawning/handshaking. Its 10-second
   default absolute connection deadline includes TLS and response I/O; dropping
   the directory aborts its owned async requests. Store/signature operations run
-  in a bounded blocking pool; permits remain held through disk completion even
-  after request timeout. Endpoint records and delete tombstones now share an
+  in bounded task groups and remain counted through disk completion even after
+  request timeout. Explicit directory close joins connections, requests and
+  maintenance, including retained groups after runner failure; see the
+  [shutdown contract](directory-lifecycle.md). Endpoint records and delete tombstones share an
   embedded redb transaction. A separately synced generation anchor refuses
   rollback of an acknowledged database generation, including recovery to an
   older root. Both commits finish before readers or HTTP success can observe

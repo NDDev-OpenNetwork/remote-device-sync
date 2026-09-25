@@ -922,3 +922,21 @@ See [receipt](reports/rds-identity-storage-20260925.md) and
 [contract](identity-storage.md). This is a W2.4/W3.2 prerequisite; local IPC,
 platform/physical qualification, directory shutdown and owned server runtime
 integration remain open. No remediation wave is closed.
+
+## Directory task ownership and shutdown
+
+Directory close now seals admission and joins bounded connection, request-worker
+and maintenance groups, including fallback after runner failure. Canceling one
+close waiter preserves handles and the runner result. HTTP timeout retains
+started disk work and its budget. Drop requests cleanup; explicit close awaits it.
+The server awaits directory and relay shutdown together and closes the directory
+on relay startup failure. Unix signal registration precedes final readiness.
+
+New tests cover real HTTP/TLS, blocked storage and maintenance, canceled and
+concurrent close, queued job cancellation, worker/runner panic and real server
+SIGTERM/restart/error paths. Formatting, three Clippy lanes, **400 workspace**
+and **194 all-feature net/relay/agent/CLI tests** passed. See
+[receipt](reports/rds-directory-lifecycle-20260925.md) and
+[contract](directory-lifecycle.md). Started filesystem calls remain nonpreemptible;
+startup cancellation, full server preflight, owned CLI runtime and platform
+qualification remain open. No remediation wave is closed.

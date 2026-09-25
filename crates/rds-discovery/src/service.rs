@@ -29,6 +29,10 @@ use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+
+mod tasks;
+use tasks::TaskGroup;
 
 use crate::http::{self, Request, Response};
 use crate::registry::{SignedRegistry, valid_name};
@@ -149,29 +153,72 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// — the scrape stays bounded under a writer flood.
 const MAX_WRITER_LABELS: usize = 4096;
 
-/// A running directory service. `Drop` aborts its listener and owned requests.
+/// A running directory service. Drop seals admission and requests cleanup.
+/// Use `close` to join requests and already-started blocking storage work.
+/// Cleanup after Drop needs the Tokio executor to continue running.
 pub struct Directory {
     addr: SocketAddr,
-    task: tokio::task::JoinHandle<()>,
+    shutdown: watch::Sender<bool>,
+    connections: Arc<TaskGroup>,
+    workers: Arc<TaskGroup>,
+    maintenance: Arc<TaskGroup>,
+    runner: tokio::sync::Mutex<Runner>,
+}
+
+struct Runner {
+    task: Option<tokio::task::JoinHandle<()>>,
+    outcome: Option<Result<(), String>>,
 }
 
 impl Directory {
-    /// Bound HTTP(S) address (port is concrete even when bound to `:0`).
+    /// Bound HTTP(S) address, including the assigned port for a `:0` bind.
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Seal admission and join service-owned work. Running blocking filesystem
+    /// operations cannot be preempted; this waits for them to return. Canceling
+    /// this waiter does not cancel cleanup or lose the runner's join handle.
+    pub async fn close(&self) -> std::io::Result<()> {
+        self.request_shutdown();
+        let mut runner = self.runner.lock().await;
+        if let Some(task) = runner.task.as_mut() {
+            let result = task.await.map_err(|error| error.to_string());
+            runner.task = None;
+            runner.outcome = Some(result);
+        }
+        // Also join connections and started jobs if the runner panicked before
+        // normal cleanup. Only one waiter may poll each fallback JoinSet.
+        tokio::join!(
+            self.connections.drain(),
+            self.workers.drain(),
+            self.maintenance.drain()
+        );
+        match runner.outcome.as_ref() {
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) => Err(std::io::Error::other(error.clone())),
+            None => Err(std::io::Error::other("directory runner outcome missing")),
+        }
+    }
+
+    fn request_shutdown(&self) {
+        self.connections.seal();
+        self.workers.seal();
+        self.maintenance.seal();
+        self.shutdown.send_replace(true);
     }
 }
 
 impl Drop for Directory {
     fn drop(&mut self) {
-        self.task.abort();
+        self.request_shutdown();
     }
 }
 
 struct State {
     store: Arc<dyn RecordStore>,
     policy: Mutex<Option<PolicyStore>>,
-    workers: Arc<tokio::sync::Semaphore>,
+    workers: Arc<TaskGroup>,
     limits: Limits,
     limiter: Limiter,
     enrollment: Enrollment,
@@ -230,54 +277,60 @@ pub async fn serve(
     let state = Arc::new(State {
         store,
         policy: Mutex::new(policy),
-        workers: Arc::new(tokio::sync::Semaphore::new(config.limits.max_workers)),
+        workers: Arc::new(TaskGroup::new(config.limits.max_workers)),
         limits: config.limits,
         limiter: Limiter::default(),
         enrollment: config.enrollment,
         metrics: Metrics::default(),
     });
+    let connections = Arc::new(TaskGroup::new(state.limits.max_conns));
+    let maintenance = Arc::new(TaskGroup::new(1));
+    let (shutdown, mut stop) = watch::channel(false);
     let task = tokio::spawn({
         let state = state.clone();
+        let connections = connections.clone();
+        let maintenance = maintenance.clone();
         let tls = config.tls.map(tokio_rustls::TlsAcceptor::from);
         async move {
-            let mut connections = tokio::task::JoinSet::new();
             // Separate single-job maintenance capacity: request saturation must
-            // not indefinitely starve expiry. A started blocking job can finish
-            // after drop, but no successor is scheduled without this owner.
-            let mut maintenance = tokio::task::JoinSet::new();
+            // not indefinitely starve expiry. Shutdown joins a started job.
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 let accepted = tokio::select! {
-                    result = listener.accept() => result,
+                    biased;
+                    _ = stop.changed() => break,
                     _ = connections.join_next(), if !connections.is_empty() => continue,
-                    _ = tick.tick(), if maintenance.is_empty() => {
-                        let store = state.store.clone();
-                        maintenance.spawn_blocking(move || store.collect_expired());
-                        continue;
-                    },
+                    _ = connections.changed() => continue,
+                    _ = state.workers.join_next(), if !state.workers.is_empty() => continue,
+                    _ = state.workers.changed() => continue,
                     result = maintenance.join_next(), if !maintenance.is_empty() => {
-                        match result {
-                            Some(Ok(Ok(count))) => { state.metrics.gc_retired.fetch_add(count as u64, Ordering::Relaxed); }
-                            _ => { state.metrics.gc_failures.fetch_add(1, Ordering::Relaxed); }
-                        }
+                        if let Some(Err(error)) = result
+                            && !error.is_cancelled()
+                        { state.metrics.gc_failures.fetch_add(1, Ordering::Relaxed); }
                         continue;
                     },
+                    _ = maintenance.changed() => continue,
+                    _ = tick.tick(), if maintenance.is_empty() => {
+                        maintenance.collect(state.clone());
+                        continue;
+                    },
+                    result = listener.accept() => result,
                 };
                 let Ok((mut sock, peer)) = accepted else {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::select! {
+                        biased;
+                        _ = stop.changed() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
                     continue;
                 };
                 // Reap completed requests before admission. The owned set is
                 // the budget, bounding completed handles as well as active
                 // tasks. There is no await between admission and spawn.
-                while connections.try_join_next().is_some() {}
-                if connections.len() >= state.limits.max_conns {
-                    continue;
-                }
                 let state = state.clone();
                 let tls = tls.clone();
-                connections.spawn(async move {
+                let _ = connections.spawn(async move {
                     let _ = tokio::time::timeout(state.limits.conn_timeout, async {
                         if let Some(tls) = tls {
                             if let Ok(mut stream) = tls.accept(sock).await {
@@ -290,9 +343,23 @@ pub async fn serve(
                     .await;
                 });
             }
+            drop(listener);
+            state.workers.seal();
+            connections.drain().await;
+            tokio::join!(state.workers.drain(), maintenance.drain());
         }
     });
-    Ok(Directory { addr: local, task })
+    Ok(Directory {
+        addr: local,
+        shutdown,
+        connections,
+        workers: state.workers.clone(),
+        maintenance,
+        runner: tokio::sync::Mutex::new(Runner {
+            task: Some(task),
+            outcome: None,
+        }),
+    })
 }
 
 async fn serve_request(
@@ -303,17 +370,14 @@ async fn serve_request(
     let response = match http::read_request(stream).await {
         Ok(Some(req)) => {
             let is_head = req.method == "HEAD";
-            let mut response = match state.workers.clone().try_acquire_owned() {
-                Ok(permit) => {
-                    let state = state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        route(&state, peer, &req)
-                    })
-                    .await
-                    .unwrap_or_else(|e| Response::error(500, &DiscoveryError::Store(e.to_string())))
-                }
-                Err(_) => Response::error(429, &DiscoveryError::RateLimited),
+            let mut response = match state.workers.request(state.clone(), peer, req) {
+                Some(reply) => reply.await.unwrap_or_else(|_| {
+                    Response::error(
+                        500,
+                        &DiscoveryError::Store("directory worker ended without a response".into()),
+                    )
+                }),
+                None => Response::error(429, &DiscoveryError::RateLimited),
             };
             // This also covers worker saturation/failure before routing HEAD.
             if is_head {

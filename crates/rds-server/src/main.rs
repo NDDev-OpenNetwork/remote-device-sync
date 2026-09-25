@@ -131,6 +131,20 @@ async fn main() -> anyhow::Result<()> {
     let enrolled_publishers = cli.directory_allow.len();
     let enrollment = rds_discovery::Enrollment::new(cli.directory_allow)?;
 
+    let allow: Vec<iroh::EndpointId> = cli
+        .allow
+        .iter()
+        .map(|s| s.parse())
+        .collect::<Result<_, _>>()?;
+    let tls = rds_relay::tls_from_flags(
+        cli.tls_https_addr,
+        cli.tls_cert,
+        cli.tls_key,
+        cli.tls_acme_domain,
+        cli.tls_acme_contact,
+        cli.tls_acme_cache,
+        cli.tls_acme_staging,
+    )?;
     let store: Arc<dyn RecordStore> = Arc::new(FileStore::new(&cli.directory)?);
     info!(dir = %cli.directory.display(), "endpoint record directory ready");
 
@@ -203,50 +217,56 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     info!(addr = %dir.addr(), https, enrolled_publishers, "discovery directory listening");
-    let _dir = dir; // serves until process exit
 
-    let allow: Vec<iroh::EndpointId> = cli
-        .allow
-        .iter()
-        .map(|s| s.parse())
-        .collect::<Result<_, _>>()?;
-    let tls = rds_relay::tls_from_flags(
-        cli.tls_https_addr,
-        cli.tls_cert,
-        cli.tls_key,
-        cli.tls_acme_domain,
-        cli.tls_acme_contact,
-        cli.tls_acme_cache,
-        cli.tls_acme_staging,
-    )?;
-    let relay = rds_relay::serve(cli.relay_addr, allow, tls).await?;
+    let relay = match rds_relay::serve(cli.relay_addr, allow, tls).await {
+        Ok(relay) => relay,
+        Err(error) => {
+            // A partially started service still owns listener and disk work.
+            dir.close().await?;
+            return Err(error);
+        }
+    };
+    // Readiness must not race signal-handler installation.
+    let shutdown = match shutdown_signal() {
+        Ok(shutdown) => shutdown,
+        Err(error) => {
+            let _ = tokio::join!(relay.shutdown(), dir.close());
+            return Err(error.into());
+        }
+    };
     info!(addr = %relay.http_addr().expect("relay config enabled"), "relay listening");
     if let Some(addr) = relay.https_addr() {
         info!(%addr, "relay tls listening");
     }
 
-    shutdown_signal().await;
-    // Graceful stop: close listener + client websockets instead of
-    // letting attached endpoints hit a silent RST.
-    let _ = relay.shutdown().await;
+    shutdown.await;
+    // Start both shutdowns before awaiting either; directory storage work
+    // remains owned until it finishes, even when relay shutdown fails.
+    let (relay_result, directory_result) = tokio::join!(relay.shutdown(), dir.close());
+    directory_result?;
+    relay_result?;
     Ok(())
 }
 
-/// SIGINT on every platform, SIGTERM on unix (systemd stop).
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+/// Install SIGINT/SIGTERM handlers before publishing final readiness.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
+            _ = interrupt.recv() => {}
             _ = term.recv() => {}
         }
-    }
-    #[cfg(not(unix))]
-    {
+    })
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
+    Ok(async {
         let _ = tokio::signal::ctrl_c().await;
-    }
+    })
 }
 
 #[cfg(test)]

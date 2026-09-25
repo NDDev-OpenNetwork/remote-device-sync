@@ -3010,6 +3010,7 @@ dependencies = [
  "iroh",
  "rds-discovery",
  "rds-relay",
+ "rustix",
  "serde_json",
  "tokio",
  "tracing",
