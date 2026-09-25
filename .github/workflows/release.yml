@@ -18,7 +18,7 @@ on:
 permissions: {}
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:

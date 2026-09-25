@@ -1394,6 +1394,9 @@ on Linux. The next macOS run exposed XNU's kernel-managed `PENDIN` flag on
 canonical-mode restoration: the test now compares all configurable modes and
 control characters, excluding only that transient macOS queue-state bit.
 See [XNU ttioctl](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c).
+XNU also exposes read-only `FWASWRITTEN` through `F_GETFL` after output; only
+that kernel-history bit is excluded on macOS, with `O_NONBLOCK` and every other
+descriptor flag still checked. See [XNU flags](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/fcntl.h).
 The local six active SSH integration tests pass. A new native CI run
 is required to establish macOS acceptance, rather than assuming portability.
 
@@ -1403,5 +1406,12 @@ default-branch checks, complete packages and official artifact attestations;
 source SPDX coverage is not presented as a complete native binary/OS SBOM.
 No installed process or consumer pin is changed. W10.3 remains partial until
 actual published-asset verification and clean-machine qualification; automatic
-activation/rollback, Apple signing/notarization and W10.8 GDS metadata/provider
-integration remain open.
+activation/rollback and Apple signing/notarization remain open.
+
+The canonical GDS anchor now points to existing Rust workspace entrypoints and
+declares numeric GitHub releases with actual provider check names. Its pinned
+0.9.15 projection was regenerated and verified through journaled GDS operations;
+generated policy content did not change. GDS `complete` still cannot integrate
+GitHub PRs, so that route remains `NOT_PROVEN`; ordinary GitHub PR integration
+and the checked-in publication workflow retain their separate evidence.
+Estate CI-feedback reconciliation and the rest of W10.8 remain open.

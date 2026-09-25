@@ -497,7 +497,17 @@ async fn tty_modes_and_shared_descriptor_flags_restore_on_rejection_and_signal()
         ] {
             assert_eq!(restored.special_codes[code], saved.special_codes[code]);
         }
-        assert_eq!(rustix::fs::fcntl_getfl(&slave).unwrap(), flags);
+        let restored_flags = rustix::fs::fcntl_getfl(&slave).unwrap();
+        // XNU exposes the read-only FWASWRITTEN bit through F_GETFL after
+        // output (bsd/sys/fcntl.h); F_SETFL cannot clear this kernel history.
+        // All other bits, particularly shared O_NONBLOCK, remain exact.
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            restored_flags.bits() & !0x0001_0000,
+            flags.bits() & !0x0001_0000
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(restored_flags, flags);
         fixture.idle().await;
         fixture.close().await;
     }
