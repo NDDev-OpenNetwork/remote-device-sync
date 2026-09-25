@@ -1,0 +1,174 @@
+{
+  "source_base": "336dcb6",
+  "scope": [
+    "W3.2 service-runner supervision",
+    "W2.5 retained lifecycle ownership"
+  ],
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/rds-discovery/src/service.rs": "ade27a255bbdf8618babc295591014ef073ea23bd1f6cbb962e4fcb3577faa49",
+    "crates/rds-discovery/src/service/tasks.rs": "0b39aeb420272b771957b0a7d098c0e4c0f4b22fdc1926b4328df964d98b6a1f",
+    "crates/rds-relay/src/runtime.rs": "e044522360b60de5330c2cd4b36c299d1bafdb43b2152404bd78b9038b2b92b3",
+    "crates/rds-relay/src/server.rs": "87a4e4019318198e69612ab46dadf20e7233f40f0986d63d3b0e5ce3a0966d03",
+    "crates/rds-relay/src/server/lifecycle_tests.rs": "ba6b0c9602ffa4c2ee247b1a277d2435a52a17d51a5195a58d3c3244b42354d5",
+    "crates/rds-relay/src/main.rs": "86216ebf09f774208468a33ab2d31c8fe0d9a863654a6d0774611a1c75b8c401",
+    "crates/rds-server/src/main.rs": "61e73618d0469ba9878d545ff893e65f12ef5b38bf741efe4e87293d10784565"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "code": 0,
+      "seconds": 0.7408330799080431,
+      "build_jobs": 2
+    },
+    {
+      "name": "fmt-shared",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "tests/support/relay_runtime.rs"
+      ],
+      "code": 0,
+      "seconds": 0.04721357696689665,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 27.482978119980544,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-x11",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--features",
+        "rds-desktop/x11",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 31.51247070298996,
+      "build_jobs": 2
+    },
+    {
+      "name": "clippy-all",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "code": 0,
+      "seconds": 31.846693456056528,
+      "build_jobs": 2
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "code": 0,
+      "seconds": 409.74221917800605,
+      "build_jobs": 2
+    },
+    {
+      "name": "test-owned",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rds-net",
+        "-p",
+        "rds-relay",
+        "-p",
+        "rds-agent",
+        "-p",
+        "rds-cli",
+        "-p",
+        "rds-server",
+        "--all-features"
+      ],
+      "code": 0,
+      "seconds": 280.78008185501676,
+      "build_jobs": 2
+    }
+  ],
+  "test_counts": {
+    "workspace": {
+      "passed": 417,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 72
+    },
+    "owned": {
+      "passed": 224,
+      "failed": 0,
+      "ignored": 0,
+      "targets": 43
+    },
+    "focused": {
+      "passed": 74,
+      "failed": 0,
+      "ignored": 1,
+      "targets": 4
+    }
+  },
+  "source_findings": [
+    "Both binaries previously waited only for signals after readiness; an exited runner was not observed until signal-driven shutdown",
+    "Calling upstream iroh Server.shutdown after completing its Server.join would repoll the consumed supervisor handle; adapter must retain its outcome",
+    "First-error propagation could hide another failure during composed startup/cleanup"
+  ],
+  "changes": [
+    "Non-stopping canceled/repeated runner observers for Directory and owned Relay sharing retained join outcomes",
+    "RunningRelay observer caches upstream iroh supervisor result and avoids second poll at shutdown",
+    "Both binaries select runner termination and signals; host observes both services",
+    "Unexpected service completion triggers joined shutdown and failure exit, even when the runner returned successfully",
+    "Both cleanup failures retained; startup/signal-handler failures preserve cleanup context"
+  ],
+  "regression": [
+    "Cancel observer then prove real directory health / iroh TCP listener / owned relay attachment still work",
+    "Concurrent wait and close sends stop before runner lock, so observation cannot deadlock shutdown",
+    "Abort actual owned accept runner; repeated observe and close return same retained JoinError allocation, occupied state zero",
+    "Directory runner panic observed before controlled request and maintenance blocking jobs are released; fallback cancellation and final joins still work",
+    "Actual upstream iroh empty-service supervisor error observed twice then returned from shutdown without double poll",
+    "Completed owned runtime can be observed twice and shut down safely",
+    "Host status checker refuses unexpected clean exit and retains nested relay plus directory error causes",
+    "Existing actual binary SIGTERM, relay forwarding, restart and preflight suites remain in final matrix"
+  ],
+  "limits": [
+    "Observation signals runner completion, not stalled-task, worker-error or remote reachability health",
+    "No automatic restart/backoff or session recovery policy introduced",
+    "Directory failure observation does not wait for fallback disk work; actual close still waits for started filesystem calls",
+    "Upstream iroh owns its internal workers and panic cleanup; no stronger engine guarantee claimed",
+    "No native macOS or deployed SSH/desktop/sync/NAT qualification",
+    "No new dependency, wire version or external runtime helper; all waves open; cargo-deny unavailable"
+  ]
+}

@@ -1,6 +1,66 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observers_do_not_stop_the_relay_or_lose_normal_and_failed_outcomes() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for abort in [false, true] {
+            let relay = serve(
+                EndpointConfig {
+                    backend: rds_net::Backend::Noq,
+                    discovery: false,
+                    bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                    ..Default::default()
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), relay.wait_stopped())
+                    .await
+                    .is_err()
+            );
+            let (mut socket, handle) = rds_noq::relay::RelaySocket::connect(
+                relay.endpoint_addr(),
+                rds_net::SecretKey::from_bytes(&[158; 32]),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(handle.is_available());
+            if abort {
+                relay
+                    .accept_task
+                    .lock()
+                    .await
+                    .task
+                    .as_ref()
+                    .unwrap()
+                    .abort();
+                let observed = relay.wait_stopped().await.unwrap_err();
+                assert!(observed.0.is_cancelled());
+                let again = relay.wait_stopped().await.unwrap_err();
+                let closed = relay.close().await.unwrap_err();
+                assert!(std::sync::Arc::ptr_eq(&observed.0, &again.0));
+                assert!(std::sync::Arc::ptr_eq(&observed.0, &closed.0));
+            } else {
+                // Observation may hold the runner mutex, but close must still
+                // deliver its stop request before waiting for that mutex.
+                let (observed, closed) = tokio::join!(relay.wait_stopped(), relay.close());
+                observed.unwrap();
+                closed.unwrap();
+            }
+            socket.close().await;
+            assert!(!handle.is_available());
+            assert_eq!(relay.lifecycle_stats().active_connections, 0);
+            assert!(relay.connections.lock().await.is_empty());
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canceled_session_removes_its_registration_and_observed_flow_history() {
     tokio::time::timeout(Duration::from_secs(10), canceled_session_case())
         .await

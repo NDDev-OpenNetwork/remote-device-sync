@@ -256,11 +256,12 @@ impl ReadyRelay {
     /// Bind the selected relay after all host configuration has been prepared.
     pub async fn bind(self, addr: SocketAddr) -> Result<RunningRelay, RelayRuntimeError> {
         let backend = match self.backend {
-            ReadyBackend::Iroh { allow, tls } => RunningBackend::Iroh(
-                crate::serve_prepared(addr, allow, tls.map(|tls| *tls))
+            ReadyBackend::Iroh { allow, tls } => RunningBackend::Iroh(IrohRuntime {
+                server: crate::serve_prepared(addr, allow, tls.map(|tls| *tls))
                     .await
                     .map_err(RelayRuntimeError::Startup)?,
-            ),
+                outcome: None,
+            }),
             #[cfg(feature = "owned-relay")]
             ReadyBackend::Noq { allow, key, limits } => RunningBackend::Noq(
                 crate::server::serve_with_limits(
@@ -300,17 +301,53 @@ pub struct RunningRelay {
     backend: RunningBackend,
 }
 enum RunningBackend {
-    Iroh(iroh_relay::server::Server),
+    Iroh(IrohRuntime),
     #[cfg(feature = "owned-relay")]
     Noq(crate::server::Relay),
 }
+
+struct IrohRuntime {
+    server: iroh_relay::server::Server,
+    outcome: Option<Result<(), RelayRuntimeError>>,
+}
+
+impl IrohRuntime {
+    async fn stopped(&mut self) {
+        if self.outcome.is_none() {
+            let outcome = match self.server.join().await {
+                Ok(result) => result.map_err(|e| RelayRuntimeError::IrohShutdown(e.into())),
+                Err(error) => Err(RelayRuntimeError::IrohShutdown(error.into())),
+            };
+            // No await after consuming the upstream JoinHandle: shutdown must
+            // return this result instead of polling that same handle again.
+            self.outcome = Some(outcome);
+        }
+    }
+
+    async fn shutdown(self) -> Result<(), RelayRuntimeError> {
+        if let Some(outcome) = self.outcome {
+            // The upstream supervisor normally joins its workers before exit.
+            // Dropping the remaining Server releases its service handles.
+            outcome
+        } else {
+            self.server
+                .shutdown()
+                .await
+                .map_err(|e| RelayRuntimeError::IrohShutdown(e.into()))
+        }
+    }
+}
+
 impl RunningRelay {
     pub fn binding(&self) -> RelayBinding {
         match &self.backend {
-            RunningBackend::Iroh(server) => RelayBinding::Iroh {
+            RunningBackend::Iroh(runtime) => RelayBinding::Iroh {
                 // serve_prepared always enables the HTTP relay/probe listener.
-                http: server.http_addr().expect("configured HTTP relay listener"),
-                https: server.https_addr(),
+                http: runtime
+                    .server
+                    .http_addr()
+                    .expect("configured HTTP relay listener"),
+                https: runtime.server.https_addr(),
             },
             #[cfg(feature = "owned-relay")]
             RunningBackend::Noq(server) => RelayBinding::Noq {
@@ -320,14 +357,26 @@ impl RunningRelay {
         }
     }
 
+    /// Observe unexpected completion without initiating shutdown. Cancellation
+    /// is safe and repeated observations complete once the runner has stopped.
+    /// Always call shutdown afterward: it joins cleanup and returns the retained
+    /// failure, including an error observed here. This does not probe reachability.
+    pub async fn stopped(&mut self) {
+        match &mut self.backend {
+            RunningBackend::Iroh(runtime) => runtime.stopped().await,
+            #[cfg(feature = "owned-relay")]
+            RunningBackend::Noq(server) => {
+                // The server retains this result for the subsequent drain/join.
+                let _ = server.wait_stopped().await;
+            }
+        }
+    }
+
     /// Await shutdown, including the owned relay's bounded drain grace.
     /// The host must await this before ending its runtime; Drop cannot join.
     pub async fn shutdown(self) -> Result<(), RelayRuntimeError> {
         match self.backend {
-            RunningBackend::Iroh(server) => server
-                .shutdown()
-                .await
-                .map_err(|e| RelayRuntimeError::IrohShutdown(e.into())),
+            RunningBackend::Iroh(runtime) => runtime.shutdown().await,
             #[cfg(feature = "owned-relay")]
             RunningBackend::Noq(server) => Ok(server.drain().await?),
         }
@@ -353,4 +402,90 @@ pub fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
     Ok(async {
         let _ = tokio::signal::ctrl_c().await;
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn canceled_iroh_observer_preserves_listener_and_shutdown() {
+        let mut relay = RelayArgs::default()
+            .prepare()
+            .unwrap()
+            .initialize()
+            .await
+            .unwrap()
+            .bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), relay.stopped())
+                .await
+                .is_err()
+        );
+        let RelayBinding::Iroh { http, .. } = relay.binding() else {
+            panic!("wrong backend");
+        };
+        let _socket = tokio::net::TcpStream::connect(http).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), relay.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let _rebound = std::net::TcpListener::bind(http).unwrap();
+    }
+
+    #[tokio::test]
+    async fn irohs_actual_supervisor_error_survives_repeated_observation_and_shutdown() {
+        // Upstream starts a supervisor even with no configured service; it
+        // returns NoRelayServicesEnabled. This is a real retained engine error.
+        let server = iroh_relay::server::Server::spawn(Default::default())
+            .await
+            .unwrap();
+        let mut runtime = IrohRuntime {
+            server,
+            outcome: None,
+        };
+        tokio::time::timeout(Duration::from_secs(2), runtime.stopped())
+            .await
+            .unwrap();
+        let before = runtime
+            .outcome
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string();
+        runtime.stopped().await;
+        let error = runtime.shutdown().await.unwrap_err();
+        assert_eq!(before, error.to_string());
+        assert!(matches!(error, RelayRuntimeError::IrohShutdown(_)));
+    }
+
+    #[cfg(feature = "owned-relay")]
+    #[tokio::test]
+    async fn owned_runtime_observes_completed_relay_without_repolling_its_runner() {
+        let server = crate::server::serve(
+            rds_net::EndpointConfig {
+                backend: rds_net::Backend::Noq,
+                discovery: false,
+                bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+        server.close().await.unwrap();
+        let mut relay = RunningRelay {
+            backend: RunningBackend::Noq(server),
+        };
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(2), relay.stopped())
+                .await
+                .unwrap();
+        }
+        relay.shutdown().await.unwrap();
+    }
 }

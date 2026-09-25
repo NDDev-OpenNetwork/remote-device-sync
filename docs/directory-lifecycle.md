@@ -35,6 +35,17 @@ If the runner fails, close still seals and joins the shared connection, request
 and maintenance groups, then reports the retained failure. Only one close waiter
 polls these fallback groups at a time.
 
+`Directory::wait_stopped(&self)` observes runner termination without requesting
+shutdown or joining failure-fallback storage jobs. It retains the result for
+subsequent observers and close calls. Canceling an observer leaves a healthy
+listener running. Call `close` after observation to seal and join retained work;
+observation alone is not a cleanup guarantee. A concurrent close delivers its
+stop request before waiting for the runner mutex, so an active observer cannot
+prevent shutdown. This allows a composed host to start stopping its other
+services before a failed directory's remaining disk jobs finish. Observation
+shares the runner mutex with close; if another caller has already begun cleanup,
+observation may wait for that caller. The host observes before starting close.
+
 Drop seals admission and signals cleanup, but cannot synchronously join. The
 executor must continue running for cleanup to progress. Applications needing a
 completion guarantee must call and await close before ending their runtime.
@@ -43,9 +54,11 @@ boundary and is not qualified by this contract. A forced process exit is also
 outside the guarantee.
 
 `rds-server` starts relay and directory shutdown together and awaits both before
-returning. A relay startup error also awaits directory close. Relay allowlist
-and TLS flag-shape validation now precede catalog creation; full certificate
-and server configuration preflight is a separate pending change. On Unix,
+returning. It also initiates both shutdowns if either service runner terminates
+unexpectedly, and reports failure even for an unexpected clean exit. A relay
+startup error awaits directory close and retains both errors if cleanup fails.
+Relay configuration and bounded certificate/registry input preflight precede
+identity/catalog creation; see the [runtime contract](relay-runtime.md). On Unix,
 SIGINT/SIGTERM handlers are installed before final relay readiness is logged.
 Real binary tests use private temporary catalogs, loopback listeners and signals
 sent only to test-owned children; they also reopen the same catalog after exit.

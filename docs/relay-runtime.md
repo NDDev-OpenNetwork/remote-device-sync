@@ -86,14 +86,37 @@ keys are preserved and rejected, never regenerated in place.
 Final relay readiness follows successful bind and Unix SIGINT/SIGTERM handler
 installation. Owned mode prints its actual UDP socket and public endpoint ID.
 This establishes local listener readiness, not external reachability, NAT
-qualification or automatic monitoring/restart of every background task.
+qualification or an automatic restart policy.
 
 Both binaries await relay shutdown; the composed host joins directory shutdown
 as well. Owned shutdown uses the [checked drain lifecycle](relay-control.md#server-task-ownership)
 and propagates retained runner errors to process failure. The existing drain
 notice/grace protocol is unchanged. Drop cannot synchronously join and durable
-filesystem work has no forced kernel-I/O deadline. Startup cancellation,
-runtime failure supervision and service-wide timeout policy remain open.
+filesystem work has no forced kernel-I/O deadline.
+
+After readiness, both binaries observe relay runner termination as well as
+signals. The composed host also observes directory runner termination. An
+unexpected return, including a clean one, starts shutdown of both services and
+ends the process unsuccessfully. If both shutdowns fail, both errors are
+reported. A concurrent service completion takes priority over a signal already
+ready in the same select. This monitors runner completion, not stalled tasks,
+every worker error or end-to-end health.
+
+`RunningRelay::stopped` observes without requesting shutdown. The caller must
+then await `shutdown`, which reports the retained failure. Repeated or canceled
+observation cannot lose ownership. In the iroh adapter, observing the upstream
+supervisor saves its result; shutdown returns that saved result instead of
+polling the consumed upstream join handle again. Upstream iroh still owns its
+internal task cleanup, including its panic behavior. The owned adapter retains
+its child task set for explicit fallback cleanup after a failed runner.
+
+The host observes directory termination before starting failure-fallback
+filesystem joins. This lets it initiate relay shutdown even while a
+directory disk operation remains blocked; the host still waits for that owned
+operation before exiting. Normal supervisor closure, cancellation and retained
+failure tests complement the real-binary signal/traffic fixtures. Startup
+cancellation, hung-task watchdogs, automatic recovery and service-wide timeout
+policy remain open.
 
 Real-binary fixtures cover flag/PEM preflight, feature-off rejection, iroh and
 manual-TLS startup, unknown-peer refusal, explicit development admission,

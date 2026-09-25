@@ -98,7 +98,9 @@ Both server binaries share a validated relay runtime: iroh remains the default;
 the opt-in owned QUIC mode loads a separate durable identity and requires an
 allowlist unless explicitly opened for development. The host prepares relay,
 registry and TLS configuration before creating identity/catalog state, then
-awaits both services on shutdown. See [runtime composition](relay-runtime.md)
+awaits both services on shutdown. Unexpected runner termination triggers
+shutdown of the composed host and a failure exit, with errors retained across
+observation and cleanup. See [runtime composition](relay-runtime.md)
 for feature selection, startup boundaries and compatibility.
 
 ## Research summary

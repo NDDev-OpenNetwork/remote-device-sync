@@ -6,6 +6,7 @@
 
 use std::net::SocketAddr;
 
+use anyhow::Context as _;
 use clap::Parser;
 use rds_relay::{RelayArgs, RelayBinding};
 
@@ -27,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
-    let server = cli
+    let mut server = cli
         .relay
         .prepare()?
         .initialize()
@@ -37,7 +38,10 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = match rds_relay::shutdown_signal() {
         Ok(shutdown) => shutdown,
         Err(error) => {
-            server.shutdown().await?;
+            server
+                .shutdown()
+                .await
+                .with_context(|| format!("could not install shutdown handlers: {error}"))?;
             return Err(error.into());
         }
     };
@@ -53,7 +57,12 @@ async fn main() -> anyhow::Result<()> {
             println!("relay endpoint id: {id}");
         }
     }
-    shutdown.await;
+    let unexpected = tokio::select! {
+        biased;
+        _ = server.stopped() => true,
+        _ = shutdown => false,
+    };
     server.shutdown().await?;
+    anyhow::ensure!(!unexpected, "relay stopped unexpectedly");
     Ok(())
 }

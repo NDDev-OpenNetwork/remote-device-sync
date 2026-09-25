@@ -211,6 +211,14 @@ retained and returned after cleanup, including on repeated calls. Drop seals
 registration, closes current tunnels and requests runner cleanup; it cannot
 synchronously join and requires the executor to continue polling.
 
+`wait_stopped()` observes runner completion without sending a stop request.
+It shares the retained outcome with close/drain and supports cancellation and
+repeated observation. It does not join failure-fallback children; the caller
+must still close/drain afterward. The binary runtime uses this notification to
+stop the composed host on unexpected relay exit. A concurrent close signals
+the runner before waiting for the observation mutex, so observers cannot block
+delivery of shutdown.
+
 Drain grace and notices also belong to the runner. Canceling a `drain()` caller
 does not cancel the requested drain, repeated calls wait for completion, and an
 explicit close takes precedence. This fixes observed live tunnels after Relay

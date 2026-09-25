@@ -104,6 +104,24 @@ struct Runner {
     outcome: Option<Result<(), ShutdownError>>,
 }
 
+impl Runner {
+    async fn wait(&mut self) {
+        if let Some(task) = self.task.as_mut() {
+            let outcome = task
+                .await
+                .map_err(|error| ShutdownError(std::sync::Arc::new(error)));
+            // No await between consuming the handle and retaining its result.
+            self.task = None;
+            self.outcome = Some(outcome);
+        }
+    }
+
+    fn result(&self) -> Result<(), ShutdownError> {
+        // Construction starts with a handle, and wait saves its outcome.
+        self.outcome.clone().expect("runner outcome retained")
+    }
+}
+
 /// The owned relay runner failed; cleanup still joins its retained children.
 #[derive(Debug, Clone)]
 pub struct ShutdownError(std::sync::Arc<tokio::task::JoinError>);
@@ -261,28 +279,24 @@ impl Relay {
         self.join_runner().await
     }
 
+    /// Observe runner termination without requesting shutdown. Cancellation
+    /// preserves its handle/result. After this returns, call close/drain to
+    /// join retained children even when the runner failed before cleanup.
+    pub async fn wait_stopped(&self) -> Result<(), ShutdownError> {
+        let mut runner = self.accept_task.lock().await;
+        runner.wait().await;
+        runner.result()
+    }
+
     async fn join_runner(&self) -> Result<(), ShutdownError> {
         let mut runner = self.accept_task.lock().await;
-        if let Some(task) = runner.task.as_mut() {
-            let outcome = task
-                .await
-                .map_err(|error| ShutdownError(std::sync::Arc::new(error)));
-            // Save this before fallback awaits: a canceled waiter must never
-            // poll the already-consumed JoinHandle again.
-            runner.task = None;
-            runner.outcome = Some(outcome);
-        }
+        runner.wait().await;
         self.state.stop();
         self.endpoint.close().await;
         let mut connections = self.connections.lock().await;
         finish_connections(&mut connections).await;
         self.state.stop();
-        // Construction starts with a handle. Taking it always saves an outcome
-        // before another await; this invariant is private to this type.
-        runner
-            .outcome
-            .clone()
-            .expect("runner outcome saved before fallback")
+        runner.result()
     }
 
     fn request_shutdown(&self) {

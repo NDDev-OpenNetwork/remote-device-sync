@@ -127,6 +127,35 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::watch;
 
+    #[tokio::test]
+    async fn observer_cancellation_preserves_live_directory_and_concurrent_close() {
+        let directory = super::super::serve(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(crate::MemoryStore::default()),
+            super::super::ServiceConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), directory.wait_stopped())
+                .await
+                .is_err()
+        );
+        crate::client::Client::new(directory.addr())
+            .health()
+            .await
+            .unwrap();
+        let (observed, closed) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(directory.wait_stopped(), directory.close())
+        })
+        .await
+        .unwrap();
+        observed.unwrap();
+        closed.unwrap();
+        directory.wait_stopped().await.unwrap();
+        directory.close().await.unwrap();
+    }
+
     struct Release(Option<std::sync::mpsc::Sender<()>>);
     impl Drop for Release {
         fn drop(&mut self) {
@@ -188,6 +217,17 @@ mod tests {
                 outcome: None,
             }),
         };
+        // Observe runner failure before the controlled blocking jobs finish.
+        // A host can now initiate shutdown of its other service immediately.
+        for _ in 0..2 {
+            let observed = tokio::time::timeout(Duration::from_secs(2), directory.wait_stopped())
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert!(observed.to_string().contains("fixture runner failure"));
+        }
+        assert!(!workers.is_empty());
+        assert!(!maintenance.is_empty());
         // The runner has failed, so this waiter is canceled in fallback drain.
         assert!(
             tokio::time::timeout(Duration::from_millis(75), directory.close())

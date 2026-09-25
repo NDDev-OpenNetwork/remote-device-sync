@@ -194,17 +194,18 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     info!(addr = %dir.addr(), https, enrolled_publishers, "discovery directory listening");
-    let relay = match relay.bind(cli.relay_addr).await {
+    let mut relay = match relay.bind(cli.relay_addr).await {
         Ok(relay) => relay,
         Err(error) => {
-            dir.close().await?;
-            return Err(error.into());
+            return check_shutdown(None, Err(error), dir.close().await);
         }
     };
     let shutdown = match rds_relay::shutdown_signal() {
         Ok(shutdown) => shutdown,
         Err(error) => {
-            let _ = tokio::join!(relay.shutdown(), dir.close());
+            let (relay_result, directory_result) = tokio::join!(relay.shutdown(), dir.close());
+            check_shutdown(None, relay_result, directory_result)
+                .with_context(|| format!("could not install shutdown handlers: {error}"))?;
             return Err(error.into());
         }
     };
@@ -219,10 +220,35 @@ async fn main() -> anyhow::Result<()> {
             info!(%addr, endpoint_id = %id, "owned relay listening");
         }
     }
-    shutdown.await;
+    let unexpected = tokio::select! {
+        biased;
+        _ = relay.stopped() => Some("relay"),
+        _ = dir.wait_stopped() => Some("directory"),
+        _ = shutdown => None,
+    };
     let (relay_result, directory_result) = tokio::join!(relay.shutdown(), dir.close());
-    directory_result?;
-    relay_result?;
+    check_shutdown(unexpected, relay_result, directory_result)
+}
+
+fn check_shutdown(
+    unexpected: Option<&str>,
+    relay: Result<(), rds_relay::RelayRuntimeError>,
+    directory: std::io::Result<()>,
+) -> anyhow::Result<()> {
+    // Both services have already joined. Preserve both failures if teardown
+    // failed in both components, rather than letting the first `?` hide one.
+    match (relay, directory) {
+        (Err(relay), Err(directory)) => {
+            let relay = anyhow::Error::new(relay);
+            anyhow::bail!("relay failed: {relay:#}; directory failed: {directory}");
+        }
+        (Err(error), Ok(())) => return Err(error.into()),
+        (Ok(()), Err(error)) => return Err(error.into()),
+        (Ok(()), Ok(())) => {}
+    }
+    if let Some(service) = unexpected {
+        anyhow::bail!("{service} stopped unexpectedly");
+    }
     Ok(())
 }
 
@@ -240,6 +266,32 @@ fn read_config_file(path: &std::path::Path, limit: usize, label: &str) -> anyhow
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unexpected_clean_service_exit_is_failure_and_dual_errors_are_preserved() {
+        assert!(check_shutdown(None, Ok(()), Ok(())).is_ok());
+        for service in ["relay", "directory"] {
+            let error = check_shutdown(Some(service), Ok(()), Ok(())).unwrap_err();
+            assert!(error.to_string().contains(service));
+        }
+        let relay = rds_relay::RelayRuntimeError::IrohShutdown(
+            anyhow::anyhow!("fixture relay cause").context("fixture supervisor error"),
+        );
+        let error = check_shutdown(
+            None,
+            Err(relay),
+            Err(std::io::Error::other("fixture directory cause")),
+        )
+        .unwrap_err()
+        .to_string();
+        for cause in [
+            "fixture relay cause",
+            "fixture supervisor error",
+            "fixture directory cause",
+        ] {
+            assert!(error.contains(cause), "lost failure: {error}");
+        }
+    }
 
     #[test]
     fn offline_migration_requires_both_paths_and_refuses_service_flags() {

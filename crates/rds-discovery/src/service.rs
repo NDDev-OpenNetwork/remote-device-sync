@@ -170,10 +170,41 @@ struct Runner {
     outcome: Option<Result<(), String>>,
 }
 
+impl Runner {
+    async fn wait(&mut self) {
+        if let Some(task) = self.task.as_mut() {
+            let result = task.await.map_err(|error| error.to_string());
+            // Retain before any further await: repeated observation/cleanup
+            // must never poll a consumed JoinHandle again.
+            self.task = None;
+            self.outcome = Some(result);
+        }
+    }
+
+    fn result(&self) -> std::io::Result<()> {
+        match self.outcome.as_ref() {
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) => Err(std::io::Error::other(error.clone())),
+            None => Err(std::io::Error::other("directory runner outcome missing")),
+        }
+    }
+}
+
 impl Directory {
     /// Bound HTTP(S) address, including the assigned port for a `:0` bind.
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Observe runner termination without stopping it. Call close afterward
+    /// to join retained request/storage work. Observation itself does not join
+    /// failure-fallback disk jobs, so observe before closing to stop sibling
+    /// services promptly. A concurrent close may hold the shared runner mutex
+    /// during cleanup. Canceled/repeated observation preserves the result.
+    pub async fn wait_stopped(&self) -> std::io::Result<()> {
+        let mut runner = self.runner.lock().await;
+        runner.wait().await;
+        runner.result()
     }
 
     /// Seal admission and join service-owned work. Running blocking filesystem
@@ -182,11 +213,7 @@ impl Directory {
     pub async fn close(&self) -> std::io::Result<()> {
         self.request_shutdown();
         let mut runner = self.runner.lock().await;
-        if let Some(task) = runner.task.as_mut() {
-            let result = task.await.map_err(|error| error.to_string());
-            runner.task = None;
-            runner.outcome = Some(result);
-        }
+        runner.wait().await;
         // Also join connections and started jobs if the runner panicked before
         // normal cleanup. Only one waiter may poll each fallback JoinSet.
         tokio::join!(
@@ -194,11 +221,7 @@ impl Directory {
             self.workers.drain(),
             self.maintenance.drain()
         );
-        match runner.outcome.as_ref() {
-            Some(Ok(())) => Ok(()),
-            Some(Err(error)) => Err(std::io::Error::other(error.clone())),
-            None => Err(std::io::Error::other("directory runner outcome missing")),
-        }
+        runner.result()
     }
 
     fn request_shutdown(&self) {

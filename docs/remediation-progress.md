@@ -29,7 +29,7 @@ promotion has occurred. Native macOS checks still require their platform lane.
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Global timeout classes, retry jitter, startup recovery and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
-| W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Runtime supervision, global/reconnect/control budgets and platform/network qualification remain open. |
+| W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
 | W3.3 | Partial; relay control and grace | Shared exact bounded codec, actual Drain/PeerGone receipt, usable grace traffic and stale-slot ownership are checked. Warm secondary relay and measured active-session migration remain open. |
 | W3.6 | Partial; validated selection and bounded credit retry | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link send failure and unknown mapping are route loss; known tunnel closure also retires stale relay selection and promotes eligible direct paths. Path-event resynchronization, complete metrics and generic child failure isolation remain open. |
 
@@ -994,3 +994,20 @@ all-feature tests** passed. See [contract](relay-control.md#datagram-work-admiss
 and [receipt](reports/rds-relay-accounting-20260925.md). Global ingress/decryption
 limits, reattachment/control budgets, service supervision, performance and
 platform/network qualification remain open. No wave closes.
+
+## Relay and directory runner supervision
+
+Both binaries observe service termination as well as signals; the composed host
+stops both services and exits unsuccessfully on unexpected completion, even a
+clean return. Observers preserve runner handles/results across cancellation and
+repetition. Directory failure observation precedes fallback disk joins, and the
+iroh adapter retains the consumed supervisor result for safe later shutdown.
+Combined startup/cleanup failures retain both component causes.
+
+**74 focused tests**, formatting, three Clippy lanes, **417 workspace**
+and **224 expanded all-feature tests** passed. Real fixtures check healthy
+listener survival, concurrent close, actual runner abort/panic and the upstream
+iroh supervisor-error path. See [contract](relay-runtime.md) and
+[receipt](reports/rds-runtime-supervision-20260925.md). Hung-task detection,
+automatic recovery, kernel-I/O shutdown deadlines and platform/network/service
+qualification remain open. No wave closes.
