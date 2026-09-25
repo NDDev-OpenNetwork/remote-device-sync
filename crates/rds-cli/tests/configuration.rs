@@ -71,3 +71,56 @@ fn invalid_forward_budget_fails_before_identity_or_dial() {
         }
     }
 }
+
+#[test]
+fn simultaneous_id_commands_share_one_persistent_identity() {
+    let dir = Scratch::new();
+    let start = std::sync::Barrier::new(8);
+    let outputs = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    run(&["--no-relay"], &dir)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let expected = run(&["--no-relay"], &dir);
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    let _: rds_net::EndpointId = std::str::from_utf8(&expected.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(outputs.iter().any(|output| output.status.success()));
+    for mut output in outputs {
+        if !output.status.success() {
+            // A bounded lock wait may expire under filesystem contention.
+            // Only Busy is retriable; no failure may print an ephemeral id.
+            assert!(output.stdout.is_empty());
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains(&rds_net::KeyStoreError::Busy.to_string()),
+                "unexpected identity failure: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output = run(&["--no-relay"], &dir);
+        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, expected.stdout);
+    }
+    assert!(!dir.0.join(".rds-key-transaction.pending").exists());
+}

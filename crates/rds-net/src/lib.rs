@@ -42,6 +42,7 @@ pub mod backends {
     #[cfg(feature = "transport-noq")]
     pub mod noq;
 }
+mod identity;
 pub mod metrics;
 pub mod relay_control;
 mod uni;
@@ -60,10 +61,9 @@ pub use iroh::endpoint::{
 };
 
 pub use announce::{Announce, AnnounceConfig, announce};
-pub use backends::iroh::{
-    Ticket, default_key_path, load_or_create_key, parse_target, relay_url_of,
-};
+pub use backends::iroh::{Ticket, parse_target, relay_url_of};
 pub use config::{ConfigError, EndpointOverrides, EndpointSettings, RelayLimits, RelaySettings};
+pub use identity::{KeyStoreError, default_key_path, load_or_create_key};
 pub use resolve::resolve_target;
 
 /// Which transport substrate an endpoint binds.

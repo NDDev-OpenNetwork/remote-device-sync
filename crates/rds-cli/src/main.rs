@@ -153,11 +153,9 @@ async fn main() -> anyhow::Result<()> {
         })?
         .into_endpoint()?;
 
-    let key = match &cli.key_file {
-        Some(path) => Some(load_or_create_key(path)?),
-        None => default_key_path()
-            .map(|p| load_or_create_key(&p))
-            .transpose()?,
+    let key = match cli.key_file.clone().or_else(default_key_path) {
+        Some(path) => Some(tokio::task::spawn_blocking(move || load_or_create_key(&path)).await??),
+        None => None,
     };
     // `id` is a pure function of the key: no socket, no relay contact.
     // (An unresolvable key previously fell back to an ephemeral identity,

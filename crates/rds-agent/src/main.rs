@@ -125,7 +125,9 @@ async fn main() -> anyhow::Result<()> {
         .key_file
         .or_else(default_key_path)
         .ok_or_else(|| anyhow::anyhow!("no --key-file and no config dir"))?;
-    let secret_key = load_or_create_key(&key_path)?;
+    let key_load_path = key_path.clone();
+    let secret_key =
+        tokio::task::spawn_blocking(move || load_or_create_key(&key_load_path)).await??;
 
     let (ssh_host, ssh_port) = cli.ssh.into_parts();
 

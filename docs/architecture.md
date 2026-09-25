@@ -19,6 +19,11 @@ updated build order — lives in [research.md](research.md).
 CLI and agent share [versioned endpoint configuration](endpoint-configuration.md)
 with explicit file/flag precedence, backend/relay validation and preflight before
 identity creation. The owned relay uses a separately pinned public identity.
+The shared [identity store](identity-storage.md) preserves the raw seed format
+and serializes creation under a directory lock. It publishes only a complete,
+synchronized seed with no replacement, refuses unsafe existing files and
+recovers its bounded pending state after a process exits. It is a prerequisite
+for stable identity ownership, not the W2.4 local IPC manager.
 TCP service flags, client requests and agent policy use the same canonical
 `rds-core::TcpTarget`; IPv6 spelling and IPv4-mapped addresses normalize before
 policy comparison and dialing. Parsing has no DNS or socket side effects.

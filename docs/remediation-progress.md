@@ -905,3 +905,20 @@ network/relay tests** and **59 isolated network/relay tests** passed. See
 [receipt](reports/rds-relay-zero-port-20260925.md). Broader alias design,
 mixed-version/physical/native-platform qualification and owned server runtime
 integration remain open. No remediation wave is closed.
+
+## Persistent identity transactions
+
+The shared key loader now publishes complete private seeds atomically, without
+replacement, under a stable directory lock. It bounds reads and lock wait, rejects
+unsafe existing files, and recovers its exact pending state after process exit.
+The raw format and default path remain; strict permissions and the typed error
+return are documented compatibility changes. CLI/agent use blocking workers.
+
+Real old-code tests reproduced symlink/nonprivate/hardlink acceptance. New tests
+cover concurrency, Busy retry, seven returned-error/process-exit boundaries, strict-umask
+initialization recovery, explicit directory unlock and path/publication races. Formatting, three Clippy lanes, **390 workspace**,
+**194 all-feature net/relay/agent/CLI** and **36 isolated tests** passed.
+See [receipt](reports/rds-identity-storage-20260925.md) and
+[contract](identity-storage.md). This is a W2.4/W3.2 prerequisite; local IPC,
+platform/physical qualification, directory shutdown and owned server runtime
+integration remain open. No remediation wave is closed.

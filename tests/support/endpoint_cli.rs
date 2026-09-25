@@ -4,6 +4,17 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+fn create_private_scratch(path: &std::path::Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+}
+
+#[cfg(not(unix))]
+fn create_private_scratch(path: &std::path::Path) {
+    std::fs::create_dir(path).unwrap();
+}
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
@@ -15,7 +26,7 @@ impl Scratch {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir(&path).unwrap();
+        create_private_scratch(&path);
         Self(path)
     }
 }
