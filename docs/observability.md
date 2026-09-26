@@ -6,6 +6,9 @@ implementation. See [current remediation state](remediation-progress.md).
 The [O1 2026-09-25 Linux receipt](reports/rds-observability-20260925.md) records
 444 workspace and 239 expanded tests, the actual collector/backend pipeline,
 and two 100-probe development ping runs with JSON telemetry enabled.
+The [2026-09-26 alert qualification follow-up](reports/rds-alert-query-20260926.md)
+records an intermittent GitHub failure and strengthens fresh-query, ingestion,
+deduplication, cancellation and recovery checks without changing alert thresholds.
 
 ## Stack and ownership
 

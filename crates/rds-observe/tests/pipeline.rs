@@ -123,17 +123,71 @@ async fn post(client: &Client, stack: &Stack, base: &str, path: &str, body: Valu
 }
 
 async fn search(client: &Client, stack: &Stack, base: &str, sql: &str) -> Value {
-    post(
+    // Qualification must observe newly ingested data, not an earlier result
+    // for a window containing the same event timestamps. OpenObserve's cache
+    // control is a URL parameter (a similarly named JSON field is insufficient).
+    let result = post(
         client,
         stack,
         base,
-        "/api/default/_search",
+        "/api/default/_search?use_cache=false",
         json!({"query": {
             "sql": sql, "start_time": now_us() - 600_000_000,
             "end_time": now_us() + 60_000_000, "from": 0, "size": 1000
         }}),
     )
-    .await
+    .await;
+    assert_ne!(result["is_partial"], true, "partial search: {result}");
+    if let Some(ratio) = result["cached_ratio"].as_f64() {
+        assert_eq!(ratio, 0.0, "qualification search used cached results");
+    }
+    result
+}
+
+async fn wait_records(client: &Client, stack: &Stack, base: &str, run: &str, expected: usize) {
+    // Include duplicate deliveries: later assertions must actually exercise
+    // the alert query's deduplication, not race the duplicate's ingestion.
+    let sql = format!("SELECT sequence FROM rds_events WHERE run_id = '{run}'");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let rows = search(client, stack, base, &sql).await;
+        let count = rows["hits"].as_array().unwrap().len();
+        if count == expected {
+            return;
+        }
+        assert!(count < expected, "unexpected fixture records: {rows}");
+        if Instant::now() >= deadline {
+            let diagnostics = stack.checked(&["logs", "--no-color", "--tail", "60", "vector"]);
+            eprintln!(
+                "fixture collector: {}",
+                diagnostics.replace(&stack.password, "[redacted]")
+            );
+            for metric in [
+                "buffer_received_events_total",
+                "buffer_sent_events_total",
+                "component_discarded_events_total",
+                "component_errors_total",
+            ] {
+                let response = client
+                    .get(format!(
+                        "{base}/api/default/prometheus/api/v1/query?query={metric}"
+                    ))
+                    .basic_auth("fixture@example.invalid", Some(&stack.password))
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                eprintln!("collector {metric}: {response}");
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture ingestion incomplete: expected {expected} records, got {rows}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -356,24 +410,14 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
         .clone();
     sample["service"] = json!("rds-cli");
     sample["run_id"] = json!(sample_run);
+    sample["operation"] = json!("connect");
     for sequence in 0..9 {
         sample["sequence"] = json!(sequence);
         sample["outcome"] = json!(if sequence < 2 { "error" } else { "ok" });
         writeln!(file, "{sample}").unwrap();
     }
     file.sync_all().unwrap();
-    let count_sql =
-        format!("SELECT DISTINCT sequence FROM rds_events WHERE run_id = '{sample_run}'");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while search(&client, &stack, &base, &count_sql).await["hits"]
-        .as_array()
-        .unwrap()
-        .len()
-        != 9
-    {
-        assert!(Instant::now() < deadline, "nine-attempt fixture missing");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_records(&client, &stack, &base, &sample_run, 9).await;
     let connect_sql = alerts[2]["query_condition"]["sql"].as_str().unwrap();
     assert!(
         search(&client, &stack, &base, connect_sql).await["hits"]
@@ -388,6 +432,7 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
     loss["telemetry_dropped_total"] = json!(5);
     writeln!(file, "{loss}").unwrap();
     file.sync_all().unwrap();
+    wait_records(&client, &stack, &base, &sample_run, 10).await;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let result = search(&client, &stack, &base, connect_sql).await;
@@ -409,6 +454,33 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    // Duplicate delivery cannot increase the numerator; cancellation cannot
+    // enter either numerator or denominator or suppress the exact boundary.
+    sample["sequence"] = json!(0);
+    sample["outcome"] = json!("error");
+    writeln!(file, "{sample}").unwrap();
+    sample["sequence"] = json!(10);
+    sample["outcome"] = json!("cancelled");
+    writeln!(file, "{sample}").unwrap();
+    file.sync_all().unwrap();
+    wait_records(&client, &stack, &base, &sample_run, 12).await;
+    let boundary = search(&client, &stack, &base, connect_sql).await;
+    assert_eq!(boundary["hits"].as_array().unwrap().len(), 1, "{boundary}");
+    assert_eq!(boundary["hits"][0]["attempts"], 10, "{boundary}");
+    assert_eq!(boundary["hits"][0]["failures"], 2, "{boundary}");
+
+    // The same query must also observe recovery: two failures out of eleven
+    // real attempts are below the unchanged 20% threshold.
+    sample["sequence"] = json!(11);
+    sample["outcome"] = json!("ok");
+    writeln!(file, "{sample}").unwrap();
+    file.sync_all().unwrap();
+    wait_records(&client, &stack, &base, &sample_run, 13).await;
+    let recovered = search(&client, &stack, &base, connect_sql).await;
+    assert!(
+        recovered["hits"].as_array().unwrap().is_empty(),
+        "below-threshold query remained active: {recovered}"
+    );
     let loss_rows = search(
         &client,
         &stack,
