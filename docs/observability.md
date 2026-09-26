@@ -360,11 +360,12 @@ See [the implementation receipt](reports/rds-durable-metrics-20260925.md).
 
 Configs live in `ops/observability/`. `images.env` pins the tested upstream
 Vector 0.58.0 and OpenObserve 1.0.4 manifest digests. Pin updates require rerunning
-the pipeline regression. OpenObserve uses its official `o2cr.ai` registry,
-listed in the [upstream OSS deployment manifest](https://github.com/openobserve/openobserve/blob/v1.0.4/deploy/k8s/statefulset.yaml).
+the pipeline regression. OpenObserve uses the upstream
+[`openobserve/openobserve` Docker Hub repository](https://hub.docker.com/r/openobserve/openobserve).
 It serves the same pinned multi-platform digest previously fetched from ECR;
-the registry change follows repeated ECR bandwidth-quota failures in CI.
-There is no mutable-tag or third-party-image fallback. Compose is a disposable development fixture, not a
+ECR returned bandwidth-quota failures and `o2cr.ai` refused anonymous CI pulls.
+There is no mutable-tag or third-party-image fallback. Compose is a disposable
+development fixture, not a
 production service definition: it has an internal collection network, a
 management bridge with an ephemeral loopback UI/API port, no Docker socket mount, disabled OpenObserve outbound
 telemetry and no embedded credentials. The test generates a new private
