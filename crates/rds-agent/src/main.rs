@@ -38,8 +38,9 @@ struct Cli {
     #[arg(long)]
     endpoint_config: Option<std::path::PathBuf>,
     /// Key-pinned owned relay: rds-relay://PUBLIC_HEX_KEY@IP:PORT.
+    /// Repeatable — each occurrence attaches a warm standby relay.
     #[arg(long, conflicts_with_all = ["relay", "no_relay"])]
-    owned_relay: Option<String>,
+    owned_relay: Vec<String>,
     /// Disable relay and public address lookup services.
     #[arg(long, conflicts_with_all = ["relay", "owned_relay"])]
     no_relay: bool,

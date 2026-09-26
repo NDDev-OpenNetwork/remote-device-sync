@@ -47,6 +47,15 @@ rds-relay --relay-backend noq --addr 0.0.0.0:3340 \
 rds-agent --backend noq --owned-relay rds-relay://<relay-id>@<ip>:3340 \
     --allow <operator-id> --ssh 127.0.0.1:22
 rds --direct --key-file <separate-client-key> --backend noq --owned-relay rds-relay://<relay-id>@<ip>:3340 ping <device-ticket>
+
+# `--owned-relay` is repeatable: each attachment is a warm secondary on
+# its own slot (up to 8). A `Drain` notice or tunnel loss on one relay
+# retires only that slot's paths; the connection migrates onto a
+# surviving attachment without re-authentication.
+rds-agent --backend noq \
+    --owned-relay rds-relay://<relay-a-id>@<ip-a>:3340 \
+    --owned-relay rds-relay://<relay-b-id>@<ip-b>:3340 \
+    --allow <operator-id> --ssh 127.0.0.1:22
 ```
 
 The two relay commands above are alternatives, not concurrent owners of the

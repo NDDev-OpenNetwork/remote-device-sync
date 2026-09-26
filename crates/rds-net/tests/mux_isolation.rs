@@ -144,7 +144,7 @@ async fn failed_last_path_is_not_selected_while_another_socket_lives() {
         };
         // This peer only has IPv4. The healthy server IPv6 socket cannot
         // supply a validated replacement for the connection's last path.
-        let server = owned::bind_with_mux(config(), mux, vec![address], runtime, None)
+        let server = owned::bind_with_mux(config(), mux, vec![address], runtime, Vec::new())
             .await
             .unwrap();
         let client = owned::bind_endpoint(config()).await.unwrap();
@@ -208,7 +208,7 @@ async fn exercise(receive: bool) {
             ..Default::default()
         };
         let health = mux.health();
-        let server = owned::bind_with_mux(config(), mux, vec![primary_addr], runtime, None)
+        let server = owned::bind_with_mux(config(), mux, vec![primary_addr], runtime, Vec::new())
             .await
             .unwrap();
         let client = owned::bind_endpoint(config()).await.unwrap();

@@ -217,7 +217,7 @@ async fn drain_grace_keeps_actual_socket_datagrams_flowing() {
             );
             let mut sender = a.create_sender();
             let transmit = Transmit {
-                destination: synthetic_for(&bid),
+                destination: synthetic_for(0, &bid),
                 ecn: None,
                 contents: b"during grace",
                 segment_size: None,
@@ -235,7 +235,7 @@ async fn drain_grace_keeps_actual_socket_datagrams_flowing() {
                     .unwrap(),
                 1
             );
-            assert_eq!(meta[0].addr, synthetic_for(&aid));
+            assert_eq!(meta[0].addr, synthetic_for(0, &aid));
             assert_eq!(&bytes[..meta[0].len], b"during grace");
         })
     );

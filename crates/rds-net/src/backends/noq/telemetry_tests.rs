@@ -24,9 +24,15 @@ async fn fixture() -> (Endpoint, Endpoint, SocketAddr) {
     };
     // Only the first socket is advertised: the fixture owns every additional
     // open, without QNT reopening the secondary address in the background.
-    let server = bind_with_socket(config(), Box::new(mux), vec![addresses[0]], runtime, None)
-        .await
-        .unwrap();
+    let server = bind_with_socket(
+        config(),
+        Box::new(mux),
+        vec![addresses[0]],
+        runtime,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     (bind_endpoint(config()).await.unwrap(), server, addresses[1])
 }
 
@@ -118,7 +124,7 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
             client.metrics(),
             client.local_addrs().to_vec(),
             Vec::new(),
-            None,
+            tokio::sync::watch::channel(0u64).1,
             true,
         );
         let task = tokio::spawn(async move {

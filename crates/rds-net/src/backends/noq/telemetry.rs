@@ -86,6 +86,7 @@ impl Telemetry {
                         && state.selected == Some(*id)
                         && status == noq::PathStatus::Available,
                     via_relay: super::relay::is_synthetic(remote),
+                    relay_slot: super::relay::synthetic_slot(remote),
                 });
             }
         }

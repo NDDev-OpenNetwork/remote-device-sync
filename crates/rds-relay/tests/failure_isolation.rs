@@ -31,13 +31,17 @@ async fn fixture_endpoint(
             backend: Backend::Noq,
             secret_key: Some(key),
             discovery: false,
-            relay_endpoint: managed.then_some(relay),
+            relay_endpoints: if managed { vec![relay] } else { vec![] },
             ..Default::default()
         },
         Box::new(mux),
         locals,
         runtime,
-        managed.then(|| handle.clone()),
+        if managed {
+            vec![handle.clone()]
+        } else {
+            vec![]
+        },
     )
     .await
     .unwrap();
@@ -95,7 +99,7 @@ async fn failure_case() {
             .unwrap()[..],
         b"direct before failure"
     );
-    let remote = synthetic_for(&b.id());
+    let remote = synthetic_for(0, &b.id());
     let id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let attempt = ca.inner().open_path_ensure(remote, PathStatus::Backup);
@@ -285,7 +289,7 @@ async fn missing_mapping_case() {
     })
     .await
     .unwrap();
-    let remote = synthetic_for(&b.id());
+    let remote = synthetic_for(0, &b.id());
     let id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let open = ca.inner().open_path_ensure(remote, PathStatus::Backup);

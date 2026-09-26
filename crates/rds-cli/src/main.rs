@@ -46,8 +46,9 @@ struct Cli {
     #[arg(long, global = true)]
     endpoint_config: Option<std::path::PathBuf>,
     /// Key-pinned owned relay: rds-relay://PUBLIC_HEX_KEY@IP:PORT.
+    /// Repeatable — each occurrence attaches a warm standby relay.
     #[arg(long, global = true, conflicts_with_all = ["relay", "no_relay"])]
-    owned_relay: Option<String>,
+    owned_relay: Vec<String>,
     /// Disable relay and public address lookup services.
     #[arg(long, global = true, conflicts_with_all = ["relay", "owned_relay"])]
     no_relay: bool,
@@ -481,7 +482,7 @@ fn validate_managed(cli: &Cli) -> anyhow::Result<()> {
             && cli.relay.is_empty()
             && cli.backend.is_none()
             && cli.endpoint_config.is_none()
-            && cli.owned_relay.is_none()
+            && cli.owned_relay.is_empty()
             && !cli.no_relay
             && cli.bind_address.is_empty()
             && cli.server.is_none()

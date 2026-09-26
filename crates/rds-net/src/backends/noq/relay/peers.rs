@@ -26,6 +26,13 @@ pub struct PeerLease {
     address: SocketAddr,
     peer: EndpointId,
 }
+impl PeerLease {
+    /// The relay-attachment slot this registration lives under — the
+    /// slot is encoded in the lease's synthetic address.
+    pub(crate) fn slot(&self) -> u8 {
+        super::synthetic_slot(self.address).expect("peer lease addresses are always synthetic")
+    }
+}
 impl std::fmt::Debug for PeerLease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerLease")
@@ -66,9 +73,11 @@ struct State {
 pub(super) struct PeerRegistry {
     state: Mutex<State>,
     grace: Duration,
+    /// Relay attachment slot — scopes this registry's synthetic addresses.
+    slot: u8,
 }
 impl PeerRegistry {
-    pub fn new(capacity: usize, grace: Duration) -> Arc<Self> {
+    pub fn new(capacity: usize, grace: Duration, slot: u8) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State {
                 entries: HashMap::new(),
@@ -76,10 +85,12 @@ impl PeerRegistry {
                 grace,
             }),
             grace,
+            slot,
         })
     }
     pub fn acquire(self: &Arc<Self>, peer: EndpointId) -> Result<PeerLease, PeerRegistrationError> {
         let address = self.state.lock().unwrap_or_else(|p| p.into_inner()).admit(
+            self.slot,
             peer,
             true,
             Instant::now(),
@@ -94,7 +105,7 @@ impl PeerRegistry {
         self.state
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .admit(peer, false, Instant::now())
+            .admit(self.slot, peer, false, Instant::now())
             .map(|_| ())
     }
     pub fn get(&self, address: SocketAddr) -> Option<EndpointId> {
@@ -103,6 +114,16 @@ impl PeerRegistry {
             .unwrap_or_else(|p| p.into_inner())
             .get(super::super::candidates::canonical(address), Instant::now())
     }
+    /// The relay reported this peer detached — drop the mapping outright
+    /// instead of letting a dead route age out through grace.
+    pub fn peer_gone(&self, peer: &EndpointId) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .retain(|_, entry| entry.peer != *peer);
+    }
+
     /// Storage occupancy, including bounded grace entries, and pinned peers.
     pub fn occupancy(&self) -> (usize, usize) {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -119,11 +140,12 @@ impl PeerRegistry {
 impl State {
     fn admit(
         &mut self,
+        slot: u8,
         peer: EndpointId,
         pin: bool,
         now: Instant,
     ) -> Result<SocketAddr, PeerRegistrationError> {
-        let address = super::synthetic_for(&peer);
+        let address = super::synthetic_for(slot, &peer);
         if self
             .entries
             .get(&address)
@@ -204,19 +226,19 @@ mod tests {
     fn active_registrations_cannot_be_evicted_by_pressure() {
         let now = Instant::now();
         let mut table = state(2);
-        table.admit(peer(1), true, now).unwrap();
-        table.admit(peer(2), true, now).unwrap();
+        table.admit(0, peer(1), true, now).unwrap();
+        table.admit(0, peer(2), true, now).unwrap();
         assert_eq!(
-            table.admit(peer(3), true, now),
+            table.admit(0, peer(3), true, now),
             Err(PeerRegistrationError::Capacity)
         );
         assert_eq!(
-            table.admit(peer(3), false, now),
+            table.admit(0, peer(3), false, now),
             Err(PeerRegistrationError::Capacity)
         );
         assert_eq!(table.entries.len(), 2);
         assert_eq!(
-            table.get(super::super::synthetic_for(&peer(1)), now),
+            table.get(super::super::synthetic_for(0, &peer(1)), now),
             Some(peer(1))
         );
     }
@@ -224,10 +246,10 @@ mod tests {
     fn only_unpinned_entries_are_evicted_and_expire() {
         let now = Instant::now();
         let mut table = state(2);
-        let pinned = table.admit(peer(1), true, now).unwrap();
-        let learned = table.admit(peer(2), false, now).unwrap();
+        let pinned = table.admit(0, peer(1), true, now).unwrap();
+        let learned = table.admit(0, peer(2), false, now).unwrap();
         let successor = table
-            .admit(peer(3), false, now + Duration::from_secs(1))
+            .admit(0, peer(3), false, now + Duration::from_secs(1))
             .unwrap();
         assert_eq!(table.get(learned, now), None);
         assert_eq!(
@@ -238,7 +260,7 @@ mod tests {
     }
     #[test]
     fn concurrent_leases_release_one_reference_and_leave_bounded_grace() {
-        let table = PeerRegistry::new(1, Duration::from_secs(30));
+        let table = PeerRegistry::new(1, Duration::from_secs(30), 0);
         let first = table.acquire(peer(1)).unwrap();
         let second = table.acquire(peer(1)).unwrap();
         assert_eq!(table.occupancy(), (1, 1));
@@ -251,7 +273,7 @@ mod tests {
         drop(second);
         assert_eq!(table.occupancy(), (1, 0));
         assert_eq!(
-            table.get(super::super::synthetic_for(&peer(1))),
+            table.get(super::super::synthetic_for(0, &peer(1))),
             Some(peer(1))
         );
         let replacement = table.acquire(peer(2)).unwrap();
@@ -260,12 +282,12 @@ mod tests {
     }
     #[test]
     fn learned_peer_can_be_promoted_to_a_protected_owner() {
-        let table = PeerRegistry::new(1, Duration::from_secs(30));
+        let table = PeerRegistry::new(1, Duration::from_secs(30), 0);
         table.observe(peer(1)).unwrap();
         let lease = table.acquire(peer(1)).unwrap();
         assert_eq!(table.observe(peer(2)), Err(PeerRegistrationError::Capacity));
         assert_eq!(
-            table.get(super::super::synthetic_for(&peer(1))),
+            table.get(super::super::synthetic_for(0, &peer(1))),
             Some(peer(1))
         );
         drop(lease);
@@ -279,20 +301,20 @@ mod tests {
             bytes[..4].copy_from_slice(&index.to_le_bytes());
             crate::SecretKey::from_bytes(&bytes).public()
         };
-        let a = key(153039);
-        let b = key(167304);
+        let a = key(5514);
+        let b = key(6238);
         assert_ne!(a, b);
         assert_eq!(
-            super::super::synthetic_for(&a),
-            super::super::synthetic_for(&b)
+            super::super::synthetic_for(0, &a),
+            super::super::synthetic_for(0, &b)
         );
-        let table = PeerRegistry::new(2, Duration::from_secs(30));
+        let table = PeerRegistry::new(2, Duration::from_secs(30), 0);
         let _lease = table.acquire(a).unwrap();
         assert_eq!(
             table.acquire(b).unwrap_err(),
             PeerRegistrationError::Collision
         );
         assert_eq!(table.observe(b), Err(PeerRegistrationError::Collision));
-        assert_eq!(table.get(super::super::synthetic_for(&a)), Some(a));
+        assert_eq!(table.get(super::super::synthetic_for(0, &a)), Some(a));
     }
 }

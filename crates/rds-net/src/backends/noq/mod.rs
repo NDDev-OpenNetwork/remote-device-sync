@@ -97,35 +97,47 @@ pub async fn bind_endpoint(mut config: crate::EndpointConfig) -> anyhow::Result<
         sockets.push(runtime.wrap_udp_socket(socket)?);
     }
 
-    // Relay attachment: a tunnel socket joins the mux so relayed paths
+    // Relay attachments: each tunnel socket joins the mux so relayed paths
     // behave like any other QUIC path — opened via candidates/QNT,
-    // scheduled by the connection driver's RTT selection.
+    // scheduled by the connection driver's RTT selection. Later attachments
+    // are warm secondaries: their slot-scoped synthetic addresses open
+    // additional disjoint paths, so a drained primary fails over in-band.
     let key = config
         .secret_key
         .clone()
         .unwrap_or_else(SecretKey::generate);
     config.secret_key = Some(key.clone());
-    let relay_handle = match &config.relay_endpoint {
-        Some(relay_addr) => {
-            // The primary socket already owns its configured port. The outer
-            // relay connection needs a separate ephemeral port on that interface.
-            let relay_bind = SocketAddr::new(binds[0].ip(), 0);
-            let (socket, handle) = relay::RelaySocket::connect_with_limits(
-                relay_addr.clone(),
-                key,
-                relay_bind,
-                config.relay_limits,
-            )
-            .await?;
-            sockets.push(Box::new(socket));
-            Some(handle)
-        }
-        None => None,
-    };
+    anyhow::ensure!(
+        config.relay_endpoints.len() <= relay::MAX_RELAY_SLOTS,
+        "at most {} relay attachments are supported",
+        relay::MAX_RELAY_SLOTS
+    );
+    // Endpoint close cancels this once; each attachment's detach pump
+    // then marks its slot dead and closes the tunnel gracefully.
+    let relay_detach = tokio_util::sync::CancellationToken::new();
+    let mut relay_handles = Vec::with_capacity(config.relay_endpoints.len());
+    for (index, relay_addr) in config.relay_endpoints.iter().enumerate() {
+        // The primary socket already owns its configured port. Each outer
+        // relay connection needs a separate ephemeral port on that interface.
+        let relay_bind = SocketAddr::new(binds[0].ip(), 0);
+        let (socket, handle) = relay::RelaySocket::connect_with_limits(
+            relay_addr.clone(),
+            key.clone(),
+            relay_bind,
+            config.relay_limits,
+            index as u8,
+            relay_detach.clone(),
+        )
+        .await?;
+        sockets.push(Box::new(socket));
+        relay_handles.push(handle);
+    }
 
     let mux = socket::Mux::new(sockets)?;
     let local_addrs = mux.local_addrs();
-    bind_with_mux(config, mux, local_addrs, runtime, relay_handle).await
+    let mut endpoint = bind_with_mux(config, mux, local_addrs, runtime, relay_handles).await?;
+    endpoint.relay_detach = relay_detach;
+    Ok(endpoint)
 }
 
 /// Bind an endpoint on a caller-provided transport.
@@ -140,7 +152,7 @@ pub async fn bind_with_socket(
     socket: Box<dyn noq::AsyncUdpSocket>,
     local_addrs: Vec<SocketAddr>,
     runtime: Arc<dyn Runtime>,
-    relay: Option<relay::RelayHandle>,
+    relay: Vec<relay::RelayHandle>,
 ) -> anyhow::Result<Endpoint> {
     bind_socket(config, socket, local_addrs, runtime, relay, None).await
 }
@@ -152,7 +164,7 @@ pub async fn bind_with_mux(
     mux: socket::Mux,
     local_addrs: Vec<SocketAddr>,
     runtime: Arc<dyn Runtime>,
-    relay: Option<relay::RelayHandle>,
+    relay: Vec<relay::RelayHandle>,
 ) -> anyhow::Result<Endpoint> {
     let health = mux.health();
     anyhow::ensure!(
@@ -177,7 +189,7 @@ async fn bind_socket(
     socket: Box<dyn noq::AsyncUdpSocket>,
     local_addrs: Vec<SocketAddr>,
     runtime: Arc<dyn Runtime>,
-    relay: Option<relay::RelayHandle>,
+    relay: Vec<relay::RelayHandle>,
     transport_health: Option<socket::Health>,
 ) -> anyhow::Result<Endpoint> {
     config.validate_for(crate::Backend::Noq)?;
@@ -186,8 +198,8 @@ async fn bind_socket(
         .copied()
         .context("endpoint has no local address")?;
     anyhow::ensure!(
-        config.relay_endpoint.is_some() == relay.is_some(),
-        "injected transport relay configuration does not match its attached relay"
+        config.relay_endpoints.is_empty() == relay.is_empty(),
+        "injected transport relay configuration does not match attached relays"
     );
     let secret_key = config.secret_key.unwrap_or_else(SecretKey::generate);
     let tls = tls::TlsConfig::new(secret_key.clone());
@@ -220,19 +232,56 @@ async fn bind_socket(
 
     debug!(?local_addrs, id = %secret_key.public(), "noq endpoint bound");
 
-    Ok(Endpoint {
+    // Per-slot unavailability/drain fan-in: bits 0..8 mark unavailable
+    // attachments, bits 8..16 mark announced drain. Each relay watcher
+    // sets its own bits; every connection policy reads the shared mask
+    // and retires only the affected slot's paths, candidates and
+    // advertisements — siblings keep carrying traffic.
+    let (relay_dead_tx, relay_dead_rx) = tokio::sync::watch::channel(0u64);
+    let endpoint = Endpoint {
         inner: endpoint,
         id: secret_key.public(),
         local_addr,
         local_addrs,
         client_configs: Arc::new(client_configs),
+        relay_dead: relay_dead_rx,
+        _relay_dead_tx: relay_dead_tx.clone(),
         relay,
         metrics: crate::metrics::Registry::default(),
         drivers: Arc::new(drivers::Drivers::new(transport_health.clone())),
         transport_health,
         transports: config.transports,
         pinned: config.max_multipath_paths == Some(1),
-    })
+        // `bind` installs the token its relay attachments listen on;
+        // injected sockets have no attachments to detach.
+        relay_detach: tokio_util::sync::CancellationToken::new(),
+    };
+    for handle in &endpoint.relay {
+        let slot = handle.slot;
+        if !handle.is_available() {
+            relay_dead_tx.send_modify(|mask| *mask |= 1 << slot);
+            continue;
+        }
+        // One watcher per signal — handles clone cheaply, and two
+        // `&mut` receivers cannot share one select. Bounded: at most
+        // `2 * MAX_RELAY_SLOTS` endpoint watchers ever exist.
+        let mut dead = handle.clone();
+        let txd = relay_dead_tx.clone();
+        endpoint.drivers.spawn_endpoint(async move {
+            dead.unavailable().await;
+            txd.send_modify(|mask| *mask |= 1 << slot);
+        });
+        let mut draining = handle.clone();
+        let tx = relay_dead_tx.clone();
+        endpoint.drivers.spawn_endpoint(async move {
+            // false: the tunnel died before any drain notice — the dead
+            // watcher already retired the slot outright.
+            if draining.drain_observed().await {
+                tx.send_modify(|mask| *mask |= 1 << (slot + relay::DRAIN_SHIFT));
+            }
+        });
+    }
+    Ok(endpoint)
 }
 
 /// Translate the bound socket address into dialable direct candidates.
@@ -283,9 +332,15 @@ pub struct Endpoint {
     local_addr: SocketAddr,
     local_addrs: Vec<SocketAddr>,
     client_configs: Arc<std::collections::BTreeMap<Vec<u8>, noq::ClientConfig>>,
-    /// Relay tunnel handle when `relay_endpoint` was configured —
-    /// steers synthetic-address sends and advertises the relay url.
-    relay: Option<relay::RelayHandle>,
+    /// Relay tunnel handles — index order matches `relay_endpoints`
+    /// configuration; slot i owns the `198.19.i.x` synthetic space.
+    relay: Vec<relay::RelayHandle>,
+    /// Bitmask of relay slots whose tunnels went unavailable —
+    /// endpoint-level watchers set bits; connection policies consume.
+    relay_dead: tokio::sync::watch::Receiver<u64>,
+    /// Holds the mask channel open for the endpoint's life — a dropped
+    /// sender must not read as "no relays can ever retire" to policies.
+    _relay_dead_tx: tokio::sync::watch::Sender<u64>,
     /// Endpoint metrics — the connection driver records QNT progress
     /// here; the facade surfaces it via `Endpoint::metrics`.
     metrics: crate::metrics::Registry,
@@ -297,6 +352,10 @@ pub struct Endpoint {
     /// beyond the established path can open, so in-band candidate
     /// exchange is suppressed rather than sprayed pointlessly.
     pinned: bool,
+    /// Endpoint-scoped relay detach: cancelled by `close`, each relay
+    /// attachment's detach pump then marks its slot unavailable and
+    /// closes its tunnel before socket destruction aborts the pumps.
+    relay_detach: tokio_util::sync::CancellationToken,
 }
 
 impl fmt::Debug for Endpoint {
@@ -361,14 +420,19 @@ impl Endpoint {
                 }
             }
         }
-        if let Some(handle) = &self.relay
-            && handle.is_available()
-            && self
-                .transport_health
-                .as_ref()
-                .is_none_or(|health| health.path_available(relay::synthetic_for(&self.id), None))
-        {
-            addrs.insert(TransportAddr::Relay(handle.url.clone()));
+        let retiring = *self.relay_dead.borrow();
+        for handle in &self.relay {
+            // Dead or draining slots stop advertising — the url must not
+            // promise a path that is leaving.
+            if retiring >> handle.slot & 1 == 0
+                && retiring >> (handle.slot + relay::DRAIN_SHIFT) & 1 == 0
+                && handle.is_available()
+                && self.transport_health.as_ref().is_none_or(|health| {
+                    health.path_available(relay::synthetic_local(handle.slot), None)
+                })
+            {
+                addrs.insert(TransportAddr::Relay(handle.url.clone()));
+            }
         }
         EndpointAddr { id: self.id, addrs }
     }
@@ -403,27 +467,28 @@ impl Endpoint {
             policy::dial_candidates(&target, &local)
         };
         // A relayed path is usable when the peer's advertised relay is
-        // the one we are attached to; it becomes the synthetic remote.
-        // Reserve before dialing; cancellation releases to bounded grace.
-        // Direct-only tickets also need a lease for later learned relay paths.
-        let (peer_lease, relay_error) = match self
-            .relay
-            .as_ref()
-            .map(|handle| handle.register_peer(remote_id))
-            .transpose()
-        {
-            Ok(lease) => (lease, None),
-            Err(error) => {
-                tracing::debug!(%remote_id, %error, "relay peer registration refused; direct candidates remain usable");
-                (None, Some(error))
+        // one we are attached to; each attachment contributes its own
+        // slot-scoped synthetic remote, giving QUIC disjoint failover
+        // paths. Reserve before dialing; cancellation releases to bounded
+        // grace. Direct-only tickets also need leases for later learned
+        // relay paths.
+        let mut peer_leases = Vec::with_capacity(self.relay.len());
+        let mut relay_error = None;
+        for handle in &self.relay {
+            match handle.register_peer(remote_id) {
+                Ok(lease) => peer_leases.push(lease),
+                Err(error) => {
+                    tracing::debug!(%remote_id, %error, relay_slot = handle.slot, "relay peer registration refused; other candidates remain usable");
+                    relay_error = Some(error);
+                }
             }
-        };
-        let relay_remote = self.relay_remote(&target).filter(|_| peer_lease.is_some());
+        }
+        let relay_remotes = self.relay_remotes(&target, &peer_leases);
         let mut attempts = candidates.clone();
-        if let Some(relay) = relay_remote
-            && !attempts.contains(&relay)
-        {
-            attempts.push(relay);
+        for remote in relay_remotes {
+            if !attempts.contains(&remote) {
+                attempts.push(remote);
+            }
         }
         if attempts.is_empty() {
             if let Some(error) = relay_error {
@@ -439,7 +504,7 @@ impl Endpoint {
 
         // Subscribe before any additional path can finish validation. Only
         // the completed handshake is initially eligible for path selection.
-        let telemetry = self.wire_connection(&conn, attempts, peer_lease)?;
+        let telemetry = self.wire_connection(&conn, attempts, peer_leases)?;
 
         Ok(Connection {
             inner: conn,
@@ -452,45 +517,67 @@ impl Endpoint {
     pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
         let accept = self.inner.accept();
         let mut our_addrs = self.advertised_socket_addrs();
-        // The synthetic relay address is worth advertising only when the
-        // peer could actually open a second path to it.
-        if !self.pinned
-            && self
-                .relay
-                .as_ref()
-                .is_some_and(relay::RelayHandle::is_available)
-        {
-            our_addrs.push(relay::synthetic_for(&self.id));
+        // Each live attachment's synthetic address is worth advertising —
+        // the peer can then open a second path to it. Dead and draining
+        // slots stay out of the offer.
+        if !self.pinned {
+            let retiring = *self.relay_dead.borrow();
+            for handle in &self.relay {
+                if retiring >> handle.slot & 1 == 0
+                    && retiring >> (handle.slot + relay::DRAIN_SHIFT) & 1 == 0
+                    && handle.is_available()
+                {
+                    our_addrs.push(relay::synthetic_for(handle.slot, &self.id));
+                }
+            }
         }
         let relay = self.relay.clone();
+        let relay_dead = self.relay_dead.clone();
         let metrics = self.metrics.clone();
         let drivers = self.drivers.clone();
         let allow_direct = self.transports != crate::Transports::RelayOnly;
         let pinned = self.pinned;
         async move {
             accept.await.map(|i| {
-                Incoming::with_drivers(i, our_addrs, relay, metrics, drivers, allow_direct, pinned)
+                Incoming::with_drivers(
+                    i,
+                    our_addrs,
+                    relay,
+                    relay_dead,
+                    metrics,
+                    drivers,
+                    allow_direct,
+                    pinned,
+                )
             })
         }
     }
 
-    /// The peer's synthetic relay remote when it advertises the relay
-    /// we are attached to.
-    fn relay_remote(&self, target: &EndpointAddr) -> Option<SocketAddr> {
-        let handle = self.relay.as_ref()?;
-        if !handle.is_available()
-            || self.transport_health.as_ref().is_some_and(|health| {
-                !health.path_available(relay::synthetic_for(&target.id), None)
-            })
-        {
-            return None;
+    /// The peer's synthetic relay remotes — one per relay we share with
+    /// its advertisement and hold a live registration on.
+    fn relay_remotes(&self, target: &EndpointAddr, leases: &[relay::PeerLease]) -> Vec<SocketAddr> {
+        let mut remotes = Vec::new();
+        for url in target.addrs.iter() {
+            let TransportAddr::Relay(url) = url else {
+                continue;
+            };
+            let Some((rid, _)) = relay::parse_relay_url(url) else {
+                continue;
+            };
+            let Some(handle) = self.relay.iter().find(|h| h.relay_id == rid) else {
+                continue;
+            };
+            if !handle.is_available()
+                || !leases.iter().any(|l| l.slot() == handle.slot)
+                || self.transport_health.as_ref().is_some_and(|health| {
+                    !health.path_available(relay::synthetic_local(handle.slot), None)
+                })
+            {
+                continue;
+            }
+            remotes.push(relay::synthetic_for(handle.slot, &target.id));
         }
-        target.addrs.iter().find_map(|a| match a {
-            TransportAddr::Relay(url) => relay::parse_relay_url(url)
-                .filter(|(rid, _)| *rid == handle.relay_id)
-                .map(|_| relay::synthetic_for(&target.id)),
-            _ => None,
-        })
+        remotes
     }
 
     /// Direct addresses we can dial from, resolved per bound socket.
@@ -529,17 +616,15 @@ impl Endpoint {
         &self,
         conn: &noq::Connection,
         candidates: Vec<SocketAddr>,
-        peer_lease: Option<relay::PeerLease>,
+        peer_leases: Vec<relay::PeerLease>,
     ) -> anyhow::Result<Arc<telemetry::Telemetry>> {
         let mut ours = self.advertised_socket_addrs();
-        if !self.pinned
-            && peer_lease.is_some()
-            && self
-                .relay
-                .as_ref()
-                .is_some_and(relay::RelayHandle::is_available)
-        {
-            ours.push(relay::synthetic_for(&self.id));
+        if !self.pinned {
+            for handle in &self.relay {
+                if peer_leases.iter().any(|l| l.slot() == handle.slot) && handle.is_available() {
+                    ours.push(relay::synthetic_for(handle.slot, &self.id));
+                }
+            }
         }
         let allow_direct = self.transports != crate::Transports::RelayOnly;
         let telemetry = self.drivers.spawn(
@@ -547,8 +632,8 @@ impl Endpoint {
             self.metrics.clone(),
             ours.clone(),
             candidates,
-            peer_lease,
-            self.relay.clone(),
+            peer_leases,
+            self.relay_dead.clone(),
             allow_direct,
         )?;
         if !self.pinned {
@@ -564,8 +649,11 @@ impl Endpoint {
     }
 
     /// Close all connections and wait for this endpoint's policy tasks.
-    /// Relay tunnel pumps and QUIC packet draining have separate lifecycles.
+    /// Relay attachments detach first: their tunnels mark slots
+    /// unavailable so connection policies migrate before teardown, then
+    /// relay tunnel pumps and QUIC packet draining have separate lifecycles.
     pub async fn close(&self) {
+        self.relay_detach.cancel();
         self.drivers.close_admission();
         self.inner.close(0u32.into(), b"closed");
         self.drivers.wait().await;
@@ -580,7 +668,10 @@ pub struct Incoming {
     /// Direct addresses to advertise to this peer once connected.
     our_addrs: Vec<SocketAddr>,
     /// Relay tunnel handle for synthetic-address peer registration.
-    relay: Option<relay::RelayHandle>,
+    relay: Vec<relay::RelayHandle>,
+    /// Endpoint-shared dead-slot mask — a relay going unavailable between
+    /// accept and registration must retire only its own slot.
+    relay_dead: tokio::sync::watch::Receiver<u64>,
     /// Endpoint metrics — the driver records QNT progress here.
     metrics: crate::metrics::Registry,
     drivers: Arc<drivers::Drivers>,
@@ -596,13 +687,16 @@ impl Incoming {
     pub fn new(
         incoming: noq::Incoming,
         our_addrs: Vec<SocketAddr>,
-        relay: Option<relay::RelayHandle>,
+        relay: Vec<relay::RelayHandle>,
         metrics: crate::metrics::Registry,
     ) -> Self {
         Self::with_drivers(
             incoming,
             our_addrs,
             relay,
+            // No endpoint watches attachments here — a standalone Incoming
+            // treats every attached relay slot as live until proven.
+            tokio::sync::watch::channel(0u64).1,
             metrics,
             Arc::new(drivers::Drivers::default()),
             true,
@@ -614,7 +708,8 @@ impl Incoming {
     fn with_drivers(
         incoming: noq::Incoming,
         our_addrs: Vec<SocketAddr>,
-        relay: Option<relay::RelayHandle>,
+        relay: Vec<relay::RelayHandle>,
+        relay_dead: tokio::sync::watch::Receiver<u64>,
         metrics: crate::metrics::Registry,
         drivers: Arc<drivers::Drivers>,
         allow_direct: bool,
@@ -625,6 +720,7 @@ impl Incoming {
             connecting: None,
             our_addrs,
             relay,
+            relay_dead,
             metrics,
             drivers,
             allow_direct,
@@ -653,43 +749,51 @@ impl Future for Incoming {
                     Err(e) => Err(e.into()),
                     Ok(inner) => match peer_endpoint_id(&inner) {
                         Some(remote_id) => {
-                            let registration = self
-                                .relay
-                                .as_ref()
-                                .map(|handle| handle.register_peer(remote_id))
-                                .transpose();
-                            let lease = match registration {
-                                Ok(lease) => lease,
-                                Err(error) => {
-                                    tracing::debug!(%remote_id, %error, "incoming relay registration refused");
-                                    let arrived_over_relay = inner
-                                        .path(noq::PathId::ZERO)
-                                        .and_then(|path| path.remote_address().ok())
-                                        .is_some_and(relay::is_synthetic);
-                                    if arrived_over_relay {
-                                        inner.close(0u32.into(), b"relay peer route unavailable");
-                                        return Poll::Ready(Err(error.into()));
-                                    }
-                                    None
+                            // A registration per attachment keeps the peer's
+                            // route open through every relay we share.
+                            let mut leases = Vec::with_capacity(self.relay.len());
+                            let mut refused = None;
+                            for handle in &self.relay {
+                                match handle.register_peer(remote_id) {
+                                    Ok(lease) => leases.push(lease),
+                                    Err(error) => refused = Some((handle.slot, error)),
                                 }
-                            };
-                            let mut ours = self.our_addrs.clone();
-                            if lease.is_none()
-                                || self
-                                    .relay
-                                    .as_ref()
-                                    .is_some_and(|handle| !handle.is_available())
-                            {
-                                ours.retain(|address| !relay::is_synthetic(*address));
                             }
+                            if let Some((slot, error)) = &refused {
+                                tracing::debug!(%remote_id, %error, relay_slot = slot, "incoming relay registration refused");
+                                let arrived_over_dead_relay = inner
+                                    .path(noq::PathId::ZERO)
+                                    .and_then(|path| path.remote_address().ok())
+                                    .and_then(relay::synthetic_slot)
+                                    .is_some_and(|arrived| arrived == *slot);
+                                if arrived_over_dead_relay {
+                                    inner.close(0u32.into(), b"relay peer route unavailable");
+                                    return Poll::Ready(Err(refused.unwrap().1.into()));
+                                }
+                            }
+                            let mut ours = self.our_addrs.clone();
+                            let retiring = *self.relay_dead.borrow();
+                            ours.retain(|address| match relay::synthetic_slot(*address) {
+                                Some(slot) => {
+                                    retiring >> slot & 1 == 0
+                                        && retiring >> (slot + relay::DRAIN_SHIFT) & 1 == 0
+                                        && leases.iter().any(|l| l.slot() == slot)
+                                        && self
+                                            .relay
+                                            .iter()
+                                            .find(|h| h.slot == slot)
+                                            .is_some_and(relay::RelayHandle::is_available)
+                                }
+                                None => true,
+                            });
                             self.drivers
                                 .spawn(
                                     &inner,
                                     self.metrics.clone(),
                                     ours.clone(),
                                     Vec::new(),
-                                    lease,
-                                    self.relay.clone(),
+                                    leases,
+                                    self.relay_dead.clone(),
                                     self.allow_direct,
                                 )
                                 .map(|telemetry| {

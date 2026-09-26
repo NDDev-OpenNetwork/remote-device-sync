@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use crate::relay_control::{read_control, write_control};
@@ -74,6 +74,14 @@ pub struct RelaySocketStats {
 /// First two octets marking a synthetic relay-mapped address.
 const SYNTHETIC_PREFIX: [u8; 2] = [198, 19];
 
+/// At most this many relay attachments per endpoint — the slot occupies
+/// octet 3 of a synthetic address.
+pub const MAX_RELAY_SLOTS: usize = 8;
+
+/// `relay_dead` mask layout: bits 0..`MAX_RELAY_SLOTS` mark unavailable
+/// attachments, bits `DRAIN_SHIFT..` mark announced drain.
+pub const DRAIN_SHIFT: u8 = MAX_RELAY_SLOTS as u8;
+
 /// Whether `ip` is a synthetic relay-mapped address.
 pub fn is_synthetic_ip(ip: IpAddr) -> bool {
     matches!(ip.to_canonical(), IpAddr::V4(v4) if v4.octets()[0..2] == SYNTHETIC_PREFIX)
@@ -84,19 +92,38 @@ pub fn is_synthetic(addr: SocketAddr) -> bool {
     is_synthetic_ip(addr.ip())
 }
 
-/// The synthetic remote address representing `peer` over the relay.
+/// The relay-attachment slot a synthetic address belongs to, or None for
+/// non-synthetic addresses. Slot scopes every relay-mapped address so a
+/// warm secondary relay's paths are distinct from the primary's.
+pub fn synthetic_slot(addr: SocketAddr) -> Option<u8> {
+    match addr.ip().to_canonical() {
+        IpAddr::V4(v4) if v4.octets()[0..2] == SYNTHETIC_PREFIX => Some(v4.octets()[2]),
+        _ => None,
+    }
+}
+
+/// The synthetic local address a relay attachment in `slot` binds inside
+/// the mux. Host octet 0 is the slot marker: peer mappings live in
+/// `.1`–`.254`, so a remote can never collide with a child's own address.
+pub fn synthetic_local(slot: u8) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 19, slot, 0)), 1)
+}
+
+/// The synthetic remote address representing `peer` over the relay in
+/// `slot`.
 ///
-/// Deterministic: every endpoint computes the same address for a given peer.
-/// BLAKE3 fills 32 free bits (16 host bits and 16 port bits). This is not an
-/// identity: colliding peer registrations are refused while an existing
-/// owner is pinned or within its inactivity grace. Hash port zero maps to one:
-/// QUIC rejects a zero remote port. All previously nonzero mappings stay stable.
-pub fn synthetic_for(id: &EndpointId) -> SocketAddr {
-    let h = blake3::hash(id.as_bytes());
+/// Deterministic: every endpoint computes the same address for a given
+/// `(slot, peer)`. BLAKE3 fills 24 free bits (8 host bits in `.1`–`.254`
+/// and 16 port bits). This is not an identity: colliding peer
+/// registrations are refused while an existing owner is pinned or within
+/// its inactivity grace. Hash port zero maps to one: QUIC rejects a zero
+/// remote port. All previously nonzero mappings stay stable.
+pub fn synthetic_for(slot: u8, id: &EndpointId) -> SocketAddr {
+    let h = blake3::hash(&[b"rds-relay-slot".as_slice(), &[slot], id.as_bytes()].concat());
     let b = h.as_bytes();
     SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::new(198, 19, b[0], b[1])),
-        u16::from_be_bytes([b[2], b[3]]).max(1),
+        IpAddr::V4(Ipv4Addr::new(198, 19, slot, 1 + b[0] % 254)),
+        u16::from_be_bytes([b[1], b[2]]).max(1),
     )
 }
 
@@ -129,6 +156,8 @@ pub struct RelayHandle {
     /// The relay server's endpoint id — matches peers' advertised
     /// `TransportAddr::Relay` urls.
     pub relay_id: EndpointId,
+    /// This attachment's slot — scopes the synthetic addresses it owns.
+    pub slot: u8,
     /// The relay server's socket address — what we dial.
     pub relay_sock: SocketAddr,
     /// The `rds-relay://` url we advertise as `TransportAddr::Relay`.
@@ -137,7 +166,7 @@ pub struct RelayHandle {
     /// `poll_send` can decode transmit destinations.
     peers: Arc<PeerRegistry>,
     /// Set when drain is observed; the existing tunnel stays usable through grace.
-    drained: Arc<AtomicBool>,
+    drained: watch::Receiver<bool>,
     /// Observability must not keep the socket's helper connection alive.
     connection: noq::WeakConnectionHandle,
     available: watch::Receiver<bool>,
@@ -188,7 +217,19 @@ impl RelayHandle {
 
     /// Whether the relay announced it is draining.
     pub fn drained(&self) -> bool {
-        self.drained.load(Ordering::Relaxed)
+        *self.drained.borrow()
+    }
+
+    /// Completes `true` when the relay announces drain, `false` when the
+    /// tunnel instead goes unavailable first — either way the watcher
+    /// ends rather than parking on a signal that can never arrive.
+    pub(super) async fn drain_observed(&mut self) -> bool {
+        tokio::select! {
+            drained = self.drained.wait_for(|drained| *drained) => drained.is_ok(),
+            // Tunnel gone without a drain notice — unavailability wins;
+            // reporting drain now would demote instead of retire.
+            _ = self.available.wait_for(|available| !*available) => false,
+        }
     }
 }
 
@@ -205,7 +246,7 @@ pub struct RelaySocket {
     _queue_owner: mpsc::Sender<Datagram>,
     drops: Arc<DropCounters>,
     available: watch::Sender<bool>,
-    tasks: Option<(JoinHandle<()>, JoinHandle<()>)>,
+    tasks: Option<(JoinHandle<()>, JoinHandle<()>, JoinHandle<()>)>,
 }
 
 impl RelaySocket {
@@ -219,15 +260,27 @@ impl RelaySocket {
         key: SecretKey,
         bind: SocketAddr,
     ) -> anyhow::Result<(Self, RelayHandle)> {
-        Self::connect_with_limits(relay, key, bind, crate::RelayLimits::default()).await
+        Self::connect_with_limits(
+            relay,
+            key,
+            bind,
+            crate::RelayLimits::default(),
+            0,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
     }
 
     /// Attach with explicit positive queue, peer and retirement limits.
+    /// `slot` scopes this attachment's synthetic addresses so additional
+    /// warm relays own disjoint routes inside the mux.
     pub async fn connect_with_limits(
         relay: EndpointAddr,
         key: SecretKey,
         bind: SocketAddr,
         limits: crate::RelayLimits,
+        slot: u8,
+        detach: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<(Self, RelayHandle)> {
         let relay_id = relay.id;
         let relay_sock = relay
@@ -245,7 +298,6 @@ impl RelaySocket {
         // the single dialed path: the configured bootstrap address is
         // the contract, so no in-band candidate exchange may move the
         // tunnel onto an unadvertised (unimpaired) address.
-        let our_id = key.public();
         let runtime = Arc::new(noq::TokioRuntime);
         let udp = std::net::UdpSocket::bind(bind)?;
         let local = udp.local_addr()?;
@@ -260,7 +312,7 @@ impl RelaySocket {
             socket,
             vec![local],
             runtime,
-            None,
+            Vec::new(),
         )
         .await?;
         // One deadline covers dial, stream credit, register write and reply.
@@ -280,8 +332,9 @@ impl RelaySocket {
         let peers = PeerRegistry::new(
             usize::from(limits.max_peers.get()),
             Duration::from_secs(u64::from(limits.peer_grace_secs.get())),
+            slot,
         );
-        let drained = Arc::new(AtomicBool::new(false));
+        let (drained_tx, drained_rx) = watch::channel(false);
         let drops = Arc::new(DropCounters::default());
         let queue_capacity = usize::from(limits.datagram_queue.get());
         let (tx, rx) = mpsc::channel(queue_capacity);
@@ -312,7 +365,7 @@ impl RelaySocket {
                             let Ok(src) = EndpointId::from_bytes(&src) else {
                                 continue;
                             };
-                            let syn = synthetic_for(&src);
+                            let syn = synthetic_for(slot, &src);
                             if peers.observe(src).is_err() {
                                 drops.peer_rejected.fetch_add(1, Ordering::Relaxed);
                                 continue;
@@ -334,8 +387,9 @@ impl RelaySocket {
 
         // Control reader: Drain/PeerGone/liveness replies.
         let ctrl_pump = tokio::spawn({
-            let drained = drained.clone();
+            let drained = drained_tx;
             let conn = conn.clone();
+            let peers = peers.clone();
             let lifetime = LinkLifetime(available.clone());
             async move {
                 let _lifetime = lifetime;
@@ -344,10 +398,13 @@ impl RelaySocket {
                     match read_control(&mut ctrl_recv).await {
                         Ok(RelayControl::Drain) => {
                             debug!("relay draining; existing tunnel remains usable during grace");
-                            drained.store(true, Ordering::SeqCst);
+                            drained.send_replace(true);
                         }
                         Ok(RelayControl::PeerGone { peer }) => {
                             debug!(peer = %data_encoding::HEXLOWER.encode(&peer[..8]), "relay peer gone");
+                            if let Ok(peer) = EndpointId::from_bytes(&peer) {
+                                peers.peer_gone(&peer);
+                            }
                         }
                         Ok(RelayControl::Ping { seq }) => {
                             if !matches!(
@@ -371,21 +428,35 @@ impl RelaySocket {
         });
 
         // Our own synthetic address — what this endpoint advertises and
-        // what reply traffic from peers resolves against.
-        let local = synthetic_for(&our_id);
+        // what reply traffic from peers resolves against. The slot marker
+        // keeps sibling attachments' routes disjoint.
+        let local = synthetic_local(slot);
         let handle = RelayHandle {
             relay_id,
+            slot,
             relay_sock,
             url: relay_url_for(&relay)
                 .ok_or_else(|| anyhow::anyhow!("relay addr has no IP candidate"))?,
             peers: peers.clone(),
-            drained: drained.clone(),
+            drained: drained_rx,
             connection: conn.inner().weak_handle(),
             available: availability,
             queue: queue_owner.downgrade(),
             queue_capacity,
             drops: drops.clone(),
         };
+        // Endpoint-initiated detach: mark the tunnel unavailable so
+        // connection policies migrate off this slot while the tunnel
+        // still closes gracefully — then let close()/Drop join.
+        let detach_pump = tokio::spawn({
+            let conn = conn.clone();
+            let available = available.clone();
+            async move {
+                detach.cancelled().await;
+                available.send_replace(false);
+                conn.close(0u32.into(), b"endpoint detached relay");
+            }
+        });
         Ok((
             Self {
                 _endpoint: endpoint,
@@ -396,7 +467,7 @@ impl RelaySocket {
                 _queue_owner: queue_owner,
                 drops,
                 available,
-                tasks: Some((dgram_pump, ctrl_pump)),
+                tasks: Some((dgram_pump, ctrl_pump, detach_pump)),
             },
             handle,
         ))
@@ -409,10 +480,11 @@ impl RelaySocket {
     pub async fn close(&mut self) {
         self.available.send_replace(false);
         self.conn.close(0u32.into(), b"relay socket closed");
-        if let Some((datagrams, control)) = self.tasks.take() {
+        if let Some((datagrams, control, detach)) = self.tasks.take() {
             datagrams.abort();
             control.abort();
-            let _ = tokio::join!(datagrams, control);
+            detach.abort();
+            let _ = tokio::join!(datagrams, control, detach);
         }
         self._endpoint.close().await;
     }
@@ -422,9 +494,10 @@ impl Drop for RelaySocket {
     fn drop(&mut self) {
         self.available.send_replace(false);
         self.conn.close(0u32.into(), b"relay socket dropped");
-        if let Some((datagrams, control)) = &self.tasks {
+        if let Some((datagrams, control, detach)) = &self.tasks {
             datagrams.abort();
             control.abort();
+            detach.abort();
         }
     }
 }
@@ -551,5 +624,77 @@ impl UdpSender for RelaySender {
 
     fn max_transmit_segments(&self) -> NonZeroUsize {
         NonZeroUsize::MIN
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(seed: u8) -> EndpointId {
+        SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    #[test]
+    fn synthetic_addresses_are_slot_scoped_and_roundtrip() {
+        let peer = id(9);
+        for slot in 0..MAX_RELAY_SLOTS as u8 {
+            let addr = synthetic_for(slot, &peer);
+            assert!(is_synthetic(addr));
+            assert_eq!(synthetic_slot(addr), Some(slot));
+            assert_eq!(synthetic_slot(synthetic_local(slot)), Some(slot));
+        }
+        // Sibling slots own disjoint routes: same peer, different slot,
+        // never the same synthetic destination.
+        assert_ne!(synthetic_for(0, &peer), synthetic_for(1, &peer));
+        assert_ne!(synthetic_local(0), synthetic_local(1));
+        // Host octet carries the slot; hash fills host-low and port.
+        let a = synthetic_for(3, &peer);
+        let IpAddr::V4(v4) = a.ip() else { panic!() };
+        assert_eq!(v4.octets()[..3], [198, 19, 3]);
+        assert_ne!(a.port(), 0);
+    }
+
+    #[test]
+    fn synthetic_local_marks_only_its_own_slot() {
+        // The local marker `198.19.<slot>.0:1` must not collide with any
+        // peer synthetic in another slot.
+        let peer = id(10);
+        for slot in 0..MAX_RELAY_SLOTS as u8 {
+            assert_eq!(
+                synthetic_local(slot).ip(),
+                IpAddr::V4(Ipv4Addr::new(198, 19, slot, 0))
+            );
+            assert_ne!(synthetic_local(slot), synthetic_for(slot, &peer));
+        }
+    }
+
+    #[test]
+    fn peer_registry_scopes_addresses_to_its_slot() {
+        let first = PeerRegistry::new(4, Duration::from_secs(30), 0);
+        let second = PeerRegistry::new(4, Duration::from_secs(30), 1);
+        let peer = id(11);
+        let a = first.acquire(peer).unwrap();
+        let b = second.acquire(peer).unwrap();
+        // Same peer, different relay slots → disjoint synthetic leases.
+        assert_ne!(a.slot(), b.slot());
+        assert!(first.get(synthetic_for(0, &peer)).is_some());
+        assert!(first.get(synthetic_for(1, &peer)).is_none());
+        assert!(second.get(synthetic_for(1, &peer)).is_some());
+    }
+
+    #[test]
+    fn peer_gone_removes_the_route_immediately() {
+        let registry = PeerRegistry::new(4, Duration::from_secs(30), 2);
+        let peer = id(12);
+        let lease = registry.acquire(peer).unwrap();
+        let addr = synthetic_for(2, &peer);
+        assert!(registry.get(addr).is_some());
+        registry.peer_gone(&peer);
+        // Even a pinned lease's mapping is gone — the relay says the
+        // peer detached, so the route cannot carry traffic.
+        assert!(registry.get(addr).is_none());
+        assert_eq!(registry.occupancy().0, 0);
+        drop(lease);
     }
 }

@@ -104,7 +104,7 @@ async fn exercise() {
         }),
         vec![local],
         runtime,
-        None,
+        Vec::new(),
     )
     .await
     .unwrap();

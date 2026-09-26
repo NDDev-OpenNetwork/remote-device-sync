@@ -94,7 +94,7 @@ pub enum Backend {
 ///
 /// - `All` (default): direct UDP plus relay attachment, with traversal.
 /// - `DirectOnly`: no relay transport — iroh clears relay transports;
-///   noq simply never attaches one (`relay_endpoint` must be unset).
+///   noq simply never attaches one (`relay_endpoints` must be empty).
 /// - `RelayOnly`: no direct endpoint-to-endpoint paths. iroh clears IP
 ///   transports outright; noq still binds its UDP socket (the relay
 ///   attachment rides on it) but suppresses direct candidates from
@@ -121,7 +121,7 @@ pub struct EndpointConfig {
     /// (`noq`); iroh refuses more than one entry.
     pub bind_addrs: Vec<SocketAddr>,
     /// Custom iroh relay URLs. Refused by the owned backend, which uses
-    /// `relay_endpoint`. Empty uses the backend's preset (iroh public relays
+    /// `relay_endpoints`. Empty uses the backend's preset (iroh public relays
     /// when discovery is enabled; otherwise direct only).
     pub relays: Vec<RelayUrl>,
     /// Publish/resolve addresses via the backend's lookup services
@@ -155,13 +155,16 @@ pub struct EndpointConfig {
     /// Measurement worlds set this to the advertised path so traffic
     /// cannot silently escape onto a kind the report does not claim.
     pub transports: Transports,
-    /// Owned-relay attachment (`noq` backend only): the relay server's
-    /// endpoint address. When set, a relay tunnel socket joins the
-    /// socket mux and the endpoint advertises it as
-    /// `TransportAddr::Relay` — peers sharing the relay can open
-    /// relayed paths that migrate like any other QUIC path.
+    /// Owned-relay attachments (`noq` backend only): each entry is a
+    /// relay server's endpoint address and joins the socket mux as one
+    /// relay tunnel in its own synthetic-address slot. The endpoint
+    /// advertises every attachment as `TransportAddr::Relay` — peers
+    /// sharing a relay can open relayed paths that migrate like any
+    /// other QUIC path. A second attachment is a warm standby: traffic
+    /// migrates to it when the primary tunnel drains or fails.
+    /// Bounded by `noq::relay::MAX_RELAY_SLOTS`.
     #[cfg(feature = "transport-noq")]
-    pub relay_endpoint: Option<EndpointAddr>,
+    pub relay_endpoints: Vec<EndpointAddr>,
     /// Per-tunnel peer/queue limits and unpinned mapping retirement.
     #[cfg(feature = "transport-noq")]
     pub relay_limits: RelayLimits,
@@ -181,7 +184,7 @@ impl Default for EndpointConfig {
             observed_address_reports: true,
             transports: Transports::default(),
             #[cfg(feature = "transport-noq")]
-            relay_endpoint: None,
+            relay_endpoints: Vec::new(),
             #[cfg(feature = "transport-noq")]
             relay_limits: RelayLimits::default(),
             alpns: vec![rds_core::ALPN.to_vec()],
@@ -257,7 +260,7 @@ pub async fn bind_noq_with_socket(
     runtime: std::sync::Arc<dyn noq::Runtime>,
 ) -> anyhow::Result<Endpoint> {
     config.backend = Backend::Noq;
-    backends::noq::bind_with_socket(config, socket, local_addrs, runtime, None)
+    backends::noq::bind_with_socket(config, socket, local_addrs, runtime, Vec::new())
         .await
         .map(Endpoint::new_noq)
 }
@@ -672,6 +675,9 @@ pub struct PathStats {
     pub selected: bool,
     /// Whether this path traverses a relay (vs a direct address).
     pub via_relay: bool,
+    /// Which attached owned-relay slot serves this path (noq only —
+    /// iroh relay paths report None, as do all direct paths).
+    pub relay_slot: Option<u8>,
 }
 
 fn path_id_u64(id: iroh::endpoint::PathId) -> u64 {

@@ -125,11 +125,13 @@ impl Health {
     pub(crate) fn route(&self, remote: SocketAddr, source: Option<IpAddr>) -> Option<usize> {
         let remote = super::super::candidates::canonical(remote);
         let source = source.map(|ip| ip.to_canonical());
-        if super::relay::is_synthetic(remote) {
+        if let Some(slot) = super::relay::synthetic_slot(remote) {
+            // Only the relay socket bound in this slot serves its remotes —
+            // sibling warm attachments own disjoint synthetic routes.
             return self
                 .0
                 .iter()
-                .position(|c| super::relay::is_synthetic(c.address));
+                .position(|c| super::relay::synthetic_slot(c.address) == Some(slot));
         }
         let family = |c: &Child| {
             !super::relay::is_synthetic(c.address)

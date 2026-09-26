@@ -66,6 +66,8 @@ pub(crate) fn iroh_snapshot(conn: &iroh::endpoint::Connection) -> PathStatsSnaps
                     congestion_events: stats.congestion_events,
                     selected: path.is_selected(),
                     via_relay: path.is_relay(),
+                    // iroh does not expose per-path relay-slot identity.
+                    relay_slot: None,
                 }
             })
             .collect()

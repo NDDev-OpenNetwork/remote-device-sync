@@ -80,12 +80,30 @@ pub enum RelaySettings {
     Disabled {},
     /// Iroh protocol relay origins; no public lookup services.
     Iroh { urls: Vec<RelayUrl> },
-    /// Key-pinned owned relay locator: `rds-relay://PUBLIC_HEX_KEY@IP:PORT`.
+    /// Key-pinned owned relay locators: `rds-relay://PUBLIC_HEX_KEY@IP:PORT`.
+    /// Multiple attachments act as warm standbys: paths migrate between
+    /// relay slots when a tunnel drains or fails. Accepts either a single
+    /// locator string (legacy files) or a list; serializes as a list.
     Owned {
-        route: String,
+        #[serde(deserialize_with = "string_or_list")]
+        route: Vec<String>,
         #[serde(default, skip_serializing_if = "RelayLimits::is_default")]
         limits: RelayLimits,
     },
+}
+
+/// `route` accepts `"rds-relay://…"` (legacy singular) or `["…","…"]`.
+fn string_or_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(route) => vec![route],
+        OneOrMany::Many(routes) => routes,
+    })
 }
 
 impl Default for RelaySettings {
@@ -129,7 +147,8 @@ pub struct EndpointOverrides {
     pub backend: Option<Backend>,
     pub bind_addrs: Vec<SocketAddr>,
     pub relays: Vec<String>,
-    pub owned_relay: Option<String>,
+    /// Repeatable: each occurrence attaches one owned relay.
+    pub owned_relay: Vec<String>,
     pub no_relay: bool,
 }
 
@@ -168,7 +187,7 @@ impl EndpointSettings {
 
     pub fn apply(mut self, flags: EndpointOverrides) -> Result<Self, ConfigError> {
         let modes = usize::from(!flags.relays.is_empty())
-            + usize::from(flags.owned_relay.is_some())
+            + usize::from(!flags.owned_relay.is_empty())
             + usize::from(flags.no_relay);
         if modes > 1 {
             return Err(ConfigError::Invalid(
@@ -192,12 +211,15 @@ impl EndpointSettings {
                     })
                     .collect::<Result<_, _>>()?,
             };
-        } else if let Some(route) = flags.owned_relay {
+        } else if !flags.owned_relay.is_empty() {
             let limits = match &self.relay {
                 RelaySettings::Owned { limits, .. } => *limits,
                 _ => RelayLimits::default(),
             };
-            self.relay = RelaySettings::Owned { route, limits };
+            self.relay = RelaySettings::Owned {
+                route: flags.owned_relay,
+                limits,
+            };
         } else if flags.no_relay {
             self.relay = RelaySettings::Disabled {};
         }
@@ -228,7 +250,16 @@ impl EndpointSettings {
                 config.relays = urls;
                 config.discovery = false;
             }
-            RelaySettings::Owned { route, limits } => set_owned_relay(&mut config, &route, limits)?,
+            RelaySettings::Owned { route, limits } => {
+                if route.is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "owned relay mode requires at least one locator",
+                    ));
+                }
+                for route in &route {
+                    set_owned_relay(&mut config, route, limits)?;
+                }
+            }
         }
         config.validate()?;
         Ok(config)
@@ -246,7 +277,9 @@ fn set_owned_relay(
         .map_err(|_| ConfigError::Invalid("invalid owned relay locator"))?;
     let id = crate::EndpointId::from_bytes(&route.key.0)
         .map_err(|_| ConfigError::Invalid("invalid owned relay identity"))?;
-    config.relay_endpoint = Some(crate::EndpointAddr::new(id).with_ip_addr(route.addr));
+    config
+        .relay_endpoints
+        .push(crate::EndpointAddr::new(id).with_ip_addr(route.addr));
     config.relay_limits = limits;
     config.discovery = false;
     Ok(())
@@ -350,28 +383,41 @@ impl EndpointConfig {
             ));
         }
         if self.relay_limits != RelayLimits::default()
-            && (backend != Backend::Noq || self.relay_endpoint.is_none())
+            && (backend != Backend::Noq || self.relay_endpoints.is_empty())
         {
             return Err(ConfigError::Invalid(
                 "custom owned-relay limits require an owned relay",
             ));
         }
-        if let Some(relay) = &self.relay_endpoint {
+        if !self.relay_endpoints.is_empty() {
             if backend != Backend::Noq {
                 return Err(ConfigError::Invalid("owned relay requires the noq backend"));
+            }
+            if self.relay_endpoints.len() > crate::backends::noq::relay::MAX_RELAY_SLOTS {
+                return Err(ConfigError::Invalid(
+                    "owned relay attachments exceed the slot bound",
+                ));
             }
             if self.transports == crate::Transports::DirectOnly {
                 return Err(ConfigError::Invalid(
                     "direct-only transports reject an owned relay attachment",
                 ));
             }
-            if relay.addrs.len() != 1 || !relay.addrs.iter().all(|a| matches!(a, crate::TransportAddr::Ip(addr) if addr.port() != 0 && !addr.ip().is_unspecified() && !addr.ip().is_multicast())) {
-                return Err(ConfigError::Invalid("owned relay bootstrap requires exactly one usable direct IP address"));
+            let mut seen = HashSet::new();
+            for relay in &self.relay_endpoints {
+                if relay.addrs.len() != 1 || !relay.addrs.iter().all(|a| matches!(a, crate::TransportAddr::Ip(addr) if addr.port() != 0 && !addr.ip().is_unspecified() && !addr.ip().is_multicast())) {
+                    return Err(ConfigError::Invalid("owned relay bootstrap requires exactly one usable direct IP address"));
+                }
+                if !seen.insert(relay.id) {
+                    return Err(ConfigError::Invalid(
+                        "duplicate owned relay attachments share one tunnel identity",
+                    ));
+                }
             }
         }
         if self.transports == crate::Transports::RelayOnly
             && backend == Backend::Noq
-            && self.relay_endpoint.is_none()
+            && self.relay_endpoints.is_empty()
         {
             return Err(ConfigError::Invalid(
                 "relay-only transports require an owned relay attachment",
