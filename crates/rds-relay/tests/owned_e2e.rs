@@ -150,36 +150,51 @@ async fn attached_relay_after_silent_direct(dual_stack: bool) {
 
 #[tokio::test]
 async fn relay_forwards_handshake_and_datagrams() {
+    async fn phase<T>(name: &str, work: impl Future<Output = T>) -> T {
+        eprintln!("owned relay fixture: starting {name}");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), work)
+            .await
+            .unwrap_or_else(|_| panic!("owned relay fixture timed out during {name}"));
+        eprintln!("owned relay fixture: completed {name}");
+        result
+    }
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
-    let relay = rds_relay::server::serve(
-        EndpointConfig {
-            backend: Backend::Noq,
-            secret_key: Some(key(0)),
-            bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
-            ..Default::default()
-        },
-        Vec::new(),
+    let relay = phase(
+        "relay startup",
+        rds_relay::server::serve(
+            EndpointConfig {
+                backend: Backend::Noq,
+                secret_key: Some(key(0)),
+                bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                ..Default::default()
+            },
+            Vec::new(),
+        ),
     )
     .await
     .expect("relay up");
 
-    let a = endpoint(1, relay.endpoint_addr()).await;
-    let b = endpoint(2, relay.endpoint_addr()).await;
+    let a = phase("attach A", endpoint(1, relay.endpoint_addr())).await;
+    let b = phase("attach B", endpoint(2, relay.endpoint_addr())).await;
     assert_eq!(relay.endpoints(), 2, "both endpoints attached");
 
     // Exercise the directory boundary too: owned relay locators have their own
     // scheme and public identity, and must survive signed announce/resolve.
-    let directory = rds_discovery::service::serve(
-        "127.0.0.1:0".parse().unwrap(),
-        std::sync::Arc::new(rds_discovery::MemoryStore::default()),
-        rds_discovery::service::ServiceConfig::open_ephemeral(),
+    let directory = phase(
+        "directory startup",
+        rds_discovery::service::serve(
+            "127.0.0.1:0".parse().unwrap(),
+            std::sync::Arc::new(rds_discovery::MemoryStore::default()),
+            rds_discovery::service::ServiceConfig::open_ephemeral(),
+        ),
     )
     .await
     .unwrap();
     let client = rds_discovery::client::Client::new(directory.addr());
-    let _announce = rds_net::announce(
+    let announce = rds_net::announce(
         b.clone(),
         rds_net::AnnounceConfig {
             issuer: rds_discovery::RecordIssuer::memory(ed25519_dalek::SigningKey::from_bytes(
@@ -206,45 +221,56 @@ async fn relay_forwards_handshake_and_datagrams() {
     let target = relay_only(resolved);
     // Accept must be polled while connect is in flight: the server's
     // endpoint only drives the handshake once the incoming is taken.
-    let accept_b = tokio::spawn({
-        let b = b.clone();
-        async move { b.accept().await.expect("incoming").await }
-    });
-    let conn_a = a.connect(target, ALPN).await.expect("connect over relay");
+    let (conn_a, conn_b) = phase("peer handshake", async {
+        tokio::join!(a.connect(target, ALPN), async {
+            b.accept().await.expect("incoming").await
+        })
+    })
+    .await;
+    let conn_a = conn_a.expect("connect over relay");
     assert_eq!(conn_a.remote_id(), b.id());
 
-    let conn_b = accept_b.await.unwrap().expect("accept");
+    let conn_b = conn_b.expect("accept");
     assert_eq!(conn_b.remote_id(), a.id());
 
     // Datagrams both ways — payload is opaque outer-QUIC to the relay.
     conn_a.send_datagram(b"hello".to_vec().into()).unwrap();
-    let got = conn_b.read_datagram().await.unwrap();
+    let got = phase("datagram A to B", conn_b.read_datagram())
+        .await
+        .unwrap();
     assert_eq!(&got[..], b"hello");
     conn_b.send_datagram(b"world".to_vec().into()).unwrap();
-    let got = conn_a.read_datagram().await.unwrap();
+    let got = phase("datagram B to A", conn_a.read_datagram())
+        .await
+        .unwrap();
     assert_eq!(&got[..], b"world");
 
     // Streams ride the same tunnel.
-    let (mut send, mut recv) = conn_a.open_bi().await.unwrap();
-    send.write_all(b"stream-data").await.unwrap();
-    send.finish().unwrap();
-    let (mut bs, mut br) = conn_b.accept_bi().await.unwrap();
-    let mut buf = vec![0u8; 11];
-    br.read_exact(&mut buf).await.unwrap();
-    assert_eq!(&buf, b"stream-data");
-    bs.write_all(b"ack").await.unwrap();
-    bs.finish().unwrap();
-    let ack = recv.read_to_end(usize::MAX).await.unwrap();
-    assert_eq!(&ack, b"ack");
+    phase("reliable stream roundtrip", async {
+        let (mut send, mut recv) = conn_a.open_bi().await.unwrap();
+        send.write_all(b"stream-data").await.unwrap();
+        send.finish().unwrap();
+        let (mut bs, mut br) = conn_b.accept_bi().await.unwrap();
+        let mut buf = vec![0u8; 11];
+        br.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"stream-data");
+        bs.write_all(b"ack").await.unwrap();
+        bs.finish().unwrap();
+        let ack = recv.read_to_end(3).await.unwrap();
+        assert_eq!(&ack, b"ack");
+    })
+    .await;
 
     let (forwarded, dropped, bytes) = relay.stats();
     assert!(forwarded > 0, "relay must have forwarded datagrams");
     assert!(bytes > 0);
     assert_eq!(dropped, 0);
 
-    a.close().await;
-    b.close().await;
-    relay.close().await.unwrap();
+    drop(announce);
+    phase("close A", a.close()).await;
+    phase("close B", b.close()).await;
+    phase("close relay", relay.close()).await.unwrap();
+    phase("close directory", directory.close()).await.unwrap();
 }
 
 #[tokio::test]

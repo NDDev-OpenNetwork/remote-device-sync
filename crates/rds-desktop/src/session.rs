@@ -1,11 +1,10 @@
 //! Serving side of a desktop session.
 //!
 //! Frame delivery follows the MoQ pattern: every encoded frame goes out on
-//! its own uni-directional stream carrying a `FrameHeader`, a fresher
-//! queued frame always supersedes a stale one, and a stale frame still
-//! in flight is reset mid-send rather than finishing on the wire.
-//! Keyframes are never superseded — every delta behind them depends on
-//! their landing. Input events, encoder steering and heartbeats arrive
+//! its own uni-directional stream carrying a `FrameHeader`. Deltas retain
+//! their predecessor; only an independent keyframe can replace a delta
+//! still in flight. A sequence gap requires a keyframe before delivery
+//! resumes. Input events, encoder steering and heartbeats arrive
 //! on the bi-directional control stream, which outranks every frame
 //! stream.
 
@@ -265,17 +264,16 @@ pub async fn serve_desktop_with(
                 }
                 match source.produce(seq, &producer_controls, &clock) {
                     Some(p) => {
-                        // Bounded queue: when full the writer is behind
-                        // and this frame is dropped — its successor
-                        // lands fresher. A keyframe carries the pending
-                        // IDR request though, so dropping one re-arms the
-                        // flag instead of losing the request to
-                        // backpressure.
-                        let was_keyframe = p.header.keyframe;
-                        if tx.try_send(p).is_err() && was_keyframe {
+                        // Losing any encoded reference breaks its successors,
+                        // not only losing an IDR. Keep the two-slot bound and
+                        // ask the producer for an independent replacement.
+                        if tx.try_send(p).is_err() {
                             producer_controls.idr.store(true, Ordering::Relaxed);
                         }
-                        seq += 1;
+                        let Some(next) = seq.checked_add(1) else {
+                            return;
+                        };
+                        seq = next;
                     }
                     None => return,
                 }
@@ -302,15 +300,9 @@ pub async fn serve_desktop_with(
         })
     };
 
-    // Writer task: one uni stream per frame. A continuous producer
-    // means any frame queued behind an in-progress send is already
-    // stale — the collapse keeps only the newest (decode-aware: a
-    // queued keyframe always survives since deltas behind it can't
-    // decode without it), and a send still in flight when a fresher
-    // frame arrives is reset mid-write rather than allowed to finish
-    // (MoQ-style stale reset): the client would drop the tail anyway,
-    // so its unsent bytes only consume path capacity the fresh frame
-    // needs.
+    // Writer task: one uni stream per frame. Collapse stale queued work, but
+    // never send a delta whose predecessor was discarded. A broken chain
+    // requests an IDR locally instead of waiting for a client roundtrip.
     let writer_conn = conn.clone();
     let writer_clock = clock.clone();
     let writer_bitrate = Arc::clone(&controls.bitrate);
@@ -318,12 +310,12 @@ pub async fn serve_desktop_with(
     workers.spawn(async move {
         // Token bucket on the paced bitrate: offering faster than the
         // path sustains only backlogs QUIC's send buffer with frames
-        // that arrive stale — the collapse cannot reach them once
-        // buffered. Debt is capped at half a second so a large
+        // that arrive stale. Debt is capped at half a second so a large
         // keyframe can't stall the writer.
         let mut budget = 0.0f64;
         let mut last = Instant::now();
         let mut pending: Option<Produced> = None;
+        let mut chain = FrameChain::default();
         'writer: loop {
             let mut produced = match pending.take() {
                 Some(p) => p,
@@ -332,11 +324,10 @@ pub async fn serve_desktop_with(
                     None => break,
                 },
             };
-            produced = collapse(produced, &mut rx);
-            // Encode-failure placeholders carry no payload: sending one
-            // decodes to garbage on the client, while a skipped seq is
-            // what the client's gap→IDR resync is for.
+            produced = collapse(produced, &mut rx, &writer_idr);
             if produced.payload.is_empty() {
+                chain.next = None;
+                writer_idr.store(true, Ordering::Relaxed);
                 continue;
             }
             let bps = writer_bitrate.load(Ordering::Relaxed).max(50_000) as f64 / 8.0;
@@ -348,31 +339,20 @@ pub async fn serve_desktop_with(
                 let wait = ((cost - budget) / bps).min(0.5);
                 tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                 budget = (budget - cost).max(-bps * 0.5);
-                // Frames produced during the pacing wait are fresher —
-                // collapse once more before committing to the wire.
-                produced = collapse(produced, &mut rx);
-                if produced.payload.is_empty() {
-                    continue;
-                }
+                produced = collapse(produced, &mut rx, &writer_idr);
             } else {
                 budget -= cost;
+            }
+            // Admission follows the final selection: advancing this before
+            // the pacing wait would lose track of frames collapsed afterward.
+            if !chain.admit(&produced) {
+                writer_idr.store(true, Ordering::Relaxed);
+                continue;
             }
             produced.header.send_ts_ms = writer_clock.now_ms();
             match send_frame(&writer_conn, &produced, &mut rx).await {
                 SendOutcome::Sent => {}
                 SendOutcome::Superseded(newer) => pending = Some(newer),
-                SendOutcome::ResetStale => {
-                    // The dropped tail broke the delta chain — the next
-                    // produced frame must be an IDR, and the queued
-                    // deltas in front of it are undecodable.
-                    writer_idr.store(true, Ordering::Relaxed);
-                    while let Ok(queued) = rx.try_recv() {
-                        if queued.header.keyframe {
-                            pending = Some(queued);
-                            continue 'writer;
-                        }
-                    }
-                }
                 SendOutcome::Done | SendOutcome::Failed => break 'writer,
             }
         }
@@ -699,19 +679,55 @@ mod x11 {
     }
 }
 
-/// Drain queued frames newest-wins. Decode-aware: once a keyframe is
-/// in the mix it absorbs everything — deltas produced after it cannot
-/// decode without it, so the keyframe is kept and later deltas are
-/// skipped rather than the other way around.
-fn collapse(mut produced: Produced, rx: &mut mpsc::Receiver<Produced>) -> Produced {
-    let mut have_keyframe = produced.header.keyframe;
-    while let Ok(newer) = rx.try_recv() {
-        if newer.header.keyframe || !have_keyframe {
-            have_keyframe |= newer.header.keyframe;
+/// Prefer a recent independent frame, otherwise the latest queued candidate.
+/// FrameChain rejects candidates with a missing reference. If a keyframe is
+/// retained while later deltas are discarded, request recovery for that gap too.
+fn collapse(
+    mut produced: Produced,
+    rx: &mut mpsc::Receiver<Produced>,
+    idr: &AtomicBool,
+) -> Produced {
+    // The producer queue has two slots. Bound this drain even if the producer
+    // refills while we select; selection must not starve actual frame writes.
+    let mut discarded_reference = false;
+    for _ in 0..2 {
+        let Ok(newer) = rx.try_recv() else { break };
+        if newer.header.keyframe {
             produced = newer;
+            discarded_reference = false;
+        } else {
+            discarded_reference = true;
+            if !produced.header.keyframe {
+                produced = newer;
+            }
         }
     }
+    if discarded_reference {
+        idr.store(true, Ordering::Relaxed);
+    }
     produced
+}
+
+/// Conservative reference contract: every delta may depend on its predecessor.
+/// A producer must identify independent keyframes from the encoded bitstream.
+#[derive(Default)]
+struct FrameChain {
+    next: Option<u64>,
+}
+
+impl FrameChain {
+    fn admit(&mut self, produced: &Produced) -> bool {
+        let header = &produced.header;
+        if produced.payload.is_empty()
+            || header.seq == u64::MAX
+            || (!header.keyframe && self.next != Some(header.seq))
+        {
+            self.next = None;
+            return false;
+        }
+        self.next = header.seq.checked_add(1);
+        true
+    }
 }
 
 /// Reset code for a frame stream abandoned mid-send — the frame went
@@ -741,10 +757,6 @@ enum SendOutcome {
     Sent,
     /// A fresher decodable frame supersedes — send it next.
     Superseded(Produced),
-    /// A stale delta was reset mid-send: the reference chain is broken
-    /// on the client and only an IDR resyncs it, so queued deltas are
-    /// worthless and the next produced frame must be a keyframe.
-    ResetStale,
     /// Producer closed mid-send; the final frame was finished.
     Done,
     /// Transport failure — the writer ends.
@@ -752,8 +764,8 @@ enum SendOutcome {
 }
 
 /// Send one frame on its own tagged uni stream, aborting mid-write if
-/// a fresher frame lands: an in-flight keyframe is finished (the chain
-/// behind it depends on it), a stale delta is reset.
+/// an independent keyframe lands. Otherwise finish the reference on which
+/// the next delta may depend, retaining partial-write progress.
 async fn send_frame(
     conn: &Connection,
     produced: &Produced,
@@ -801,7 +813,7 @@ async fn send_frame_inner(
     }
     let outcome = match send_payload(stream, produced, rx).await {
         Ok(PayloadOutcome::Abandoned(next)) => {
-            return next.map_or(SendOutcome::ResetStale, SendOutcome::Superseded);
+            return SendOutcome::Superseded(next);
         }
         Ok(PayloadOutcome::Sent) => SendOutcome::Sent,
         Ok(PayloadOutcome::Superseded(next)) => SendOutcome::Superseded(next),
@@ -824,7 +836,7 @@ enum PayloadOutcome {
     Sent,
     Superseded(Produced),
     ProducerEnded,
-    Abandoned(Option<Produced>),
+    Abandoned(Produced),
 }
 
 async fn send_payload<W: AsyncWrite + Unpin>(
@@ -846,13 +858,11 @@ async fn send_payload<W: AsyncWrite + Unpin>(
                 writing.await?;
                 Ok(PayloadOutcome::ProducerEnded)
             }
-            Some(newer) if produced.header.keyframe => {
+            Some(newer) if produced.header.keyframe || !newer.header.keyframe => {
                 writing.await?;
                 Ok(PayloadOutcome::Superseded(newer))
             }
-            Some(newer) => Ok(PayloadOutcome::Abandoned(
-                newer.header.keyframe.then_some(newer)
-            )),
+            Some(newer) => Ok(PayloadOutcome::Abandoned(newer)),
         },
     }
 }
@@ -877,7 +887,7 @@ mod tests {
         }
     }
 
-    async fn partial_write(closed: bool) {
+    async fn partial_write(closed: bool, keyframe: bool) {
         use std::future::{Future, poll_fn};
         use std::task::Poll;
         use tokio::io::AsyncReadExt;
@@ -885,7 +895,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(3), async {
             let (mut writer, mut reader) = tokio::io::duplex(64);
             let (tx, mut rx) = mpsc::channel(1);
-            let frame = produced(0, true);
+            let frame = produced(0, keyframe);
             let mut wire = vec![0; 17];
             {
                 let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx));
@@ -929,12 +939,18 @@ mod tests {
 
     #[tokio::test]
     async fn partial_keyframe_supersession_preserves_exact_bytes() {
-        partial_write(false).await;
+        partial_write(false, true).await;
     }
 
     #[tokio::test]
     async fn partial_final_frame_preserves_exact_bytes() {
-        partial_write(true).await;
+        partial_write(true, true).await;
+        partial_write(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn partial_delta_finishes_before_its_dependent_successor() {
+        partial_write(false, false).await;
     }
 
     #[tokio::test]
@@ -973,11 +989,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_delta_abandons_without_waiting_for_peer() {
+    async fn independent_keyframe_replaces_delta_without_waiting_for_peer() {
         use std::future::{Future, poll_fn};
         use std::task::Poll;
 
-        for next_keyframe in [false, true] {
+        {
             let (mut writer, _reader) = tokio::io::duplex(64);
             let (tx, mut rx) = mpsc::channel(1);
             let frame = produced(0, false);
@@ -987,7 +1003,7 @@ mod tests {
                 Poll::Ready(())
             })
             .await;
-            tx.send(produced(1, next_keyframe)).await.unwrap();
+            tx.send(produced(1, true)).await.unwrap();
             let result = tokio::time::timeout(Duration::from_secs(1), sending)
                 .await
                 .unwrap()
@@ -995,11 +1011,117 @@ mod tests {
             let PayloadOutcome::Abandoned(next) = result else {
                 panic!("stale delta was not abandoned");
             };
-            assert_eq!(next.is_some(), next_keyframe);
-            if let Some(next) = next {
-                assert_eq!(next.header.seq, 1);
+            assert_eq!(next.header.seq, 1);
+            assert!(next.header.keyframe);
+        }
+    }
+
+    #[test]
+    fn reference_chain_waits_for_keyframe_after_gap_empty_or_sequence_end() {
+        let mut chain = FrameChain::default();
+        assert!(!chain.admit(&produced(0, false)));
+        assert!(chain.admit(&produced(1, true)));
+        assert!(chain.admit(&produced(2, false)));
+        assert!(!chain.admit(&produced(4, false))); // Missing reference 3.
+        assert!(!chain.admit(&produced(5, false)));
+        assert!(chain.admit(&produced(6, true)));
+        let mut empty = produced(7, false);
+        empty.payload = Bytes::new();
+        assert!(!chain.admit(&empty));
+        assert!(!chain.admit(&produced(8, false)));
+        assert!(chain.admit(&produced(u64::MAX - 1, true)));
+        assert!(!chain.admit(&produced(u64::MAX, false)));
+        assert!(!chain.admit(&produced(0, false)));
+    }
+
+    #[test]
+    fn collapsed_references_request_recovery_and_never_admit_a_broken_delta() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let idr = AtomicBool::new(false);
+        let mut chain = FrameChain::default();
+        assert!(chain.admit(&produced(0, true)));
+        tx.try_send(produced(2, false))
+            .unwrap_or_else(|_| panic!("fixture queue full"));
+        let selected = collapse(produced(1, false), &mut rx, &idr);
+        assert_eq!(selected.header.seq, 2);
+        assert!(!chain.admit(&selected));
+        assert!(idr.swap(false, Ordering::Relaxed));
+
+        // A queued IDR replaces the broken prefix without dropping its own
+        // references; no redundant request is needed when it is the last item.
+        tx.try_send(produced(4, true))
+            .unwrap_or_else(|_| panic!("fixture queue full"));
+        let selected = collapse(produced(3, false), &mut rx, &idr);
+        assert!(chain.admit(&selected));
+        assert!(!idr.load(Ordering::Relaxed));
+
+        // Retaining a keyframe while shedding a successor also loses a
+        // reference: a later delta must wait for another independent frame.
+        tx.try_send(produced(6, false))
+            .unwrap_or_else(|_| panic!("fixture queue full"));
+        let selected = collapse(produced(5, true), &mut rx, &idr);
+        assert!(chain.admit(&selected));
+        assert!(idr.load(Ordering::Relaxed));
+        assert!(!chain.admit(&produced(7, false)));
+    }
+
+    #[cfg(feature = "x11")]
+    #[test]
+    fn native_h264_chain_recovers_after_a_lost_reference() {
+        use crate::{Decoder, EncodedFrame, Encoder, H264Decoder, H264Encoder, RawFrame};
+
+        let mut encoder = H264Encoder::new(4_000_000, 30.0).unwrap();
+        let mut decoder = H264Decoder::new().unwrap();
+        let mut chain = FrameChain::default();
+        let mut decoded = Vec::new();
+        for seq in 0..7 {
+            let mut bgra = vec![0; 64 * 64 * 4];
+            for (i, pixel) in bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let value = if (i / 64 + seq as usize * 4) % 32 < 16 {
+                    220
+                } else {
+                    40
+                };
+                pixel.copy_from_slice(&[value, value, value, 255]);
+            }
+            if seq == 5 {
+                encoder.request_idr();
+            }
+            let encoded = encoder
+                .encode(&RawFrame {
+                    width: 64,
+                    height: 64,
+                    stride: 256,
+                    data: bgra.into(),
+                })
+                .unwrap();
+            assert!(!encoded.data.is_empty());
+            assert_eq!(encoded.keyframe, seq == 0 || seq == 5);
+            let mut frame = produced(seq, encoded.keyframe);
+            frame.header.width = 64;
+            frame.header.height = 64;
+            frame.payload = encoded.data;
+            if seq == 2 {
+                // Simulate an encoded frame lost to backpressure.
+                continue;
+            }
+            if chain.admit(&frame) {
+                let raw = decoder
+                    .decode(&EncodedFrame {
+                        codec: frame.header.codec,
+                        keyframe: frame.header.keyframe,
+                        data: frame.payload,
+                    })
+                    .unwrap()
+                    .expect("admitted H.264 frame must decode");
+                assert_eq!((raw.width, raw.height), (64, 64));
+                // Check a native decoded pixel after recovery, not just a header.
+                let expected = if (seq * 4) % 32 < 16 { 220i16 } else { 40 };
+                assert!((i16::from(raw.data[0]) - expected).abs() < 12);
+                decoded.push(seq);
             }
         }
+        assert_eq!(decoded, [0, 1, 5, 6]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

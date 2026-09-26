@@ -3,8 +3,8 @@
 //! Two `rds_net` endpoints, one running `serve_desktop_with` against a
 //! `SyntheticProducer`, the other a `DesktopSession`. A shared
 //! `SessionClock` makes `FrameHeader` timestamps directly comparable to
-//! client receive times, so viewer-visible latency is measured, not
-//! inferred.
+//! client receive times. This measures complete header arrival, not decoded
+//! pixels or viewer presentation.
 //!
 //! The impairment lane runs on the owned transport (`noq`) with
 //! `impair::ImpairingSocket` wrapping each endpoint's UDP socket:
@@ -392,9 +392,9 @@ async fn view_only_and_failed_injection_never_ack_but_keep_control_alive() {
 }
 
 /// C5 impairment + G5 latency gate: 5% loss + 30 ms jitter on a 50 ms
-/// base — queue stays bounded, stale frames drop, viewer-visible latency
-/// p95 stays in the 150 ms budget and control RTT is unaffected by the
-/// video backlog.
+/// base — queue stays bounded and control RTT is unaffected by the video
+/// backlog. Header-arrival tail bounds below include retransmission; this is
+/// not the clean-link 150 ms gate or an input-to-visible measurement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn impaired_link_latency_gate() {
     // 60 fps of ~1 KB frames ≈ one datagram per frame — enough samples
@@ -460,8 +460,8 @@ async fn impaired_link_latency_gate() {
         "too few frames arrived: {}",
         latencies.len()
     );
-    // Protocol queues stay bounded: capture→send wait is the collapse
-    // + channel time only — must stay near zero even under loss.
+    // Protocol queues stay bounded: capture→send wait is the bounded
+    // channel and pacing time — must stay near zero even under loss.
     let queue_p95 = p95(queue_ms);
     let lat_p50 = p50(latencies.clone());
     assert!(
@@ -524,11 +524,11 @@ async fn soak_60fps() {
         p99_age,
         rss_peak
     );
-    // Starvation check: the collapse may legitimately shed frames under
+    // Starvation check: bounded admission may legitimately shed frames under
     // CPU contention, so the floor is sustained flow, not offered rate —
     // a stalled pipeline delivers ~0.
     assert!(ages.len() >= secs as usize * 10, "starved: {}", ages.len());
-    // G5: viewer-visible latency ≤150 ms p95 in-process on a clean link.
+    // G5 synthetic header-arrival age ≤150 ms p95 on a clean loopback link.
     assert!(
         p95_age <= 150,
         "frame age p95 {p95_age}ms exceeds G5 budget"
