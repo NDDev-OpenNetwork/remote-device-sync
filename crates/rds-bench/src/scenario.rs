@@ -63,7 +63,7 @@ pub enum Scenario {
     Handshake,
     /// Established connection, N ping probes, RTT percentiles.
     Ping,
-    /// Bulk stream throughput to a TCP discard target.
+    /// Bulk stream goodput through receiver byte/digest acknowledgement.
     Transfer,
     /// Handshake under 5% loss (interop `multiconnect` analogue).
     Multiconnect,
@@ -83,7 +83,7 @@ impl Scenario {
         match self {
             Scenario::Handshake => "handshake",
             Scenario::Ping => "ping",
-            Scenario::Transfer => "transfer",
+            Scenario::Transfer => "transfer-receiver-ack-v1",
             Scenario::Multiconnect => "multiconnect",
             Scenario::RelayFallback => "relay-fallback",
             Scenario::Impaired => "impaired",
@@ -262,43 +262,56 @@ async fn ping(
     })
 }
 
-/// `transfer_mib` MiB over one forwarded stream to a discard sink.
+/// `transfer_mib` MiB over one forwarded stream, ending at a verified receipt.
 async fn transfer(p: &Params) -> anyhow::Result<BenchReport> {
-    let world = World::spawn(Path::Direct, p.transport_backend()?)
-        .await
-        .context("spawn world")?;
-    let conn = tokio::time::timeout(
+    let total = p
+        .transfer_mib
+        .checked_mul(1024 * 1024)
+        .context("transfer size overflow")?;
+    anyhow::ensure!(total > 0, "transfer size must be positive");
+    anyhow::ensure!(!p.timeout.is_zero(), "transfer timeout must be positive");
+    let world = tokio::time::timeout(
         p.timeout,
-        rds_cli::connect(&world.client, world.target.clone()),
+        World::spawn(Path::Direct, p.transport_backend()?),
     )
     .await
-    .context("connect timed out")?
-    .context("connect failed")?;
-    let (host, port) = world.discard_target();
-    let (mut send, _recv) = rds_cli::open_tcp(&conn, &host, port).await?;
-    let chunk = vec![0xABu8; 256 * 1024];
-    let mut written = 0u64;
-    let total = p.transfer_mib * 1024 * 1024;
-    let t0 = Instant::now();
-    while written < total {
-        let n = (total - written).min(chunk.len() as u64) as usize;
-        send.write_all(&chunk[..n]).await?;
-        written += n as u64;
-    }
-    send.finish()?;
-    // Wait until the receiver has drained: finish() returns when our
-    // side is done sending; add a grace read timeout on recv to bound it.
-    let elapsed = t0.elapsed();
-    let mib_s = written as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64();
-    let metrics = world.metrics_snapshot(Some(&conn));
-    world.close().await;
+    .context("world startup timed out")?
+    .context("spawn world")?;
+    // A single deadline covers connect, OpenTcp, upload, receipt and EOF.
+    let outcome = tokio::time::timeout(p.timeout, async {
+        let conn = rds_cli::connect(&world.client, world.target.clone())
+            .await
+            .context("connect failed")?;
+        let (host, port) = world.transfer_target();
+        let (mut send, mut recv) = rds_cli::open_tcp(&conn, &host, port).await?;
+        let measurement = crate::transfer::send_verified(&mut send, &mut recv, total).await?;
+        anyhow::Ok((measurement, world.metrics_snapshot(Some(&conn))))
+    })
+    .await
+    .context("transfer operation timed out")
+    .and_then(|result| result);
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), world.close()).await;
+    let (measurement, mut metrics) = outcome?;
+    cleanup.context("world shutdown timed out")?;
+    let mib_s = measurement.bytes as f64 / (1024.0 * 1024.0) / measurement.elapsed.as_secs_f64();
+    metrics.insert("transfer_verified_bytes".into(), measurement.bytes);
+    metrics.insert(
+        "transfer_completion_ns".into(),
+        measurement
+            .elapsed
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    );
+    let mut notes = proxy_note(&world);
+    notes.push("receiver-ack-v1: byte count + BLAKE3 digest + EOF; payload generation/hash, upload and receipt are timed; connect/OpenTcp excluded; not comparable to historical sender-finish results".into());
     Ok(BenchReport {
-        meta: meta("transfer", p, world.path_label(), None),
+        meta: meta(Scenario::Transfer.name(), p, world.path_label(), None),
         rtt: None,
         throughput_mib_s: Some(mib_s),
         attempts: None,
         metrics,
-        notes: proxy_note(&world),
+        notes,
     })
 }
 
@@ -490,5 +503,58 @@ fn impairment_of(path: &Path) -> Option<Impairment> {
     match path {
         Path::DirectImpaired(i) => Some(*i),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn verified_transfer(backend: &str) {
+        let p = Params {
+            transfer_mib: 1,
+            backend: backend.into(),
+            ..Params::default()
+        };
+        let report = tokio::time::timeout(Duration::from_secs(40), transfer(&p))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.meta.scenario, "transfer-receiver-ack-v1");
+        assert_eq!(report.metrics["transfer_verified_bytes"], 1024 * 1024);
+        assert!(report.metrics["transfer_completion_ns"] > 0);
+        let rate = report.throughput_mib_s.unwrap();
+        assert!(rate.is_finite() && rate > 0.0);
+    }
+
+    #[tokio::test]
+    async fn transfer_receipt_crosses_real_iroh_and_forwarded_tcp() {
+        verified_transfer("iroh").await;
+    }
+
+    #[cfg(feature = "transport-noq")]
+    #[tokio::test]
+    async fn transfer_receipt_crosses_real_noq_and_forwarded_tcp() {
+        verified_transfer("noq").await;
+    }
+
+    #[tokio::test]
+    async fn invalid_transfer_parameters_fail_before_startup() {
+        for p in [
+            Params {
+                transfer_mib: 0,
+                ..Params::default()
+            },
+            Params {
+                transfer_mib: u64::MAX,
+                ..Params::default()
+            },
+            Params {
+                timeout: Duration::ZERO,
+                ..Params::default()
+            },
+        ] {
+            assert!(transfer(&p).await.is_err());
+        }
     }
 }

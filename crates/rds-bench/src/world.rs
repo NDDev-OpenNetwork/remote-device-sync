@@ -8,9 +8,8 @@ use std::sync::Arc;
 
 use rds_agent::{Agent, AgentPolicy};
 use rds_net::{Endpoint, EndpointAddr, EndpointConfig, TransportAddr, bind_endpoint};
-use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 
 use crate::impair::{self, Impairment, Proxy};
 
@@ -38,22 +37,22 @@ impl Path {
     }
 }
 
-/// Everything a scenario needs; dropping `tasks` stops the world.
+/// Everything a scenario needs; dropping the owned task group stops the world.
 pub struct World {
     pub client: Endpoint,
     pub target: EndpointAddr,
     pub agent: Arc<Agent>,
-    pub discard_port: u16,
+    pub transfer_port: u16,
     pub proxy_stats: Option<Arc<Proxy>>,
-    tasks: Vec<JoinHandle<()>>,
+    _tasks: JoinSet<()>,
     /// Keeps the in-process relay alive for the world's lifetime.
     _relay: Option<iroh_relay::server::Server>,
 }
 
 impl World {
-    /// TCP discard service port the agent permits (for `transfer`).
-    pub fn discard_target(&self) -> (String, u16) {
-        ("127.0.0.1".into(), self.discard_port)
+    /// TCP verified-receipt service the agent permits (for `transfer`).
+    pub fn transfer_target(&self) -> (String, u16) {
+        ("127.0.0.1".into(), self.transfer_port)
     }
 
     /// Graceful endpoint shutdown; scenarios call this before the
@@ -90,28 +89,20 @@ impl World {
     }
 }
 
-impl Drop for World {
-    fn drop(&mut self) {
-        for t in &self.tasks {
-            t.abort();
-        }
-    }
-}
-
 impl World {
     /// Spin up relay + agent + client on `backend` and return the world
     /// plus the target address the client should dial for `path`.
     ///
-    /// The owned `noq` backend has no relay transport yet (WS2): relay
-    /// paths on it fail here with a clear error, and no relay process
-    /// is spawned.
+    /// This fixture only wires relay paths for iroh. The owned relay
+    /// implementation has separate fixtures; requesting it here fails
+    /// explicitly rather than measuring the wrong carrier.
     pub async fn spawn(path: Path, backend: rds_net::Backend) -> anyhow::Result<World> {
-        let mut tasks = Vec::new();
+        let mut tasks = JoinSet::new();
 
         let wants_relay = matches!(path, Path::RelayOnly | Path::Mixed);
         if wants_relay && backend != rds_net::Backend::Iroh {
             anyhow::bail!(
-                "path {:?} needs a relay; backend {backend:?} has no relay transport yet (WS2)",
+                "benchmark world does not wire relay path {:?} for backend {backend:?}",
                 path.label()
             );
         }
@@ -146,19 +137,18 @@ impl World {
         agent_ep.online().await;
         client_ep.online().await;
 
-        // TCP discard sink for throughput scenarios.
-        let discard_port = spawn_discard(&mut tasks).await;
+        let transfer_port = spawn_transfer_target(&mut tasks).await?;
 
-        let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), discard_port));
+        let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), transfer_port));
         policy.allow.insert(client_ep.id());
         policy.allow_any_tcp = true; // bench targets are ours
         let agent = Arc::new(Agent::new(agent_ep, policy));
-        tasks.push(tokio::spawn({
+        tasks.spawn({
             let agent = agent.clone();
             async move {
                 let _ = agent.run().await;
             }
-        }));
+        });
 
         // The agent's real UDP address and relay address from its addr().
         let advertised = agent.endpoint.addr();
@@ -211,25 +201,61 @@ impl World {
                 addrs,
             },
             agent,
-            discard_port,
+            transfer_port,
             proxy_stats,
-            tasks,
+            _tasks: tasks,
             _relay: relay,
         })
     }
 }
 
-/// TCP server that reads and discards — the `transfer` scenario's target.
-async fn spawn_discard(tasks: &mut Vec<JoinHandle<()>>) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tasks.push(tokio::spawn(async move {
-        while let Ok((mut sock, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 64 * 1024];
-                while sock.read(&mut buf).await.unwrap_or(0) > 0 {}
-            });
+/// Bounded, owned receiver tasks; errors close without a success receipt.
+async fn spawn_transfer_target(tasks: &mut JoinSet<()>) -> anyhow::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    tasks.spawn(async move {
+        let mut receivers = JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = receivers.join_next(), if !receivers.is_empty() => {},
+                accepted = listener.accept(), if receivers.len() < 8 => {
+                    let Ok((mut socket, _)) = accepted else { break };
+                    receivers.spawn(async move {
+                        let _ = crate::transfer::receive(&mut socket).await;
+                    });
+                }
+            }
         }
-    }));
-    port
+    });
+    Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn transfer_target_acknowledges_received_bytes_and_digest_after_fin() {
+        let mut tasks = JoinSet::new();
+        let port = spawn_transfer_target(&mut tasks).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let body = b"payload with a receiver completion barrier";
+            socket.write_all(body).await.unwrap();
+            socket.shutdown().await.unwrap();
+            let mut receipt = [0; 40];
+            socket
+                .read_exact(&mut receipt)
+                .await
+                .expect("receiver must acknowledge before throughput is reported");
+            assert_eq!(&receipt[..8], &(body.len() as u64).to_be_bytes());
+            assert_eq!(&receipt[8..], blake3::hash(body).as_bytes());
+            assert_eq!(socket.read(&mut [0]).await.unwrap(), 0);
+        })
+        .await
+        .unwrap();
+    }
 }
