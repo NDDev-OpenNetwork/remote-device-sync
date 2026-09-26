@@ -12,7 +12,6 @@ type = "file"
 include = ["${RDS_LOG_GLOB}"]
 read_from = "beginning"
 max_line_bytes = 4096
-acknowledgements.enabled = true
 
 [sources.collector]
 type = "internal_metrics"
@@ -119,6 +118,7 @@ if is_string(tags.output) { .tags.output = tags.output }
 [sinks.logs]
 type = "http"
 inputs = ["safe"]
+acknowledgements.enabled = true
 uri = "${RDS_OO_URL}/api/${RDS_OO_ORG}/rds_events/_json"
 method = "post"
 # Standard Basic header, pre-encoded to avoid inserting arbitrary password
@@ -130,8 +130,11 @@ compression = "gzip"
 batch.max_bytes = 1048576
 batch.max_events = 512
 batch.timeout_secs = 1
-buffer.type = "disk"
-buffer.max_size = 536870912
+# Retained source files are the replay log. Checkpoints advance only after
+# delivery; an in-memory queue must not make unacknowledged files disposable.
+# Vector 0.58.0's disk path stalled on isolated low-volume tails in qualification.
+buffer.type = "memory"
+buffer.max_events = 4096
 buffer.when_full = "block"
 request.timeout_secs = 10
 request.concurrency = 2

@@ -160,6 +160,44 @@ async fn search(client: &Client, stack: &Stack, base: &str, sql: &str) -> Value 
     result
 }
 
+async fn collector_metrics(client: &Client, stack: &Stack) -> String {
+    let port = stack.checked(&["port", "vector", "9598"]);
+    assert!(port.trim().starts_with("127.0.0.1:"));
+    client
+        .get(format!("http://{}/metrics", port.trim()))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+async fn wait_collector_received(client: &Client, stack: &Stack, expected: f64) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let metrics = collector_metrics(client, stack).await;
+        let count = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("vector_buffer_received_events_total{")
+                    && line.contains("component_id=\"logs\"")
+            })
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|count| count.parse::<f64>().ok());
+        if count == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "collector did not receive {expected} records before kill: {metrics}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 async fn wait_records(client: &Client, stack: &Stack, base: &str, run: &str, expected: usize) {
     // Include duplicate deliveries: later assertions must actually exercise
     // the alert query's deduplication, not race the duplicate's ingestion.
@@ -178,11 +216,13 @@ async fn wait_records(client: &Client, stack: &Stack, base: &str, run: &str, exp
                 "fixture collector: {}",
                 diagnostics.replace(&stack.password, "[redacted]")
             );
+            let local = collector_metrics(client, stack).await;
+            eprintln!("independent collector metrics: {local}");
             for metric in [
-                "buffer_received_events_total",
-                "buffer_sent_events_total",
-                "component_discarded_events_total",
-                "component_errors_total",
+                "vector_buffer_received_events_total",
+                "vector_buffer_sent_events_total",
+                "vector_component_discarded_events_total",
+                "vector_component_errors_total",
             ] {
                 let response = client
                     .get(format!(
@@ -497,6 +537,15 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
         recovered["hits"].as_array().unwrap().is_empty(),
         "below-threshold query remained active: {recovered}"
     );
+    // Repeated low-volume tails exercise idle buffer flushes, not only the
+    // initial batch. Each append must become visible without a later write
+    // rescuing its delivery.
+    for sequence in 12..20 {
+        sample["sequence"] = json!(sequence);
+        writeln!(file, "{sample}").unwrap();
+        file.sync_all().unwrap();
+        wait_records(&client, &stack, &base, &sample_run, sequence + 2).await;
+    }
     let loss_rows = search(
         &client,
         &stack,
@@ -547,9 +596,9 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
     }
     println!("alerts: SQL predicates and scheduled local webhook delivery passed");
 
-    // Recover all unique records after collector/backend restart. This allows
-    // replay from source checkpoints; it is not an isolated disk-buffer or
-    // power-loss durability proof.
+    // Retained files are the durable replay source. Kill the collector while
+    // the backend is unavailable: its memory queue cannot perform a graceful
+    // flush, so recovery must use acknowledged source checkpoints.
     stack.checked(&["stop", "--timeout", "5", "openobserve"]);
     let output = Command::new(&fixture).output().unwrap();
     assert!(output.status.success());
@@ -558,8 +607,12 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
     assert_ne!(second["run_id"], first_run);
     file.write_all(second_text.as_bytes()).unwrap();
     file.sync_all().unwrap();
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    stack.checked(&["restart", "--timeout", "5", "vector"]);
+    // 8 original valid records + 1 loss record + 21 boundary/tail records +
+    // this new run's 7 records. Prove they entered the collector before kill;
+    // otherwise the test could pass just because Vector never read the tail.
+    wait_collector_received(&client, &stack, 37.0).await;
+    stack.checked(&["kill", "--signal", "SIGKILL", "vector"]);
+    stack.checked(&["start", "vector"]);
     stack.checked(&["start", "openobserve"]);
     // Docker can allocate a different ephemeral host port when restarting.
     let port = stack.checked(&["port", "openobserve", "5080"]);
