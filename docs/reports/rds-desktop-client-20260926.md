@@ -48,7 +48,20 @@ Only disposable loopback peers were used; installed agents were not replaced.
   20-second 60-fps header-soak gates passed in both feature sets. These measure
   synthetic header arrival, not displayed pixels or user-visible latency.
 
-Full-workspace and exact-head GitHub checks are required before integration. Native macOS execution and deployment acceptance remain independent.
+`cargo test --locked --workspace` passed: 546 tests, zero failures, three
+opt-in tests ignored, across 94 test/doc-test targets. `cargo-deny` was unavailable
+locally; GitHub supply-chain checks remain independent. Exact-head GitHub checks
+are required before integration.
+
+A separate serial measurement run on clean source
+`ff632db75e128fc10228c71d22ff2729c1d6adbb` passed all seven session scenarios.
+The 60-second synthetic iroh loopback soak delivered 3591 headers: age p95 11 ms,
+p99 22 ms, test-process peak RSS 49408 KiB. The seeded impaired noq lane delivered
+429 headers: age p95 98 ms, p99 107 ms, queue p95 17 ms and heartbeat RTT p95
+232 ms. Both directions recorded actual dropped datagrams. These are one-run
+supporting measurements, not an improvement claim, process-memory ceiling,
+physical-network SLO or displayed-pixel measurement. Reproduction metadata and
+binary/lockfile hashes are in the [JSON receipt](rds-desktop-client-20260926-data.json). Native macOS execution and deployment acceptance remain independent.
 
 ## Remaining scope
 
