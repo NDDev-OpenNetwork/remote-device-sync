@@ -135,6 +135,8 @@ Tasks:
   MB/s), `migrate` (kill socket path mid-transfer — simulated via mux
   drop, real netem variant later), `loss`/`jitter` via `tc netem`
   wrapper scripts (documented; run on Linux, skipped on macOS).
+  Current `transfer` emits the versioned [receiver-verified goodput](benchmark-transfer.md)
+  scenario; historical sender-finish results are not comparable to it.
 - **B3 — desktop-latency methodology**: frame carries
   `{capture_ts, encode_done_ts, send_ts}`; client stamps
   `{recv_ts, decoded_ts, presented_ts}`; input-to-pixel measured by a

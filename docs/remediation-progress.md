@@ -16,9 +16,10 @@ requirement; the later [native Rust SSH increment](ssh.md) removes that local
 requirement while retaining a configured remote SSH server. The repository is
 still not a completed remote access product. Frame presentation returns unavailable;
 ScreenCaptureKit, image-copy and PipeWire capture probes remain placeholders.
-The throughput scenario stops timing after sender finish without checking a
-receiver byte/digest acknowledgment. These implementation gaps remain in
-W5, W6/W7 and W0.2, alongside the other open plan tasks. That Linux
+The historical throughput scenario stopped timing at sender finish; the later
+[verified transfer increment](benchmark-transfer.md) adds a receiver byte/digest
+receipt and EOF barrier. Known-rate and phase calibration remain W0.2. The other
+implementation gaps remain in W5 and W6/W7 alongside the open plan tasks. That Linux
 receipt records 431 workspace, 238 expanded and 2 isolated iroh tests passing;
 those results do not establish missing functionality or native platform/network
 qualification. The O1 observability foundation recorded 444 workspace and 239 expanded
@@ -28,7 +29,8 @@ Neither increment closes these product gaps or any wave.
 
 | Task | State | Evidence / remaining scope |
 |---|---|---|
-| W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08 has failing-before actual-client Drain/drop regressions and passing framing/grace checks. R09 has failing-before direct/relay candidate regressions and passing family/cancellation checks. Desktop body cancellation still needs its owning fixes/tests. |
+| W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08 has failing-before actual-client Drain/drop regressions and passing framing/grace checks. R09 has failing-before direct/relay candidate regressions and passing family/cancellation checks. Desktop byte/cancellation and lifecycle regressions now cover the W6.1/W6.2 increments; broader native/network qualification remains open. |
+| W0.2 | Partial; receiver completion barrier | Versioned transfer goodput waits for exact received byte count, BLAKE3 digest and response EOF under one operation deadline. A missing-receipt regression failed before the fix; corrupt/truncated/reordered payloads, invalid receipts, delayed reception and real iroh/noq forwarded-TCP checks cover the boundary. Known-rate calibration, connect/auth/service phase timings and topology/load qualification remain open; see [contract](benchmark-transfer.md). |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
@@ -1485,3 +1487,37 @@ See [the scope and validation receipt](reports/rds-managed-sync-20260926.md).
 This is a reviewed increment, not closure of W2/W8 or product acceptance. Viewer
 manager APIs, directory synchronization, platform/installed migration, disk-job
 qualification and the remaining remediation gates stay open.
+
+## 2026-09-26 — receiver-verified transfer measurement (W0.2 partial)
+
+The `transfer` scenario no longer stops its timer at sender finish. The local
+TCP target now streams the body through BLAKE3 and answers only after payload
+EOF with a fixed 40-byte receipt — big-endian byte count plus digest — followed
+by response EOF. The sender verifies all three under one operation deadline
+that covers connect, OpenTcp, upload and receipt; world startup and endpoint
+cleanup carry separate deadlines. Bounded, owned receiver tasks (eight live)
+replace the unbounded discard sink, and payload is deterministic
+position-dependent BLAKE3 XOF data so duplicated/reordered bytes change the
+digest. The report names the scenario `transfer-receiver-ack-v1`, adds
+`transfer_verified_bytes` and `transfer_completion_ns`, and keeps historical
+sender-finish results incomparable by name. See
+[the contract](benchmark-transfer.md).
+
+Regression evidence: `large_send_window_cannot_complete_before_receiver_ack`
+failed before the fix (`UnexpectedEof` — the old target never acknowledged);
+invalid/missing/truncated/trailing receipts, corrupt/short/reordered bodies and
+a receipt without EOF all fail the measurement. End-to-end runs cross real iroh
+and noq connections over forwarded TCP.
+
+Local validation: `cargo fmt --check`; workspace clippy with default features
+and the owned-transport feature set (`-D warnings`); `cargo test -p rds-bench`
+(14 tests including both real-transport receipts). Fixed measurement series on
+this tree, debug profile, 32 MiB each: iroh 4.4 MiB/s verified
+([iroh](reports/bench-transfer-20260926-iroh.md)), noq 3.7 MiB/s verified
+([noq](reports/bench-transfer-20260926-noq.md)). The debug-profile series
+needed `--timeout-s 120`; the default 15 s deadline expires mid-transfer under
+unoptimized crypto — a harness constraint, not a product defect, and the run
+fails closed rather than reporting a partial number. Report metadata does not
+yet record the build profile; that is W0.6 scope. W0.2 stays partial:
+known-rate calibration, per-phase connect/auth/service timings and
+topology/load qualification remain open.
