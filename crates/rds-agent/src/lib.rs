@@ -636,7 +636,11 @@ async fn serve_stream(
                     .await?;
                 }
             }
-            StreamHello::Sync => {
+            StreamHello::Sync | StreamHello::SyncTransfer { .. } => {
+                let transfer = match hello {
+                    StreamHello::SyncTransfer { id } => Some(rds_sync::engine::Transfer::new(id)),
+                    _ => None,
+                };
                 let Some(dir) = policy.sync_dir.clone() else {
                     write_frame(
                         &mut send,
@@ -666,15 +670,27 @@ async fn serve_stream(
                             write: g.permits_sync_write(),
                         }
                     });
-                rds_sync::engine::serve_with_access(
-                    conn,
-                    send,
-                    recv,
-                    dir,
-                    access,
-                    rds_sync::engine::TRANSFER_TIMEOUT,
-                )
-                .await?;
+                if let Some(transfer) = transfer {
+                    transfer
+                        .serve(
+                            conn,
+                            (send, recv),
+                            dir,
+                            access,
+                            rds_sync::engine::TRANSFER_TIMEOUT,
+                        )
+                        .await?;
+                } else {
+                    rds_sync::engine::serve_with_access(
+                        conn,
+                        send,
+                        recv,
+                        dir,
+                        access,
+                        rds_sync::engine::TRANSFER_TIMEOUT,
+                    )
+                    .await?;
+                }
             }
             StreamHello::Audio(_) => {
                 // Wire shape landed in protocol v2; capture/codec support
@@ -716,7 +732,7 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         StreamHello::Info => ServiceKind::Info,
         StreamHello::TcpConnect { .. } => ServiceKind::Tcp,
         StreamHello::Desktop(_) => ServiceKind::Desktop,
-        StreamHello::Sync => ServiceKind::Sync,
+        StreamHello::Sync | StreamHello::SyncTransfer { .. } => ServiceKind::Sync,
         StreamHello::Audio(_) => ServiceKind::Audio,
         StreamHello::Authz(_) | StreamHello::RenewAuthz(_) => return None,
     })

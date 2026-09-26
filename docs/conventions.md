@@ -47,7 +47,7 @@ Rules every change follows. CI enforces what it can; the rest is review.
   `rds-ssh`; do not duplicate them as RDS control messages.
 - Transport protocol selection uses ALPN (`rds/0`, `rds-relay/0`). Signed
   objects and local IPC also carry independent explicit versions: [grant v2
-  and IPC v3](grant-leases.md) require a coordinated upgrade without weakening
+  and IPC v4](grant-leases.md) require a coordinated upgrade without weakening
   authorization. General remote capability negotiation remains W2.2.
 
 ## Platform code

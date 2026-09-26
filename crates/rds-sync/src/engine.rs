@@ -66,6 +66,131 @@ pub struct Stats {
     pub bytes: u64,
 }
 
+/// A transfer's uni-stream route. IDs must be freshly generated for each
+/// greeting, including retries; legacy service-kind routing is compatibility
+/// only and is never used by the local session manager.
+#[derive(Clone, Copy)]
+pub struct Transfer(rds_core::UniHello);
+
+impl Transfer {
+    const LEGACY: Self = Self(rds_core::UniHello::Sync);
+
+    pub fn new(id: [u8; 16]) -> Self {
+        Self(rds_core::UniHello::SyncTransfer { id })
+    }
+
+    pub async fn serve(
+        self,
+        conn: Connection,
+        streams: (SendStream, RecvStream),
+        dir: PathBuf,
+        access: Access,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let mut control = Control::new(streams);
+        let stopped = control.send.stopped();
+        session(timeout, async {
+            let result = tokio::select! {
+                biased;
+                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync caller stopped receiving"),
+                result = serve_inner(conn, &mut control.send, &mut control.recv, dir, access, self.0) => result,
+            };
+            if let Err(error) = result {
+                // Preserve an explicitly written Refuse frame. Cancellation
+                // and deadlines still drop/reset the unfinished control pair.
+                control.finish(false).await?;
+                return Err(error);
+            }
+            if self.0 != rds_core::UniHello::Sync {
+                // Client finishes after Done; server FIN is the barrier that
+                // all client control bytes were consumed before slot release.
+                tokio::time::timeout(READ_STALL, control.recv.read_to_end(0))
+                    .await.context("sync caller completion stalled")??;
+            }
+            control.finish(false).await
+        }).await
+    }
+
+    pub async fn send_file(
+        self,
+        conn: &Connection,
+        path: &Path,
+        streams: (SendStream, RecvStream),
+        timeout: Duration,
+    ) -> anyhow::Result<Stats> {
+        let mut control = Control::new(streams);
+        let stopped = control.send.stopped();
+        session(timeout, async {
+            let stats = tokio::select! {
+                biased;
+                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync receiver stopped reading"),
+                result = send_file_inner(conn, path, &mut control.send, &mut control.recv, self.0) => result?,
+            };
+            control.finish(self.0 != rds_core::UniHello::Sync).await?;
+            Ok(stats)
+        }).await
+    }
+
+    pub async fn recv_file(
+        self,
+        conn: &Connection,
+        rel_path: &str,
+        dest_dir: &Path,
+        streams: (SendStream, RecvStream),
+        timeout: Duration,
+    ) -> anyhow::Result<(PathBuf, Stats)> {
+        let mut control = Control::new(streams);
+        let stopped = control.send.stopped();
+        session(timeout, async {
+            let result = tokio::select! {
+                biased;
+                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync sender stopped reading"),
+                result = recv_file_inner(conn, rel_path, dest_dir, &mut control.send, &mut control.recv, self.0) => result?,
+            };
+            control.finish(self.0 != rds_core::UniHello::Sync).await?;
+            Ok(result)
+        }).await
+    }
+}
+
+/// Reset abandoned bodies instead of implicitly finishing buffered writes.
+/// Cancellation is scoped to this transfer; other services keep their streams.
+struct Control {
+    send: SendStream,
+    recv: RecvStream,
+    complete: bool,
+}
+
+impl Control {
+    fn new((send, recv): (SendStream, RecvStream)) -> Self {
+        Self {
+            send,
+            recv,
+            complete: false,
+        }
+    }
+
+    async fn finish(&mut self, wait_peer: bool) -> anyhow::Result<()> {
+        self.send.finish()?;
+        if wait_peer {
+            tokio::time::timeout(READ_STALL, self.recv.read_to_end(0))
+                .await
+                .context("sync completion stalled")??;
+        }
+        self.complete = true;
+        Ok(())
+    }
+}
+
+impl Drop for Control {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = self.send.reset(0u32.into());
+            let _ = self.recv.stop(0u32.into());
+        }
+    }
+}
+
 /// Agent-side entry: one control stream, whichever direction the peer
 /// picks. `dir` is the agent's sync root — every path is validated
 /// under it.
@@ -101,17 +226,20 @@ pub async fn serve_with_access(
     access: Access,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    session(timeout, serve_inner(conn, send, recv, dir, access)).await
+    Transfer::LEGACY
+        .serve(conn, (send, recv), dir, access, timeout)
+        .await
 }
 
 async fn serve_inner(
     conn: Connection,
-    mut send: SendStream,
-    mut recv: RecvStream,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
     dir: PathBuf,
     access: Access,
+    route: rds_core::UniHello,
 ) -> anyhow::Result<()> {
-    let first = read_timed::<_, SyncMsg>(&mut recv).await?;
+    let first = read_timed::<_, SyncMsg>(recv).await?;
     match first {
         SyncMsg::Offer {
             rel_path,
@@ -120,13 +248,13 @@ async fn serve_inner(
             chunk_count,
         } => {
             if !access.write {
-                refuse(&mut send, "sync write not granted").await?;
+                refuse(send, "sync write not granted").await?;
                 bail!("sync write not granted");
             }
             let rel = match check_rel_path(&rel_path) {
                 Ok(r) => r,
                 Err(e) => {
-                    refuse(&mut send, &e.to_string()).await?;
+                    refuse(send, &e.to_string()).await?;
                     bail!("offer refused: {e}");
                 }
             };
@@ -146,13 +274,13 @@ async fn serve_inner(
                 .context("destination preflight task")?
             };
             if let Err(e) = preflight {
-                refuse(&mut send, &e.to_string()).await?;
+                refuse(send, &e.to_string()).await?;
                 bail!("offer refused: {e}");
             }
-            let manifest = match read_manifest(&mut recv, size, root, chunk_count).await {
+            let manifest = match read_manifest(recv, size, root, chunk_count).await {
                 Ok(m) => m,
                 Err(e) => {
-                    refuse(&mut send, &e.to_string()).await?;
+                    refuse(send, &e.to_string()).await?;
                     return Err(e);
                 }
             };
@@ -164,19 +292,19 @@ async fn serve_inner(
                 "sync push accepted"
             );
             let (_dest, stats) =
-                receive(&conn, &mut send, &dir, &rel.to_string_lossy(), &manifest).await?;
+                receive(&conn, send, &dir, &rel.to_string_lossy(), &manifest, route).await?;
             tracing::info!(?stats, "push receive complete");
             Ok(())
         }
         SyncMsg::Request { rel_path } => {
             if !access.read {
-                refuse(&mut send, "sync read not granted").await?;
+                refuse(send, "sync read not granted").await?;
                 bail!("sync read not granted");
             }
             let rel = match check_rel_path(&rel_path) {
                 Ok(r) => r,
                 Err(e) => {
-                    refuse(&mut send, &e.to_string()).await?;
+                    refuse(send, &e.to_string()).await?;
                     bail!("request refused: {e}");
                 }
             };
@@ -193,7 +321,7 @@ async fn serve_inner(
             let source = match source {
                 Ok(file) => Arc::new(file),
                 Err(_) => {
-                    refuse(&mut send, "no such file").await?;
+                    refuse(send, "no such file").await?;
                     bail!("requested file absent or outside root: {}", rel.display());
                 }
             };
@@ -205,13 +333,13 @@ async fn serve_inner(
                 chunks = manifest.chunks.len(),
                 "sync pull serving"
             );
-            send_manifest(&mut send, &rel.to_string_lossy(), &manifest).await?;
-            let SyncMsg::Need { bits } = read_timed::<_, SyncMsg>(&mut recv).await? else {
+            send_manifest(send, &rel.to_string_lossy(), &manifest).await?;
+            let SyncMsg::Need { bits } = read_timed::<_, SyncMsg>(recv).await? else {
                 bail!("expected Need");
             };
             let indices = bits_to_indices(&bits, manifest.chunks.len())?;
-            push_chunks(&conn, source, &manifest, &indices).await?;
-            match read_timed::<_, SyncMsg>(&mut recv).await? {
+            push_chunks(&conn, source, &manifest, &indices, route).await?;
+            match read_timed::<_, SyncMsg>(recv).await? {
                 SyncMsg::Done { root } if root == manifest.root => {
                     tracing::info!(sent = indices.len(), "sync pull complete");
                     Ok(())
@@ -242,14 +370,17 @@ pub async fn send_file_with_timeout(
     recv: RecvStream,
     timeout: Duration,
 ) -> anyhow::Result<Stats> {
-    session(timeout, send_file_inner(conn, path, send, recv)).await
+    Transfer::LEGACY
+        .send_file(conn, path, (send, recv), timeout)
+        .await
 }
 
 async fn send_file_inner(
     conn: &Connection,
     path: &Path,
-    mut send: SendStream,
-    mut recv: RecvStream,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    route: rds_core::UniHello,
 ) -> anyhow::Result<Stats> {
     let rel = path
         .file_name()
@@ -259,7 +390,21 @@ async fn send_file_inner(
     if check_rel_path(&rel)? != Path::new(&rel) {
         bail!("source file name has an ambiguous sync spelling");
     }
-    let source = Arc::new(tokio::fs::File::open(path).await?.into_std().await);
+    let path = path.to_path_buf();
+    let source = Arc::new(
+        tokio::task::spawn_blocking(move || -> anyhow::Result<File> {
+            use rustix::fs::{Mode, OFlags};
+            let file = File::from(rustix::fs::open(
+                &path,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?);
+            anyhow::ensure!(file.metadata()?.is_file(), "source must be a regular file");
+            Ok(file)
+        })
+        .await
+        .context("open source task")??,
+    );
     let manifest = manifest_from_file(source.clone()).await?;
     tracing::info!(
         peer = %conn.remote_id(),
@@ -268,19 +413,18 @@ async fn send_file_inner(
         chunks = manifest.chunks.len(),
         "sync push start"
     );
-    send_manifest(&mut send, &rel, &manifest).await?;
-    let indices = match read_timed::<_, SyncMsg>(&mut recv).await? {
+    send_manifest(send, &rel, &manifest).await?;
+    let indices = match read_timed::<_, SyncMsg>(recv).await? {
         SyncMsg::Need { bits } => bits_to_indices(&bits, manifest.chunks.len())?,
         SyncMsg::Refuse { reason } => bail!("offer refused: {reason}"),
         other => bail!("expected Need, got {other:?}"),
     };
-    push_chunks(conn, source, &manifest, &indices).await?;
-    match read_timed::<_, SyncMsg>(&mut recv).await? {
+    push_chunks(conn, source, &manifest, &indices, route).await?;
+    match read_timed::<_, SyncMsg>(recv).await? {
         SyncMsg::Done { root } if root == manifest.root => {}
         SyncMsg::Refuse { reason } => bail!("receiver refused: {reason}"),
         other => bail!("expected Done, got {other:?}"),
     }
-    send.finish()?;
     let stats = Stats {
         fetched: indices.len() as u64,
         total: manifest.chunks.len() as u64,
@@ -314,29 +458,28 @@ pub async fn recv_file_with_timeout(
     recv: RecvStream,
     timeout: Duration,
 ) -> anyhow::Result<(PathBuf, Stats)> {
-    session(
-        timeout,
-        recv_file_inner(conn, rel_path, dest_dir, send, recv),
-    )
-    .await
+    Transfer::LEGACY
+        .recv_file(conn, rel_path, dest_dir, (send, recv), timeout)
+        .await
 }
 
 async fn recv_file_inner(
     conn: &Connection,
     rel_path: &str,
     dest_dir: &Path,
-    mut send: SendStream,
-    mut recv: RecvStream,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    route: rds_core::UniHello,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     let requested = check_rel_path(rel_path)?;
     write_frame(
-        &mut send,
+        send,
         &SyncMsg::Request {
             rel_path: rel_path.to_string(),
         },
     )
     .await?;
-    let (rel, size, root, chunk_count) = match read_timed::<_, SyncMsg>(&mut recv).await? {
+    let (rel, size, root, chunk_count) = match read_timed::<_, SyncMsg>(recv).await? {
         SyncMsg::Offer {
             rel_path,
             size,
@@ -354,9 +497,16 @@ async fn recv_file_inner(
     if rel != requested {
         bail!("offered path differs from requested path");
     }
-    let manifest = read_manifest(&mut recv, size, root, chunk_count).await?;
-    let (dest, stats) =
-        receive(conn, &mut send, dest_dir, &rel.to_string_lossy(), &manifest).await?;
+    let manifest = read_manifest(recv, size, root, chunk_count).await?;
+    let (dest, stats) = receive(
+        conn,
+        send,
+        dest_dir,
+        &rel.to_string_lossy(),
+        &manifest,
+        route,
+    )
+    .await?;
     tracing::info!(rel = %rel.display(), ?stats, "sync pull complete");
     Ok((dest, stats))
 }
@@ -520,6 +670,7 @@ async fn receive(
     dir: &Path,
     rel: &str,
     manifest: &Manifest,
+    route: rds_core::UniHello,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     // Journal open walks and re-verifies every stored part — disk-bound
     // work belongs on the blocking pool, not an async worker.
@@ -537,10 +688,9 @@ async fn receive(
         }
     };
     // Claim before sending Need: the peer may send immediately. This also
-    // refuses a second live receive on the same unversioned Sync route.
-    let uni = conn
-        .uni_streams(rds_core::UniHello::Sync)
-        .context("claim sync uni streams")?;
+    // refuses a second live receive on the same route. Managed operations
+    // use a unique transfer ID; direct compatibility retains the Sync tag.
+    let uni = conn.uni_streams(route).context("claim sync uni streams")?;
     let bits = need_bits(journal.total(), journal.have_set());
     write_frame(send, &SyncMsg::Need { bits }).await?;
 
@@ -565,9 +715,8 @@ async fn receive_chunks(
 ) -> anyhow::Result<(PathBuf, Stats)> {
     let total = journal.total() as u64;
 
-    // Chunk streams arrive tagged `UniHello::Sync` — routed by the
-    // connection's demux so a concurrent desktop session on the same
-    // connection can't consume them.
+    // Chunk streams arrive on the already claimed transfer/service route;
+    // neither other services nor different transfer IDs can consume them.
     let mut requested: std::collections::HashSet<u32> = journal.need().into_iter().collect();
     let (sink, stopped) = JournalSink::start(journal);
     // Remove only requested unique indices from the bounded set. Disk stores
@@ -687,6 +836,7 @@ async fn push_chunks(
     file: Arc<File>,
     manifest: &Manifest,
     indices: &[u32],
+    route: rds_core::UniHello,
 ) -> anyhow::Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
     for k in 0..FETCH_STREAMS {
@@ -708,7 +858,7 @@ async fn push_chunks(
                 .context("opening sync chunk stream stalled")??;
             // First frame on every uni stream is its UniHello tag —
             // the receiver's demux routes on it.
-            write_frame(&mut stream, &rds_core::UniHello::Sync).await?;
+            write_frame(&mut stream, &route).await?;
             // One scratch per stream — chunks are ≤256 KiB, so this is
             // a single allocation rather than one per chunk.
             let mut buf = Vec::with_capacity(MAX_CHUNK as usize);

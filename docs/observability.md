@@ -9,6 +9,13 @@ and two 100-probe development ping runs with JSON telemetry enabled.
 
 ## Stack and ownership
 
+[Managed file transfers](local-sessions.md) add fixed `sync_send` and `sync_recv`
+operation names in the agent and Vector projection. Duration/outcome records
+exclude paths, transfer IDs and content. Cancellation remains an uncertain
+filesystem commit outcome, not evidence of rollback. This increment validates
+both operation names and stripping of private fields with the pinned Vector
+container; it does not deploy or requalify an operational OpenObserve stack.
+
 The [native SSH client](ssh.md) adds fixed `ssh_connect` and `ssh_session`
 operation names to both the Rust and Vector allowlists. Outcomes/timings contain
 no host, account, command, key or terminal bytes. JSON SSH requires a separate

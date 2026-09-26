@@ -121,7 +121,7 @@ agent and name CLI persist their policy revisions and freshness state. See
 the issuer or deploying managed access. [Grant v2 and renewable leases](docs/grant-leases.md)
 bind access to the controlled endpoint. `rds session renew --session <id>
 --grant-file <path>` extends a live same-scope connection; automatic GDS issuance
-is still pending. Old grants must be reissued, and CLI/agent IPC v3 upgraded together.
+is still pending. Old grants must be reissued, and CLI/agent IPC v4 upgraded together.
 
 Endpoint publication also persists its revision counter and exact retry bytes
 (`rds-agent --record-state`, default beside the identity key). Records and
