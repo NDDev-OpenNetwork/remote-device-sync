@@ -50,6 +50,8 @@ xvfb-run -a -s '-noreset -screen 0 1280x720x24 -screen 1 640x480x24' \
 
 The fixture checks real capture/DAMAGE, evdev keys/buttons, motion, lone scroll,
 screen mismatch/nonexistent screens, invalid numeric input and release on drop.
+`-noreset` keeps the disposable server alive between client lifetimes. Capture
+also compares a known painted pixel; see the [qualification report](reports/rds-x11-native-20260926.md).
 Xvfb is a test fixture only. Physical/composited X11, Wayland and macOS native
 qualification and a graphical viewer still have their own gates.
 
