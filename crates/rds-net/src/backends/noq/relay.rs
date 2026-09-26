@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use crate::relay_control::{read_control, write_control};
-use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey};
+use crate::{EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
 use noq::udp::{RecvMeta, Transmit};
 use noq::{AsyncUdpSocket, Runtime, UdpSender};
 use rds_core::relay::{self, RelayControl};
@@ -104,7 +104,7 @@ pub fn synthetic_for(id: &EndpointId) -> SocketAddr {
 /// payload: `rds-relay://<id>@<ip>:<port>`.
 pub fn relay_url_for(relay: &EndpointAddr) -> Option<RelayUrl> {
     let sock = relay.addrs.iter().find_map(|a| match a {
-        iroh::TransportAddr::Ip(s) => Some(*s),
+        TransportAddr::Ip(s) => Some(*s),
         _ => None,
     })?;
     rds_discovery::OwnedRelayRoute {
@@ -234,7 +234,7 @@ impl RelaySocket {
             .addrs
             .iter()
             .find_map(|a| match a {
-                iroh::TransportAddr::Ip(s) => Some(*s),
+                TransportAddr::Ip(s) => Some(*s),
                 _ => None,
             })
             .ok_or_else(|| anyhow::anyhow!("relay address has no IP candidate"))?;

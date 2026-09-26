@@ -449,17 +449,12 @@ once at its first actionable position.
 
 ### Executable now (Linux, in-repo)
 
-1. **W2.7 — owned types and layer discipline** *(next)*.
-   `rds-net` publicly aliases `iroh::{EndpointAddr, EndpointId, RelayUrl,
-   SecretKey, TransportAddr}` — service crates are coupled to iroh's API
-   surface, and `rds-core` carries tokio `read_frame`/`write_frame` despite
-   the documented "no io, no async runtime" leaf contract (its callers all
-   already depend on `rds-net`). Own the identity/address/service/frame
-   types in `rds-core` as wire-identical newtypes (postcard newtype
-   transparency keeps signed `EndpointRecord` bytes stable), confine
-   `From`/`Into` adapters to `backends::*`, and move async framing into
-   `rds-net::wire`.
-2. **W2.8 — session correlation and typed lifecycle events.**
+1. ~~W2.7 — owned types and layer discipline~~ **done 2026-09-26**:
+   async framing moved to `rds-net::wire`; `EndpointId`/`EndpointAddr`/
+   `RelayUrl`/`SecretKey`/`TransportAddr` are owned by `rds-core` with
+   postcard-identical encodings; backend-native types confined to
+   `backends::*` adapters; `tests/layering.rs` binds the leaf manifest.
+2. **W2.8 — session correlation and typed lifecycle events** *(next)*.
    One structured event stream (tracing span/fields, typed reason codes,
    stage timestamps) explaining dial→grant→service→migration→close;
    no secrets or private filenames by default. Design against current

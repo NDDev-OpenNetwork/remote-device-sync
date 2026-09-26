@@ -52,9 +52,10 @@ pub mod resolve;
 pub mod wire;
 pub use wire::{read_frame, write_frame};
 
-// Shared identity and address types — the same key material works on
-// both backends.
-pub use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
+// Shared identity and address types — owned by rds-core so the wire
+// and service surfaces never alias a backend's public types. Each
+// backend converts to its native types inside its adapter.
+pub use rds_core::{EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
 
 // Shared stream/error types (re-exported through `iroh::endpoint`,
 // which aliases the `noq` types the owned backend also returns).
@@ -305,7 +306,7 @@ impl Endpoint {
     /// This endpoint's public identity.
     pub fn id(&self) -> EndpointId {
         match &self.inner {
-            EndpointInner::Iroh(ep) => ep.id(),
+            EndpointInner::Iroh(ep) => backends::iroh::convert::id_from(ep.id()),
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.id(),
         }
@@ -315,7 +316,7 @@ impl Endpoint {
     /// transport addresses it knows about (direct IPs, home relay).
     pub fn addr(&self) -> EndpointAddr {
         match &self.inner {
-            EndpointInner::Iroh(ep) => ep.addr(),
+            EndpointInner::Iroh(ep) => backends::iroh::convert::addr_from(ep.addr()),
             #[cfg(feature = "transport-noq")]
             EndpointInner::Noq(ep) => ep.addr(),
         }
@@ -337,7 +338,7 @@ impl Endpoint {
     pub async fn connect(&self, target: EndpointAddr, alpn: &[u8]) -> anyhow::Result<Connection> {
         let conn = match &self.inner {
             EndpointInner::Iroh(ep) => ep
-                .connect(target, alpn)
+                .connect(backends::iroh::convert::addr(&target), alpn)
                 .await
                 .map(Connection::new_iroh)
                 .context("connect to peer"),
@@ -469,7 +470,7 @@ impl Connection {
     /// Verified peer identity.
     pub fn remote_id(&self) -> EndpointId {
         match &self.inner {
-            ConnectionInner::Iroh(c) => c.remote_id(),
+            ConnectionInner::Iroh(c) => backends::iroh::convert::id_from(c.remote_id()),
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.remote_id(),
         }

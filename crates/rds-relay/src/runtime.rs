@@ -1,7 +1,7 @@
 //! Shared relay configuration, identity initialization and runtime composition.
 use clap::{Args, ValueEnum};
-use iroh::EndpointId;
 use iroh_relay::server::TlsConfig;
+use rds_core::EndpointId;
 use std::{net::SocketAddr, num::NonZeroU16, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]

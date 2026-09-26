@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use super::candidates::{Origin, Pending, canonical};
-use iroh::{EndpointAddr, TransportAddr};
+use crate::{EndpointAddr, TransportAddr};
 use tokio::time::Instant;
 
 /// Maximum address candidates considered per connect.

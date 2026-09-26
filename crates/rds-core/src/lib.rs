@@ -8,6 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Owned endpoint identity and addressing types (ed25519 keys,
+/// relay/direct transport addresses) shared by both backends.
+pub mod endpoint;
 /// Capability grants (WS4): signed service-scope tokens presented on
 /// the connection's first stream.
 pub mod grant;
@@ -15,6 +18,9 @@ pub mod local;
 /// Owned relay protocol wire types (ALPN `rds-relay/0`).
 pub mod relay;
 mod tcp_target;
+pub use endpoint::{
+    EndpointAddr, EndpointId, KeyParseError, PUBLIC_KEY_LENGTH, RelayUrl, SecretKey, TransportAddr,
+};
 pub use tcp_target::{TcpTarget, TcpTargetError};
 
 /// ALPN negotiated for all rds traffic.

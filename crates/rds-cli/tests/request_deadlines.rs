@@ -155,7 +155,7 @@ async fn authorization_deadline_includes_stream_credit() {
     };
     let task = tokio::spawn({
         let client = client.clone();
-        let addr = server.addr();
+        let addr = rds_net::backends::iroh::convert::addr_from(server.addr());
         async move {
             tokio::time::timeout(
                 Duration::from_secs(17),
@@ -193,7 +193,7 @@ async fn canceling_authorization_after_ack_without_fin_closes_connection() {
     };
     let mut task = tokio::spawn({
         let client = client.clone();
-        let addr = server.addr();
+        let addr = rds_net::backends::iroh::convert::addr_from(server.addr());
         async move { rds_cli::connect_authorized(&client, addr, &grant).await }
     });
     let peer = server.accept().await.unwrap().await.unwrap();

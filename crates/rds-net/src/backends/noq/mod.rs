@@ -38,8 +38,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use crate::{EndpointAddr, EndpointId, SecretKey, TransportAddr};
 use anyhow::{Context as _, bail};
-use iroh::{EndpointAddr, EndpointId, SecretKey, TransportAddr};
 use noq::Runtime;
 use tracing::debug;
 

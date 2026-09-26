@@ -8,6 +8,12 @@ Rules every change follows. CI enforces what it can; the rest is review.
   `docs/architecture.md`. Adding an upward or sideways dep is an
   architecture change: discuss it in the PR body.
 - `rds-core` is a leaf: no io, no async runtime, no platform code.
+  `crates/rds-core/tests/layering.rs` enforces the manifest side.
+- Shared identity/address types (`EndpointId`, `EndpointAddr`,
+  `RelayUrl`, `SecretKey`, `TransportAddr`) are owned by `rds-core`
+  and re-exported by `rds-net`. Backend-native types (iroh, noq)
+  never appear in service surfaces — convert inside the backend
+  adapter (`rds_net::backends::iroh::convert`).
 - No new third-party dependency without need: prefer standards,
   thin FFI bindings to OS/driver APIs, and our own protocol code.
   Justify in the PR description; `deny.toml` gates licenses.

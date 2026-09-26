@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
-use iroh::EndpointId;
+use rds_net::EndpointId;
 use rds_net::backends::noq as rds_noq;
 use rds_net::relay_control::{read_control, write_control};
 use rds_net::{EndpointConfig, SendStream};
@@ -287,7 +287,7 @@ impl Relay {
     }
 
     /// The relay's advertised endpoint address (identity + socket).
-    pub fn endpoint_addr(&self) -> iroh::EndpointAddr {
+    pub fn endpoint_addr(&self) -> rds_net::EndpointAddr {
         self.endpoint.addr()
     }
 

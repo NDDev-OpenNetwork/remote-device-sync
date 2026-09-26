@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use iroh::{EndpointAddr, TransportAddr};
+use crate::{EndpointAddr, TransportAddr};
 use rds_discovery::client::Client as DirectoryClient;
 use rds_discovery::publisher::{RecordDraft, RecordIssuer};
 use rds_discovery::{DiscoveryError, EndpointRecord, MAX_RECORD_TTL, Service};

@@ -5,9 +5,9 @@
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use iroh::{EndpointAddr, EndpointId, TransportAddr};
-use rds_net::EndpointConfig;
+use rds_net::backends::iroh::convert;
 use rds_net::backends::noq;
+use rds_net::{EndpointAddr, EndpointConfig, EndpointId, SecretKey, TransportAddr};
 
 const PING: &[u8] = b"rds-ping";
 
@@ -26,7 +26,7 @@ fn addr_of(id: EndpointId, sock: SocketAddr) -> EndpointAddr {
 
 #[test]
 fn owned_relay_advertisement_parser_roundtrips_ipv4_and_ipv6() {
-    let id = iroh::SecretKey::from_bytes(&[91; 32]).public();
+    let id = SecretKey::from_bytes(&[91; 32]).public();
     for socket in ["127.0.0.1:3340", "[::1]:3340"] {
         let socket = socket.parse().unwrap();
         let url = noq::relay::relay_url_for(&addr_of(id, socket)).unwrap();
@@ -136,7 +136,7 @@ async fn noq_socket_mux_second_socket_accepts() -> anyhow::Result<()> {
         async move {
             let incoming = server_ep.accept().await.expect("accept");
             let conn = incoming.await.expect("handshake");
-            assert_eq!(conn.remote_id(), client_id);
+            assert_eq!(conn.remote_id().as_bytes(), client_id.as_bytes());
             serve_noq(conn).await;
         }
     });
@@ -169,14 +169,14 @@ async fn iroh_client_to_noq_server() -> anyhow::Result<()> {
         async move {
             let incoming = server_ep.accept().await.expect("accept");
             let conn = incoming.await.expect("handshake");
-            assert_eq!(conn.remote_id(), client_id);
+            assert_eq!(conn.remote_id().as_bytes(), client_id.as_bytes());
             serve_noq(conn).await;
         }
     });
 
     let conn = client_ep
         .connect(
-            addr_of(server_ep.id(), server_ep.local_addr()),
+            convert::addr(&addr_of(server_ep.id(), server_ep.local_addr())),
             rds_core::ALPN,
         )
         .await?;
@@ -204,14 +204,9 @@ async fn noq_client_to_iroh_server() -> anyhow::Result<()> {
         .await?;
     let client_ep = noq::bind_endpoint(loopback_config()).await?;
 
-    let server_sock = server_ep
-        .addr()
-        .addrs
-        .iter()
-        .find_map(|a| match a {
-            TransportAddr::Ip(sock) if sock.ip().is_loopback() => Some(*sock),
-            _ => None,
-        })
+    let server_sock = *convert::addr_from(server_ep.addr())
+        .ip_addrs()
+        .find(|s| s.ip().is_loopback())
         .expect("loopback addr");
 
     let server = tokio::spawn({
@@ -220,15 +215,18 @@ async fn noq_client_to_iroh_server() -> anyhow::Result<()> {
         async move {
             let incoming = server_ep.accept().await.expect("accept");
             let conn = incoming.await.expect("handshake");
-            assert_eq!(conn.remote_id(), client_id);
+            assert_eq!(conn.remote_id().as_bytes(), client_id.as_bytes());
             serve_iroh(conn).await;
         }
     });
 
     let conn = client_ep
-        .connect(addr_of(server_ep.id(), server_sock), rds_core::ALPN)
+        .connect(
+            addr_of(convert::id_from(server_ep.id()), server_sock),
+            rds_core::ALPN,
+        )
         .await?;
-    assert_eq!(conn.remote_id(), server_ep.id());
+    assert_eq!(conn.remote_id().as_bytes(), server_ep.id().as_bytes());
     ping_noq(&conn).await?;
     conn.close(0u32.into(), b"done");
     server.await?;
