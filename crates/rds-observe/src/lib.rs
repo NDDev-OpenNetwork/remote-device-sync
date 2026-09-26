@@ -260,6 +260,10 @@ pub enum Event {
     HandshakeFailed,
     HandshakeTimedOut,
     ConnectionBudgetExhausted,
+    /// A `rds.conn` span opened: emitted once per accepted session.
+    SessionOpened,
+    /// The connection's observed data path moved to a different route.
+    PathMigrated,
 }
 
 impl Event {
@@ -275,7 +279,153 @@ impl Event {
             Self::HandshakeFailed => "handshake_failed",
             Self::HandshakeTimedOut => "handshake_timed_out",
             Self::ConnectionBudgetExhausted => "connection_budget_exhausted",
+            Self::SessionOpened => "session_opened",
+            Self::PathMigrated => "path_migrated",
         }
+    }
+}
+
+/// Typed reason codes for session close and refused work — the export-safe
+/// counterpart to free-form error strings, which stay in text mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// Finished cleanly.
+    Completed,
+    /// Work dropped before resolution (guard/cancellation path).
+    Cancelled,
+    /// A deadline fired (hello, handshake, authorization, dial).
+    Timeout,
+    /// Policy, allowlist, scope or grant verification refusal.
+    Denied,
+    /// Grant or lease expiry.
+    Expired,
+    /// Grant revoked since issuance.
+    Revoked,
+    /// Capacity refusal (connection/stream/service budgets).
+    BudgetExhausted,
+    /// Peer closed the association at the application level.
+    PeerClosed,
+    /// This side closed the association.
+    LocalClosed,
+    /// Stateless reset observed on the path.
+    Reset,
+    /// Transport-level failure or transport close frame.
+    Transport,
+    /// Wire/protocol violation or unexpected message.
+    Protocol,
+    /// Requested capability is not supported here.
+    Unsupported,
+    /// Required policy material (e.g. revocation list) unavailable or stale.
+    PolicyUnavailable,
+    /// Session ended without a reasoned close (error propagation path).
+    Aborted,
+}
+
+impl Reason {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Timeout => "timeout",
+            Self::Denied => "denied",
+            Self::Expired => "expired",
+            Self::Revoked => "revoked",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::PeerClosed => "peer_closed",
+            Self::LocalClosed => "local_closed",
+            Self::Reset => "reset",
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+            Self::Unsupported => "unsupported",
+            Self::PolicyUnavailable => "policy_unavailable",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
+/// Monotonic per-process session ids for `rds.conn` spans and session
+/// boundary events. The id is scoped to `run_id` — it is never a peer key
+/// or a distributed trace id. Both the accepting agent and the dialing
+/// side mint from the same counter convention.
+static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+
+pub fn next_session_id() -> u64 {
+    SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The one span shape that correlates a session's events on this host.
+/// `peer` stays declared-but-private: JSON records carry only `session_id`.
+pub fn conn_span(session_id: u64) -> tracing::Span {
+    tracing::info_span!("rds.conn", session_id, peer = tracing::field::Empty)
+}
+
+/// Emit once when a session begins (post-handshake on the agent; after the
+/// dial/authorization sequence on the dialing side). Must run inside the
+/// session's `rds.conn` span so the record carries `session_id`.
+pub fn session_opened() {
+    emit(Event::SessionOpened);
+}
+
+/// Emit once when the session ends. `elapsed` is the session's lifetime —
+/// the remaining W2.8 stage timings arrive via `operation_completed`.
+pub fn session_closed(reason: Reason, elapsed: Duration) {
+    tracing::info!(target: "rds_telemetry", event = "session_closed",
+        reason = reason.name(), elapsed_us = micros(elapsed));
+}
+
+/// A request was refused before entering a service path. Emitted at the
+/// decision point, inside the session span when one exists.
+pub fn request_refused(reason: Reason) {
+    tracing::warn!(target: "rds_telemetry", event = "request_refused",
+        reason = reason.name());
+}
+
+/// Emits `session_closed` on drop inside the session's span, so the record
+/// still carries `session_id` when the holder is dropped outside it; call
+/// [`SessionGuard::close`] at a reasoned exit so the reason reflects the
+/// decision, not the default `Aborted`.
+pub struct SessionGuard {
+    span: tracing::Span,
+    started: Instant,
+    reason: Option<Reason>,
+}
+
+impl SessionGuard {
+    /// Emit `session_opened` inside `span` and arm the close emission.
+    /// Pair with [`conn_span`]; keep the returned guard for the session's
+    /// whole lifetime and instrument work in [`SessionGuard::span`].
+    pub fn open(span: tracing::Span) -> Self {
+        span.in_scope(session_opened);
+        Self {
+            span,
+            started: Instant::now(),
+            reason: None,
+        }
+    }
+
+    /// The span this session's work should be instrumented under.
+    pub fn span(&self) -> tracing::Span {
+        self.span.clone()
+    }
+
+    /// Record the close reason without ending the session yet.
+    pub fn set_reason(&mut self, reason: Reason) {
+        self.reason = Some(reason);
+    }
+
+    /// End the session now with `reason`; the guard will not re-emit.
+    pub fn close(mut self, reason: Reason) {
+        self.reason = Some(reason);
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let _enter = self.span.enter();
+        session_closed(
+            self.reason.unwrap_or(Reason::Aborted),
+            self.started.elapsed(),
+        );
     }
 }
 
@@ -385,6 +535,7 @@ struct SafeFields {
     event: Option<&'static str>,
     operation: Option<&'static str>,
     outcome: Option<&'static str>,
+    reason: Option<&'static str>,
     elapsed_us: Option<u64>,
 }
 
@@ -406,6 +557,10 @@ impl Visit for SafeFields {
                 self.event = Some("connection_budget_exhausted")
             }
             ("event", "operation_completed") => self.event = Some("operation_completed"),
+            ("event", "session_opened") => self.event = Some("session_opened"),
+            ("event", "session_closed") => self.event = Some("session_closed"),
+            ("event", "path_migrated") => self.event = Some("path_migrated"),
+            ("event", "request_refused") => self.event = Some("request_refused"),
             ("operation", "connect") => self.operation = Some("connect"),
             ("operation", "service_stream") => self.operation = Some("service_stream"),
             ("operation", "ssh_connect") => self.operation = Some("ssh_connect"),
@@ -417,6 +572,21 @@ impl Visit for SafeFields {
             ("outcome", "ok") => self.outcome = Some("ok"),
             ("outcome", "error") => self.outcome = Some("error"),
             ("outcome", "cancelled") => self.outcome = Some("cancelled"),
+            ("reason", "completed") => self.reason = Some("completed"),
+            ("reason", "cancelled") => self.reason = Some("cancelled"),
+            ("reason", "timeout") => self.reason = Some("timeout"),
+            ("reason", "denied") => self.reason = Some("denied"),
+            ("reason", "expired") => self.reason = Some("expired"),
+            ("reason", "revoked") => self.reason = Some("revoked"),
+            ("reason", "budget_exhausted") => self.reason = Some("budget_exhausted"),
+            ("reason", "peer_closed") => self.reason = Some("peer_closed"),
+            ("reason", "local_closed") => self.reason = Some("local_closed"),
+            ("reason", "reset") => self.reason = Some("reset"),
+            ("reason", "transport") => self.reason = Some("transport"),
+            ("reason", "protocol") => self.reason = Some("protocol"),
+            ("reason", "unsupported") => self.reason = Some("unsupported"),
+            ("reason", "policy_unavailable") => self.reason = Some("policy_unavailable"),
+            ("reason", "aborted") => self.reason = Some("aborted"),
             _ => {}
         }
     }

@@ -70,6 +70,20 @@ pub mod convert {
     }
 }
 
+/// Fold iroh's (quinn-shaped) `ConnectionError` into the owned kind.
+pub(crate) fn close_kind(error: iroh::endpoint::ConnectionError) -> crate::CloseKind {
+    use crate::CloseKind;
+    use iroh::endpoint::ConnectionError as E;
+    match error {
+        E::LocallyClosed => CloseKind::Local,
+        E::ApplicationClosed(_) => CloseKind::PeerApplication,
+        E::ConnectionClosed(_) => CloseKind::PeerTransport,
+        E::TimedOut => CloseKind::TimedOut,
+        E::Reset => CloseKind::Reset,
+        E::VersionMismatch | E::TransportError(_) | E::CidsExhausted => CloseKind::Transport,
+    }
+}
+
 /// Bind an rds endpoint: configured ALPNs, identity and relay mode.
 ///
 /// With a custom relay the endpoint uses `presets::Minimal` — no n0 address
@@ -304,5 +318,51 @@ mod tests {
         let ticket = Ticket(owned.clone()).to_string();
         let parsed = Ticket::from_str(&ticket).unwrap().0;
         assert_eq!(parsed, owned);
+    }
+
+    /// Every `ConnectionError` variant the backend can surface folds into
+    /// the owned kind — telemetry must never see backend error vocabulary.
+    #[test]
+    fn connection_errors_map_to_owned_close_kinds() {
+        use crate::CloseKind;
+        use iroh::endpoint::{
+            ApplicationClose, ConnectionClose, ConnectionError as E, TransportError,
+            TransportErrorCode, VarInt,
+        };
+
+        let app_close = ApplicationClose {
+            error_code: VarInt::from(0u32),
+            reason: bytes::Bytes::new(),
+        };
+        let transport_close = ConnectionClose {
+            error_code: TransportErrorCode::NO_ERROR,
+            frame_type: noq_proto::MaybeFrame::None,
+            reason: bytes::Bytes::new(),
+        };
+        let cases = [
+            (E::LocallyClosed, CloseKind::Local),
+            (
+                E::ApplicationClosed(app_close.clone()),
+                CloseKind::PeerApplication,
+            ),
+            (
+                E::ConnectionClosed(transport_close),
+                CloseKind::PeerTransport,
+            ),
+            (E::TimedOut, CloseKind::TimedOut),
+            (E::Reset, CloseKind::Reset),
+            (E::VersionMismatch, CloseKind::Transport),
+            (
+                E::TransportError(TransportError::new(
+                    TransportErrorCode::INTERNAL_ERROR,
+                    String::new(),
+                )),
+                CloseKind::Transport,
+            ),
+            (E::CidsExhausted, CloseKind::Transport),
+        ];
+        for (error, want) in cases {
+            assert_eq!(close_kind(error), want);
+        }
     }
 }

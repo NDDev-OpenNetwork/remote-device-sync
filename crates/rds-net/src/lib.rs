@@ -569,6 +569,17 @@ impl Connection {
         self.inner.closed().await;
     }
 
+    /// Close cause once the association has ended. Backend error detail is
+    /// folded into the owned [`CloseKind`]; the typed variant, not free-form
+    /// reason bytes, is what telemetry may export.
+    pub fn close_kind(&self) -> Option<CloseKind> {
+        match &self.inner {
+            ConnectionInner::Iroh(c) => c.close_reason().map(backends::iroh::close_kind),
+            #[cfg(feature = "transport-noq")]
+            ConnectionInner::Noq(c) => c.inner().close_reason().map(backends::noq::close_kind),
+        }
+    }
+
     /// Counters for currently observed live paths. Noq observations contain
     /// only the handshake path and subsequently consumed Established events.
     /// Use [`Self::path_stats_snapshot`] when coverage matters.
@@ -592,6 +603,25 @@ impl Connection {
     pub fn current_path_stats(&self) -> Option<PathStats> {
         self.path_stats().into_iter().find(|p| p.selected)
     }
+}
+
+/// Why the transport association ended. Backend `ConnectionError`s fold
+/// into this owned, low-cardinality kind so telemetry and policy code
+/// never depend on a backend's error vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseKind {
+    /// `close()` ran on this handle.
+    Local,
+    /// Peer closed at the application level (APPLICATION_CLOSE).
+    PeerApplication,
+    /// Peer closed at the transport level (CONNECTION_CLOSE frame).
+    PeerTransport,
+    /// Idle or required timeout fired.
+    TimedOut,
+    /// Stateless reset observed on the path.
+    Reset,
+    /// Version mismatch, CID exhaustion or other transport failure.
+    Transport,
 }
 
 /// Scope of the accompanying path observation, not a delivery guarantee.

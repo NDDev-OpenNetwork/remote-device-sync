@@ -384,6 +384,19 @@ impl ScopeError {
     pub(crate) fn terminal(&self) -> bool {
         !matches!(self, Self::Pending | Self::Authorizing)
     }
+
+    /// Export-safe refusal reason for telemetry; the free-form `message()`
+    /// stays local diagnostics.
+    pub(crate) fn reason(&self) -> rds_observe::Reason {
+        match self {
+            Self::Pending | Self::Authorizing => rds_observe::Reason::Denied,
+            Self::AuthorizationTimeout => rds_observe::Reason::Timeout,
+            Self::Closed => rds_observe::Reason::PeerClosed,
+            Self::Expired => rds_observe::Reason::Expired,
+            Self::Revoked => rds_observe::Reason::Revoked,
+            Self::PolicyStale => rds_observe::Reason::PolicyUnavailable,
+        }
+    }
 }
 
 /// Even aborting the connection service future runs authorization cleanup.
@@ -429,6 +442,7 @@ pub(crate) async fn authorize(
         authz.begin()
     };
     if let Err(message) = begin {
+        rds_observe::request_refused(rds_observe::Reason::Denied);
         let _ = tokio::time::timeout(
             AUTHZ_REPLY_TIMEOUT,
             write_frame(
@@ -446,13 +460,22 @@ pub(crate) async fn authorize(
         authz,
         committed: false,
     };
-    let verified = grant.verify(
+    let verified = match grant.verify(
         &policy.issuers,
         conn.remote_id().as_bytes(),
         &authz.audience,
         policy.grant_max_ttl,
         grant::now_unix(),
-    )?;
+    ) {
+        Ok(verified) => verified,
+        Err(error) => {
+            rds_observe::request_refused(match error {
+                grant::GrantError::Expired => rds_observe::Reason::Expired,
+                _ => rds_observe::Reason::Denied,
+            });
+            return Err(error.into());
+        }
+    };
     let id = verified.id;
     let next = if renewal {
         Some(
@@ -1018,6 +1041,35 @@ mod tests {
             assert!(lock(&policy.active_grants).is_empty());
             client.close().await;
             server.close().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::ScopeError;
+
+    /// Every refusal surface exports a typed reason — the free-form
+    /// `message()` stays local diagnostics and never reaches telemetry.
+    #[test]
+    fn scope_errors_map_to_export_safe_reasons() {
+        let cases = [
+            (ScopeError::Pending, rds_observe::Reason::Denied),
+            (ScopeError::Authorizing, rds_observe::Reason::Denied),
+            (
+                ScopeError::AuthorizationTimeout,
+                rds_observe::Reason::Timeout,
+            ),
+            (ScopeError::Closed, rds_observe::Reason::PeerClosed),
+            (ScopeError::Expired, rds_observe::Reason::Expired),
+            (ScopeError::Revoked, rds_observe::Reason::Revoked),
+            (
+                ScopeError::PolicyStale,
+                rds_observe::Reason::PolicyUnavailable,
+            ),
+        ];
+        for (error, want) in cases {
+            assert_eq!(error.reason(), want, "{}", error.message());
         }
     }
 }

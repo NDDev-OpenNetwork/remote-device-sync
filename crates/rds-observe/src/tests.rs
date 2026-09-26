@@ -292,3 +292,60 @@ async fn sync_operations_export_only_fixed_names_and_lifecycle_outcomes() {
     assert_eq!(records[3]["operation"], "sync_recv");
     assert_eq!(records[3]["outcome"], "cancelled");
 }
+
+#[test]
+fn session_guard_emits_reasoned_open_and_close_correlated_by_session_id() {
+    let capture = Capture::default();
+    let (subscriber, telemetry) = subscriber(
+        Service::Agent,
+        Config::new(Format::Json, "trace").unwrap(),
+        capture.clone(),
+    )
+    .unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        let session = SessionGuard::open(conn_span(41));
+        session.span().in_scope(|| emit(Event::PathMigrated));
+        session.close(Reason::Timeout);
+    });
+    assert!(telemetry.shutdown().drained);
+    let records = capture.records();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["event"], "session_opened");
+    assert_eq!(records[0]["session_id"], 41);
+    assert_eq!(records[1]["event"], "path_migrated");
+    assert_eq!(records[1]["session_id"], 41);
+    assert_eq!(records[2]["event"], "session_closed");
+    assert_eq!(records[2]["reason"], "timeout");
+    assert_eq!(records[2]["session_id"], 41);
+    assert!(records[2]["elapsed_us"].is_u64());
+    for record in &records {
+        assert!(record.get("peer").is_none(), "peer never leaves the span");
+    }
+}
+
+#[test]
+fn session_guard_drop_without_reason_reports_aborted() {
+    let capture = Capture::default();
+    let (subscriber, telemetry) = subscriber(
+        Service::Cli,
+        Config::new(Format::Json, "trace").unwrap(),
+        capture.clone(),
+    )
+    .unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        drop(SessionGuard::open(conn_span(9)));
+    });
+    assert!(telemetry.shutdown().drained);
+    let records = capture.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["event"], "session_opened");
+    assert_eq!(records[1]["event"], "session_closed");
+    assert_eq!(records[1]["reason"], "aborted");
+    assert_eq!(records[1]["session_id"], 9);
+}
+
+#[test]
+fn session_ids_mint_monotonic() {
+    let first = next_session_id();
+    assert!(next_session_id() > first);
+}
