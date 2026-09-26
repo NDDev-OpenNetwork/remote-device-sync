@@ -101,7 +101,7 @@ Each JSON record contains:
 | `timestamp_unix_us`, `uptime_us` | wall clock for search; monotonic elapsed process time for diagnosis |
 | `service`, `version` | fixed executable role and Cargo version; not an exact build attestation |
 | `run_id`, `sequence` | random 128-bit process ID and local event sequence; concurrent arrival order may differ |
-| `session_id` | numeric agent connection ID, scoped to `run_id`; never a peer key or distributed trace ID |
+| `session_id` | numeric session ID minted by the accepting agent or the dialing client on its `rds.conn` span, scoped to `run_id`; never a peer key or distributed trace ID |
 | `level`, `target`, `line` | static source metadata |
 | `event`, `operation`, `outcome`, `elapsed_us` | allowlisted operational fields; absent fields are null |
 | `telemetry_*_total` | cumulative queue rejection, oversized-record and output I/O error counts |
@@ -114,7 +114,11 @@ not a real hostname. Correlation IDs stay in logs, never metric labels.
 
 Typed events cover process start/return, 15-second heartbeat, listener readiness,
 agent allowlist admission/rejection, handshake failures/timeouts, connection
-budget rejection and local connect/service-handler completion. Membership
+budget rejection, session open/close bookends with typed reason codes,
+selected-path migration, typed request refusals and local
+connect/service-handler completion. Session close reasons are an owned
+`CloseKind`/`Reason` vocabulary — backend error text stays in local
+diagnostics. Membership
 admission does **not** mean a grant has authorized every service. A service
 handler returning `ok` does **not** prove remote presentation, durable transfer
 or even a successful service request: a handler can finish after replying with

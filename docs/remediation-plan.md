@@ -454,13 +454,16 @@ once at its first actionable position.
    `RelayUrl`/`SecretKey`/`TransportAddr` are owned by `rds-core` with
    postcard-identical encodings; backend-native types confined to
    `backends::*` adapters; `tests/layering.rs` binds the leaf manifest.
-2. **W2.8 — session correlation and typed lifecycle events** *(next)*.
-   One structured event stream (tracing span/fields, typed reason codes,
-   stage timestamps) explaining dial→grant→service→migration→close;
-   no secrets or private filenames by default. Design against current
-   `tracing` conventions; must compose with the O-series observability
-   rows in W10.
-3. **W3.3 — warm secondary relay and measured migration.** The owned
+2. ~~W2.8 — session correlation and typed lifecycle events~~ **done
+   2026-09-26**: shared `next_session_id()` + `conn_span`; session
+   open/close bookends via `SessionGuard` (drop = `aborted`); owned
+   `CloseKind` folds both backends' `ConnectionError` vocabularies;
+   `ScopeError::reason()` exports typed refusal codes; `ConnSampler`
+   reports true only on selected-path change (deselect gaps do not
+   reset it); dialer's `Dialed` guard instruments every command under
+   the session span. Stage timings ride `observe(Operation::…)`; `peer`
+   stays span-local and never serializes.
+3. **W3.3 — warm secondary relay and measured migration** *(next)*. The owned
    relay has Drain/PeerGone/grace traffic verified; add a second
    attachment, measured active-session migration under interruption
    budget, and the bench lane that proves it.

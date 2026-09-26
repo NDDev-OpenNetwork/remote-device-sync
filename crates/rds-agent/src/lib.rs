@@ -42,14 +42,9 @@ use authz::{ConnAuthz, ConnectionLifetime, authorize};
 pub use limits::AgentLimits;
 pub use revocations::{RevocationFeed, RevocationPolicy, watch_revocations};
 
-/// Monotonic session ids for structured tracing — every connection's
-/// `rds.conn` span carries one, so `session_id` filters a whole
-/// session's events (streams, grants, sync, desktop) in the log.
-static SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn next_session_id() -> u64 {
-    SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
+/// Session ids and the `rds.conn` span shape are minted by rds-observe so
+/// both sides of a connection share the correlation convention.
+use rds_observe::{Reason, conn_span, next_session_id};
 
 /// A peer that opens a stream but never writes its `StreamHello` would
 /// otherwise park a task per stream for the connection's lifetime —
@@ -299,11 +294,8 @@ impl Agent {
                         let _permit = permit;
                         match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
                             Ok(Ok(conn)) => {
-                                let span = info_span!(
-                                    "rds.conn",
-                                    peer = %conn.remote_id(),
-                                    session_id = next_session_id(),
-                                );
+                                let span = conn_span(next_session_id());
+                                span.record("peer", tracing::field::display(conn.remote_id()));
                                 if let Err(error) = serve_connection(conn, audience, policy, desktop, metrics, limits, stream_counter)
                                     .instrument(span).await {
                                     debug!(%error, "connection ended");
@@ -351,11 +343,8 @@ impl Agent {
             conn.close(5u32.into(), b"agent connection budget exhausted");
             anyhow::bail!("agent connection budget exhausted");
         };
-        let span = info_span!(
-            "rds.conn",
-            peer = %conn.remote_id(),
-            session_id = next_session_id(),
-        );
+        let span = conn_span(next_session_id());
+        span.record("peer", tracing::field::display(conn.remote_id()));
         serve_connection(
             conn,
             *self.endpoint.id().as_bytes(),
@@ -388,6 +377,9 @@ async fn serve_connection(
     }
     info!(%peer, "peer connected");
     rds_observe::emit(rds_observe::Event::PeerAccepted);
+    // Drop emits session_closed(aborted) even when this future is aborted —
+    // the acceptance loop's shutdown budget can cancel live connections.
+    let session = rds_observe::SessionGuard::open(tracing::Span::current());
     let authz = Arc::new(ConnAuthz::new(
         policy.grants_required(),
         audience,
@@ -403,20 +395,36 @@ async fn serve_connection(
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut streams = JoinSet::new();
-    loop {
+    // The close cause must be read before `lifetime` drops — its Drop
+    // closes the conn locally and would overwrite a peer-side reason.
+    let close_reason = loop {
         tokio::select! {
             biased;
-            _ = conn.wait_closed() => break,
+            _ = conn.wait_closed() => {
+                break match conn.close_kind() {
+                    Some(rds_net::CloseKind::Local) => Reason::LocalClosed,
+                    Some(rds_net::CloseKind::PeerApplication)
+                    | Some(rds_net::CloseKind::PeerTransport) => Reason::PeerClosed,
+                    Some(rds_net::CloseKind::TimedOut) => Reason::Timeout,
+                    Some(rds_net::CloseKind::Reset) => Reason::Reset,
+                    Some(rds_net::CloseKind::Transport) => Reason::Transport,
+                    None => Reason::Aborted,
+                };
+            }
             result = streams.join_next(), if !streams.is_empty() => {
                 if let Some(Err(error)) = result { debug!(%error, "stream task ended"); }
             }
-            _ = tick.tick() => sampler.sample(),
+            _ = tick.tick() => {
+                if sampler.sample() {
+                    rds_observe::emit(rds_observe::Event::PathMigrated);
+                }
+            }
             incoming = conn.accept_bi(), if streams.len() < limits.streams() => {
                 let (send, recv) = match incoming {
                     Ok(streams) => streams,
                     Err(error) => {
                         debug!(%peer, %error, "connection closed");
-                        break;
+                        break Reason::Transport;
                     }
                 };
                 let policy = policy.clone();
@@ -435,11 +443,12 @@ async fn serve_connection(
                 }.instrument(span));
             }
         }
-    }
+    };
     sampler.sample();
     authz.close_and_wait().await;
     drop(lifetime);
     streams.shutdown().await;
+    session.close(close_reason);
     Ok(())
 }
 
@@ -454,7 +463,10 @@ async fn serve_stream(
     let hello: StreamHello = match tokio::time::timeout(HELLO_TIMEOUT, read_frame(&mut recv)).await
     {
         Ok(h) => h?,
-        Err(_) => anyhow::bail!("stream hello timed out"),
+        Err(_) => {
+            rds_observe::request_refused(Reason::Timeout);
+            anyhow::bail!("stream hello timed out");
+        }
     };
     if let StreamHello::Authz(grant) = hello {
         return rds_observe::observe(
@@ -473,6 +485,7 @@ async fn serve_stream(
     let grant = match authz.service_scope(&policy).await {
         Ok(g) => g,
         Err(why) => {
+            rds_observe::request_refused(why.reason());
             if why.terminal() {
                 conn.close(2u32.into(), why.message().as_bytes());
             }
@@ -489,10 +502,12 @@ async fn serve_stream(
     };
     let scope_err = grant.as_ref().and_then(|g| scope_check(g, &hello).err());
     if let Some(why) = scope_err {
+        rds_observe::request_refused(Reason::Denied);
         write_frame(&mut send, &HelloAck::Error { message: why }).await?;
         anyhow::bail!("stream outside grant scope");
     }
     let Some(_service_slot) = authz.try_service_slot() else {
+        rds_observe::request_refused(Reason::BudgetExhausted);
         tokio::time::timeout(
             HELLO_TIMEOUT,
             write_frame(

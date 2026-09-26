@@ -1730,3 +1730,40 @@ Verified: fmt, both clippy lanes (default + x11), full workspace tests,
 
 Remaining W2.7 scope: none functional — the convention doc now states
 the owned-type rule; future backends convert at their own adapter.
+
+## 2026-09-26 — session correlation and typed lifecycle events (W2.8)
+
+Every accepted or dialed connection now carries one `rds.conn` span
+minted from a shared monotonic `next_session_id()` — the same
+`session_id` correlates the whole lifecycle: `peer_accepted`,
+`session_opened`, typed `request_refused`, `path_migrated` and
+`session_closed{reason, elapsed_us}` on the agent; the dialer's
+`Dialed` guard pairs `session_opened`/`session_closed` around each
+instrumented command (ping, info, ssh, forward, desktop, sync).
+
+Close and refusal reasons are owned vocabularies, never backend error
+text: `rds_net::CloseKind` folds iroh and noq `ConnectionError`
+variants (all eight mapped, asserted per-variant in unit tests), and
+`ScopeError::reason()` maps authorization failures to export-safe
+`rds_observe::Reason` codes. `ConnSampler::sample()` reports true only
+when the *selected* path id changes — a deselected sample does not
+forget the last serving path, so `5 → none → 7` still reads as
+migration; first observation is not a move. `SessionGuard` emits
+`session_closed(aborted)` on drop, so aborted service futures still
+close their session record.
+
+Stage timings ride the existing `observe(Operation::…)` records —
+`connect`, `grant_authorize`, `grant_renew`, service ops — inside the
+session span, rather than a parallel timing vocabulary. Private data:
+`peer` is recorded on the span but the record layer serializes only
+`session_id`; reasons are fixed strings; no filenames or secrets.
+
+Tests: session guard emits open/close correlated by `session_id`
+(JSON capture asserts `peer` never serializes), drop reports
+`aborted`, session ids mint monotonic, per-variant `CloseKind`
+mappings on both backends, `ScopeError`→`Reason` table, and the
+migration predicate (first/no-op/change/move-back).
+
+Verified: fmt, clippy default + x11 + `transport-noq` lanes, full
+workspace suite green including the new rds-observe/rds-net/rds-agent
+tests.

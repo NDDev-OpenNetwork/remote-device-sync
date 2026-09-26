@@ -845,3 +845,66 @@ impl ConnectionObserver {
         }
     }
 }
+
+/// Fold noq's `ConnectionError` into the owned kind.
+pub(crate) fn close_kind(error: noq::ConnectionError) -> crate::CloseKind {
+    use crate::CloseKind;
+    use noq::ConnectionError as E;
+    match error {
+        E::LocallyClosed => CloseKind::Local,
+        E::ApplicationClosed(_) => CloseKind::PeerApplication,
+        E::ConnectionClosed(_) => CloseKind::PeerTransport,
+        E::TimedOut => CloseKind::TimedOut,
+        E::Reset => CloseKind::Reset,
+        E::VersionMismatch | E::TransportError(_) | E::CidsExhausted => CloseKind::Transport,
+    }
+}
+
+#[cfg(test)]
+mod close_kind_tests {
+    use super::close_kind;
+    use crate::CloseKind;
+    use noq::{
+        ApplicationClose, ConnectionClose, ConnectionError as E, TransportErrorCode, VarInt,
+    };
+
+    /// Every `ConnectionError` variant folds into the owned kind —
+    /// telemetry must never see backend error vocabulary.
+    #[test]
+    fn connection_errors_map_to_owned_close_kinds() {
+        let app_close = ApplicationClose {
+            error_code: VarInt::from(0u32),
+            reason: bytes::Bytes::new(),
+        };
+        let transport_close = ConnectionClose {
+            error_code: TransportErrorCode::NO_ERROR,
+            frame_type: noq_proto::MaybeFrame::None,
+            reason: bytes::Bytes::new(),
+        };
+        let cases = [
+            (E::LocallyClosed, CloseKind::Local),
+            (
+                E::ApplicationClosed(app_close.clone()),
+                CloseKind::PeerApplication,
+            ),
+            (
+                E::ConnectionClosed(transport_close),
+                CloseKind::PeerTransport,
+            ),
+            (E::TimedOut, CloseKind::TimedOut),
+            (E::Reset, CloseKind::Reset),
+            (E::VersionMismatch, CloseKind::Transport),
+            (
+                E::TransportError(noq_proto::TransportError::new(
+                    TransportErrorCode::INTERNAL_ERROR,
+                    String::new(),
+                )),
+                CloseKind::Transport,
+            ),
+            (E::CidsExhausted, CloseKind::Transport),
+        ];
+        for (error, want) in cases {
+            assert_eq!(close_kind(error), want);
+        }
+    }
+}

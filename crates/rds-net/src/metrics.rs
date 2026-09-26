@@ -106,6 +106,7 @@ impl Registry {
             last_policy: 0,
             last_degraded: 0,
             last_lost_events: 0,
+            last_selected: None,
         }
     }
 
@@ -246,12 +247,17 @@ pub struct ConnSampler {
     last_policy: u64,
     last_degraded: u64,
     last_lost_events: u64,
+    /// Selected path at the previous sample; None before first
+    /// observation. A change means the data path migrated.
+    last_selected: Option<u64>,
 }
 
 impl ConnSampler {
     /// Fold current `path_stats` into the registry. Safe to call any
-    /// number of times — only deltas count.
-    pub fn sample(&mut self) {
+    /// number of times — only deltas count. Returns true when the
+    /// selected path moved to a *different* observed path since the last
+    /// sample; first observation of a path does not count as migration.
+    pub fn sample(&mut self) -> bool {
         let snapshot = self.conn.snapshot();
         self.observe_coverage(snapshot.coverage);
         let paths = snapshot.paths;
@@ -287,6 +293,12 @@ impl ConnSampler {
             );
         }
         let selected = paths.iter().find(|p| p.selected);
+        let migrated = selected.is_some_and(|sel| migrated_to(self.last_selected, sel.path_id));
+        if let Some(sel) = selected {
+            // A deselected sample must not forget the last serving path:
+            // 5 → none → 7 is still a migration.
+            self.last_selected = Some(sel.path_id);
+        }
         *self
             .registry
             .inner
@@ -306,6 +318,7 @@ impl ConnSampler {
             .live_paths
             .fetch_add(live, Ordering::Relaxed);
         self.last_live = live;
+        migrated
     }
 
     fn observe_coverage(&mut self, coverage: PathStatsCoverage) {
@@ -428,6 +441,12 @@ impl Drop for ConnSampler {
     }
 }
 
+/// A different path serving the connection is a migration; the first
+/// observed selection is not — there was nothing to move from.
+fn migrated_to(last_selected: Option<u64>, selected: u64) -> bool {
+    last_selected.is_some_and(|prev| prev != selected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +478,13 @@ mod tests {
         assert_eq!(values["rds_net_selected_path_known"], 1);
         assert_eq!(values["rds_net_rtt_us"], 25);
         assert_eq!(values["rds_net_cwnd_bytes"], 64);
+    }
+
+    #[test]
+    fn only_a_change_of_serving_path_counts_as_migration() {
+        assert!(!migrated_to(None, 5), "first observation is not a move");
+        assert!(!migrated_to(Some(5), 5));
+        assert!(migrated_to(Some(5), 9));
+        assert!(migrated_to(Some(9), 5), "moving back is also a migration");
     }
 }

@@ -8,6 +8,7 @@ use rds_net::{
     EndpointOverrides, EndpointSettings, Ticket, acquire_key, bind_endpoint, default_key_path,
     load_or_create_key,
 };
+use tracing::Instrument;
 
 #[cfg(unix)]
 mod logging;
@@ -336,7 +337,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .await?;
                 println!("connected to {}", conn.remote_id());
                 for i in 0..count {
-                    let rtt = rds_cli::ping(&conn, i as u64).await?;
+                    let rtt = rds_cli::ping(&conn, i as u64)
+                        .instrument(conn.session.span())
+                        .await?;
                     println!("pong seq={i} rtt={:.1}ms", rtt.as_secs_f64() * 1000.0);
                 }
                 let snapshot = conn.path_stats_snapshot();
@@ -361,7 +364,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     grant.clone(),
                 )
                 .await?;
-                let info = rds_cli::info(&conn).await?;
+                let info = rds_cli::info(&conn).instrument(conn.session.span()).await?;
                 println!("{info:#?}");
             }
             Command::Ssh { target, options } => {
@@ -371,7 +374,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     grant.clone(),
                 )
                 .await?;
-                ssh::direct(&conn, options).await?;
+                ssh::direct(&conn, options)
+                    .instrument(conn.session.span())
+                    .await?;
             }
             Command::Forward {
                 target,
@@ -379,16 +384,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 remote,
                 max_connections,
             } => {
-                let conn = Arc::new(
-                    dial(
-                        &endpoint,
-                        resolve(&directory, &target).await?,
-                        grant.clone(),
-                    )
-                    .await?,
-                );
+                let session = dial(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                )
+                .await?;
+                let conn = Arc::new(session.conn.clone());
                 let listener = tokio::net::TcpListener::bind(bind).await?;
-                rds_cli::forward_bound_listener(conn, listener, remote, max_connections).await?;
+                rds_cli::forward_bound_listener(conn, listener, remote, max_connections)
+                    .instrument(session.session.span())
+                    .await?;
             }
             Command::Desktop {
                 target,
@@ -397,13 +403,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             } => {
                 #[cfg(feature = "desktop")]
                 {
-                    let conn = dial(
+                    let session = dial(
                         &endpoint,
                         resolve(&directory, &target).await?,
                         grant.clone(),
                     )
                     .await?;
-                    rds_desktop::client::run_desktop_client(conn, display, max_fps).await?;
+                    rds_desktop::client::run_desktop_client(session.conn.clone(), display, max_fps)
+                        .instrument(session.session.span())
+                        .await?;
                 }
                 #[cfg(not(feature = "desktop"))]
                 {
@@ -420,8 +428,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     grant.clone(),
                 )
                 .await?;
-                let (send, recv) = rds_cli::open_sync(&conn).await?;
-                let stats = rds_sync::engine::send_file(&conn, &path, send, recv).await?;
+                let (send, recv) = rds_cli::open_sync(&conn)
+                    .instrument(conn.session.span())
+                    .await?;
+                let stats = rds_sync::engine::send_file(&conn, &path, send, recv)
+                    .instrument(conn.session.span())
+                    .await?;
                 println!(
                     "sent {} ({} chunks, {} bytes)",
                     path.display(),
@@ -440,9 +452,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     grant.clone(),
                 )
                 .await?;
-                let (send, recv) = rds_cli::open_sync(&conn).await?;
-                let (dest, stats) =
-                    rds_sync::engine::recv_file(&conn, &rel_path, &dir, send, recv).await?;
+                let (send, recv) = rds_cli::open_sync(&conn)
+                    .instrument(conn.session.span())
+                    .await?;
+                let (dest, stats) = rds_sync::engine::recv_file(&conn, &rel_path, &dir, send, recv)
+                    .instrument(conn.session.span())
+                    .await?;
                 println!(
                     "received {} ({} chunks fetched, {} bytes)",
                     dest.display(),
@@ -493,15 +508,39 @@ fn control_directory(cli: &Cli) -> anyhow::Result<std::path::PathBuf> {
     }
 }
 
+/// One client-side session: the `rds.conn` span correlates dial, grant,
+/// service and close events under one `session_id` for this process, and
+/// the guard emits `session_closed` when the command ends — by error
+/// propagation, by peer, or cleanly.
+struct Dialed {
+    conn: rds_net::Connection,
+    session: rds_observe::SessionGuard,
+}
+
+impl std::ops::Deref for Dialed {
+    type Target = rds_net::Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
+}
+
 async fn dial(
     endpoint: &rds_net::Endpoint,
     target: rds_net::EndpointAddr,
     grant: Option<rds_core::grant::Grant>,
-) -> anyhow::Result<rds_net::Connection> {
-    match grant {
-        Some(g) => rds_cli::connect_authorized(endpoint, target, &g).await,
-        None => rds_cli::connect(endpoint, target).await,
+) -> anyhow::Result<Dialed> {
+    let span = rds_observe::conn_span(rds_observe::next_session_id());
+    let conn = async {
+        match grant {
+            Some(g) => rds_cli::connect_authorized(endpoint, target, &g).await,
+            None => rds_cli::connect(endpoint, target).await,
+        }
     }
+    .instrument(span.clone())
+    .await?;
+    span.record("peer", tracing::field::display(conn.remote_id()));
+    let session = rds_observe::SessionGuard::open(span);
+    Ok(Dialed { conn, session })
 }
 
 async fn resolve(
