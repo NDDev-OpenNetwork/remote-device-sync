@@ -92,6 +92,22 @@ impl Stack {
 
 impl Drop for Stack {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Preserve startup/early-phase evidence too, before disposable
+            // containers disappear. This stack contains only synthetic data.
+            let logs = self.compose(&["logs", "--no-color", "--tail", "80"]);
+            let authorization = format!(
+                "Basic {}",
+                data_encoding::BASE64
+                    .encode(format!("fixture@example.invalid:{}", self.password).as_bytes())
+            );
+            eprintln!(
+                "fixture failure logs: {}",
+                String::from_utf8_lossy(&logs.stdout)
+                    .replace(&self.password, "[redacted]")
+                    .replace(&authorization, "[redacted]")
+            );
+        }
         // Only this randomly named fixture project and its newly created data.
         let output = self.compose(&["down", "--volumes", "--timeout", "5"]);
         if !output.status.success() {
