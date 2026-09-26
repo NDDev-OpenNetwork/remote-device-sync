@@ -82,3 +82,19 @@ metrics, scheduled local webhook, and collector/backend restart recovery. It
 uses only disposable synthetic peers, credentials and destinations. This is
 collector configuration and test hardening, not evidence for production alert delivery,
 desktop readiness, a new release or completed W10 acceptance.
+
+## Integration evidence
+
+[PR #28](https://github.com/NDDev-OpenNetwork/remote-device-sync/pull/28)
+merged as `263ba6b69a9e585737250d7aabfa98a1f9c654bd`. At reviewed source
+`7cf2783f890920c01a66b5ba4e7fa3654538ed88`, the
+[real observability pipeline](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/36231164980),
+[Linux/macOS CI](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/36231164975),
+[supply chain](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/36231164877),
+[CodeQL](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/36231164881)
+and [native packaging](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/36231164501)
+passed. Final focused clippy passed locally. Three file-replay runs passed;
+the final run also required independent evidence that the new records reached
+Vector before SIGKILL. These results apply to the replacement configuration,
+not the former disk-queue path. Existing deployments and preview assets remain
+unchanged.

@@ -71,6 +71,11 @@ opening, request write and response completion. Pending streams reset on
 cancellation; incomplete authorization closes its connection. Local forwarding
 owns a bounded worker group with connection-close joins and cancellation cleanup.
 
+The [desktop client boundary](desktop-client-lifecycle.md) owns its control,
+event and bounded frame-reader tasks. Native decoding uses globally limited
+blocking work with retained cancellation budgets. This is separate from the
+still-required viewer UI, per-session media routing and native media acceptance.
+
 Owned path policy now uses [validated eligibility](path-selection.md): only the
 handshake path is seeded; application-opened candidates stay Backup until an
 Established event. An owned bounded queue retries temporary path-credit
