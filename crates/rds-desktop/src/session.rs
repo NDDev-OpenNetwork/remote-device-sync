@@ -1076,7 +1076,7 @@ mod tests {
         let mut decoded = Vec::new();
         for seq in 0..7 {
             let mut bgra = vec![0; 64 * 64 * 4];
-            for (i, pixel) in bgra.chunks_exact_mut(4).enumerate() {
+            for (i, pixel) in bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let value = if (i / 64 + seq as usize * 4) % 32 < 16 {
                     220
                 } else {
