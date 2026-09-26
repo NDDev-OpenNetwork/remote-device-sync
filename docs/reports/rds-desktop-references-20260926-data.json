@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "commit": "4221c59a53713de716f4e781a858a3587f991621",
+  "dirty": false,
+  "os": "linux",
+  "architecture": "x86_64",
+  "profile": "test (debug)",
+  "features": "rds-desktop default; dev harness enables transport-noq",
+  "command": "RDS_SOAK_SECS=60 CARGO_BUILD_JOBS=2 cargo test --locked -p rds-desktop --test session_v2 -- --nocapture --test-threads=1",
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "lockfile_sha256": "78723e059a78f49d715542632620884b1a279b0db82acd379259b5344f20acdb",
+  "test_binary_sha256": "79975cd92bf9b3163db368f2c5a09c9adbcf39c7921bfcacdece0419048ab811",
+  "repetitions": 1,
+  "failures": 0,
+  "skips": 0,
+  "tests_passed": 7,
+  "measurement": "synthetic complete frame-header arrival, not decoded/presented pixels",
+  "clean_iroh_loopback": {
+    "duration_seconds": 60,
+    "frames": 3601,
+    "age_p95_ms": 3,
+    "age_p99_ms": 5,
+    "process_rss_peak_kib": 50060
+  },
+  "impaired_noq_loopback": {
+    "frames": 420,
+    "age_p95_ms": 110,
+    "age_p99_ms": 116,
+    "queue_p95_ms": 37,
+    "wire_p95_ms": 80,
+    "control_rtt_p95_ms": 159,
+    "server_forwarded": 1276,
+    "server_dropped": 67,
+    "server_bytes": 355132,
+    "client_forwarded": 1165,
+    "client_dropped": 64,
+    "client_bytes": 57085
+  },
+  "impairment": "Impairment::lossy() at recorded commit, applied under both endpoints UDP sockets",
+  "acceptance_limits": "existing session_v2 thresholds unchanged; no native desktop or WAN acceptance"
+}
