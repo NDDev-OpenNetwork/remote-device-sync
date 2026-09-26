@@ -13,11 +13,16 @@ use crate::{ConnectionInner, RecvStream};
 
 const QUEUE_DEPTH: usize = 128;
 const MAX_PENDING: usize = 64;
+const MAX_ROUTES: usize = 32;
 const TAG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Local implementation budgets, not negotiated wire capabilities.
 #[derive(Clone, Copy, Debug)]
 pub struct UniRoutingStats {
+    /// Live registered inboxes, including distinct file-transfer IDs.
+    pub routes: usize,
+    /// Maximum live inboxes on one connection.
+    pub max_routes: usize,
     /// Tasks reading a tag or waiting to hand a stream to its inbox.
     pub pending: usize,
     /// Maximum simultaneous tag/queue-handoff tasks for this connection.
@@ -46,6 +51,21 @@ impl UniStreams {
     }
 }
 
+impl Drop for UniStreams {
+    fn drop(&mut self) {
+        self.rx.close();
+        let mut state = self._owner.state.lock().unwrap_or_else(|p| p.into_inner());
+        // A new claim may already have replaced this closed channel.
+        if state
+            .routes
+            .get(&self.kind)
+            .is_some_and(|tx| tx.is_closed())
+        {
+            state.routes.remove(&self.kind);
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Demux {
     state: Mutex<State>,
@@ -67,8 +87,12 @@ impl Demux {
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         if !conn.is_closed() {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.routes.retain(|_, tx| !tx.is_closed());
             if state.routes.get(&kind).is_some_and(|s| !s.is_closed()) {
                 anyhow::bail!("uni stream kind {kind:?} already claimed");
+            }
+            if state.routes.len() >= MAX_ROUTES {
+                anyhow::bail!("uni route capacity reached");
             }
             state.routes.insert(kind, tx);
             if state.task.is_none() {
@@ -89,6 +113,13 @@ impl Demux {
 
     pub fn stats(&self) -> UniRoutingStats {
         UniRoutingStats {
+            routes: self
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .routes
+                .len(),
+            max_routes: MAX_ROUTES,
             pending: self.pending.load(Ordering::Relaxed),
             max_pending: MAX_PENDING,
             queue_depth: QUEUE_DEPTH,

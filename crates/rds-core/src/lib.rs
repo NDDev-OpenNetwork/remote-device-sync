@@ -48,6 +48,8 @@ pub enum UniHello {
     /// Audio packet stream: [`AudioFrame`] records follow (codec
     /// support lands in v0.3).
     Audio,
+    /// Isolated file-transfer route. Never reuse an ID on a connection.
+    SyncTransfer { id: [u8; 16] },
 }
 
 /// First frame on every bi-directional stream.
@@ -73,6 +75,9 @@ pub enum StreamHello {
     Authz(grant::Grant),
     /// Signed lease revision for this connection; same identity and exact scope.
     RenewAuthz(grant::Grant),
+    /// File transfer with an isolated uni-stream route. Additive extension;
+    /// older agents reject this greeting before filesystem operations.
+    SyncTransfer { id: [u8; 16] },
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -339,6 +344,36 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn isolated_sync_appends_tags_and_legacy_decoders_refuse_the_extension() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        enum LegacyHello {
+            Ping { nonce: u64 },
+            Info,
+            TcpConnect { host: String, port: u16 },
+            Desktop(DesktopHello),
+            Sync,
+            Audio(AudioHello),
+            Authz(grant::Grant),
+            RenewAuthz(grant::Grant),
+        }
+        #[derive(serde::Deserialize)]
+        enum LegacyUni {
+            Desktop,
+            Sync,
+            Audio,
+        }
+        assert_eq!(postcard::to_stdvec(&StreamHello::Sync).unwrap(), [4]);
+        assert_eq!(postcard::to_stdvec(&UniHello::Sync).unwrap(), [1]);
+        let hello = postcard::to_stdvec(&StreamHello::SyncTransfer { id: [42; 16] }).unwrap();
+        let uni = postcard::to_stdvec(&UniHello::SyncTransfer { id: [42; 16] }).unwrap();
+        assert_eq!(hello, [vec![8], vec![42; 16]].concat());
+        assert_eq!(uni, [vec![3], vec![42; 16]].concat());
+        assert!(postcard::from_bytes::<LegacyHello>(&hello).is_err());
+        assert!(postcard::from_bytes::<LegacyUni>(&uni).is_err());
+    }
 
     #[tokio::test]
     async fn frame_rejects_trailing_postcard_payload() {

@@ -2,6 +2,7 @@
 //! The manager borrows the agent endpoint; it never reads identity material.
 mod socket;
 mod state;
+mod sync;
 mod tcp;
 
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(45);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(55);
 const MAX_WORKERS: usize = 96;
 const MAX_STREAMS: usize = 64;
+const SYNC_TIMEOUT: Duration = rds_sync::engine::TRANSFER_TIMEOUT.saturating_add(OPERATION_TIMEOUT);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -176,6 +178,7 @@ async fn run(
 ) -> Result<(), Error> {
     let mut workers = JoinSet::new();
     let streams = Arc::new(Semaphore::new(MAX_STREAMS));
+    let transfers = Arc::new(Semaphore::new(sync::MAX_TRANSFERS));
     let mut sample = tokio::time::interval(Duration::from_secs(1));
     sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
@@ -200,10 +203,11 @@ async fn run(
                 let endpoint = endpoint.clone();
                 let directory = directory.clone();
                 let streams = streams.clone();
+                let transfers = transfers.clone();
                 workers.spawn(async move {
                     // Responses carry typed reasons; never log the request or
                     // an upstream error containing a ticket/grant/private path.
-                    let _ = serve(stream, shared, endpoint, directory, streams).await;
+                    let _ = serve(stream, shared, endpoint, directory, streams, transfers).await;
                 });
             }
         }
@@ -236,11 +240,17 @@ async fn serve(
     endpoint: Endpoint,
     directory: Option<rds_discovery::client::Client>,
     streams: Arc<Semaphore>,
+    transfers: Arc<Semaphore>,
 ) -> Result<(), Error> {
     let request: Request = tokio::time::timeout(PRELUDE_TIMEOUT, read_frame(&mut stream))
         .await
         .map_err(|_| ErrorCode::Timeout)??;
     let mut probe = [0];
+    let timeout = if matches!(request.command, Command::Sync { .. }) {
+        SYNC_TIMEOUT
+    } else {
+        OPERATION_TIMEOUT
+    };
     let result = if request.version != VERSION {
         Err(ErrorCode::Version)
     } else {
@@ -249,7 +259,7 @@ async fn serve(
         tokio::select! {
             biased;
             _ = stream.read(&mut probe) => return Ok(()),
-            result = tokio::time::timeout(OPERATION_TIMEOUT, execute(request.command, &shared, &endpoint, directory, streams)) => result.unwrap_or(Err(ErrorCode::Timeout)),
+            result = tokio::time::timeout(timeout, execute(request.command, &shared, &endpoint, directory, streams, transfers)) => result.unwrap_or(Err(ErrorCode::Timeout)),
         }
     };
     let response = Response {
@@ -289,8 +299,18 @@ async fn execute(
     endpoint: &Endpoint,
     directory: Option<rds_discovery::client::Client>,
     streams: Arc<Semaphore>,
+    transfers: Arc<Semaphore>,
 ) -> Result<Output, ErrorCode> {
     match command {
+        Command::Sync { session, operation } => {
+            let observed = match operation {
+                rds_core::local::SyncOperation::Send { .. } => rds_observe::Operation::SyncSend,
+                rds_core::local::SyncOperation::Recv { .. } => rds_observe::Operation::SyncRecv,
+            };
+            rds_observe::observe(observed, sync::run(shared, session, operation, transfers))
+                .await
+                .map(Output::reply)
+        }
         Command::Ticket => Ok(Output::reply(Reply::Ticket(
             rds_net::Ticket::of(endpoint).to_string(),
         ))),
@@ -438,7 +458,12 @@ impl Client {
 
     async fn exchange(&self, command: Command) -> Result<(Reply, UnixStream), Error> {
         let body = matches!(command, Command::OpenTcp { .. });
-        tokio::time::timeout(CLIENT_TIMEOUT, async {
+        let timeout = if matches!(command, Command::Sync { .. }) {
+            SYNC_TIMEOUT + Duration::from_secs(10)
+        } else {
+            CLIENT_TIMEOUT
+        };
+        tokio::time::timeout(timeout, async {
             let mut stream = socket::connect(&self.directory).await?;
             write_frame(
                 &mut stream,

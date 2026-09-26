@@ -1459,3 +1459,27 @@ extraction warnings/errors, and leave no unresolved code-scanning alerts. API
 pagination is exhaustive. Negative tests reject green workflows with open alerts,
 foreign/stale/duplicate/incomplete scans, later-main evidence and a late-page
 alert. This strengthens release qualification without changing Rust runtime code.
+
+## 2026-09-26 — managed single-file transfers (W2.4 / W2.2 partial)
+
+Ordinary `send`/`recv` and selected/explicit `session send`/`session recv` now
+reuse the agent endpoint and session identity. The manager delegates to the
+existing Rust sync engine, with one transfer per session and eight active
+transfers across its outgoing sessions. Local IPC v4 requires a coordinated
+CLI/agent upgrade. Local paths are caller-resolved, absolute UTF-8 paths within
+the same-UID filesystem trust boundary.
+
+The additive `SyncTransfer` greeting/tag carries a fresh 128-bit ID. Legacy
+wire tags stay fixed; old peers reject this new service before file mutation.
+Canceled/late chunk streams cannot enter a replacement transfer, and the uni
+router bounds and retires its route registrations. Cancellation resets the
+transfer's control streams while preserving other TCP/SSH streams. Successful
+completion waits for the verified data exchange and control completion. There
+is no automatic retry; started filesystem commits may outlive cancellation.
+Safe `sync_send`/`sync_recv` duration/outcome records pass both application and
+Vector allowlists without paths or file contents.
+
+See [the scope and validation receipt](reports/rds-managed-sync-20260926.md).
+This is a reviewed increment, not closure of W2/W8 or product acceptance. Viewer
+manager APIs, directory synchronization, platform/installed migration, disk-job
+qualification and the remaining remediation gates stay open.

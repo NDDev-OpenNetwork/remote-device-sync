@@ -1,7 +1,7 @@
 //! Versioned local control protocol. This is not a remote service ALPN.
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 pub const MAX_SESSIONS: usize = 32;
 pub const TCP_CHUNK: usize = 16 * 1024;
 
@@ -100,6 +100,26 @@ pub enum Command {
         session: SessionId,
         grant: Box<crate::grant::Grant>,
     },
+    /// Agent-owned single-file transfer. Local paths are absolute UTF-8 paths;
+    /// the authenticated same-UID caller explicitly delegates filesystem I/O.
+    Sync {
+        session: SessionId,
+        operation: SyncOperation,
+    },
+}
+
+/// Never Debug: paths may contain private information.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum SyncOperation {
+    Send { path: String },
+    Recv { rel_path: String, directory: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncStats {
+    pub fetched: u64,
+    pub total: u64,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +165,10 @@ pub enum Reply {
     },
     Opened(SessionId),
     Ticket(String),
+    Synced {
+        session: SessionId,
+        stats: SyncStats,
+    },
 }
 
 /// Stable reasons, with no upstream error, address, path or credential payload.
@@ -176,6 +200,10 @@ pub enum ErrorCode {
     Stopped,
     #[error("manager state unavailable")]
     Internal,
+    #[error("another file transfer is active on this session")]
+    TransferBusy,
+    #[error("file transfer failed; a started commit may still complete; reconcile before retrying")]
+    Transfer,
 }
 
 #[cfg(test)]

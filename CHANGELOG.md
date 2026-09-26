@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- File send/receive now reuse the local agent's identity and selected or explicit
+  sessions. Per-transfer uni-stream IDs isolate cancellation and late data;
+  limits reserve control capacity and preserve unrelated TCP/SSH streams.
+- Local IPC v4 requires upgrading CLI and agent together. Managed transfers
+  require the new remote `SyncTransfer` extension; no legacy downgrade occurs.
+- Safe transfer duration/outcome telemetry is collected by the Vector pipeline.
+
 ## [0.1.0] - 2026-09-26
 
 **Engineering preview.** This first published workspace release is for explicit

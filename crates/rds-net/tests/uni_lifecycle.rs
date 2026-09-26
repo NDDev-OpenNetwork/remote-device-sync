@@ -165,3 +165,68 @@ async fn stalled_tag_and_reclaimed_kind_preserve_ready_routing() {
         server.close().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_transfer_tags_cannot_enter_replacement_inboxes_and_routes_are_bounded() {
+    use rds_core::UniHello;
+    for backend in backends() {
+        let (client, server, a, b) = pair(backend).await;
+        let old_tag = UniHello::SyncTransfer { id: [1; 16] };
+        let old = a.uni_streams(old_tag).unwrap();
+        let mut delayed = b.open_uni().await.unwrap();
+        // Send only part of the tag prefix: its router worker stays pending.
+        delayed.write_all(&[0]).await.unwrap();
+        pending_is(&a, 1).await;
+        drop(old);
+        assert_eq!(a.uni_routing_stats().routes, 0);
+        let new_tag = UniHello::SyncTransfer { id: [2; 16] };
+        let mut current = a.uni_streams(new_tag).unwrap();
+        let mut tag = Vec::new();
+        rds_core::write_frame(&mut tag, &old_tag).await.unwrap();
+        delayed.write_all(&tag[1..]).await.unwrap();
+        delayed.write_all(b"stale").await.unwrap();
+        delayed.finish().unwrap();
+        let mut valid = b.open_uni().await.unwrap();
+        rds_core::write_frame(&mut valid, &new_tag).await.unwrap();
+        valid.write_all(b"fresh").await.unwrap();
+        valid.finish().unwrap();
+        let mut received = tokio::time::timeout(Duration::from_secs(3), current.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.read_to_end(5).await.unwrap(), b"fresh");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), current.recv())
+                .await
+                .is_err()
+        );
+        let mut inboxes = Vec::new();
+        for id in 3..(a.uni_routing_stats().max_routes + 2) {
+            inboxes.push(
+                a.uni_streams(UniHello::SyncTransfer { id: [id as u8; 16] })
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            a.uni_routing_stats().routes,
+            a.uni_routing_stats().max_routes
+        );
+        assert!(
+            a.uni_streams(UniHello::SyncTransfer { id: [255; 16] })
+                .is_err()
+        );
+        drop(inboxes);
+        drop(current);
+        assert_eq!(a.uni_routing_stats().routes, 0);
+        // Historical transfers do not accumulate map entries.
+        for id in 0..128 {
+            drop(
+                a.uni_streams(UniHello::SyncTransfer { id: [id; 16] })
+                    .unwrap(),
+            );
+        }
+        assert_eq!(a.uni_routing_stats().routes, 0);
+        client.close().await;
+        server.close().await;
+    }
+}

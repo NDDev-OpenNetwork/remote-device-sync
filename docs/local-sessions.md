@@ -14,7 +14,7 @@ the [exclusive persisted-key owner](identity-storage.md#runtime-ownership)
 through shutdown, including with the explicit server-only `--no-control` flag.
 
 `rds-client` owns outgoing protocol operations and the local manager/client.
-It depends on core/net/discovery/observe. Agent and CLI depend on it; the former
+It depends on core/net/discovery/observe and the existing rds-sync engine. Agent and CLI depend on it; the former
 `rds-cli` library exports remain compatibility re-exports. The manager uses
 existing Tokio, rustix, postcard, BLAKE3 and random-number libraries.
 The later [native SSH increment](ssh.md) adds a standard protocol library at
@@ -40,12 +40,15 @@ rds session --control-dir /absolute/private/rds-control use <session-id>
 rds session --control-dir /absolute/private/rds-control ping
 rds session --control-dir /absolute/private/rds-control info
 rds session --control-dir /absolute/private/rds-control ssh --user <account> --host-key /private/device-host.pub --identity /private/operator-key
+rds session --control-dir /absolute/private/rds-control send ./file.bin
+rds session --control-dir /absolute/private/rds-control recv file.bin --dir ./downloads
 rds session --control-dir /absolute/private/rds-control disconnect <session-id>
 ```
 
 With the default path, omit every `--control-dir` above. Ordinary
 `rds ticket`, `rds ping <target>`, `rds info <target>`, `rds ssh <target>` and
-`rds forward <target>` now use the same manager. Target commands connect/reuse
+`rds forward <target>`, `rds send <target> <file>` and
+`rds recv <target> <relative-path> --dir <directory>` use the same manager. Target commands connect/reuse
 a session, then pin its handle; they never disconnect another CLI's
 operation on exit. The session remains visible in `session list` until explicit
 disconnect, peer loss or agent restart. `ticket` returns current addresses
@@ -65,16 +68,16 @@ for this boundary; no package/version or external helper was added.
 Compatibility: `rds --direct --key-file <separate-key> ...` explicitly binds
 an independent endpoint and acquires the same exclusive key owner as the agent.
 An occupied key is an error. Direct mode requires a persisted key path; there is
-no accidental ephemeral-identity fallback. `desktop`, `send` and `recv` currently
-require this explicit mode because their manager APIs remain unimplemented.
-The local wire version is now **3** (adds explicit grant renewal); upgrade CLI
+no accidental ephemeral-identity fallback. `desktop` still requires this explicit
+mode because its manager API remains unimplemented. Send/receive default to the manager.
+The local wire version is now **4** (adds file transfers); upgrade CLI
 and agent together. Old/new local versions fail without mutating session state.
-Remote ALPN/service framing is unchanged; signed grant v2 requires a coordinated
+Remote ALPN is unchanged, with an appended isolated sync greeting; signed grant v2 requires a coordinated
 issuer/agent/client migration. See [renewal contract](grant-leases.md).
 
 `list --json` returns instance ID, generation, endpoint, selected handle and
-entries. Handles print as 32 hexadecimal characters. `ping`, `info`, `ssh` and
-`forward` accept `--session <id>`. `connect --grant-file <path>` uses a grant
+entries. Handles print as 32 hexadecimal characters. `ping`, `info`, `ssh`,
+`forward`, `send` and `recv` accept `--session <id>`. `connect --grant-file <path>` uses a grant
 issued to **the local agent identity**; file and resulting frame must each fit
 64 KiB. Session commands dispatch before identity/config loading and reject
 direct endpoint/directory/grant options rather than silently ignoring them.
@@ -149,15 +152,19 @@ broker.
 | Sessions, including pending | 32 |
 | IPC workers | 96; acceptance pauses at capacity |
 | Long-lived TCP streams | 64; leaves control worker space |
+| File transfers | 8 agent-wide; 1 per outgoing session; immediate capacity/busy refusal |
 | Request prelude / reply write | 5 seconds each |
 | Resolve + dial + Authz + operation | 45 seconds total |
-| Client exchange, including connect/response and control EOF | 55 seconds |
+| Client exchange, including connect/response and control EOF | 55 seconds for short operations |
+| File transfer | 1 hour absolute engine budget, 300-second protocol stall bound; 45-second IPC allowance plus 10-second client margin |
+| Local/relative sync path text | 8192 bytes each, UTF-8 |
 | Framed postcard control message | 64 KiB; trailing payload rejected |
 | Target text | 8192 bytes |
 | CLI forwarding workers | positive 16-bit limit; default 64 |
 
 Wire types live in `rds-core::local`, with explicit request/response versions.
-Remote `rds/0` is unchanged. There are no unbounded task/command queues; the OS
+Local IPC is **version 4**; upgrade CLI and agent together. Remote ALPN stays
+`rds/0`, with the appended `SyncTransfer` greeting described below. There are no unbounded task/command queues; the OS
 backlog is separate. TCP bodies do not inherit the prelude deadline and use the
 existing reset/stop cancellation guard. Operations never automatically retry a
 remote side effect.
@@ -179,13 +186,51 @@ network resources. Outgoing samplers feed existing shared network counters.
 The Vector admin allowlist already accepts `rds_agent_`; no pipeline change or
 production deployment is implied.
 
+## Managed single-file transfers
+
+Both target commands and `rds session send/recv [--session <id>]` reuse the
+agent identity. Selection is resolved once; an existing transfer cannot move to
+another device. Paths are resolved to absolute paths **in the CLI process**,
+then explicitly delegated to the authenticated same-UID agent. This is not a
+privileged file broker: agents and their CLI must use the same user/filesystem
+view. Local paths must be UTF-8; source opens reject non-regular files without
+blocking on FIFOs. Remote paths, manifests, journal locks, verification and
+atomic destination replacement retain the sync engine's confinement rules.
+
+Every operation uses a fresh random 128-bit ID in the appended remote
+`StreamHello::SyncTransfer` and `UniHello::SyncTransfer` variants. Older agents
+reject the unknown greeting before file I/O; there is no automatic downgrade to
+legacy service-kind routing. Legacy explicit-direct transfer remains compatible.
+The uni router allows 32 live routes and removes dropped inboxes; historical
+transfer IDs do not grow the map. Delayed canceled tags cannot enter a new
+transfer's inbox. One active sync service per remote connection is still the
+admission policy; multiplexed concurrent files are not claimed.
+
+Success requires the verified `Done` exchange and clean control completion.
+Closing IPC or pressing Ctrl-C resets only this transfer's control streams;
+its uni inbox and chunk task group are dropped. Other TCP/SSH streams and the
+manager session remain usable. Blocking filesystem calls already in progress
+cannot be revoked: cancellation, timeout or a lost reply can leave a completed
+commit. Inspect the destination before retrying; no automatic replay or rollback
+is promised. An immediate retry may encounter the remote service's transient
+busy refusal while cancellation cleanup finishes.
+
+`sync_send` / `sync_recv` operation telemetry records duration and
+`ok` / `error` / `cancelled` outcomes through the existing safe JSON and Vector
+allowlists. No path, transfer ID, credential or file content is exported. The
+agent records local operation completion; it does not claim WAN SLOs or an
+end-to-end receipt after the CLI disappears.
+
+See the [managed-transfer receipt](reports/rds-managed-sync-20260926.md).
+
 ## Remaining sequence and exit checks
 
-1. **W2.4 migration:** viewer/sync manager APIs and coordinated installed-binary
+1. **W2.4 migration:** viewer manager APIs and coordinated installed-binary
    migration remain. CLI connectivity defaults and cooperative same-key-inode
    runtime ownership are implemented. Qualify native macOS credentials,
    actual distinct-user rejection, relay-registration reuse,
-   FD/RSS budgets and manager service APIs for media/sync.
+   FD/RSS budgets and manager service APIs for media. Single-file send/receive
+   are implemented; directory/two-way synchronization remains W8.
 2. **W5 SSH:** native client, explicit host pins, credential selection, OS PTY
    requests and terminal restoration are implemented. Complete GDS host/account
    provisioning, broker isolation and authorized reattachment; qualify native

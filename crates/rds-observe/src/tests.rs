@@ -255,3 +255,40 @@ fn terminal_failure_cannot_reintroduce_private_error_text_or_a_source_chain() {
         }
     }
 }
+
+#[tokio::test]
+async fn sync_operations_export_only_fixed_names_and_lifecycle_outcomes() {
+    let capture = Capture::default();
+    let (subscriber, telemetry) = subscriber(
+        Service::Cli,
+        Config::new(Format::Json, "off").unwrap(),
+        capture.clone(),
+    )
+    .unwrap();
+    let _default = tracing::subscriber::set_default(subscriber);
+    let _: Result<(), ()> = observe(Operation::SyncSend, async { Ok(()) }).await;
+    let _: Result<(), ()> = observe(Operation::SyncRecv, async { Ok(()) }).await;
+    let _: Result<(), ()> = observe(Operation::SyncSend, async { Err(()) }).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            observe(
+                Operation::SyncRecv,
+                std::future::pending::<Result<(), ()>>()
+            )
+        )
+        .await
+        .is_err()
+    );
+    assert!(telemetry.shutdown().drained);
+    let records = capture.records();
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[1]["operation"], "sync_recv");
+    assert_eq!(records[1]["outcome"], "ok");
+    assert_eq!(records[2]["operation"], "sync_send");
+    assert_eq!(records[2]["outcome"], "error");
+    assert_eq!(records[0]["operation"], "sync_send");
+    assert_eq!(records[0]["outcome"], "ok");
+    assert_eq!(records[3]["operation"], "sync_recv");
+    assert_eq!(records[3]["outcome"], "cancelled");
+}
