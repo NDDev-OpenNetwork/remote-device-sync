@@ -6,6 +6,9 @@ implementation. See [current remediation state](remediation-progress.md).
 The [O1 2026-09-25 Linux receipt](reports/rds-observability-20260925.md) records
 444 workspace and 239 expanded tests, the actual collector/backend pipeline,
 and two 100-probe development ping runs with JSON telemetry enabled.
+The [2026-09-26 alert qualification follow-up](reports/rds-alert-query-20260926.md)
+records an intermittent GitHub failure and strengthens fresh-query, ingestion,
+deduplication, cancellation and recovery checks without changing alert thresholds.
 
 ## Stack and ownership
 
@@ -150,14 +153,25 @@ into a product failure. There is no claim of lossless audit storage. Text-mode
 Debug implementations can still do arbitrary CPU/allocation work; JSON does
 not invoke them. Neither mode promises zero formatting cost.
 
-The supplied Vector file source uses acknowledgments/checkpoints and a 512 MiB
-disk buffer for logs. Full buffer stops file consumption. Product log rotation
-and filesystem quotas remain necessary: rotating unread files can lose data,
-and an exhausted filesystem can stop capture. Metrics use a bounded memory
-buffer with drop-newest behavior. Retries can duplicate logs; use
+The supplied Vector file source uses acknowledged checkpoints and a 4096-event
+memory queue with blocking backpressure for logs. **Retained source files are
+the replay log**; checkpoints advance after sink delivery. Keep unacknowledged
+files, including renamed rotations, readable across collector restarts. Do not
+use copy-truncate or delete a file merely because Vector read it. An exhausted
+filesystem can stop capture; bounded retention and independent backlog alerts
+remain deployment responsibilities. Metrics use their separate bounded memory
+queue with drop-newest behavior. Retries can duplicate logs; use
 `(run_id, sequence)` to deduplicate. The local shutdown receipt is not backend
-delivery acknowledgment. Vector's disk buffer also has a documented crash
-sync window; graceful restart evidence is not power-loss qualification.
+delivery acknowledgment, and collector-crash replay is not power-loss proof.
+
+This replaces the former 512 MiB disk queue after a reproduced low-volume stall
+in the pinned Vector 0.58.0 disk path; see the
+[follow-up receipt](reports/rds-alert-query-20260926.md). It uses Vector's standard
+[end-to-end acknowledgements](https://vector.dev/docs/architecture/end-to-end-acknowledgements/)
+without a patched collector binary. For an existing disk-queue deployment,
+drain and verify its pending records before changing buffer type; preserve its
+old state and source files if drain stalls. This change does not migrate or
+activate any existing deployment.
 
 Collector export admits a fixed set of buffer/error/uptime families. It rejects
 per-file/per-endpoint series rather than merging distinct counters by erasing
@@ -355,6 +369,8 @@ resources. It uses synthetic events and an internal webhook receiver; no human
 notification is sent. The smoke overlay alone opts into OpenObserve's supported
 loopback webhook setting and shares its network namespace with a fixture
 receiver. It retains general private-address/cloud-metadata SSRF protection.
+The smoke overlay also publishes Vector's filtered metrics on an ephemeral
+loopback port so failure diagnostics do not depend on backend ingestion.
 
 Pre-pull the exact images from `images.env` using Docker. Then, with one Cargo
 process at a time:
@@ -370,7 +386,9 @@ OpenObserve log search, controlled ok/error counters and histogram units through
 remote write, authenticated admin scrapes through the merged Vector config,
 exact source counters/labels, disabled scrape proxying, alert
 minimum-volume/20-percent/loss predicates, scheduled delivery to a local
-receiver, and log recovery after a collector restart while the backend is unavailable. Default
+receiver, repeated single-record tails, and file-checkpoint replay after
+SIGKILL of a collector that has already read new records while the backend is
+unavailable. Default
 workspace tests exercise redaction, output failure, queue saturation, record
 bounds, filtering, cancellation, heartbeat and bounded shutdown without Docker.
 

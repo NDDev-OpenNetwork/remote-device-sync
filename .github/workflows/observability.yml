@@ -38,8 +38,15 @@ jobs:
       test_command: >-
         bash -euo pipefail -c '
         . ops/observability/images.env;
-        docker pull "$RDS_VECTOR_IMAGE";
-        docker pull "$RDS_OPENOBSERVE_IMAGE";
+        pull_image() {
+          for delay in 0 10 30; do
+            sleep "$delay";
+            if timeout 120 docker pull "$1"; then return 0; fi;
+          done;
+          return 1;
+        };
+        pull_image "$RDS_VECTOR_IMAGE";
+        pull_image "$RDS_OPENOBSERVE_IMAGE";
         cargo build --locked -p rds-observe --example fixture;
         cargo test --locked -p rds-observe --test pipeline -- --ignored --nocapture'
       fmt_command: "cargo fmt --all -- --check"

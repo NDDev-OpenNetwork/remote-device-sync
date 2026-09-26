@@ -1,6 +1,13 @@
 # Only the ignored pipeline regression loads this fixture receiver. It has no
 # host port and receives synthetic alert notifications on an internal network.
 services:
+  vector:
+    environment:
+      # Independent fixture diagnostics, including when backend ingestion stalls.
+      RDS_VECTOR_LOCAL_METRICS_ADDR: "0.0.0.0:9598"
+    ports:
+      - "127.0.0.1::9598"
+    networks: [telemetry, management]
   openobserve:
     environment:
       # Official narrow opt-in for our owned loopback-only test receiver.
