@@ -145,6 +145,24 @@ async fn failure_case() {
         .addrs
         .retain(|address| matches!(address, rds_net::TransportAddr::Relay(_)));
     assert!(!relay_only.addrs.is_empty());
+    // Keep a reliable service stream alive across the failure, like SSH or
+    // sync. QUIC DATAGRAM has no delivery guarantee (RFC 9221); one missing
+    // reply must not be mistaken for a permanently stalled connection.
+    let (mut send, mut recv, mut return_send, mut receive) =
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (mut send, mut recv) = ca.open_bi().await.unwrap();
+            send.write_all(b"ready").await.unwrap();
+            let (mut return_send, mut receive) = cb.accept_bi().await.unwrap();
+            let mut ready = [0; 5];
+            receive.read_exact(&mut ready).await.unwrap();
+            assert_eq!(&ready, b"ready");
+            return_send.write_all(&ready).await.unwrap();
+            recv.read_exact(&mut ready).await.unwrap();
+            assert_eq!(&ready, b"ready");
+            (send, recv, return_send, receive)
+        })
+        .await
+        .expect("service stream did not start before relay failure");
     tokio::time::timeout(Duration::from_secs(3), relay.close())
         .await
         .expect("relay close stalled")
@@ -193,16 +211,15 @@ async fn failure_case() {
         for seq in 0u8..25 {
             // A dead path may be abandoned normally; the direct connection must survive.
             let _ = path.ping();
-            ca.send_datagram(vec![seq].into())?;
+            send.write_all(&[seq]).await?;
             progress.0 += 1;
-            let body = cb.read_datagram().await?;
+            let mut body = [0; 1];
+            receive.read_exact(&mut body).await?;
             progress.1 += 1;
-            anyhow::ensure!(body.as_ref() == [seq].as_slice(), "direct datagram changed");
-            cb.send_datagram(body)?;
-            anyhow::ensure!(
-                ca.read_datagram().await?.as_ref() == [seq].as_slice(),
-                "direct reply changed"
-            );
+            anyhow::ensure!(body == [seq], "direct stream byte changed");
+            return_send.write_all(&body).await?;
+            recv.read_exact(&mut body).await?;
+            anyhow::ensure!(body == [seq], "direct reply changed");
             progress.2 += 1;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
