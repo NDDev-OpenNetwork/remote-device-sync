@@ -1,10 +1,11 @@
 # Tagged uni-stream routing
 
-The current v3 protocol routes inbound uni streams by `UniHello` service kind.
+The current v3 protocol routes inbound uni streams by `UniHello`. The additive
+`SyncTransfer { id }` variant isolates managed file transfers by random ID.
 `Connection::uni_streams` permits one live inbox per kind. Services order their
 own payloads by frame sequence or chunk identity: parallel tag reads need not
-complete in the order streams were accepted. Session/transfer ID routing and
-negotiated limits remain W2.2 work.
+complete in the order streams were accepted. Desktop session IDs and negotiated limits remain W2.2 work. Legacy `Sync`
+service-kind routing remains available only for explicit direct compatibility.
 
 ## Ownership and termination
 
@@ -26,7 +27,8 @@ cannot retain a blocked route worker indefinitely. Already-buffered streams can
 be drained after closure; this bounded queue is not silently flushed. A new
 claim on an already-closed connection returns an ended inbox immediately.
 
-Dropping an inbox allows its kind to be reclaimed. Cleanup from an old sender
+Dropping an inbox removes its closed route, allowing its kind to be reclaimed.
+At most 32 live routes are registered; historical transfer IDs do not accumulate. Cleanup from an old sender
 removes a route only if the map still holds that sender's channel. This prevents
 old cleanup from deleting a replacement inbox, but does not provide session-ID
 isolation for late streams whose tags have not yet been read.

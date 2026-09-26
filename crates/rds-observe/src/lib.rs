@@ -301,6 +301,8 @@ pub enum Operation {
     SshSession,
     GrantAuthorize,
     GrantRenew,
+    SyncSend,
+    SyncRecv,
 }
 
 impl Operation {
@@ -312,6 +314,8 @@ impl Operation {
             Self::SshSession => "ssh_session",
             Self::GrantAuthorize => "grant_authorize",
             Self::GrantRenew => "grant_renew",
+            Self::SyncSend => "sync_send",
+            Self::SyncRecv => "sync_recv",
         }
     }
 }
@@ -408,6 +412,8 @@ impl Visit for SafeFields {
             ("operation", "ssh_session") => self.operation = Some("ssh_session"),
             ("operation", "grant_authorize") => self.operation = Some("grant_authorize"),
             ("operation", "grant_renew") => self.operation = Some("grant_renew"),
+            ("operation", "sync_send") => self.operation = Some("sync_send"),
+            ("operation", "sync_recv") => self.operation = Some("sync_recv"),
             ("outcome", "ok") => self.outcome = Some("ok"),
             ("outcome", "error") => self.outcome = Some("error"),
             ("outcome", "cancelled") => self.outcome = Some("cancelled"),

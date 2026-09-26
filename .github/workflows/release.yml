@@ -194,6 +194,7 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
+      security-events: read
     env:
       VERSION: ${{ needs.contract.outputs.version }}
       GH_TOKEN: ${{ github.token }}
@@ -217,16 +218,15 @@ jobs:
           test "$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.sha)" = "$(git rev-parse "refs/tags/$VERSION")"
           # Required product/supply-chain evidence is from the default branch,
           # on this exact source commit. Missing, ambiguous or failed runs stop.
-          gh api --method GET "repos/$GH_REPO/actions/runs" -f head_sha="$commit" -f per_page=100 > "$RUNNER_TEMP/checks.json"
-          python3 - "$RUNNER_TEMP/checks.json" "$commit" <<'PY'
-          import json, sys
-          runs = json.load(open(sys.argv[1]))["workflow_runs"]
-          for workflow in ("ci.yml", "supply-chain.yml", "codeql.yml"):
-              matches = [r for r in runs if r["path"] == ".github/workflows/" + workflow
-                         and r["head_sha"] == sys.argv[2] and r["event"] == "push" and r["head_branch"] == "main"]
-              if len(matches) != 1 or matches[0]["status"] != "completed" or matches[0]["conclusion"] != "success":
-                  raise SystemExit("missing/ambiguous/unsuccessful exact-commit workflow: " + workflow)
-          PY
+          gh api --method GET --paginate --slurp "repos/$GH_REPO/actions/runs" \
+            -f head_sha="$commit" -f per_page=100 > "$RUNNER_TEMP/checks.json"
+          gh api --method GET --paginate --slurp "repos/$GH_REPO/code-scanning/analyses" \
+            -f ref=refs/heads/main -f tool_name=CodeQL -f per_page=100 > "$RUNNER_TEMP/analyses.json"
+          gh api --method GET --paginate --slurp "repos/$GH_REPO/code-scanning/alerts" \
+            -f ref=refs/heads/main -f state=open -f per_page=100 > "$RUNNER_TEMP/alerts.json"
+          python3 scripts/release.py evidence --version "$VERSION" --tagged \
+            --checks "$RUNNER_TEMP/checks.json" --analyses "$RUNNER_TEMP/analyses.json" \
+            --alerts "$RUNNER_TEMP/alerts.json"
           # Do not mistake an authentication/network error for a missing release.
           code="$(curl --disable --silent --show-error --output "$RUNNER_TEMP/preflight.json" --write-out '%{http_code}'             --proto '=https' --tlsv1.2 --max-time 60             -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json'             "https://api.github.com/repos/$GH_REPO/releases/tags/$VERSION")"
           test "$code" = 404

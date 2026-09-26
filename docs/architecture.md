@@ -37,7 +37,8 @@ agent's endpoint through same-UID Unix IPC. It owns outgoing connections,
 selection, bounded requests and TCP streams. Ordinary connectivity commands use
 it without loading a key. Explicit `--direct` commands, the agent and the owned
 relay acquire cooperative exclusive ownership of the validated seed inode.
-Viewer/sync manager APIs and installed-binary/platform qualification remain W2.4.
+Single-file send/receive also use the manager and an isolated transfer route.
+Viewer manager APIs and installed-binary/platform qualification remain W2.4.
 TCP service flags, client requests and agent policy use the same canonical
 `rds-core::TcpTarget`; IPv6 spelling and IPv4-mapped addresses normalize before
 policy comparison and dialing. Parsing has no DNS or socket side effects.
@@ -69,6 +70,11 @@ The [client request boundary](client-lifecycle.md) applies one deadline to strea
 opening, request write and response completion. Pending streams reset on
 cancellation; incomplete authorization closes its connection. Local forwarding
 owns a bounded worker group with connection-close joins and cancellation cleanup.
+
+The [desktop client boundary](desktop-client-lifecycle.md) owns its control,
+event and bounded frame-reader tasks. Native decoding uses globally limited
+blocking work with retained cancellation budgets. This is separate from the
+still-required viewer UI, per-session media routing and native media acceptance.
 
 Owned path policy now uses [validated eligibility](path-selection.md): only the
 handshake path is seeded; application-opened candidates stay Backup until an
@@ -269,7 +275,8 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   control service hosts outgoing sessions on that same endpoint; `--control-dir`
   overrides its location, and `--no-control` explicitly disables it.
 - **`rds-client`** — shared request/forwarding library and local session
-  manager/client; depends on core/net/discovery/observe, never on the CLI.
+  manager/client; depends on core/net/discovery/observe/sync, never on the CLI. The sync
+  engine remains below the manager; no new external dependency is introduced.
 - **`rds-ssh`** — bounded SSH session adapter over generic async I/O; depends
   on russh/Tokio/typed errors, not on RDS endpoints or the CLI. `rds-cli` owns
   Unix terminal adapters and feeds managed/direct streams into this library.
@@ -393,7 +400,8 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 | `Info` | bi | agent version, services, displays |
 | `TcpConnect { host, port }` | bi | raw byte splice (ssh = `127.0.0.1:22`) |
 | `Desktop` | bi + uni | hello/capabilities; input events client→server; one uni stream per video frame server→client |
-| `Sync` | bi + uni | offer/request → manifest parts → `Need` bitmap → chunk pull on 4 dedicated uni streams → `Done` |
+| `SyncTransfer { id }` | bi + uni | isolated per-transfer routing; same verified file/journal payload, one active transfer per connection |
+| `Sync` (legacy direct) | bi + uni | offer/request → manifest parts → `Need` bitmap → chunk pull on 4 dedicated uni streams → `Done` |
 
 Every uni stream leads with a `UniHello` tag frame (protocol v3). The
 accepting side runs one per-connection demux (`Connection::uni_streams`)

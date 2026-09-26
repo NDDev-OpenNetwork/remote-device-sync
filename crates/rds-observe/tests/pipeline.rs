@@ -92,6 +92,22 @@ impl Stack {
 
 impl Drop for Stack {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Preserve startup/early-phase evidence too, before disposable
+            // containers disappear. This stack contains only synthetic data.
+            let logs = self.compose(&["logs", "--no-color", "--tail", "80"]);
+            let authorization = format!(
+                "Basic {}",
+                data_encoding::BASE64
+                    .encode(format!("fixture@example.invalid:{}", self.password).as_bytes())
+            );
+            eprintln!(
+                "fixture failure logs: {}",
+                String::from_utf8_lossy(&logs.stdout)
+                    .replace(&self.password, "[redacted]")
+                    .replace(&authorization, "[redacted]")
+            );
+        }
         // Only this randomly named fixture project and its newly created data.
         let output = self.compose(&["down", "--volumes", "--timeout", "5"]);
         if !output.status.success() {
@@ -123,17 +139,111 @@ async fn post(client: &Client, stack: &Stack, base: &str, path: &str, body: Valu
 }
 
 async fn search(client: &Client, stack: &Stack, base: &str, sql: &str) -> Value {
-    post(
+    // Qualification must observe newly ingested data, not an earlier result
+    // for a window containing the same event timestamps. OpenObserve's cache
+    // control is a URL parameter (a similarly named JSON field is insufficient).
+    let result = post(
         client,
         stack,
         base,
-        "/api/default/_search",
+        "/api/default/_search?use_cache=false",
         json!({"query": {
             "sql": sql, "start_time": now_us() - 600_000_000,
             "end_time": now_us() + 60_000_000, "from": 0, "size": 1000
         }}),
     )
-    .await
+    .await;
+    assert_ne!(result["is_partial"], true, "partial search: {result}");
+    if let Some(ratio) = result["cached_ratio"].as_f64() {
+        assert_eq!(ratio, 0.0, "qualification search used cached results");
+    }
+    result
+}
+
+async fn collector_metrics(client: &Client, stack: &Stack) -> String {
+    let port = stack.checked(&["port", "vector", "9598"]);
+    assert!(port.trim().starts_with("127.0.0.1:"));
+    client
+        .get(format!("http://{}/metrics", port.trim()))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+async fn wait_collector_received(client: &Client, stack: &Stack, expected: f64) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let metrics = collector_metrics(client, stack).await;
+        let count = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("vector_buffer_received_events_total{")
+                    && line.contains("component_id=\"logs\"")
+            })
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|count| count.parse::<f64>().ok());
+        if count == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "collector did not receive {expected} records before kill: {metrics}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn wait_records(client: &Client, stack: &Stack, base: &str, run: &str, expected: usize) {
+    // Include duplicate deliveries: later assertions must actually exercise
+    // the alert query's deduplication, not race the duplicate's ingestion.
+    let sql = format!("SELECT sequence FROM rds_events WHERE run_id = '{run}'");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let rows = search(client, stack, base, &sql).await;
+        let count = rows["hits"].as_array().unwrap().len();
+        if count == expected {
+            return;
+        }
+        assert!(count < expected, "unexpected fixture records: {rows}");
+        if Instant::now() >= deadline {
+            let diagnostics = stack.checked(&["logs", "--no-color", "--tail", "60", "vector"]);
+            eprintln!(
+                "fixture collector: {}",
+                diagnostics.replace(&stack.password, "[redacted]")
+            );
+            let local = collector_metrics(client, stack).await;
+            eprintln!("independent collector metrics: {local}");
+            for metric in [
+                "vector_buffer_received_events_total",
+                "vector_buffer_sent_events_total",
+                "vector_component_discarded_events_total",
+                "vector_component_errors_total",
+            ] {
+                let response = client
+                    .get(format!(
+                        "{base}/api/default/prometheus/api/v1/query?query={metric}"
+                    ))
+                    .basic_auth("fixture@example.invalid", Some(&stack.password))
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                eprintln!("collector {metric}: {response}");
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture ingestion incomplete: expected {expected} records, got {rows}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -356,24 +466,14 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
         .clone();
     sample["service"] = json!("rds-cli");
     sample["run_id"] = json!(sample_run);
+    sample["operation"] = json!("connect");
     for sequence in 0..9 {
         sample["sequence"] = json!(sequence);
         sample["outcome"] = json!(if sequence < 2 { "error" } else { "ok" });
         writeln!(file, "{sample}").unwrap();
     }
     file.sync_all().unwrap();
-    let count_sql =
-        format!("SELECT DISTINCT sequence FROM rds_events WHERE run_id = '{sample_run}'");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while search(&client, &stack, &base, &count_sql).await["hits"]
-        .as_array()
-        .unwrap()
-        .len()
-        != 9
-    {
-        assert!(Instant::now() < deadline, "nine-attempt fixture missing");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_records(&client, &stack, &base, &sample_run, 9).await;
     let connect_sql = alerts[2]["query_condition"]["sql"].as_str().unwrap();
     assert!(
         search(&client, &stack, &base, connect_sql).await["hits"]
@@ -388,6 +488,7 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
     loss["telemetry_dropped_total"] = json!(5);
     writeln!(file, "{loss}").unwrap();
     file.sync_all().unwrap();
+    wait_records(&client, &stack, &base, &sample_run, 10).await;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let result = search(&client, &stack, &base, connect_sql).await;
@@ -396,11 +497,54 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
             assert_eq!(row["failures"], 2);
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "20 percent error boundary missing"
-        );
+        if Instant::now() >= deadline {
+            let rows = search(&client, &stack, &base, &format!(
+                "SELECT service, run_id, sequence, operation, outcome FROM rds_events WHERE run_id = '{sample_run}' ORDER BY sequence"
+            )).await;
+            let counts = search(&client, &stack, &base,
+                "SELECT service, COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS failures FROM rds_events WHERE operation = 'connect' GROUP BY service"
+            ).await;
+            panic!(
+                "20 percent error boundary missing: alert={result}; fixture={rows}; grouped={counts}"
+            );
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // Duplicate delivery cannot increase the numerator; cancellation cannot
+    // enter either numerator or denominator or suppress the exact boundary.
+    sample["sequence"] = json!(0);
+    sample["outcome"] = json!("error");
+    writeln!(file, "{sample}").unwrap();
+    sample["sequence"] = json!(10);
+    sample["outcome"] = json!("cancelled");
+    writeln!(file, "{sample}").unwrap();
+    file.sync_all().unwrap();
+    wait_records(&client, &stack, &base, &sample_run, 12).await;
+    let boundary = search(&client, &stack, &base, connect_sql).await;
+    assert_eq!(boundary["hits"].as_array().unwrap().len(), 1, "{boundary}");
+    assert_eq!(boundary["hits"][0]["attempts"], 10, "{boundary}");
+    assert_eq!(boundary["hits"][0]["failures"], 2, "{boundary}");
+
+    // The same query must also observe recovery: two failures out of eleven
+    // real attempts are below the unchanged 20% threshold.
+    sample["sequence"] = json!(11);
+    sample["outcome"] = json!("ok");
+    writeln!(file, "{sample}").unwrap();
+    file.sync_all().unwrap();
+    wait_records(&client, &stack, &base, &sample_run, 13).await;
+    let recovered = search(&client, &stack, &base, connect_sql).await;
+    assert!(
+        recovered["hits"].as_array().unwrap().is_empty(),
+        "below-threshold query remained active: {recovered}"
+    );
+    // Repeated low-volume tails exercise idle buffer flushes, not only the
+    // initial batch. Each append must become visible without a later write
+    // rescuing its delivery.
+    for sequence in 12..20 {
+        sample["sequence"] = json!(sequence);
+        writeln!(file, "{sample}").unwrap();
+        file.sync_all().unwrap();
+        wait_records(&client, &stack, &base, &sample_run, sequence + 2).await;
     }
     let loss_rows = search(
         &client,
@@ -452,9 +596,9 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
     }
     println!("alerts: SQL predicates and scheduled local webhook delivery passed");
 
-    // Recover all unique records after collector/backend restart. This allows
-    // replay from source checkpoints; it is not an isolated disk-buffer or
-    // power-loss durability proof.
+    // Retained files are the durable replay source. Kill the collector while
+    // the backend is unavailable: its memory queue cannot perform a graceful
+    // flush, so recovery must use acknowledged source checkpoints.
     stack.checked(&["stop", "--timeout", "5", "openobserve"]);
     let output = Command::new(&fixture).output().unwrap();
     assert!(output.status.success());
@@ -463,8 +607,12 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
     assert_ne!(second["run_id"], first_run);
     file.write_all(second_text.as_bytes()).unwrap();
     file.sync_all().unwrap();
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    stack.checked(&["restart", "--timeout", "5", "vector"]);
+    // 8 original valid records + 1 loss record + 21 boundary/tail records +
+    // this new run's 7 records. Prove they entered the collector before kill;
+    // otherwise the test could pass just because Vector never read the tail.
+    wait_collector_received(&client, &stack, 37.0).await;
+    stack.checked(&["kill", "--signal", "SIGKILL", "vector"]);
+    stack.checked(&["start", "vector"]);
     stack.checked(&["start", "openobserve"]);
     // Docker can allocate a different ephemeral host port when restarting.
     let port = stack.checked(&["port", "openobserve", "5080"]);

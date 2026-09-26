@@ -12,7 +12,6 @@ type = "file"
 include = ["${RDS_LOG_GLOB}"]
 read_from = "beginning"
 max_line_bytes = 4096
-acknowledgements.enabled = true
 
 [sources.collector]
 type = "internal_metrics"
@@ -32,7 +31,7 @@ assert!(includes(["diagnostic", "process_started", "process_completed", "process
 assert!(match(string!(r.run_id), r'^[0-9a-f]{32}$'))
 assert!(match(string!(r.target), r'^[a-zA-Z0-9_:.-]{1,128}$'))
 assert!(match(string!(r.version), r'^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$'))
-assert!(includes([null, "connect", "service_stream", "ssh_connect", "ssh_session", "grant_authorize", "grant_renew"], r.operation))
+assert!(includes([null, "connect", "service_stream", "ssh_connect", "ssh_session", "grant_authorize", "grant_renew", "sync_send", "sync_recv"], r.operation))
 assert!(includes([null, "ok", "error", "cancelled"], r.outcome))
 assert!(is_null(r.session_id) || is_integer(r.session_id))
 assert!(is_null(r.elapsed_us) || is_integer(r.elapsed_us))
@@ -119,6 +118,7 @@ if is_string(tags.output) { .tags.output = tags.output }
 [sinks.logs]
 type = "http"
 inputs = ["safe"]
+acknowledgements.enabled = true
 uri = "${RDS_OO_URL}/api/${RDS_OO_ORG}/rds_events/_json"
 method = "post"
 # Standard Basic header, pre-encoded to avoid inserting arbitrary password
@@ -130,8 +130,11 @@ compression = "gzip"
 batch.max_bytes = 1048576
 batch.max_events = 512
 batch.timeout_secs = 1
-buffer.type = "disk"
-buffer.max_size = 536870912
+# Retained source files are the replay log. Checkpoints advance only after
+# delivery; an in-memory queue must not make unacknowledged files disposable.
+# Vector 0.58.0's disk path stalled on isolated low-volume tails in qualification.
+buffer.type = "memory"
+buffer.max_events = 4096
 buffer.when_full = "block"
 request.timeout_secs = 10
 request.concurrency = 2
@@ -256,3 +259,27 @@ extract_from = "safe"
 [[tests.outputs.conditions]]
 type = "vrl"
 source = "assert!(.operation == \"grant_renew\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.command) && !exists(.user) && !exists(.key))"
+
+[[tests]]
+name = "sync_send metadata survives without file paths"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-cli\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": null, \"event\": \"operation_completed\", \"outcome\": \"cancelled\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"path\": \"PRIVATE_SENTINEL\", \"directory\": \"PRIVATE_SENTINEL\", \"key\": \"PRIVATE_SENTINEL\", \"operation\": \"sync_send\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.operation == \"sync_send\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.path) && !exists(.directory) && !exists(.key))"
+
+[[tests]]
+name = "sync_recv metadata survives without file paths"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-cli\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"INFO\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": null, \"event\": \"operation_completed\", \"outcome\": \"cancelled\", \"elapsed_us\": 1000, \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"path\": \"PRIVATE_SENTINEL\", \"directory\": \"PRIVATE_SENTINEL\", \"key\": \"PRIVATE_SENTINEL\", \"operation\": \"sync_recv\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.operation == \"sync_recv\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.path) && !exists(.directory) && !exists(.key))"

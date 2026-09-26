@@ -14,6 +14,7 @@ pub(super) struct Entry {
     pub cancel: CancellationToken,
     pub conn: Option<Connection>,
     pub sampler: Option<ConnSampler>,
+    pub sync: Arc<tokio::sync::Semaphore>,
 }
 
 impl Drop for Entry {
@@ -182,6 +183,7 @@ pub(super) fn reserve(
             cancel: cancel.clone(),
             conn: None,
             sampler: None,
+            sync: Arc::new(tokio::sync::Semaphore::new(1)),
         },
     );
     state.changed();

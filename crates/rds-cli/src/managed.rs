@@ -61,6 +61,20 @@ enum Action {
         #[command(flatten)]
         options: super::ssh::Options,
     },
+    /// Send a file through the selected or explicitly pinned session.
+    Send {
+        #[arg(long)]
+        session: Option<SessionId>,
+        path: PathBuf,
+    },
+    /// Receive a file through the selected or explicitly pinned session.
+    Recv {
+        #[arg(long)]
+        session: Option<SessionId>,
+        rel_path: String,
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
     /// Forward to a peer-side TCP target through an existing connection.
     Forward {
         #[arg(long)]
@@ -118,6 +132,18 @@ pub async fn run(options: Options, directory: PathBuf) -> anyhow::Result<()> {
         Action::Ssh { session, options } => {
             let session = client.selected(session).await?;
             return super::ssh::managed(&client, session, options).await;
+        }
+        Action::Send { session, path } => {
+            let session = client.selected(session).await?;
+            return send_file(&client, session, path).await;
+        }
+        Action::Recv {
+            session,
+            rel_path,
+            dir,
+        } => {
+            let session = client.selected(session).await?;
+            return recv_file(&client, session, rel_path, dir).await;
         }
         Action::Forward {
             session,
@@ -190,7 +216,9 @@ pub async fn run_default(
         }
         super::Command::Ping { target, .. }
         | super::Command::Info { target }
-        | super::Command::Ssh { target, .. } => target,
+        | super::Command::Ssh { target, .. }
+        | super::Command::Send { target, .. }
+        | super::Command::Recv { target, .. } => target,
         super::Command::Forward { target, bind, .. } => {
             anyhow::ensure!(
                 bind.ip().is_loopback(),
@@ -198,11 +226,9 @@ pub async fn run_default(
             );
             target
         }
-        super::Command::Desktop { .. }
-        | super::Command::Send { .. }
-        | super::Command::Recv { .. } => {
+        super::Command::Desktop { .. } => {
             anyhow::bail!(
-                "desktop and file transfer do not yet have manager APIs; use --direct with a separate --key-file"
+                "desktop does not yet have a manager API; use --direct with a separate --key-file"
             );
         }
         _ => anyhow::bail!("unsupported managed command"),
@@ -259,6 +285,10 @@ pub async fn run_default(
         super::Command::Ssh { options, .. } => {
             super::ssh::managed(&client, session, options).await?
         }
+        super::Command::Send { path, .. } => send_file(&client, session, path).await?,
+        super::Command::Recv { rel_path, dir, .. } => {
+            recv_file(&client, session, rel_path, dir).await?
+        }
         super::Command::Forward {
             bind,
             remote,
@@ -269,6 +299,35 @@ pub async fn run_default(
         }
         _ => anyhow::bail!("unsupported managed command"),
     }
+    Ok(())
+}
+
+async fn send_file(client: &Client, session: SessionId, path: PathBuf) -> anyhow::Result<()> {
+    let stats = tokio::select! {
+        result = client.send_file(session, &path) => result?,
+        _ = tokio::signal::ctrl_c() => anyhow::bail!("transfer canceled; a started commit may still complete; reconcile before retrying"),
+    };
+    println!(
+        "sent: {} bytes, {}/{} chunks",
+        stats.bytes, stats.fetched, stats.total
+    );
+    Ok(())
+}
+
+async fn recv_file(
+    client: &Client,
+    session: SessionId,
+    rel_path: String,
+    dir: PathBuf,
+) -> anyhow::Result<()> {
+    let stats = tokio::select! {
+        result = client.recv_file(session, &rel_path, &dir) => result?,
+        _ = tokio::signal::ctrl_c() => anyhow::bail!("transfer canceled; a started commit may still complete; reconcile before retrying"),
+    };
+    println!(
+        "received: {} bytes, {}/{} chunks",
+        stats.bytes, stats.fetched, stats.total
+    );
     Ok(())
 }
 

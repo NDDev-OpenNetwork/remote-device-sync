@@ -40,9 +40,9 @@ Neither increment closes these product gaps or any wave.
 | W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
-| W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Capability/limit/version negotiation and session/transfer routing IDs remain open. |
+| W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs. Capability/limit/version negotiation and desktop session routing IDs remain open. |
 | W2.3 | Partial; destination-bound renewable grants and directional scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Tenant/policy binding, per-path/account scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
-| W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer/sync manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
+| W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
@@ -51,7 +51,9 @@ Neither increment closes these product gaps or any wave.
 | W3.6 | Partial; validated selection and local child failure isolation | Extra paths become eligible on Established; weak policy ownership includes bounded backoff for temporary connection-ID/path-credit exhaustion and candidate-address snapshots. Relay-link route loss and known tunnel closure retire stale relay selection. Mux child send/receive failures are isolated; policy withdraws failed advertisements, excludes failed routes even when last-path close is refused, and closes held connections after all-child loss. Real loopback fixtures preserve open-stream traffic and accept new connections on the surviving child. Policy-observed telemetry exposes sticky event loss and unknown selection. Full path-event resynchronization, lossless retirement metrics, interface/socket recreation, per-service scheduling and physical-network qualification remain open. |
 | W4.4 | Partial; directional service boundaries | Real iroh/noq agents refuse writes with `SyncRead` and reads with `SyncWrite`, permit authorized transfers, and remain usable after refusal/cancellation. A view-only desktop never calls its input sink; failed injection never emits a success ACK. Linux/macOS account isolation, per-path policy, native seat/focus boundaries, consent and concurrent-role qualification remain open. See [receipt](reports/rds-service-scopes-20260926.md). |
 | W5.1/W5.3/W5.5 | Partial; native SSH client and standard PTY | `rds-ssh` uses russh 0.63.3 over pinned managed/direct streams. Explicit host pins, key/agent authentication, PTY/exec acknowledgements, terminal restoration, resize, cancellation and complete exit/output handling have Linux regression coverage and an OpenSSH interop fixture. SSH-specific fixed telemetry names are accepted by Vector; JSON uses a separate private file and terminal console logging pauses during SSH. GDS host/account provisioning, certificates/MFA, native macOS, broker/reattachment and mixed-load/network qualification remain open. See [contract](ssh.md). |
-| W6.4 | Partial; input ACK semantics | Input ACK follows a successful sink result; unavailable/failed/denied input has no ACK. One lazily created bounded worker reuses the sink outside Tokio's async executor and drops queued work on cancellation. Real evdev/X11 mapping, screen/seat/focus targeting, held-key release and input-to-visible qualification remain open. |
+| W6.1 | Partial; sender partial-write correctness | A pinned payload write preserves progress across supersession/producer closure; write/FIN errors fail, and a frame guard resets on cancellation/error under one 30-second deadline. The serving future owns capture/writer/pacing tasks and resets its control stream on cancellation; normal exit joins async siblings. Failing-before byte/capture regressions and real iroh/noq RESET coverage pass. Reference-aware queue dropping, wire session IDs and native presentation/network gates remain open; see [contract](desktop-frame-delivery.md). |
+| W6.2 | Partial; client receive ownership and limits | Four encoded frames per session/eight per process, two blocking decoder calls, owned task groups and cancellation, full handshake deadlines, dimension/sequence checks and rate-limited keyframe recovery are implemented. Real iroh/noq lifecycle and native codec regressions passed locally. Per-session wire IDs, global decoded/native memory accounting, renderer and native platform/network acceptance remain open; see [contract](desktop-client-lifecycle.md). |
+| W6.4 | Partial; ACK semantics and native X11 mapping | ACK follows successful backend acceptance. A bounded session-owned input worker reuses its sink. X11 maps evdev keys/buttons, bounds coordinates and fractional scroll, uses relative motion correctly, selects the explicit screen, checks native errors and releases owned holds on drop. Four failing-before native regressions and two-screen Xvfb checks cover the increment; the Linux CI lane requires actual native execution. Exclusive seat/controller ownership, focus races, custom layouts/IME, dynamic geometry and input-to-visible qualification remain open; see [contract](x11-input.md). |
 | W10.1/W10.2 | Partial; O1 foundation and O2 admin/source increment | Shared bounded Rust telemetry and Vector/OpenObserve pipeline; opt-in authenticated loopback metrics on agent/relay/server, aggregate source observations and old public metrics removal. Durable policy/catalog observations and effective agent revocation revision/lease are implemented. Finer queue/task and upstream adapter coverage, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
 
 ## Authorization change
@@ -1448,3 +1450,38 @@ holds the actual selected sibling for the final-socket fault. Selection, stream
 continuity, advertisement withdrawal and shutdown assertions retain their
 deadlines. The source archive now includes root `tests/` and `examples/`, required
 by the crates' compile-time fixture includes; the archive contract checks this.
+
+PR integration exposed a separate release-gate issue: CodeQL workflow success
+can coexist with unresolved scanner findings. The reviewed PR findings were
+synthetic test grants, non-cryptographic Ping echo values, test-only diagnostics
+and variable uses inside assertion macros; each disposition is recorded in
+GitHub without disabling a query. Publication now additionally requires the
+latest Rust/Actions analyses on main to bind the exact source revision, have no
+extraction warnings/errors, and leave no unresolved code-scanning alerts. API
+pagination is exhaustive. Negative tests reject green workflows with open alerts,
+foreign/stale/duplicate/incomplete scans, later-main evidence and a late-page
+alert. This strengthens release qualification without changing Rust runtime code.
+
+## 2026-09-26 — managed single-file transfers (W2.4 / W2.2 partial)
+
+Ordinary `send`/`recv` and selected/explicit `session send`/`session recv` now
+reuse the agent endpoint and session identity. The manager delegates to the
+existing Rust sync engine, with one transfer per session and eight active
+transfers across its outgoing sessions. Local IPC v4 requires a coordinated
+CLI/agent upgrade. Local paths are caller-resolved, absolute UTF-8 paths within
+the same-UID filesystem trust boundary.
+
+The additive `SyncTransfer` greeting/tag carries a fresh 128-bit ID. Legacy
+wire tags stay fixed; old peers reject this new service before file mutation.
+Canceled/late chunk streams cannot enter a replacement transfer, and the uni
+router bounds and retires its route registrations. Cancellation resets the
+transfer's control streams while preserving other TCP/SSH streams. Successful
+completion waits for the verified data exchange and control completion. There
+is no automatic retry; started filesystem commits may outlive cancellation.
+Safe `sync_send`/`sync_recv` duration/outcome records pass both application and
+Vector allowlists without paths or file contents.
+
+See [the scope and validation receipt](reports/rds-managed-sync-20260926.md).
+This is a reviewed increment, not closure of W2/W8 or product acceptance. Viewer
+manager APIs, directory synchronization, platform/installed migration, disk-job
+qualification and the remaining remediation gates stay open.

@@ -3450,6 +3450,7 @@ dependencies = [
  "rds-discovery",
  "rds-net",
  "rds-observe",
+ "rds-sync",
  "rustix",
  "thiserror 2.0.20",
  "tokio",

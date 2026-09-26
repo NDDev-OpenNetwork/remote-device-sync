@@ -54,7 +54,7 @@ async fn real_cli_uses_running_identity_without_creating_its_own_key() {
     assert!(snapshot.sessions.is_empty());
     assert!(!key.exists(), "keyless managed CLI created a key");
     // Real CLI processes reuse one authenticated remote connection. This peer
-    // implements only Ping/Info, so accidental TCP or command execution fails.
+    // implements Ping/Info and sync, so accidental TCP or command execution fails.
     let remote = rds_net::bind_endpoint(rds_net::EndpointConfig {
         discovery: false,
         bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
@@ -66,6 +66,8 @@ async fn real_cli_uses_running_identity_without_creating_its_own_key() {
     let peer = remote.clone();
     let observed = accepted.clone();
     let expected = endpoint.id();
+    let sync_root = path.join("remote-files");
+    std::fs::create_dir(&sync_root).unwrap();
     let service = tokio::spawn(async move {
         while let Some(incoming) = peer.accept().await {
             let conn = incoming.await.unwrap();
@@ -75,6 +77,22 @@ async fn real_cli_uses_running_identity_without_creating_its_own_key() {
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                 let request: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
                 match request {
+                    rds_core::StreamHello::SyncTransfer { id } => {
+                        rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+                            .await
+                            .unwrap();
+                        rds_sync::engine::Transfer::new(id)
+                            .serve(
+                                conn.clone(),
+                                (send, recv),
+                                sync_root.clone(),
+                                rds_sync::engine::Access::READ_WRITE,
+                                std::time::Duration::from_secs(10),
+                            )
+                            .await
+                            .unwrap();
+                        continue;
+                    }
                     rds_core::StreamHello::Ping { nonce } => {
                         rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
                             .await
@@ -140,6 +158,41 @@ async fn real_cli_uses_running_identity_without_creating_its_own_key() {
     assert_eq!(before.generation, after.generation);
     assert_eq!(before.sessions[0].id, after.sessions[0].id);
     assert_eq!(accepted.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let source = path.join("file.bin");
+    std::fs::write(&source, b"managed CLI payload").unwrap();
+    let dest = path.join("download");
+    let pinned = before.sessions[0].id.to_string();
+    for args in [
+        vec!["send", &target, source.to_str().unwrap()],
+        vec!["recv", &target, "file.bin", "--dir", dest.to_str().unwrap()],
+        vec![
+            "session",
+            "send",
+            source.to_str().unwrap(),
+            "--session",
+            &pinned,
+        ],
+        vec![
+            "session",
+            "recv",
+            "file.bin",
+            "--dir",
+            dest.to_str().unwrap(),
+        ],
+    ] {
+        let output = run(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        std::fs::read(dest.join("file.bin")).unwrap(),
+        b"managed CLI payload"
+    );
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(!key.exists());
     for args in [
         vec![
             "session",

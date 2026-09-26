@@ -76,6 +76,29 @@ def notes(version):
     return result + "\n"
 
 
+def verify_ci_evidence(commit, runs, analyses, alerts):
+    """A successful scanner invocation does not mean its findings are resolved."""
+    require(all(isinstance(items, list) for items in (runs, analyses, alerts)), "invalid CI evidence")
+    for workflow in ("ci.yml", "supply-chain.yml", "codeql.yml"):
+        matches = [r for r in runs if r["path"] == ".github/workflows/" + workflow
+                   and r["head_sha"] == commit and r["event"] == "push" and r["head_branch"] == "main"]
+        require(len(matches) == 1 and matches[0]["status"] == "completed"
+                and matches[0]["conclusion"] == "success",
+                "missing/ambiguous/unsuccessful exact-commit workflow: " + workflow)
+    for language in ("rust", "actions"):
+        matches = [a for a in analyses if a["ref"] == "refs/heads/main"
+                   and a["category"] == "/language:" + language
+                   and a["analysis_key"] == ".github/workflows/codeql.yml:codeql"
+                   and a["tool"]["name"] == "CodeQL"]
+        # GitHub returns newest first. Alerts on main must describe this
+        # source, not a later revision that already fixed its vulnerabilities.
+        require(sum(a["commit_sha"] == commit for a in matches) == 1
+                and matches[0]["commit_sha"] == commit
+                and matches[0]["error"] == "" and matches[0]["warning"] == "",
+                "missing/ambiguous/incomplete exact-commit CodeQL analysis: " + language)
+    require(not alerts, "unresolved code-scanning alerts on main")
+
+
 def new_output(path):
     path.mkdir(parents=True, exist_ok=False)
     return path
@@ -215,16 +238,28 @@ def finalize(version, incoming, out, tagged=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "source", "binary", "finalize"))
+    parser.add_argument("command", choices=("check", "evidence", "source", "binary", "finalize"))
     parser.add_argument("--version", required=True)
     parser.add_argument("--tagged", action="store_true")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--binary-dir", type=Path)
     parser.add_argument("--incoming", type=Path)
+    parser.add_argument("--checks", type=Path)
+    parser.add_argument("--analyses", type=Path)
+    parser.add_argument("--alerts", type=Path)
     args = parser.parse_args()
     if args.command == "check":
         print(json.dumps(dict(zip(("commit", "toolchain"), contract(args.version, args.tagged)))))
+    elif args.command == "evidence":
+        require(args.checks and args.analyses and args.alerts, "all three CI evidence files required")
+        commit, _ = contract(args.version, args.tagged)
+        # gh --paginate --slurp preserves every page, including late alerts.
+        runs = [r for page in json.loads(args.checks.read_text()) for r in page["workflow_runs"]]
+        analyses = [a for page in json.loads(args.analyses.read_text()) for a in page]
+        alerts = [a for page in json.loads(args.alerts.read_text()) for a in page]
+        verify_ci_evidence(commit, runs, analyses, alerts)
+        print(json.dumps({"commit": commit, "ci_evidence": "verified"}))
     else:
         require(args.out is not None, "--out required")
         if args.command == "source":

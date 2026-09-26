@@ -69,7 +69,8 @@ screen selection, focus, key/button mapping and held-key release remain W6.4;
 the synthetic sink tests do not qualify those behaviors.
 
 New `ServiceKind` tags are appended as 6–9; tags 0–5, grant payload version 2,
-local IPC version 3, `StreamHello` and service framing are unchanged. Agents
+local IPC (version 3 at introduction), `StreamHello` and service framing
+were unchanged by the fine-scope increment. Agents
 continue advertising coarse services in `AgentInfo`. Old decoders reject a
 grant containing an unknown fine capability; no automatic fallback to a broad
 grant is permitted. Upgrade agents before issuing these scopes. General
@@ -134,7 +135,7 @@ reserved state; extra reply bytes are rejected. A lost response after successful
 publication remains an uncertain RPC outcome, inspectable through `session list`.
 Neither another device nor a remote command is selected/replayed automatically.
 
-Local IPC is **version 3**. Upgrade CLI and local agent together; incompatible
+Local IPC is now **version 4** following [managed file transfers](local-sessions.md). Upgrade CLI and local agent together; incompatible
 versions fail before session mutation. Remote ALPN `rds/0` and existing service
 framing are unchanged. The signed grant is independently versioned and the new
 renewal variant is appended; old servers reject unsupported renewal without a

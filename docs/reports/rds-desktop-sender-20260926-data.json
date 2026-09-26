@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "commit": "423ecb3f8a90877eb75487dcb64477a2c3722555",
+  "dirty": false,
+  "os": "linux",
+  "architecture": "x86_64",
+  "profile": "test (debug)",
+  "features": "rds-desktop default; dev harness enables transport-noq",
+  "command": "RDS_SOAK_SECS=60 CARGO_BUILD_JOBS=2 cargo test --locked -p rds-desktop --test session_v2 -- --nocapture --test-threads=1",
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "lockfile_sha256": "78723e059a78f49d715542632620884b1a279b0db82acd379259b5344f20acdb",
+  "test_binary_sha256": "94021d590ee15cd3f04706dbb0083fccc922ff6e0d001a1cba6655726f21c4c0",
+  "repetitions": 1,
+  "failures": 0,
+  "skips": 0,
+  "tests_passed": 7,
+  "measurement": "synthetic complete frame-header arrival, not decoded/presented pixels",
+  "clean_iroh_loopback": {
+    "duration_seconds": 60,
+    "frames": 3600,
+    "age_p95_ms": 4,
+    "age_p99_ms": 6,
+    "process_rss_peak_kib": 49052
+  },
+  "impaired_noq_loopback": {
+    "frames": 426,
+    "age_p95_ms": 94,
+    "age_p99_ms": 107,
+    "queue_p95_ms": 17,
+    "wire_p95_ms": 80,
+    "control_rtt_p95_ms": 160
+  },
+  "impairment": "Impairment::lossy() at recorded commit, applied under both endpoints UDP sockets",
+  "limits": {
+    "encoded_inputs_per_session": 4,
+    "encoded_inputs_per_process": 8,
+    "payload_bytes_per_input": 33554432,
+    "native_decode_calls_per_process": 2,
+    "frame_send_deadline_seconds": 30
+  },
+  "acceptance_limits": "existing session_v2 gates, unchanged; no native desktop or WAN acceptance"
+}
