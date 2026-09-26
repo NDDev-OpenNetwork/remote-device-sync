@@ -48,6 +48,21 @@ focused impairment test and the complete suites above. No threshold was relaxed
 and no failed test was retried unchanged to manufacture a pass. X11 clippy also
 caught a test-fixture chunk API lint, which was corrected before final checks.
 
+The first GitHub Linux run at `b3d910d79cb93d6cb4954e7a171af2afef5a98d2`
+([run 36235900357](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/36235900357))
+stalled in the pre-existing `relay_forwards_handshake_and_datagrams` fixture.
+The live job log showed its five sibling scenarios completed and this scenario
+still running after more than 17 minutes of job time. Its unbounded awaits did
+not identify the stalled phase; this is not evidence of a specific relay-runtime
+root cause. The fixture now reports startup/attach/handshake/datagram/stream/close
+phases with five-second deadlines, polls connect/accept together without a
+detached task, bounds its ACK read and explicitly closes the directory. All
+original payload/identity/forwarding assertions remain. One full local run and
+a fixed ten-run batch passed all six scenarios (66 executions). This bounds and
+improves diagnosis of the qualification test; it does not prove loss-free
+DATAGRAM delivery or repair an unlocalized runtime fault. Final GitHub checks
+are required for the revised source, not inferred from earlier green jobs.
+
 Remaining: real H.264 network loss/reordering/RESET continuity, long-duration
 overload and IDR-rate behavior, pacing/grant convergence, desktop wire session
 IDs, managed viewer/rendering, native memory accounting and physical-platform
