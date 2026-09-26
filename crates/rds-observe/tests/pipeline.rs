@@ -396,10 +396,17 @@ async fn vector_openobserve_logs_metrics_alerts_and_restart() {
             assert_eq!(row["failures"], 2);
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "20 percent error boundary missing"
-        );
+        if Instant::now() >= deadline {
+            let rows = search(&client, &stack, &base, &format!(
+                "SELECT service, run_id, sequence, operation, outcome FROM rds_events WHERE run_id = '{sample_run}' ORDER BY sequence"
+            )).await;
+            let counts = search(&client, &stack, &base,
+                "SELECT service, COUNT(*) AS attempts, SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS failures FROM rds_events WHERE operation = 'connect' GROUP BY service"
+            ).await;
+            panic!(
+                "20 percent error boundary missing: alert={result}; fixture={rows}; grouped={counts}"
+            );
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let loss_rows = search(
