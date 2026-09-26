@@ -1,11 +1,22 @@
 # Desktop frame sender contract
 
-Scope: partial writes and serving-session cancellation in W6.1/W2.5/W2.6.
-This does not close codec reference-chain or presentation gates.
+Scope: partial writes, reference recovery and serving-session cancellation in
+W6.1/W2.5/W2.6. This does not close real-network codec or presentation gates.
 
 Each encoded frame has one tagged unidirectional stream. An in-flight keyframe
-finishes before a newer frame is selected; a stale delta is abandoned with
-RESET. When the producer closes during a send, its final frame finishes.
+finishes before a newer frame is selected. A delta also finishes when the next
+candidate is another delta, because the successor may depend on it. An
+independent keyframe may replace an in-flight delta with RESET. When the producer
+closes during a send, its final frame finishes.
+
+The producer queue remains two slots. Losing any encoded frame to admission
+backpressure requests an IDR. Queue collapse selects a recent keyframe when
+available and requests recovery for discarded references after that keyframe;
+each drain is bounded to two items. The sender admits deltas only after a
+keyframe and only at the exact next sequence. Gaps, empty encode results and
+sequence exhaustion invalidate the chain. Dependent deltas wait for an IDR,
+without first being sent as undecodable work or requiring a client roundtrip.
+Selection is checked again after pacing, when additional frames may be dropped.
 
 The payload writer retains one pinned `write_all` future across producer
 events. `write_all` may already have accepted a prefix when its other select
@@ -31,7 +42,8 @@ write deadline. No detached worker retains a connection after async teardown.
 Regression coverage uses a 64-byte duplex buffer and a 4096-byte patterned
 payload to force a partial write before each producer event. Both supersession
 and closure previously delivered 4160 bytes; both now preserve exact bytes.
-Other tests retain errors after the producer event, abandon stale deltas without
+Other tests retain errors after the producer event, preserve a partial delta
+before its successor, replace a delta with an independent keyframe without
 waiting for a reader, and observe RESET after aborting an owned sender on real
 iroh/noq connections while a subsequent stream still succeeds.
 
@@ -39,8 +51,12 @@ A separate real-session regression observes the producer being dropped after
 server cancellation with the client connection still alive; this failed before
 task-group ownership was added and passes on both backends.
 
-Remaining work includes reference-aware queue collapsing with real codec continuity tests, per-session
-wire IDs, global encoded/decoded/native allocation accounting, managed viewers,
+Native H.264 coverage checks decode and a pixel across a dropped reference and
+IDR recovery. This is separate from the synthetic QUIC impairment measurements;
+it does not establish real-codec continuity under network loss/reordering.
+
+Remaining work includes real-codec network continuity and overload/IDR-rate
+qualification, per-session wire IDs, global encoded/decoded/native allocation accounting, managed viewers,
 rendering/input release and platform/network acceptance. See the
 [client receive contract](desktop-client-lifecycle.md). No wire format, frame
 priority, dependency, installed binary or published release changes here.
