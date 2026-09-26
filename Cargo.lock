@@ -3405,6 +3405,7 @@ dependencies = [
  "ed25519-dalek",
  "iroh-relay",
  "noq",
+ "rand 0.10.3",
  "rds-agent",
  "rds-cli",
  "rds-discovery",
@@ -3589,6 +3590,7 @@ dependencies = [
  "rustls-pki-types",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

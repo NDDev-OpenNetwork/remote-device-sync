@@ -157,7 +157,7 @@ fn check_owned_example(settings: Result<EndpointSettings, ConfigError>) {
     assert_eq!(EndpointSettings::from_json(&bytes).unwrap(), settings);
     let config = settings.into_endpoint().unwrap();
     assert_eq!(config.backend, Backend::Noq);
-    assert!(config.relay_endpoint.is_some());
+    assert_eq!(config.relay_endpoints.len(), 1);
     assert!(config.relays.is_empty());
     assert!(!config.discovery);
 }
@@ -223,7 +223,7 @@ fn owned_relay_and_endpoint_identity_are_not_interchangeable() {
         ],
     ] {
         let mut invalid = config.clone();
-        invalid.relay_endpoint.as_mut().unwrap().addrs = addresses.into_iter().collect();
+        invalid.relay_endpoints.first_mut().unwrap().addrs = addresses.into_iter().collect();
         assert!(invalid.validate().is_err());
     }
 }
@@ -233,7 +233,7 @@ fn owned_relay_limits_are_positive_strict_and_preserved_when_only_route_changes(
     let defaults = RelayLimits::default();
     for field in ["max_peers", "datagram_queue", "peer_grace_secs"] {
         let json = format!(
-            r#"{{"schema_version":1,"relay":{{"mode":"owned","route":"placeholder","limits":{{"{field}":0}}}}}}"#
+            r#"{{"schema_version":1,"backend":"noq","relay":{{"mode":"owned","route":"placeholder","limits":{{"{field}":0}}}}}}"#
         );
         assert!(EndpointSettings::from_json(json.as_bytes()).is_err());
     }
@@ -241,14 +241,14 @@ fn owned_relay_limits_are_positive_strict_and_preserved_when_only_route_changes(
     let settings=EndpointSettings::from_json(br#"{"schema_version":1,"relay":{"mode":"owned","route":"old","limits":{"max_peers":7,"datagram_queue":3}}}"#).unwrap();
     let changed = settings
         .apply(EndpointOverrides {
-            owned_relay: Some("new".into()),
+            owned_relay: vec!["new".into()],
             ..Default::default()
         })
         .unwrap();
     let RelaySettings::Owned { route, limits } = changed.relay else {
         panic!("owned relay mode lost")
     };
-    assert_eq!(route, "new");
+    assert_eq!(route, ["new"]);
     assert_eq!(limits.max_peers.get(), 7);
     assert_eq!(limits.datagram_queue.get(), 3);
     assert_eq!(limits.peer_grace_secs, defaults.peer_grace_secs);
@@ -273,7 +273,7 @@ fn owned_limits_lower_into_runtime_and_cannot_be_silently_ignored() {
     assert_eq!(config.relay_limits.datagram_queue.get(), 3);
     assert_eq!(config.relay_limits.peer_grace_secs.get(), 2);
     let mut absent = config.clone();
-    absent.relay_endpoint = None;
+    absent.relay_endpoints.clear();
     assert!(absent.validate().is_err());
     let mut incompatible = config;
     incompatible.backend = Backend::Iroh;
@@ -286,6 +286,77 @@ fn owned_limits_lower_into_runtime_and_cannot_be_silently_ignored() {
         .unwrap()
         .into_endpoint()
         .unwrap();
-    assert!(disabled.relay_endpoint.is_none());
+    assert!(disabled.relay_endpoints.is_empty());
     assert_eq!(disabled.relay_limits, RelayLimits::default());
+}
+
+#[test]
+#[cfg(feature = "transport-noq")]
+fn owned_relay_routes_accept_list_or_legacy_singular_and_bound_slots() {
+    let relay = |seed: u8| {
+        let id = crate::SecretKey::from_bytes(&[seed; 32]).public();
+        format!(
+            "rds-relay://{}@127.0.0.1:9{}",
+            data_encoding::HEXLOWER.encode(id.as_bytes()),
+            seed
+        )
+    };
+    // Legacy singular string still parses.
+    let single = EndpointSettings::from_json(
+        format!(
+            r#"{{"schema_version":1,"backend":"noq","relay":{{"mode":"owned","route":"{}"}}}}"#,
+            relay(1)
+        )
+        .as_bytes(),
+    )
+    .unwrap()
+    .into_endpoint()
+    .unwrap();
+    assert_eq!(single.relay_endpoints.len(), 1);
+    // A list attaches warm secondaries, each in its own slot.
+    let dual = EndpointSettings::from_json(
+        format!(
+            r#"{{"schema_version":1,"backend":"noq","relay":{{"mode":"owned","route":["{}","{}"]}}}}"#,
+            relay(1),
+            relay(2)
+        )
+        .as_bytes(),
+    )
+    .unwrap()
+    .into_endpoint()
+    .unwrap();
+    assert_eq!(dual.relay_endpoints.len(), 2);
+    // Empty lists and duplicate identities are refused.
+    assert!(
+        EndpointSettings::from_json(br#"{"schema_version":1,"relay":{"mode":"owned","route":[]}}"#)
+            .unwrap()
+            .into_endpoint()
+            .is_err()
+    );
+    let dup = EndpointSettings::from_json(
+        format!(
+            r#"{{"schema_version":1,"backend":"noq","relay":{{"mode":"owned","route":["{}","{}"]}}}}"#,
+            relay(3),
+            relay(3)
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    assert!(
+        dup.into_endpoint().is_err(),
+        "duplicate relay must be refused"
+    );
+    // Nine attachments exceed the slot bound.
+    let many = (0..9u8).map(relay).collect::<Vec<_>>().join("\",\"");
+    let over = EndpointSettings::from_json(
+        format!(
+            r#"{{"schema_version":1,"backend":"noq","relay":{{"mode":"owned","route":["{many}"]}}}}"#
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    assert!(
+        over.into_endpoint().is_err(),
+        "more than 8 slots is refused"
+    );
 }

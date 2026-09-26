@@ -471,7 +471,7 @@ async fn attached_endpoint(key: rds_net::SecretKey, relay: rds_net::EndpointAddr
         secret_key: Some(key),
         bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
         discovery: false,
-        relay_endpoint: Some(relay),
+        relay_endpoints: vec![relay],
         // The relay-only handshake occupies the only path, so a direct child
         // cannot subsequently bypass this fixture's relay during transfer.
         max_multipath_paths: Some(1),

@@ -27,7 +27,7 @@ async fn fixture() -> (owned::Endpoint, owned::Endpoint, SocketAddr) {
         Box::new(mux),
         vec![addresses[0]],
         runtime,
-        None,
+        Vec::new(),
     )
     .await
     .unwrap();

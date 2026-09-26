@@ -174,7 +174,7 @@ async fn sim_endpoint(
         Box::new(socket),
         vec![SocketAddr::new(sim_ip, local.port())],
         Arc::new(noq::TokioRuntime),
-        None,
+        Vec::new(),
     )
     .await
 }
@@ -393,7 +393,7 @@ fn delayed_path_credit(drop_pending: bool) -> turmoil::Result {
                 Box::new(mux),
                 vec![SocketAddr::new(turmoil::lookup("server"), 4433)],
                 Arc::new(noq::TokioRuntime),
-                None,
+                Vec::new(),
             )
             .await?;
             let mut tasks = tokio::task::JoinSet::new();

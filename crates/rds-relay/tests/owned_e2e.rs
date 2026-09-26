@@ -56,7 +56,7 @@ async fn endpoint(seed: u8, relay_addr: EndpointAddr) -> rds_net::Endpoint {
         secret_key: Some(key(seed)),
         bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
         alpns: vec![ALPN.to_vec()],
-        relay_endpoint: Some(relay_addr),
+        relay_endpoints: vec![relay_addr],
         ..Default::default()
     })
     .await
@@ -100,7 +100,7 @@ async fn attached_relay_after_silent_direct(dual_stack: bool) {
             secret_key: Some(key(86)),
             discovery: false,
             bind_addrs: vec!["127.0.0.1:0".parse().unwrap(), "[::1]:0".parse().unwrap()],
-            relay_endpoint: Some(relay.endpoint_addr()),
+            relay_endpoints: vec![relay.endpoint_addr()],
             ..Default::default()
         })
         .await
@@ -328,7 +328,7 @@ async fn drain_evicts_and_refuses_new_attachments() {
         secret_key: Some(key(2)),
         bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
         alpns: vec![ALPN.to_vec()],
-        relay_endpoint: Some(relay_addr),
+        relay_endpoints: vec![relay_addr],
         ..Default::default()
     })
     .await;

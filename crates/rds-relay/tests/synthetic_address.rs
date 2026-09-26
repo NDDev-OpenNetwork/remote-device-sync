@@ -25,13 +25,13 @@ async fn attached(key: SecretKey, relay: EndpointAddr) -> owned::Endpoint {
             backend: Backend::Noq,
             secret_key: Some(key),
             discovery: false,
-            relay_endpoint: Some(relay),
+            relay_endpoints: vec![relay],
             ..Default::default()
         },
         Box::new(socket),
         vec![local],
         Arc::new(noq::TokioRuntime),
-        Some(handle),
+        vec![handle],
     )
     .await
     .unwrap()

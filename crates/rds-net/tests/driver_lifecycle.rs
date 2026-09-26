@@ -40,7 +40,7 @@ async fn driver_terminates(drop_last_handle: bool) {
         a.metrics(),
         a.local_addrs().to_vec(),
         Vec::new(),
-        None,
+        tokio::sync::watch::channel(0u64).1,
         true,
     ));
     tokio::task::yield_now().await;

@@ -6,7 +6,11 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Default)]
 pub(super) struct Drivers {
+    /// Connection-scoped drivers — what `len()`/`active_path_drivers` counts.
     tasks: TaskTracker,
+    /// Endpoint-scoped watchers (relay drain/unavailability fan-in) —
+    /// they outlive any connection and are not path drivers.
+    endpoint_tasks: TaskTracker,
     shutdown: CancellationToken,
     // Serialize task admission with shutdown: TaskTracker::close alone does
     // not prohibit new tasks, so it cannot provide this lifecycle boundary.
@@ -22,6 +26,23 @@ impl Drivers {
         }
     }
 
+    /// Park an endpoint-scoped watcher inside the same lifecycle: closed
+    /// admission refuses new work, shutdown cancels, `wait` joins.
+    pub fn spawn_endpoint(&self, task: impl Future<Output = ()> + Send + 'static) -> bool {
+        let _guard = self.admission.lock().unwrap_or_else(|p| p.into_inner());
+        if self.endpoint_tasks.is_closed() {
+            return false;
+        }
+        let shutdown = self.shutdown.clone();
+        self.endpoint_tasks.spawn(async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                _ = task => {}
+            }
+        });
+        true
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         &self,
@@ -29,8 +50,8 @@ impl Drivers {
         metrics: crate::metrics::Registry,
         local_addrs: Vec<std::net::SocketAddr>,
         candidates: Vec<std::net::SocketAddr>,
-        peer_lease: Option<super::relay::PeerLease>,
-        relay: Option<super::relay::RelayHandle>,
+        peer_leases: Vec<super::relay::PeerLease>,
+        relay_dead: tokio::sync::watch::Receiver<u64>,
         allow_direct: bool,
     ) -> anyhow::Result<Arc<super::telemetry::Telemetry>> {
         let _guard = self.admission.lock().unwrap_or_else(|p| p.into_inner());
@@ -64,13 +85,13 @@ impl Drivers {
             metrics,
             local_addrs,
             candidates,
-            relay,
+            relay_dead,
             allow_direct,
         );
         self.tasks.spawn(async move {
             // Streams may outlive the Connection facade. The weak policy
-            // lifetime, not facade drop, owns this metadata-only route lease.
-            let _peer_lease = peer_lease;
+            // lifetime, not facade drop, owns these metadata-only route leases.
+            let _peer_leases = peer_leases;
             let _observer_guard = guard;
             tokio::select! {
                 biased;
@@ -91,11 +112,13 @@ impl Drivers {
     pub fn close_admission(&self) {
         let _guard = self.admission.lock().unwrap_or_else(|p| p.into_inner());
         self.tasks.close();
+        self.endpoint_tasks.close();
         self.shutdown.cancel();
     }
 
     pub async fn wait(&self) {
         self.tasks.wait().await;
+        self.endpoint_tasks.wait().await;
     }
 
     pub fn len(&self) -> usize {

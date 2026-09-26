@@ -178,7 +178,7 @@ pub async fn connection_driver(
     metrics: crate::metrics::Registry,
     local_addrs: Vec<SocketAddr>,
     initial_candidates: Vec<SocketAddr>,
-    relay: Option<super::relay::RelayHandle>,
+    relay_dead: tokio::sync::watch::Receiver<u64>,
     allow_direct: bool,
 ) {
     let Some(telemetry) = conn.upgrade().map(|c| super::telemetry::Telemetry::new(&c)) else {
@@ -196,7 +196,7 @@ pub async fn connection_driver(
         metrics,
         local_addrs,
         initial_candidates,
-        relay,
+        relay_dead,
         allow_direct,
     )
     .await;
@@ -216,7 +216,7 @@ pub(super) async fn connection_driver_observed(
     metrics: crate::metrics::Registry,
     local_addrs: Vec<SocketAddr>,
     initial_candidates: Vec<SocketAddr>,
-    relay: Option<super::relay::RelayHandle>,
+    mut relay_dead: tokio::sync::watch::Receiver<u64>,
     allow_direct: bool,
 ) {
     use tokio_stream::StreamExt;
@@ -233,16 +233,14 @@ pub(super) async fn connection_driver_observed(
         return;
     };
     tokio::pin!(closed);
-    let mut relay_down = relay.as_ref().is_some_and(|handle| !handle.is_available());
-    let health = relay.clone();
-    let relay_unavailable = async move {
-        match health {
-            Some(mut handle) => handle.unavailable().await,
-            None => std::future::pending().await,
-        }
-    };
-    tokio::pin!(relay_unavailable);
-    let mut relay_withdrawn = false;
+    // Bitmask of relay attachment slots: bits 0..8 mark unavailable
+    // tunnels, bits `DRAIN_SHIFT..` mark announced drain. Endpoint-level
+    // watchers set one bit per attachment; candidates and advertisements
+    // retire on either tier, paths close only on unavailability, so a
+    // warm secondary keeps serving while the primary drains away.
+    let mut relay_mask = *relay_dead.borrow_and_update();
+    let mut withdrawn_mask = 0u64;
+    let mut mask_open = true;
 
     let mut paths = telemetry.paths();
     // Paths opened to QNT-learned candidates — an Established event on
@@ -277,7 +275,14 @@ pub(super) async fn connection_driver_observed(
                 Some(changes) => changes.poll_changed(cx),
                 None => std::task::Poll::Pending,
             }) => {},
-            _ = &mut relay_unavailable, if !relay_down => { relay_down = true; },
+            changed = relay_dead.changed(), if mask_open => {
+                match changed {
+                    Ok(()) => relay_mask = *relay_dead.borrow_and_update(),
+                    // Sender gone means the endpoint is gone — the final
+                    // mask stands; keep driving direct/sibling paths.
+                    Err(_) => mask_open = false,
+                }
+            },
             _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {},
             event = qnt.next(), if qnt_open => match event {
                 Some(Ok(noq_proto::n0_nat_traversal::Event::AddressAdded(addr))) => {
@@ -355,15 +360,25 @@ pub(super) async fn connection_driver_observed(
                 }
             }
         }
-        if relay_down {
-            pending.retain(|address| !super::relay::is_synthetic(address));
-            if !relay_withdrawn {
+        // A draining slot retires exactly like a dead one minus the path
+        // close: peers stop opening new paths into it and we stop
+        // advertising our synthetic route through it, while existing
+        // traffic finishes within the relay's grace period.
+        let retiring = (relay_mask & 0xff) | (relay_mask >> super::relay::DRAIN_SHIFT);
+        if retiring != 0 {
+            pending.retain(|address| {
+                super::relay::synthetic_slot(address).is_none_or(|slot| retiring >> slot & 1 == 0)
+            });
+            let to_withdraw = retiring & !withdrawn_mask;
+            if to_withdraw != 0 {
                 for address in &local_addrs {
-                    if super::relay::is_synthetic(*address) {
+                    if super::relay::synthetic_slot(*address)
+                        .is_some_and(|slot| to_withdraw >> slot & 1 == 1)
+                    {
                         let _ = owner.remove_nat_traversal_address(*address);
                     }
                 }
-                relay_withdrawn = true;
+                withdrawn_mask |= to_withdraw;
             }
         }
         for opened in pending.open_due(&owner, Instant::now()) {
@@ -378,7 +393,7 @@ pub(super) async fn connection_driver_observed(
             &conn,
             &mut paths,
             &mut selected,
-            relay_down,
+            relay_mask,
             transport.as_ref(),
         );
         telemetry.publish(&paths, selected);
@@ -409,11 +424,20 @@ fn reconcile_candidates(
 /// Apply the biased-RTT selection: the lowest-RTT path becomes
 /// `Available`, all others `Backup`. The current selection is kept
 /// unless a candidate beats it by at least [`RTT_SWITCHING_MIN`].
+/// A path's remote lies in a relay attachment slot marked in `mask`
+/// (dead or draining bits as the caller composes them).
+fn on_masked_slot(path: &noq::Path, mask: u64) -> bool {
+    path.remote_address()
+        .ok()
+        .and_then(super::relay::synthetic_slot)
+        .is_some_and(|slot| mask >> slot & 1 == 1)
+}
+
 fn reselect(
     conn: &noq::WeakConnectionHandle,
     paths: &mut HashMap<noq::PathId, noq::WeakPathHandle>,
     selected: &mut Option<noq::PathId>,
-    relay_down: bool,
+    relay_mask: u64,
     transport: Option<&super::socket::Health>,
 ) {
     if !conn.is_alive() {
@@ -425,13 +449,17 @@ fn reselect(
     // Tunnel loss is authoritative local link state; stale RTT must not keep
     // a dead relay selected over a validated direct path. Close only known
     // validated paths here; unobserved engine/QNT paths remain its responsibility.
-    if relay_down {
+    let dead = relay_mask & 0xff;
+    let draining = relay_mask >> super::relay::DRAIN_SHIFT;
+    if dead != 0 || draining != 0 {
         for weak in paths.values() {
-            if let Some(path) = weak.upgrade()
-                && path.remote_address().is_ok_and(super::relay::is_synthetic)
-            {
-                let _ = path.set_status(noq::PathStatus::Backup);
-                let _ = path.close();
+            if let Some(path) = weak.upgrade() {
+                if on_masked_slot(&path, dead) {
+                    let _ = path.set_status(noq::PathStatus::Backup);
+                    let _ = path.close();
+                } else if on_masked_slot(&path, draining) {
+                    let _ = path.set_status(noq::PathStatus::Backup);
+                }
             }
         }
         paths.retain(|_, weak| weak.upgrade().is_some_and(|path| path.status().is_ok()));
@@ -453,10 +481,17 @@ fn reselect(
                     return None;
                 }
             }
-            if relay_down && path.remote_address().is_ok_and(super::relay::is_synthetic) {
+            if dead != 0 && on_masked_slot(&path, dead) {
                 return None;
             }
-            Some((*id, path.stats().rtt))
+            // A draining path stays eligible — it may be the only one —
+            // but at maximum penalty so any live sibling wins selection.
+            let rtt = if draining != 0 && on_masked_slot(&path, draining) {
+                Duration::MAX
+            } else {
+                path.stats().rtt
+            };
+            Some((*id, rtt))
         })
         .collect();
     let Some((mut choice, best_rtt)) = rtts.iter().min_by_key(|(_, rtt)| *rtt).copied() else {

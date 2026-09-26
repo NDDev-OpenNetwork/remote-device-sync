@@ -1186,6 +1186,7 @@ mod tests {
             congestion_events: congestion,
             selected: true,
             via_relay: false,
+            relay_slot: None,
         }
     }
 

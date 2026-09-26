@@ -50,6 +50,8 @@ async fn exercise() {
         key,
         "127.0.0.1:0".parse().unwrap(),
         limits,
+        0,
+        tokio_util::sync::CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -65,7 +67,7 @@ async fn exercise() {
     for seq in 0u8..64 {
         let bytes = [seq; 32];
         let tx = Transmit {
-            destination: synthetic_for(&aid),
+            destination: synthetic_for(0, &aid),
             ecn: None,
             contents: &bytes,
             segment_size: None,
@@ -106,7 +108,7 @@ async fn exercise() {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let tx = Transmit {
-                destination: synthetic_for(&aid),
+                destination: synthetic_for(0, &aid),
                 ecn: None,
                 contents: marker,
                 segment_size: None,
@@ -125,7 +127,7 @@ async fn exercise() {
     .await
     .expect("relay did not recover after queue pressure");
     let tx = Transmit {
-        destination: synthetic_for(&aid),
+        destination: synthetic_for(0, &aid),
         ecn: None,
         contents: b"queued before drop",
         segment_size: None,

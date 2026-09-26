@@ -36,15 +36,15 @@ async fn colliding_peer_registration_cannot_replace_the_existing_route() {
         .expect("collision fixture exceeded deadline");
 }
 async fn collision_case() {
-    let ka = collision_key(153039);
-    let kb = collision_key(167304);
+    let ka = collision_key(5514);
+    let kb = collision_key(6238);
     let aid = ka.public();
     let bid = kb.public();
     assert_ne!(aid, bid);
-    let alias = synthetic_for(&aid);
+    let alias = synthetic_for(0, &aid);
     assert_eq!(
         alias,
-        synthetic_for(&bid),
+        synthetic_for(0, &bid),
         "public fixture keys must actually collide"
     );
     let relay = rds_relay::server::serve(
@@ -200,6 +200,8 @@ async fn managed_endpoint(
         key.clone(),
         "127.0.0.1:0".parse().unwrap(),
         limits,
+        0,
+        tokio_util::sync::CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -214,14 +216,14 @@ async fn managed_endpoint(
             backend: Backend::Noq,
             secret_key: Some(key),
             discovery: false,
-            relay_endpoint: Some(relay),
+            relay_endpoints: vec![relay],
             relay_limits: limits,
             ..Default::default()
         },
         Box::new(mux),
         local,
         runtime,
-        Some(handle.clone()),
+        vec![handle.clone()],
     )
     .await
     .unwrap();
