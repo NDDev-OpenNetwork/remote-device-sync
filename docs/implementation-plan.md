@@ -25,7 +25,8 @@ below was verified against vendored sources or upstream documents on
 The current product-facing increment is the W2.4
 [local session manager](local-sessions.md). Default CLI connectivity and local
 key-inode runtime ownership are implemented. Remaining manager work covers
-viewer/sync APIs and installed-device qualification. The [native SSH client](ssh.md)
+viewer APIs and installed-device qualification; single-file send/receive now
+use the manager. The [native SSH client](ssh.md)
 now covers standard shell/exec/PTY requests; host-key/account enrollment,
 broker/reattachment and real-network/platform qualification remain W5 work,
 alongside viewer/input switching. This supplements the complete remediation plan;
