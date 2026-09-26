@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use rds_core::{DesktopControl, DesktopEvent, DesktopHello, FrameHeader, read_frame, write_frame};
 use rds_net::{Connection, PathStats, RecvStream, SendStream};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::DesktopError;
@@ -694,6 +695,22 @@ fn collapse(mut produced: Produced, rx: &mut mpsc::Receiver<Produced>) -> Produc
 /// stale while still in flight, so its tail is dropped instead of
 /// consuming path capacity the fresher frame needs.
 const STALE_FRAME_RESET: u32 = 0x1;
+/// One budget covers stream credit, tag, header and the complete payload.
+const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// An interrupted frame must never look like a successfully finished payload.
+struct FrameSend {
+    stream: SendStream,
+    finished: bool,
+}
+
+impl Drop for FrameSend {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.stream.reset(STALE_FRAME_RESET.into());
+        }
+    }
+}
 
 /// How one frame send ended.
 enum SendOutcome {
@@ -719,13 +736,31 @@ async fn send_frame(
     produced: &Produced,
     rx: &mut mpsc::Receiver<Produced>,
 ) -> SendOutcome {
-    let mut stream = match conn.open_uni().await {
-        Ok(s) => s,
+    match tokio::time::timeout(FRAME_SEND_TIMEOUT, send_frame_inner(conn, produced, rx)).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            tracing::debug!("frame send deadline exceeded");
+            SendOutcome::Failed
+        }
+    }
+}
+
+async fn send_frame_inner(
+    conn: &Connection,
+    produced: &Produced,
+    rx: &mut mpsc::Receiver<Produced>,
+) -> SendOutcome {
+    let mut sending = match conn.open_uni().await {
+        Ok(stream) => FrameSend {
+            stream,
+            finished: false,
+        },
         Err(e) => {
             tracing::debug!("frame stream open failed: {e}");
             return SendOutcome::Failed;
         }
     };
+    let stream = &mut sending.stream;
     // Frame streams rank below the control stream — a stale frame
     // must never delay an input event or a resync request.
     if let Err(e) = stream.set_priority(FRAME_PRIORITY) {
@@ -733,49 +768,68 @@ async fn send_frame(
     }
     // Every uni stream leads with its UniHello tag — the receiver's
     // per-connection demux routes on it.
-    if let Err(e) = write_frame(&mut stream, &rds_core::UniHello::Desktop).await {
+    if let Err(e) = write_frame(&mut *stream, &rds_core::UniHello::Desktop).await {
         tracing::debug!("frame tag write failed: {e}");
         return SendOutcome::Failed;
     }
-    if let Err(e) = write_frame(&mut stream, &produced.header).await {
+    if let Err(e) = write_frame(&mut *stream, &produced.header).await {
         tracing::debug!("frame header write failed: {e}");
         return SendOutcome::Failed;
     }
+    let outcome = match send_payload(stream, produced, rx).await {
+        Ok(PayloadOutcome::Abandoned(next)) => {
+            return next.map_or(SendOutcome::ResetStale, SendOutcome::Superseded);
+        }
+        Ok(PayloadOutcome::Sent) => SendOutcome::Sent,
+        Ok(PayloadOutcome::Superseded(next)) => SendOutcome::Superseded(next),
+        Ok(PayloadOutcome::ProducerEnded) => SendOutcome::Done,
+        Err(e) => {
+            tracing::debug!("frame send failed: {e}");
+            return SendOutcome::Failed;
+        }
+    };
+    if let Err(e) = stream.finish() {
+        tracing::debug!("frame finish failed: {e}");
+        return SendOutcome::Failed;
+    }
+    sending.finished = true;
+    outcome
+}
+
+/// Completed payloads may FIN; abandoned ones must RESET.
+enum PayloadOutcome {
+    Sent,
+    Superseded(Produced),
+    ProducerEnded,
+    Abandoned(Option<Produced>),
+}
+
+async fn send_payload<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    produced: &Produced,
+    rx: &mut mpsc::Receiver<Produced>,
+) -> std::io::Result<PayloadOutcome> {
+    // write_all is not cancellation-safe: keep its progress alive across a
+    // producer event. Starting another write_all would duplicate the prefix.
+    let writing = stream.write_all(&produced.payload);
+    tokio::pin!(writing);
     tokio::select! {
-        res = async {
-            stream.write_all(&produced.payload).await.map_err(std::io::Error::other)?;
-            stream.finish().map_err(std::io::Error::other)
-        } => match res {
-            Ok(()) => SendOutcome::Sent,
-            Err(e) => {
-                tracing::debug!("frame send failed: {e}");
-                SendOutcome::Failed
-            }
-        },
+        result = &mut writing => {
+            result?;
+            Ok(PayloadOutcome::Sent)
+        }
         newer = rx.recv() => match newer {
-            // The producer ended: this is the freshest frame that will
-            // ever exist — finish it, then the writer drains out.
-            None => match stream.write_all(&produced.payload).await {
-                Ok(()) => {
-                    let _ = stream.finish();
-                    SendOutcome::Done
-                }
-                Err(_) => SendOutcome::Failed,
-            },
-            Some(newer) => {
-                if produced.header.keyframe {
-                    let _ = stream.write_all(&produced.payload).await;
-                    let _ = stream.finish();
-                    SendOutcome::Superseded(newer)
-                } else {
-                    let _ = stream.reset(STALE_FRAME_RESET.into());
-                    if newer.header.keyframe {
-                        SendOutcome::Superseded(newer)
-                    } else {
-                        SendOutcome::ResetStale
-                    }
-                }
+            None => {
+                writing.await?;
+                Ok(PayloadOutcome::ProducerEnded)
             }
+            Some(newer) if produced.header.keyframe => {
+                writing.await?;
+                Ok(PayloadOutcome::Superseded(newer))
+            }
+            Some(newer) => Ok(PayloadOutcome::Abandoned(
+                newer.header.keyframe.then_some(newer)
+            )),
         },
     }
 }
@@ -783,6 +837,196 @@ async fn send_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn produced(seq: u64, keyframe: bool) -> Produced {
+        Produced {
+            header: FrameHeader {
+                seq,
+                capture_ts_ms: 0,
+                encode_done_ts_ms: 0,
+                send_ts_ms: 0,
+                keyframe,
+                codec: rds_core::Codec::H264,
+                width: 16,
+                height: 16,
+            },
+            payload: Bytes::from((0..4096).map(|n| (n % 251) as u8).collect::<Vec<_>>()),
+        }
+    }
+
+    async fn partial_write(closed: bool) {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+        use tokio::io::AsyncReadExt;
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (mut writer, mut reader) = tokio::io::duplex(64);
+            let (tx, mut rx) = mpsc::channel(1);
+            let frame = produced(0, true);
+            let mut wire = vec![0; 17];
+            {
+                let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx));
+                // Poll until the tiny stream buffer is full, then consume only
+                // a prefix. The producer event must interrupt a partial write.
+                poll_fn(|cx| {
+                    assert!(sending.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                }).await;
+                reader.read_exact(&mut wire).await.unwrap();
+                if !closed {
+                    tx.send(produced(1, false)).await.unwrap();
+                }
+                drop(tx);
+                poll_fn(|cx| {
+                    assert!(sending.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                }).await;
+                let (result, ()) = tokio::join!(sending, async {
+                    // Drain enough to complete the write; after dropping the
+                    // writer below, read to EOF to detect any extra bytes.
+                    while wire.len() < frame.payload.len() {
+                        let mut chunk = [0; 256];
+                        let n = reader.read(&mut chunk).await.unwrap();
+                        assert_ne!(n, 0);
+                        wire.extend_from_slice(&chunk[..n]);
+                    }
+                });
+                if closed {
+                    assert!(matches!(result.unwrap(), PayloadOutcome::ProducerEnded));
+                } else {
+                    assert!(matches!(result.unwrap(), PayloadOutcome::Superseded(next) if next.header.seq == 1));
+                }
+            }
+            drop(writer);
+            reader.read_to_end(&mut wire).await.unwrap();
+            assert_eq!(wire.len(), frame.payload.len(), "partial-write prefix was duplicated");
+            assert_eq!(wire.as_slice(), frame.payload.as_ref());
+        }).await.expect("partial frame send hung");
+    }
+
+    #[tokio::test]
+    async fn partial_keyframe_supersession_preserves_exact_bytes() {
+        partial_write(false).await;
+    }
+
+    #[tokio::test]
+    async fn partial_final_frame_preserves_exact_bytes() {
+        partial_write(true).await;
+    }
+
+    #[tokio::test]
+    async fn interrupted_payload_preserves_write_errors() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        for closed in [false, true] {
+            let (mut writer, reader) = tokio::io::duplex(64);
+            let (tx, mut rx) = mpsc::channel(1);
+            let frame = produced(0, true);
+            let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx));
+            poll_fn(|cx| {
+                assert!(sending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            if !closed {
+                tx.send(produced(1, true)).await.unwrap();
+            }
+            drop(tx);
+            // Select the producer event before causing the write to fail.
+            poll_fn(|cx| {
+                assert!(sending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(reader);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), sending)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_delta_abandons_without_waiting_for_peer() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        for next_keyframe in [false, true] {
+            let (mut writer, _reader) = tokio::io::duplex(64);
+            let (tx, mut rx) = mpsc::channel(1);
+            let frame = produced(0, false);
+            let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx));
+            poll_fn(|cx| {
+                assert!(sending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            tx.send(produced(1, next_keyframe)).await.unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(1), sending)
+                .await
+                .unwrap()
+                .unwrap();
+            let PayloadOutcome::Abandoned(next) = result else {
+                panic!("stale delta was not abandoned");
+            };
+            assert_eq!(next.is_some(), next_keyframe);
+            if let Some(next) = next {
+                assert_eq!(next.header.seq, 1);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_frame_writer_resets_stream_and_preserves_connection() {
+        for backend in [rds_net::Backend::Iroh, rds_net::Backend::Noq] {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let config = rds_net::EndpointConfig {
+                    backend,
+                    discovery: false,
+                    bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                    ..Default::default()
+                };
+                let client = rds_net::bind_endpoint(config.clone()).await.unwrap();
+                let server = rds_net::bind_endpoint(config).await.unwrap();
+                let (a, b) = tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
+                    server.accept().await.unwrap().await
+                });
+                let (a, b) = (a.unwrap(), b.unwrap());
+                let stream = a.open_uni().await.unwrap();
+                let writer = tokio::spawn(async move {
+                    let mut sending = FrameSend {
+                        stream,
+                        finished: false,
+                    };
+                    sending.stream.write_all(b"prefix").await.unwrap();
+                    std::future::pending::<()>().await;
+                });
+                let mut recv = b.accept_uni().await.unwrap();
+                let mut prefix = [0; 6];
+                recv.read_exact(&mut prefix).await.unwrap();
+                assert_eq!(&prefix, b"prefix");
+                writer.abort();
+                assert!(writer.await.unwrap_err().is_cancelled());
+                assert!(matches!(recv.read(&mut prefix).await,
+                    Err(rds_net::ReadError::Reset(code)) if code == STALE_FRAME_RESET.into()));
+
+                // Reset belongs to the abandoned frame, not the connection.
+                let mut next = a.open_uni().await.unwrap();
+                next.write_all(b"usable").await.unwrap();
+                next.finish().unwrap();
+                let mut recv = b.accept_uni().await.unwrap();
+                assert_eq!(recv.read_to_end(6).await.unwrap(), b"usable");
+                a.close(0u32.into(), b"done");
+                client.close().await;
+                server.close().await;
+            })
+            .await
+            .expect("frame cancellation did not release transport resources");
+        }
+    }
 
     fn path(sent: u64, lost: u64, rtt_ms: u64, congestion: u64) -> PathStats {
         PathStats {
