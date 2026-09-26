@@ -39,7 +39,7 @@ jobs:
         && cargo test --locked -p rds-net --features metrics --test metrics --no-fail-fast
         && { [ "$(uname -s)" != "Linux" ] || {
         cargo test --locked --workspace --features rds-desktop/x11 --no-fail-fast
-        && xvfb-run -a -s "-screen 0 1280x720x24 -screen 1 640x480x24"
+        && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24"
         cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1;
         }; }
       fmt_command: "cargo fmt --all -- --check"

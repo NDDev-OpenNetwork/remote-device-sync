@@ -242,8 +242,6 @@ pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     /// Explicit native fixture: never silently succeeds without capture.
@@ -270,9 +268,35 @@ mod tests {
         // server-side repaint re-dirties it.
         assert!(cap.changed(), "first changed() must be dirty");
         assert!(!cap.changed(), "still screen reported damage");
-        x11rb::protocol::xproto::clear_area(&cap.conn, false, cap.root, 0, 0, 100, 100).unwrap();
-        cap.conn.flush().unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        use x11rb::protocol::xproto::{CreateGCAux, Rectangle};
+        let gc = cap.conn.generate_id().unwrap();
+        cap.conn
+            .create_gc(gc, cap.root, &CreateGCAux::new().foreground(0x12_34_56))
+            .unwrap()
+            .check()
+            .unwrap();
+        cap.conn
+            .poly_fill_rectangle(
+                cap.root,
+                gc,
+                &[Rectangle {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                }],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
         assert!(cap.changed(), "root repaint produced no damage");
+        let frame = cap.capture().unwrap();
+        let pixel = 50 * frame.stride as usize + 50 * 4;
+        assert_eq!(
+            &frame.data[pixel..pixel + 3],
+            &[0x56, 0x34, 0x12],
+            "captured pixel did not match the native paint"
+        );
+        cap.conn.free_gc(gc).unwrap().check().unwrap();
     }
 }

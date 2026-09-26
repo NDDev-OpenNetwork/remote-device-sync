@@ -44,7 +44,7 @@ then run them serially on a dedicated two-screen Xvfb server. Missing DISPLAY,
 failed backend initialization or failed injection is an error in that lane:
 
 ```sh
-xvfb-run -a -s '-screen 0 1280x720x24 -screen 1 640x480x24' \
+xvfb-run -a -s '-noreset -screen 0 1280x720x24 -screen 1 640x480x24' \
   cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1
 ```
 
