@@ -83,7 +83,7 @@ async fn inbox_keeps_router_alive_after_facade_handles_drop() {
         drop(a);
         drop(clone);
         let mut send = b.open_uni().await.unwrap();
-        rds_core::write_frame(&mut send, &rds_core::UniHello::Sync)
+        rds_net::write_frame(&mut send, &rds_core::UniHello::Sync)
             .await
             .unwrap();
         send.write_all(b"owned inbox").await.unwrap();
@@ -148,7 +148,7 @@ async fn stalled_tag_and_reclaimed_kind_preserve_ready_routing() {
         drop(old);
         let mut new = a.uni_streams(rds_core::UniHello::Sync).unwrap();
         let mut ready = b.open_uni().await.unwrap();
-        rds_core::write_frame(&mut ready, &rds_core::UniHello::Sync)
+        rds_net::write_frame(&mut ready, &rds_core::UniHello::Sync)
             .await
             .unwrap();
         ready.write_all(b"new claim").await.unwrap();
@@ -182,12 +182,12 @@ async fn delayed_transfer_tags_cannot_enter_replacement_inboxes_and_routes_are_b
         let new_tag = UniHello::SyncTransfer { id: [2; 16] };
         let mut current = a.uni_streams(new_tag).unwrap();
         let mut tag = Vec::new();
-        rds_core::write_frame(&mut tag, &old_tag).await.unwrap();
+        rds_net::write_frame(&mut tag, &old_tag).await.unwrap();
         delayed.write_all(&tag[1..]).await.unwrap();
         delayed.write_all(b"stale").await.unwrap();
         delayed.finish().unwrap();
         let mut valid = b.open_uni().await.unwrap();
-        rds_core::write_frame(&mut valid, &new_tag).await.unwrap();
+        rds_net::write_frame(&mut valid, &new_tag).await.unwrap();
         valid.write_all(b"fresh").await.unwrap();
         valid.finish().unwrap();
         let mut received = tokio::time::timeout(Duration::from_secs(3), current.recv())

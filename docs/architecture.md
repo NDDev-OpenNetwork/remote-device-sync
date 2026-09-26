@@ -241,7 +241,7 @@ depend on it; `rds-core` remains free of I/O/runtime dependencies. The logging
 adapter never owns a connection or calls Vector/OpenObserve directly.
 
 ```text
-                     rds-core           types, framing, tokens — leaf
+                     rds-core           types, wire format, tokens — leaf
                        │  │
         ┌──────────────┘  └───────────────┐
         ▼                               ▼

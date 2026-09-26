@@ -4,10 +4,11 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rds_core::HelloAck;
 use rds_core::grant::{self, GrantId, VerifiedGrant};
-use rds_core::{HelloAck, write_frame};
 use rds_discovery::clock::{Lease, Reading};
 use rds_net::Connection;
+use rds_net::write_frame;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -638,7 +639,7 @@ mod tests {
             authz.clone(),
             false,
         ));
-        let ack = rds_core::read_frame::<_, HelloAck>(&mut recv);
+        let ack = rds_net::read_frame::<_, HelloAck>(&mut recv);
         tokio::pin!(ack);
         let early = tokio::time::timeout(Duration::from_millis(50), &mut ack).await;
         // Never authorize a service before commit, and never race a premature

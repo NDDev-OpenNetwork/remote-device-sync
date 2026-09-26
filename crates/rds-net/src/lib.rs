@@ -49,6 +49,8 @@ pub mod relay_control;
 mod uni;
 pub use uni::{UniRoutingStats, UniStreams};
 pub mod resolve;
+pub mod wire;
+pub use wire::{read_frame, write_frame};
 
 // Shared identity and address types — the same key material works on
 // both backends.

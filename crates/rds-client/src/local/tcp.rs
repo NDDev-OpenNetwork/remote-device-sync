@@ -25,11 +25,11 @@ async fn encode(
     loop {
         let read = reader.read(&mut buffer).await?;
         if read == 0 {
-            rds_core::write_frame(writer, &TcpFrame::Finish).await?;
+            rds_net::write_frame(writer, &TcpFrame::Finish).await?;
             // Do not OS-half-close the IPC socket: its EOF means caller loss.
             return Ok(());
         }
-        rds_core::write_frame(writer, &TcpFrame::Data(buffer[..read].to_vec())).await?;
+        rds_net::write_frame(writer, &TcpFrame::Data(buffer[..read].to_vec())).await?;
     }
 }
 
@@ -38,7 +38,7 @@ async fn decode(
     writer: &mut (impl AsyncWrite + Unpin),
 ) -> io::Result<()> {
     loop {
-        match rds_core::read_frame::<_, TcpFrame>(reader).await? {
+        match rds_net::read_frame::<_, TcpFrame>(reader).await? {
             TcpFrame::Data(bytes) if !bytes.is_empty() && bytes.len() <= TCP_CHUNK => {
                 writer.write_all(&bytes).await?
             }

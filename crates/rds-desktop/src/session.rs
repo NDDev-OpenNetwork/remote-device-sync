@@ -13,8 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use rds_core::{DesktopControl, DesktopEvent, DesktopHello, FrameHeader, read_frame, write_frame};
+use rds_core::{DesktopControl, DesktopEvent, DesktopHello, FrameHeader};
 use rds_net::{Connection, PathStats, RecvStream, SendStream};
+use rds_net::{read_frame, write_frame};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;

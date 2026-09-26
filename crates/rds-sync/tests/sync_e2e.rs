@@ -160,7 +160,7 @@ async fn pull_recv_completes() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pull_keeps_original_inode_after_offer_path_is_replaced() {
-    use rds_core::{read_frame, write_frame};
+    use rds_net::{read_frame, write_frame};
     use rds_sync::proto::SyncMsg;
     let (server, client, target, task, server_dir) = pair().await;
     let original = b"original file bytes";
@@ -226,7 +226,7 @@ async fn pull_keeps_original_inode_after_offer_path_is_replaced() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canceled_control_stream_releases_receive_lock() {
-    use rds_core::{read_frame, write_frame};
+    use rds_net::{read_frame, write_frame};
     use rds_sync::{journal::Journal, proto::SyncMsg};
     let (server, client, target, task, server_dir) = pair().await;
     let manifest = manifest_of(b"one chunk");
@@ -455,7 +455,7 @@ async fn path_traversal_rejected() {
     let (_s, c_ep, target, _task, _server_dir) = pair().await;
     let conn = client_conn(&c_ep, target).await;
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut send,
         &rds_sync::proto::SyncMsg::Offer {
             rel_path: "../escape.bin".into(),
@@ -466,7 +466,7 @@ async fn path_traversal_rejected() {
     )
     .await
     .unwrap();
-    match rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv)
+    match rds_net::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv)
         .await
         .unwrap()
     {
@@ -511,7 +511,7 @@ async fn symlink_escape_refused() {
     let manifest = manifest_of(&data);
     let conn = client_conn(&c_ep, target.clone()).await;
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut send,
         &rds_sync::proto::SyncMsg::Offer {
             rel_path: "link/victim.bin".into(),
@@ -524,7 +524,7 @@ async fn symlink_escape_refused() {
     .unwrap();
     let verdict = tokio::time::timeout(
         Duration::from_secs(10),
-        rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
+        rds_net::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
     )
     .await;
     match verdict {
@@ -549,7 +549,7 @@ async fn symlink_escape_refused() {
     let jail_target = jail_ep.addr();
     let conn = client_conn(&c_ep, jail_target).await;
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut send,
         &rds_sync::proto::SyncMsg::Offer {
             rel_path: "ok.bin".into(),
@@ -560,7 +560,7 @@ async fn symlink_escape_refused() {
     )
     .await
     .unwrap();
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut send,
         &rds_sync::proto::SyncMsg::ManifestPart {
             chunks: manifest.chunks.clone(),
@@ -570,7 +570,7 @@ async fn symlink_escape_refused() {
     .unwrap();
     let verdict = tokio::time::timeout(
         Duration::from_secs(10),
-        rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
+        rds_net::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
     )
     .await;
     match verdict {
@@ -596,7 +596,7 @@ async fn forged_chunk_len_rejected() {
     // Offer a real one-chunk file so the manifest validates.
     let data = random_bytes(64 * 1024, 0xBAD);
     let manifest = manifest_of(&data);
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut send,
         &rds_sync::proto::SyncMsg::Offer {
             rel_path: "victim.bin".into(),
@@ -607,7 +607,7 @@ async fn forged_chunk_len_rejected() {
     )
     .await
     .unwrap();
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut send,
         &rds_sync::proto::SyncMsg::ManifestPart {
             chunks: manifest.chunks.clone(),
@@ -616,7 +616,7 @@ async fn forged_chunk_len_rejected() {
     .await
     .unwrap();
     // Server answers Need.
-    match rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv)
+    match rds_net::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv)
         .await
         .unwrap()
     {
@@ -626,16 +626,16 @@ async fn forged_chunk_len_rejected() {
 
     // Chunk stream: tag, set, then a ChunkHdr claiming 4 GiB.
     let mut stream = conn.open_uni().await.unwrap();
-    rds_core::write_frame(&mut stream, &rds_core::UniHello::Sync)
+    rds_net::write_frame(&mut stream, &rds_core::UniHello::Sync)
         .await
         .unwrap();
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut stream,
         &rds_sync::proto::SyncMsg::ChunkSet { indices: vec![0] },
     )
     .await
     .unwrap();
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut stream,
         &rds_sync::proto::SyncMsg::ChunkHdr {
             index: 0,
@@ -652,7 +652,7 @@ async fn forged_chunk_len_rejected() {
     // control stream ends without Done.
     let verdict = tokio::time::timeout(
         Duration::from_secs(10),
-        rds_core::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
+        rds_net::read_frame::<_, rds_sync::proto::SyncMsg>(&mut recv),
     )
     .await;
     match verdict {

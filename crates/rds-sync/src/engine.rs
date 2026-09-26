@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use rds_core::{read_frame, write_frame as write_raw_frame};
 use rds_net::{Connection, RecvStream, SendStream};
+use rds_net::{read_frame, write_frame as write_raw_frame};
 use tokio::sync::mpsc;
 
 use crate::proto::{

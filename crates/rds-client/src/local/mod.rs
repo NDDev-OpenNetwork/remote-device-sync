@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rds_core::local::{Command, ErrorCode, Reply, Request, Response, SessionId, VERSION};
-use rds_core::{read_frame, write_frame};
 use rds_net::{Connection, Endpoint};
+use rds_net::{read_frame, write_frame};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};

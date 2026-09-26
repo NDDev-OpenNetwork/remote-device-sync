@@ -3,13 +3,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use rds_core::{Codec, DesktopCaps, HelloAck, StreamHello, read_frame, write_frame};
+use rds_core::{Codec, DesktopCaps, HelloAck, StreamHello};
 use rds_desktop::client::DesktopSession;
 use rds_desktop::{
     FrameProducer, Produced, ProducerControls, SessionClock, SessionConfig, SyntheticProducer,
     serve_desktop_with,
 };
 use rds_net::{Backend, EndpointConfig};
+use rds_net::{read_frame, write_frame};
 
 struct Source {
     inner: SyntheticProducer,

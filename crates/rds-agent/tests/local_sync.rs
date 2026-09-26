@@ -180,7 +180,8 @@ async fn managed_transfers_pin_devices_and_reuse_the_agent_identity() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canceled_transfer_releases_its_slot_without_closing_tcp_or_the_session() {
-    use rds_core::{HelloAck, StreamHello, read_frame, write_frame};
+    use rds_core::{HelloAck, StreamHello};
+    use rds_net::{read_frame, write_frame};
     for (backend, upload) in backends()
         .into_iter()
         .flat_map(|b| [false, true].map(move |upload| (b, upload)))

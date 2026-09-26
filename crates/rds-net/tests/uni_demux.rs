@@ -115,7 +115,7 @@ async fn stalled_tag_does_not_block_routing() {
     // Stream two: tagged properly — must route despite the stalled
     // predecessor sitting at the head of the accept queue.
     let mut tagged = server_conn.open_uni().await.unwrap();
-    rds_core::write_frame(&mut tagged, &rds_core::UniHello::Desktop)
+    rds_net::write_frame(&mut tagged, &rds_core::UniHello::Desktop)
         .await
         .unwrap();
 

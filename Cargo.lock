@@ -3471,7 +3471,6 @@ dependencies = [
  "proptest",
  "serde",
  "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -3531,6 +3530,7 @@ dependencies = [
  "noq",
  "noq-proto",
  "postcard",
+ "proptest",
  "rand 0.10.3",
  "rds-core",
  "rds-discovery",

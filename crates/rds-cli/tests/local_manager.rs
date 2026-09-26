@@ -75,10 +75,10 @@ async fn real_cli_uses_running_identity_without_creating_its_own_key() {
                 assert_eq!(conn.remote_id(), expected);
             }
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                let request: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
+                let request: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
                 match request {
                     rds_core::StreamHello::SyncTransfer { id } => {
-                        rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+                        rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
                             .await
                             .unwrap();
                         rds_sync::engine::Transfer::new(id)
@@ -94,13 +94,13 @@ async fn real_cli_uses_running_identity_without_creating_its_own_key() {
                         continue;
                     }
                     rds_core::StreamHello::Ping { nonce } => {
-                        rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+                        rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
                             .await
                             .unwrap();
                         send.write_all(&nonce.to_be_bytes()).await.unwrap();
                     }
                     rds_core::StreamHello::Info => {
-                        rds_core::write_frame(
+                        rds_net::write_frame(
                             &mut send,
                             &rds_core::HelloAck::Info(rds_core::AgentInfo {
                                 protocol: 0,

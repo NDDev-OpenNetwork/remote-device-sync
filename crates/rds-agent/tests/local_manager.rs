@@ -70,8 +70,8 @@ async fn control_reply_requires_commit_eof_and_rejects_trailing_bytes() {
         let client = Client::new(&root.0);
         let mut pending = tokio::spawn(async move { client.request(Command::List).await });
         let (mut socket, _) = listener.accept().await.unwrap();
-        let _: Request = rds_core::read_frame(&mut socket).await.unwrap();
-        rds_core::write_frame(
+        let _: Request = rds_net::read_frame(&mut socket).await.unwrap();
+        rds_net::write_frame(
             &mut socket,
             &Response {
                 version: VERSION,
@@ -515,7 +515,7 @@ async fn bad_ipc_version_oversized_frame_and_untrusted_socket_do_not_mutate_stat
     let mut stream = UnixStream::connect(path.join("control.sock"))
         .await
         .unwrap();
-    rds_core::write_frame(
+    rds_net::write_frame(
         &mut stream,
         &rds_core::local::Request {
             version: 999,
@@ -524,7 +524,7 @@ async fn bad_ipc_version_oversized_frame_and_untrusted_socket_do_not_mutate_stat
     )
     .await
     .unwrap();
-    let response: rds_core::local::Response = rds_core::read_frame(&mut stream).await.unwrap();
+    let response: rds_core::local::Response = rds_net::read_frame(&mut stream).await.unwrap();
     assert_eq!(response.result.unwrap_err(), ErrorCode::Version);
     let mut stream = UnixStream::connect(path.join("control.sock"))
         .await
@@ -897,7 +897,7 @@ async fn abandoned_silent_tcp_bodies_release_capacity_but_half_close_preserves_r
         let mut raw = UnixStream::connect(path.join("control.sock"))
             .await
             .unwrap();
-        rds_core::write_frame(
+        rds_net::write_frame(
             &mut raw,
             &rds_core::local::Request {
                 version: rds_core::local::VERSION,
@@ -909,10 +909,10 @@ async fn abandoned_silent_tcp_bodies_release_capacity_but_half_close_preserves_r
         )
         .await
         .unwrap();
-        let response: rds_core::local::Response = rds_core::read_frame(&mut raw).await.unwrap();
+        let response: rds_core::local::Response = rds_net::read_frame(&mut raw).await.unwrap();
         assert!(matches!(response.result, Ok(Reply::Opened(_))));
         let (mut service, _) = tcp.accept().await.unwrap();
-        rds_core::write_frame(&mut raw, &rds_core::local::TcpFrame::Data(bytes))
+        rds_net::write_frame(&mut raw, &rds_core::local::TcpFrame::Data(bytes))
             .await
             .unwrap();
         assert!(

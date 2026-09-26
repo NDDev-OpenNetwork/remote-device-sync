@@ -196,7 +196,7 @@ async fn run(conn: ConnectionInner, owner: Weak<Demux>, pending: Arc<AtomicUsize
 async fn route(mut stream: RecvStream, owner: Weak<Demux>) {
     let kind = match tokio::time::timeout(
         TAG_TIMEOUT,
-        rds_core::read_frame::<_, UniHello>(&mut stream),
+        crate::read_frame::<_, UniHello>(&mut stream),
     )
     .await
     {
@@ -281,7 +281,7 @@ mod tests {
                 phase = "send stream tags";
                 for _ in 0..QUEUE_DEPTH + MAX_PENDING + 8 {
                     let mut send = peer.open_uni().await.unwrap();
-                    rds_core::write_frame(&mut send, &UniHello::Sync)
+                    crate::write_frame(&mut send, &UniHello::Sync)
                         .await
                         .unwrap();
                     send.write_all(b"pending body").await.unwrap();

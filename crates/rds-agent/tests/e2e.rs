@@ -304,7 +304,8 @@ async fn desktop_handshake_completes() {
 // ---- WS4: capability grants -------------------------------------------
 
 use rds_core::grant::{Grant, GrantConstraints};
-use rds_core::{HelloAck, ServiceKind, StreamHello, read_frame, write_frame};
+use rds_core::{HelloAck, ServiceKind, StreamHello};
+use rds_net::{read_frame, write_frame};
 
 fn issuer() -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::from_bytes(&[77u8; 32])

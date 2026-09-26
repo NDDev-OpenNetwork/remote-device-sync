@@ -3,8 +3,9 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context;
-use rds_core::{HelloAck, StreamHello, read_frame, write_frame};
+use rds_core::{HelloAck, StreamHello};
 use rds_net::{Connection, RecvStream, SendStream};
+use rds_net::{read_frame, write_frame};
 
 /// One deadline includes stream-credit wait, framed write and response/body.
 /// Long-lived TCP/sync bodies start after this prelude and use their own policy.
