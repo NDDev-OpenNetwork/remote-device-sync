@@ -1690,3 +1690,43 @@ a flake: it failed only in workspace runs). Tests now probe
 `rds_relay::OWNED_BACKEND_COMPILED`, which answers for the compiled
 library rather than the including package's flag; the rejection contract
 (explicit refusal, no state) is exercised either way.
+
+## 2026-09-26 — runtime-free core and owned endpoint types (W2.7)
+
+`rds-core` documented itself as a leaf — "no io, no async runtime" —
+while `read_frame`/`write_frame` awaited `tokio::io` inside it, and
+`rds-net` re-exported `iroh::{EndpointId, EndpointAddr, RelayUrl,
+SecretKey, TransportAddr}` as the shared identity types, coupling every
+consumer to one backend's public API. Both halves are now corrected.
+
+Async framing moved to `rds-net::wire` (`read_frame`/`write_frame`,
+re-exported at crate root); `rds-core` keeps only `MAX_MESSAGE_LEN` —
+a wire-format constant — and drops its `tokio` dependency entirely.
+Every callsite across agent, cli, desktop, net, relay, server and the
+test-support fixture now imports framing from `rds_net`.
+
+`rds-core::endpoint` now owns `EndpointId`, `EndpointAddr`, `RelayUrl`,
+`SecretKey` and `TransportAddr` — postcard byte-identical to the iroh
+types they replace (a dedicated parity test proves the serializations
+match, preserving ticket compat) and string-identical (z-base-32 ids,
+bare transport addrs, `relay://` URLs). `SecretKey` wraps
+`ed25519_dalek::SigningKey` with `zeroize` on drop; `RelayUrl` stores
+`Arc<Url>` matching iroh's memory shape. `rds-net` re-exports the owned
+types so service surfaces no longer name a backend; native iroh types
+exist only inside `backends::iroh` (plus `iroh_relay` adapter mode and
+noq's TLS key plumbing), converted at the `EndpointInner` boundary via
+`#[doc(hidden)] convert` helpers. `rds-discovery` was already clean —
+its signed records use the owned `EndpointKey([u8; 32])`.
+
+A layering test (`rds-core/tests/layering.rs`) binds the contract: the
+manifest's `[dependencies]` is asserted free of runtime/backend crates
+(tokio, iroh, noq, russh, rustls, turmoil, display stacks), so a future
+dep edge fails under `cargo test -p rds-core` rather than drifting.
+
+Verified: fmt, both clippy lanes (default + x11), full workspace tests,
+`rds-relay`/`rds-server` under `owned-relay`, `rds-net` under
+`transport-noq`, and `cargo tree -p rds-core` shows a pure leaf
+(blake3/bytes/ed25519/postcard/serde/thiserror/url/rand/data-encoding).
+
+Remaining W2.7 scope: none functional — the convention doc now states
+the owned-type rule; future backends convert at their own adapter.

@@ -1,5 +1,5 @@
 //! Bounded identity ownership for the relay's synthetic address namespace.
-use iroh::EndpointId;
+use crate::EndpointId;
 use std::{
     collections::HashMap,
     net::SocketAddr,

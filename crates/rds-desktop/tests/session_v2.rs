@@ -16,9 +16,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rds_bench::impair::{ImpairingSocket, Impairment, StatsHandle};
-use rds_core::{Codec, DesktopEvent, DesktopHello, HelloAck, StreamHello, read_frame};
+use rds_core::{Codec, DesktopEvent, DesktopHello, HelloAck, StreamHello};
 use rds_desktop::client::{DesktopSession, SessionOpts};
 use rds_desktop::{SessionClock, SessionConfig, SyntheticProducer, serve_desktop_with};
+use rds_net::read_frame;
 use rds_net::{Endpoint, EndpointAddr, EndpointConfig, bind_noq_with_socket};
 
 #[derive(Clone, Default)]
@@ -119,7 +120,7 @@ async fn spawn_serving(
         let (mut send, mut recv) = conn.accept_bi().await.unwrap();
         match read_frame::<_, StreamHello>(&mut recv).await.unwrap() {
             StreamHello::Desktop(hello) => {
-                rds_core::write_frame(
+                rds_net::write_frame(
                     &mut send,
                     &HelloAck::Desktop(rds_core::DesktopCaps {
                         displays: vec![],
@@ -574,7 +575,7 @@ async fn desktop_and_sync_share_one_connection() {
                 tokio::spawn(async move {
                     match read_frame::<_, StreamHello>(&mut recv).await {
                         Ok(StreamHello::Desktop(hello)) => {
-                            rds_core::write_frame(
+                            rds_net::write_frame(
                                 &mut send,
                                 &HelloAck::Desktop(rds_core::DesktopCaps {
                                     displays: vec![],
@@ -633,7 +634,7 @@ async fn desktop_and_sync_share_one_connection() {
     let conn2 = conn.clone();
     let pull = tokio::spawn(async move {
         let (mut send, recv) = conn2.open_bi().await.unwrap();
-        rds_core::write_frame(&mut send, &StreamHello::Sync)
+        rds_net::write_frame(&mut send, &StreamHello::Sync)
             .await
             .unwrap();
         rds_sync::engine::recv_file(&conn2, "media.bin", &dest_dir, send, recv).await

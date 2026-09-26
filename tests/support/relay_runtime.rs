@@ -442,7 +442,7 @@ async fn valid_manual_iroh_tls_starts_and_shuts_down() {
 }
 
 #[cfg(feature = "owned-relay")]
-fn owned_args(scratch: &Scratch, keys: &[iroh::SecretKey], cap: u16) -> Vec<String> {
+fn owned_args(scratch: &Scratch, keys: &[rds_net::SecretKey], cap: u16) -> Vec<String> {
     let mut values = args(&[
         "--relay-backend",
         "noq",
@@ -458,12 +458,14 @@ fn owned_args(scratch: &Scratch, keys: &[iroh::SecretKey], cap: u16) -> Vec<Stri
 }
 
 #[cfg(feature = "owned-relay")]
-fn relay_address(ready: &Ready) -> iroh::EndpointAddr {
-    iroh::EndpointAddr::new(ready.id.unwrap()).with_ip_addr(ready.addr)
+fn relay_address(ready: &Ready) -> rds_net::EndpointAddr {
+    rds_net::EndpointAddr::new(
+        rds_net::backends::iroh::convert::id_from(ready.id.unwrap()),
+    ).with_ip_addr(ready.addr)
 }
 
 #[cfg(feature = "owned-relay")]
-async fn attached_endpoint(key: iroh::SecretKey, relay: iroh::EndpointAddr) -> rds_net::Endpoint {
+async fn attached_endpoint(key: rds_net::SecretKey, relay: rds_net::EndpointAddr) -> rds_net::Endpoint {
     rds_net::bind_endpoint(rds_net::EndpointConfig {
         backend: rds_net::Backend::Noq,
         secret_key: Some(key),
@@ -481,8 +483,8 @@ async fn attached_endpoint(key: iroh::SecretKey, relay: iroh::EndpointAddr) -> r
 
 #[cfg(feature = "owned-relay")]
 async fn attachment(
-    relay: iroh::EndpointAddr,
-    key: iroh::SecretKey,
+    relay: rds_net::EndpointAddr,
+    key: rds_net::SecretKey,
 ) -> anyhow::Result<(
     rds_net::backends::noq::relay::RelaySocket,
     rds_net::backends::noq::relay::RelayHandle,
@@ -496,8 +498,8 @@ async fn attachment(
 async fn owned_binary_forwards_encrypted_traffic_and_reuses_identity_after_restart() {
     tokio::time::timeout(Duration::from_secs(45), async {
         let scratch = Scratch::new();
-        let ka = iroh::SecretKey::from_bytes(&[151; 32]);
-        let kb = iroh::SecretKey::from_bytes(&[152; 32]);
+        let ka = rds_net::SecretKey::from_bytes(&[151; 32]);
+        let kb = rds_net::SecretKey::from_bytes(&[152; 32]);
         let mut values = owned_args(&scratch, &[ka.clone(), kb.clone()], 2);
         if HOSTS_DIRECTORY {
             values.extend(args(&[
@@ -523,7 +525,7 @@ async fn owned_binary_forwards_encrypted_traffic_and_reuses_identity_after_resta
             // the allowlist, not an unrelated overload rejection.
             let denied = tokio::time::timeout(
                 Duration::from_secs(5),
-                attachment(relay.clone(), iroh::SecretKey::from_bytes(&[153; 32])),
+                attachment(relay.clone(), rds_net::SecretKey::from_bytes(&[153; 32])),
             )
             .await;
             assert!(
@@ -535,7 +537,7 @@ async fn owned_binary_forwards_encrypted_traffic_and_reuses_identity_after_resta
             let mut target = b.addr();
             target
                 .addrs
-                .retain(|address| matches!(address, iroh::TransportAddr::Relay(_)));
+                .retain(|address| matches!(address, rds_net::TransportAddr::Relay(_)));
             assert_eq!(target.addrs.len(), 1);
             if let Some(addr) = ready.directory {
                 let client = rds_discovery::client::Client::new(addr);
@@ -547,7 +549,7 @@ async fn owned_binary_forwards_encrypted_traffic_and_reuses_identity_after_resta
                                 .addrs
                                 .iter()
                                 .filter_map(|addr| match addr {
-                                    iroh::TransportAddr::Relay(url) => Some(url.to_string()),
+                                    rds_net::TransportAddr::Relay(url) => Some(url.to_string()),
                                     _ => None,
                                 })
                                 .collect(),
@@ -629,8 +631,8 @@ async fn owned_binary_forwards_encrypted_traffic_and_reuses_identity_after_resta
 async fn owned_binary_capacity_recovers_after_disconnect() {
     tokio::time::timeout(Duration::from_secs(20), async {
         let scratch = Scratch::new();
-        let ka = iroh::SecretKey::from_bytes(&[154; 32]);
-        let kb = iroh::SecretKey::from_bytes(&[155; 32]);
+        let ka = rds_net::SecretKey::from_bytes(&[154; 32]);
+        let kb = rds_net::SecretKey::from_bytes(&[155; 32]);
         let mut process = scratch.spawn(&owned_args(&scratch, &[ka.clone(), kb.clone()], 1));
         let relay = relay_address(&process.ready(true).await);
         let (first, _) = attachment(relay.clone(), ka).await.unwrap();
@@ -668,7 +670,7 @@ async fn explicit_development_open_mode_accepts_unlisted_peer_and_delivers_drain
         "--development-open-relay",
     ]));
     let relay = relay_address(&process.ready(true).await);
-    let (socket, handle) = attachment(relay, iroh::SecretKey::from_bytes(&[156; 32]))
+    let (socket, handle) = attachment(relay, rds_net::SecretKey::from_bytes(&[156; 32]))
         .await
         .unwrap();
     process.stop().await;

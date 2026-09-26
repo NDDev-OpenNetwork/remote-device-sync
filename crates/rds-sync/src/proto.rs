@@ -42,7 +42,7 @@ pub const MANIFEST_BATCH: usize = 512;
 pub const CHUNKSET_BATCH: usize = 4096;
 
 /// Control-stream and chunk-stream messages (postcard-framed via
-/// `rds_core::write_frame`).
+/// `rds_net::write_frame`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyncMsg {
     /// Holder → receiver: offer `rel_path`. `chunks` arrive as

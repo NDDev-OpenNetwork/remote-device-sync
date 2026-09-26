@@ -3466,12 +3466,14 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytes",
+ "data-encoding",
  "ed25519-dalek",
  "postcard",
  "proptest",
+ "rand 0.10.3",
  "serde",
  "thiserror 2.0.20",
- "tokio",
+ "url",
 ]
 
 [[package]]
@@ -3531,6 +3533,7 @@ dependencies = [
  "noq",
  "noq-proto",
  "postcard",
+ "proptest",
  "rand 0.10.3",
  "rds-core",
  "rds-discovery",

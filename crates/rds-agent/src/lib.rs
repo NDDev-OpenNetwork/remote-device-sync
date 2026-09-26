@@ -28,10 +28,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rds_core::grant::{GrantId, VerifiedGrant};
-use rds_core::{
-    AgentInfo, HelloAck, PROTOCOL_VERSION, ServiceKind, StreamHello, read_frame, write_frame,
-};
-use rds_net::{Connection, Endpoint, EndpointId};
+use rds_core::{AgentInfo, HelloAck, PROTOCOL_VERSION, ServiceKind, StreamHello};
+use rds_net::{Connection, Endpoint, EndpointId, read_frame, write_frame};
 use tokio::net::TcpStream;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;

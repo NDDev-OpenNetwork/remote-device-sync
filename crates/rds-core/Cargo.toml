@@ -13,11 +13,13 @@ desktop = []
 [dependencies]
 blake3.workspace = true
 bytes.workspace = true
-ed25519-dalek = { workspace = true, features = ["rand_core"] }
+data-encoding.workspace = true
+ed25519-dalek = { workspace = true, features = ["rand_core", "serde", "zeroize"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
-serde.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["rc"] }
 thiserror.workspace = true
-tokio.workspace = true
+url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 proptest.workspace = true

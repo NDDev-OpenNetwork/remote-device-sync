@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use rds_core::{
     Codec, DesktopCaps, DesktopControl, DesktopEvent, FrameHeader, HelloAck, StreamHello, UniHello,
-    read_frame, write_frame,
 };
 use rds_desktop::client::DesktopSession;
-use rds_net::{Backend, Connection, Endpoint, EndpointConfig, RecvStream, SendStream};
+use rds_net::{
+    Backend, Connection, Endpoint, EndpointConfig, RecvStream, SendStream, read_frame, write_frame,
+};
 
 async fn pair(backend: Backend) -> (Endpoint, Endpoint, Connection, Connection) {
     let config = EndpointConfig {

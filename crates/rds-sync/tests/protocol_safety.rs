@@ -1,6 +1,6 @@
 //! Adversarial peers use real transport streams and synthetic isolated files.
-use rds_core::{read_frame, write_frame};
 use rds_net::{Backend, Connection, Endpoint, EndpointConfig, bind_endpoint};
+use rds_net::{read_frame, write_frame};
 use rds_sync::{Manifest, engine, manifest_of, proto::SyncMsg};
 use std::{path::PathBuf, time::Duration};
 

@@ -37,7 +37,7 @@ async fn pair(backend: Backend) -> (Endpoint, Endpoint, Connection, Connection) 
 async fn accept(peer: &Connection) -> (rds_net::SendStream, rds_net::RecvStream) {
     tokio::time::timeout(Duration::from_secs(2), async {
         let (send, mut recv) = peer.accept_bi().await.unwrap();
-        let hello: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
+        let hello: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
         assert!(matches!(
             hello,
             rds_core::StreamHello::TcpConnect { port: 9, .. }
@@ -73,7 +73,7 @@ async fn canceling_forwarder_closes_live_splice_and_preserves_shared_connection(
         ));
         let mut local = TcpStream::connect(addr).await.unwrap();
         let (mut send, mut recv) = accept(&peer).await;
-        rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+        rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
             .await
             .unwrap();
         local.write_all(b"body").await.unwrap();
@@ -102,9 +102,9 @@ async fn canceling_forwarder_closes_live_splice_and_preserves_shared_connection(
             async move { rds_cli::ping(&conn, 3).await }
         });
         let (mut send, mut recv) = peer.accept_bi().await.unwrap();
-        let hello: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
+        let hello: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
         assert!(matches!(hello, rds_core::StreamHello::Ping { nonce: 3 }));
-        rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+        rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
             .await
             .unwrap();
         send.write_all(&3u64.to_be_bytes()).await.unwrap();
@@ -141,7 +141,7 @@ async fn forward_budget_recovers_and_connection_close_joins_workers() {
                 .await
                 .is_err()
         );
-        rds_core::write_frame(
+        rds_net::write_frame(
             &mut first,
             &rds_core::HelloAck::Error {
                 message: "fixture refusal".into(),

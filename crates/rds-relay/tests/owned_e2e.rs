@@ -3,8 +3,8 @@
 //! through the tunnel when only the relay candidate is dialable.
 #![cfg(feature = "owned-relay")]
 
-use iroh::{EndpointAddr, SecretKey, TransportAddr};
 use rds_net::{Backend, EndpointConfig};
+use rds_net::{EndpointAddr, SecretKey, TransportAddr};
 
 const ALPN: &[u8] = b"rds/0";
 

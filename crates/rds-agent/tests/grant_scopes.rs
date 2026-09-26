@@ -3,8 +3,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use ed25519_dalek::SigningKey;
 use rds_agent::{Agent, AgentPolicy};
-use rds_core::{ServiceKind, grant::Grant, read_frame, write_frame};
+use rds_core::{ServiceKind, grant::Grant};
 use rds_net::{Backend, Connection, Endpoint, EndpointConfig, RecvStream, SendStream};
+use rds_net::{read_frame, write_frame};
 use rds_sync::{engine, proto::SyncMsg};
 
 struct Scratch(PathBuf);

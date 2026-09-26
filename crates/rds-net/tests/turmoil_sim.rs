@@ -15,11 +15,11 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use iroh::{EndpointAddr, EndpointId, SecretKey, TransportAddr};
 use noq::udp::RecvMeta;
 use noq::{AsyncUdpSocket, UdpSender};
 use rds_net::EndpointConfig;
 use rds_net::backends::noq as rds_noq;
+use rds_net::{EndpointAddr, EndpointId, SecretKey, TransportAddr};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};

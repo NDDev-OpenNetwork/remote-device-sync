@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use iroh::SecretKey;
+use crate::SecretKey;
 use noq::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use noq::rustls;
 
@@ -30,8 +30,8 @@ const PROTOCOL_VERSIONS: &[&rustls::SupportedProtocolVersion] = &[&rustls::versi
 /// name is used only locally — to carry the expected peer id into the
 /// certificate verifier and to bucket 0-RTT session tickets per peer.
 pub mod name {
+    use crate::EndpointId;
     use data_encoding::BASE32_DNSSEC;
-    use iroh::EndpointId;
 
     pub fn encode(endpoint_id: EndpointId) -> String {
         format!(
@@ -220,8 +220,8 @@ impl rustls::sign::Signer for SecretKeySigner {
 }
 
 mod verify {
+    use crate::EndpointId;
     use ed25519_dalek::pkcs8::DecodePublicKey;
-    use iroh::EndpointId;
     use noq::rustls::pki_types::{
         InvalidSignature, SignatureVerificationAlgorithm, SubjectPublicKeyInfoDer,
     };

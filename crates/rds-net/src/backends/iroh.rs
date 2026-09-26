@@ -7,9 +7,68 @@
 
 use std::str::FromStr;
 
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, TransportAddr};
+use iroh::{Endpoint, RelayMap, RelayMode};
 
-use crate::EndpointConfig;
+use crate::{EndpointAddr, EndpointConfig, EndpointId, RelayUrl, TransportAddr};
+
+/// Adapter conversions between the owned shared types and iroh-base.
+///
+/// `rds-core` owns the wire-facing identity/address types so service
+/// crates never name a backend type; this module is the only place
+/// that translates. String and postcard encodings are byte-identical
+/// on both sides, so tickets and records stay interchangeable. Public
+/// but doc-hidden: external adapters and interop tests convert here
+/// too instead of re-deriving the mapping.
+#[doc(hidden)]
+pub mod convert {
+    use crate::{EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr};
+
+    pub fn id(id: EndpointId) -> iroh::EndpointId {
+        iroh::EndpointId::try_from(id.as_bytes()).expect("endpoint ids are validated")
+    }
+
+    pub fn id_from(id: iroh::EndpointId) -> EndpointId {
+        EndpointId::from_bytes(id.as_bytes()).expect("iroh ids are validated")
+    }
+
+    pub fn key(key: &SecretKey) -> iroh::SecretKey {
+        iroh::SecretKey::from(&key.to_bytes())
+    }
+
+    pub fn relay(url: &RelayUrl) -> iroh::RelayUrl {
+        iroh::RelayUrl::from(url.as_url().clone())
+    }
+
+    pub fn relay_from(url: iroh::RelayUrl) -> RelayUrl {
+        url.to_string()
+            .parse()
+            .expect("iroh relay urls are normalized")
+    }
+
+    pub fn transport(addr: &TransportAddr) -> iroh::TransportAddr {
+        match addr {
+            TransportAddr::Relay(url) => iroh::TransportAddr::Relay(relay(url)),
+            TransportAddr::Ip(sock) => iroh::TransportAddr::Ip(*sock),
+            other => unreachable!("TransportAddr variant added upstream: {other}"),
+        }
+    }
+
+    pub fn transport_from(addr: iroh::TransportAddr) -> TransportAddr {
+        match addr {
+            iroh::TransportAddr::Relay(url) => TransportAddr::Relay(relay_from(url)),
+            iroh::TransportAddr::Ip(sock) => TransportAddr::Ip(sock),
+            other => unreachable!("TransportAddr variant added upstream: {other}"),
+        }
+    }
+
+    pub fn addr(addr: &EndpointAddr) -> iroh::EndpointAddr {
+        iroh::EndpointAddr::from_parts(id(addr.id), addr.addrs.iter().map(transport))
+    }
+
+    pub fn addr_from(addr: iroh::EndpointAddr) -> EndpointAddr {
+        EndpointAddr::from_parts(id_from(addr.id), addr.addrs.into_iter().map(transport_from))
+    }
+}
 
 /// Bind an rds endpoint: configured ALPNs, identity and relay mode.
 ///
@@ -19,15 +78,17 @@ use crate::EndpointConfig;
 pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     config.validate_for(crate::Backend::Iroh)?;
     let mut builder = match (config.relays.is_empty(), config.discovery) {
-        (false, _) => Endpoint::builder(iroh::endpoint::presets::Minimal).relay_mode(
-            RelayMode::Custom(RelayMap::from_iter(config.relays.clone())),
-        ),
+        (false, _) => {
+            Endpoint::builder(iroh::endpoint::presets::Minimal).relay_mode(RelayMode::Custom(
+                RelayMap::from_iter(config.relays.iter().map(convert::relay)),
+            ))
+        }
         (true, true) => Endpoint::builder(iroh::endpoint::presets::N0),
         // No relay, no lookup: Minimal binds a plain QUIC socket.
         (true, false) => Endpoint::builder(iroh::endpoint::presets::Minimal),
     };
     if let Some(key) = config.secret_key {
-        builder = builder.secret_key(key);
+        builder = builder.secret_key(convert::key(&key));
     }
     builder = match config.transports {
         // Hard bound on reachable path kinds: iroh's in-band NAT
@@ -219,5 +280,29 @@ mod tests {
         let addr = parse_target(&id.to_string()).unwrap();
         assert_eq!(addr.id, id);
         assert!(addr.addrs.is_empty());
+    }
+
+    /// The owned types must encode byte-identically to iroh-base:
+    /// tickets and discovery records written by either side decode
+    /// on the other. Guards the postcard layout contract.
+    #[test]
+    fn owned_and_iroh_addresses_encode_identically() {
+        let key = SecretKey::generate();
+        let owned = EndpointAddr::new(key.public())
+            .with_ip_addr("10.0.0.7:12345".parse().unwrap())
+            .with_relay_url(RelayUrl::from_str("https://relay.example.com").unwrap());
+        let iroh_addr = iroh::EndpointAddr::new(convert::id(key.public()))
+            .with_ip_addr("10.0.0.7:12345".parse().unwrap())
+            .with_relay_url(iroh::RelayUrl::from_str("https://relay.example.com").unwrap());
+
+        assert_eq!(
+            postcard::to_stdvec(&owned).unwrap(),
+            postcard::to_stdvec(&iroh_addr).unwrap()
+        );
+        assert_eq!(convert::addr_from(iroh_addr), owned);
+
+        let ticket = Ticket(owned.clone()).to_string();
+        let parsed = Ticket::from_str(&ticket).unwrap().0;
+        assert_eq!(parsed, owned);
     }
 }

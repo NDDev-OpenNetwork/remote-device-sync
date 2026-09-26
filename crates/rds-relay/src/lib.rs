@@ -36,15 +36,19 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use iroh::EndpointId;
 use iroh_relay::server::{
     Access, AccessControl, AcmeConfig, CertConfig, ClientRequest, ConnectionId, RelayConfig,
     Server, ServerConfig, TlsConfig,
 };
+use rds_core::EndpointId;
 
 /// Admit only endpoint ids on the relay allowlist.
+///
+/// Stores the backend's key type: this impl is the iroh-relay adapter,
+/// so it compares in iroh terms. `serve()` still takes the owned
+/// `EndpointId`; conversion happens once at construction.
 #[derive(Debug)]
-struct AllowList(HashSet<EndpointId>);
+struct AllowList(HashSet<iroh::EndpointId>);
 
 impl AccessControl for AllowList {
     async fn on_connect(&self, request: &ClientRequest) -> Access {
@@ -57,7 +61,7 @@ impl AccessControl for AllowList {
         }
     }
 
-    fn on_disconnect(&self, _endpoint_id: EndpointId, _connection_id: ConnectionId) {}
+    fn on_disconnect(&self, _endpoint_id: iroh::EndpointId, _connection_id: ConnectionId) {}
 }
 
 /// TLS mode for the relay's HTTPS listener.
@@ -107,7 +111,14 @@ async fn serve_prepared(
 ) -> anyhow::Result<Server> {
     let mut relay_config = RelayConfig::new(addr);
     if !allow.is_empty() {
-        relay_config.access = Arc::new(AllowList(allow.into_iter().collect()));
+        relay_config.access = Arc::new(AllowList(
+            allow
+                .into_iter()
+                .map(|id| {
+                    iroh::EndpointId::try_from(id.as_bytes()).expect("endpoint ids are validated")
+                })
+                .collect(),
+        ));
     }
     relay_config.tls = tls;
     let mut config = ServerConfig::default();

@@ -16,7 +16,7 @@
 
 use anyhow::{Context, bail};
 
-use iroh::{EndpointAddr, EndpointId, TransportAddr};
+use crate::{EndpointAddr, EndpointId, TransportAddr};
 use rds_discovery::client::Client as DirectoryClient;
 use rds_discovery::{EndpointKey, EndpointRecord};
 

@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use rds_core::{
     Codec, DesktopCaps, DesktopControl, DesktopEvent, DesktopHello, FrameHeader, HelloAck,
-    InputEvent, InputKind, StreamHello, read_frame, write_frame,
+    InputEvent, InputKind, StreamHello,
 };
-use rds_net::Connection;
+use rds_net::{Connection, read_frame, write_frame};
 use tokio::sync::{Semaphore, SemaphorePermit, mpsc};
 use tokio::task::JoinSet;
 

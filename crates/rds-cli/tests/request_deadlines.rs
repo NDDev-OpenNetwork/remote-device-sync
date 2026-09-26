@@ -88,7 +88,7 @@ async fn canceling_request_resets_its_stream_without_closing_shared_connection()
         async move { rds_cli::ping(&conn, 4).await }
     });
     let (_send, mut recv) = peer.accept_bi().await.unwrap();
-    let hello: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
+    let hello: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
     assert!(matches!(hello, rds_core::StreamHello::Ping { nonce: 4 }));
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
@@ -118,9 +118,9 @@ async fn canceling_renewal_after_ack_without_fin_closes_the_uncertain_connection
         async move { rds_cli::renew_authorization(&conn, &grant).await }
     });
     let (mut send, mut recv) = peer.accept_bi().await.unwrap();
-    let hello: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
+    let hello: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
     assert!(matches!(hello, rds_core::StreamHello::RenewAuthz(_)));
-    rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+    rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
         .await
         .unwrap();
     assert!(
@@ -155,7 +155,7 @@ async fn authorization_deadline_includes_stream_credit() {
     };
     let task = tokio::spawn({
         let client = client.clone();
-        let addr = server.addr();
+        let addr = rds_net::backends::iroh::convert::addr_from(server.addr());
         async move {
             tokio::time::timeout(
                 Duration::from_secs(17),
@@ -193,14 +193,14 @@ async fn canceling_authorization_after_ack_without_fin_closes_connection() {
     };
     let mut task = tokio::spawn({
         let client = client.clone();
-        let addr = server.addr();
+        let addr = rds_net::backends::iroh::convert::addr_from(server.addr());
         async move { rds_cli::connect_authorized(&client, addr, &grant).await }
     });
     let peer = server.accept().await.unwrap().await.unwrap();
     let (mut send, mut recv) = peer.accept_bi().await.unwrap();
-    let hello: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
+    let hello: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
     assert!(matches!(hello, rds_core::StreamHello::Authz(_)));
-    rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+    rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
         .await
         .unwrap();
     // Keep the server's reply open, modeling an interrupted response transaction.
@@ -223,9 +223,9 @@ async fn ping_echo_shares_the_prelude_deadline() {
     let (client, server, conn, peer) = pair().await;
     let task = tokio::spawn(async move {
         let (mut send, mut recv) = peer.accept_bi().await.unwrap();
-        let _: rds_core::StreamHello = rds_core::read_frame(&mut recv).await.unwrap();
+        let _: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
         tokio::time::sleep(Duration::from_secs(10)).await;
-        rds_core::write_frame(&mut send, &rds_core::HelloAck::Ok)
+        rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
             .await
             .unwrap();
         // A fresh timeout for echo would allow 25 seconds; one budget allows 15.

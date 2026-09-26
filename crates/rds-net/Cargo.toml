@@ -32,6 +32,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 iroh-relay = { workspace = true, features = ["server"] }
+proptest.workspace = true
 turmoil = "0.7.2"
 
 [features]
