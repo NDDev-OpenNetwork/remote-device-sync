@@ -3405,6 +3405,7 @@ dependencies = [
  "ed25519-dalek",
  "iroh-relay",
  "noq",
+ "rand 0.10.3",
  "rds-agent",
  "rds-cli",
  "rds-discovery",

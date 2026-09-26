@@ -19,6 +19,7 @@ clap.workspace = true
 ed25519-dalek.workspace = true
 iroh-relay = { workspace = true, features = ["server"] }
 noq = { workspace = true, optional = true }
+rand.workspace = true
 rds-agent.workspace = true
 rds-relay = { workspace = true, optional = true, features = ["owned-relay"] }
 rds-cli.workspace = true
