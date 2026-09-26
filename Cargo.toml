@@ -53,7 +53,7 @@ noq = "1"
 noq-proto = "1"
 postcard = "1"
 proptest = "1"
-rand = "0.9"
+rand = "0.10"
 redb = "4.3"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rustix = { version = "1", features = ["fs"] }
