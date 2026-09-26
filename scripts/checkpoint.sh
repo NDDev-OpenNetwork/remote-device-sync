@@ -51,6 +51,15 @@ ${extra}
 - [ ] security/unsafe review done for new code paths
 EOF
     note "wrote $REPORTS/checkpoint-${gate}.md"
+
+    note "append hash-chained machine receipt (docs/receipts/)"
+    cargo run -q -p rds-bench -- receipt \
+        --kind gate --subject "$gate" --status pass --topology loopback \
+        --report "$REPORTS/checkpoint-${gate}.md" \
+        --note "verdict: $verdict" \
+        || fail "receipt append"
+    cargo run -q -p rds-bench -- validate-receipts \
+        || fail "receipt log validation"
 }
 
 case "$GATE" in
@@ -98,7 +107,7 @@ c1)
         || fail "turmoil sim"
 
     note "noq bench suite"
-    cargo run -q -p rds-bench --features transport-noq -- run --scenario all --backend noq \
+    cargo run -q -p rds-bench --features rds-bench/transport-noq -- run --scenario all --backend noq \
         --json "$REPORTS/bench-${TS}-noq.json" --md "$REPORTS/bench-${TS}-noq.md" \
         || fail "noq bench suite"
 

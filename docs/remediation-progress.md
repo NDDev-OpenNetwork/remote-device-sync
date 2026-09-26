@@ -31,7 +31,10 @@ Neither increment closes these product gaps or any wave.
 |---|---|---|
 | W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08 has failing-before actual-client Drain/drop regressions and passing framing/grace checks. R09 has failing-before direct/relay candidate regressions and passing family/cancellation checks. Desktop byte/cancellation and lifecycle regressions now cover the W6.1/W6.2 increments; broader native/network qualification remains open. |
 | W0.2 | Partial; receiver completion barrier | Versioned transfer goodput waits for exact received byte count, BLAKE3 digest and response EOF under one operation deadline. A missing-receipt regression failed before the fix; corrupt/truncated/reordered payloads, invalid receipts, delayed reception and real iroh/noq forwarded-TCP checks cover the boundary. Known-rate calibration, connect/auth/service phase timings and topology/load qualification remain open; see [contract](benchmark-transfer.md). |
+| W0.3 | Partial; Linux bench worlds contained | `Transports` bounds peer-path kinds per endpoint: iroh removes the transport itself (`clear_ip_transports`/`clear_relay_transports`) because its in-band QNT exchange cannot be disabled; noq suppresses direct candidates from `addr()`, dialing, advertisement and learned-candidate opens while keeping the UDP socket its relay attachment rides. `max_multipath_paths=1` now actually pins iroh via a first-path selector (config floors would otherwise leave migration open); noq pins through its own policy. noq bench worlds run the owned `rds-relay` with impairment proxies on each endpoint↔relay leg; noq impaired-direct uses socket-level impairment. Integrity enforcement now requires offered-vs-observed coverage (every sent datagram entered an impairment device) and a delay floor on measured path RTT; both caught the real iroh/noq escapes this change fixed. `resolve-connect` runs on noq through the owned relay. iroh relay-impaired remains an explicit skip (TCP relay leg, no UDP impairment model); recovery-path scenarios and real-network qualification remain open. |
 | W0.4 | Partial; comparator faults refused | Absent metrics, nonfinite values, failed scenarios, insufficient samples and backend/impairment profile mismatches now refuse comparison (seed excluded from profile). `checkpoint.sh` registers `r0-evidence` with a CLI negative-fixture battery; the c1 noq suite gains its missing `transport-noq` feature flag. Gate invocation and re-qualification of historical reports remain open; see section below. |
+| W0.5 | Partial; versioned matrix landed | `docs/capability-matrix.md` v1 records implemented/experimental/stub/unavailable per capability with runtime prerequisites separate from state. Tests enforce every `ServiceKind` variant and every `rds-bench` lane name has a matrix row, the state vocabulary is closed, placeholders name what is missing and README links the matrix. Live `rds info` advertisement ↔ matrix agreement beyond enum coverage, per-report capability tagging and release-gate enforcement remain open. |
+| W0.6 | Partial; hash-chained receipt schema landed | `docs/receipts/rds-receipts.jsonl` is append-only JSONL, one receipt per gate/report: full commit SHA, dirty flag, bench-binary and Cargo.lock digests, toolchain channel, features, OS/arch, topology class, repetitions/failures/skips, budgets and cited-report digests — no host identifiers. `prev_hash`/`hash` chaining rejects tampered, reordered or mid-deleted lines with the offending line number; `rds-bench receipt`/`validate-receipts` are the writer/reader and `write_checkpoint` now records every gate run. Historical receipt backfill, `--report` coverage of bench JSONs inside gates and release-gate consumption remain open. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
@@ -1552,3 +1555,138 @@ Local validation: `cargo fmt --check`, `cargo clippy -p rds-bench
 --all-targets -- -D warnings`, `cargo test -p rds-bench` (10 tests), the
 fixture battery through the built CLI (7 refused, 1 accepted) and
 `bash -n scripts/checkpoint.sh`.
+
+## 2026-09-26 — versioned capability matrix (W0.5 partial)
+
+`docs/capability-matrix.md` v1 is now the single source of truth for what
+this build claims: every service kind, transport, desktop backend, codec,
+platform, policy/discovery surface and bench lane carries an explicit state
+(`implemented`/`experimental`/`stub`/`unavailable`) and a separate runtime-
+prerequisites column. The header states `matrix_version`, and the doc states
+that placeholder states must name what would make them real.
+
+Agreement is enforced rather than asserted: a shared checker under
+`tests/support/` parses the matrix and is included by `rds-cli` tests
+(every `ServiceKind` variant must have a `service:<kebab>` row; `audio`
+must stay `stub` until a codec exists) and `rds-bench` tests (every lane in
+`scenario::LANES` must have a `measure:<name>` row, so an emitted report
+name always resolves to a declared capability). README links the matrix and
+the checker fails if the link is removed. The lane list is now a single
+`LANES` constant in `rds-bench`, so `run --scenario all` and the matrix test
+share one ordering source.
+
+Remaining W0.5 scope: live `rds info` advertisement ↔ matrix agreement
+beyond enum coverage, per-report capability tagging, release-gate
+enforcement, and qualification of the experimental rows themselves.
+
+## 2026-09-26 — append-only receipt log (W0.6 partial)
+
+`rds-bench` gains a receipt writer and validator. `rds-bench receipt`
+appends one JSON object per line to `docs/receipts/rds-receipts.jsonl`
+recording full commit SHA, dirty flag, digests of the bench binary and
+`Cargo.lock`, the pinned toolchain channel, enabled features, OS/arch,
+topology class, repetitions/failures/skips, explicit budgets, and the
+blake3 digest of every cited report. No hostnames, addresses or user
+paths are recorded — receipts are reproducible without private host
+identifiers.
+
+Every line carries `prev_hash` (the previous line's `hash`, `genesis`
+for the first) and `hash` over the canonical JSON. `rds-bench
+validate-receipts` replays the whole log: a tampered field, a swapped
+line order or a mid-log deletion fails with the offending line number.
+Unit tests cover the roundtrip, tamper, reorder, bad-status and
+bad-budgets refusals; the writer only ever appends, so history is
+linked rather than overwritten.
+
+`write_checkpoint` now appends a `kind:gate` receipt — citing the
+checkpoint markdown by digest — immediately after writing it, so every
+future gate run leaves machine-checkable evidence. Receipts only record
+executed gates; a failed gate appends nothing and validates nothing.
+
+Remaining W0.6 scope: citing each gate's bench JSONs individually,
+backfilling receipts for historical reports where their inputs are
+still known, per-report capability tagging (W0.5 link) and release-gate
+consumption of the log.
+
+## 2026-09-26 — measured-path containment (W0.3 partial)
+
+Every bench world now bounds the peer-path kinds its ticket advertises
+instead of trusting the ticket alone. `EndpointConfig::transports` is the
+hard bound: `DirectOnly`/`RelayOnly` on iroh physically remove the other
+transport (`clear_relay_transports`/`clear_ip_transports`) — required
+because iroh's in-band NAT-traversal exchange cannot be switched off
+(`max_remote_nat_traversal_addresses` floors at 8) and `observed_address
+_reports=false` does not cover candidate exchange. On noq, `RelayOnly`
+suppresses direct addrs in `addr()`, dial candidates, in-band QNT
+advertisement and learned-candidate path opens while keeping the UDP
+socket the owned-relay attachment rides on.
+
+Two real escapes were found and closed. iroh relay-only had opened a
+direct path mid-run (integrity check caught 9146B direct under a relay
+ticket). iroh direct-impaired was worse: QNT migrated path 0 to the
+agent's unproxied address, so the "impaired" suite measured loopback RTT
+(~5 ms under configured 50 ms) while counters still showed residual
+proxy traffic — the old `forwarded > 0` check could not see it. Integrity
+now additionally requires the impairment devices' offered count to cover
+every datagram the client sent on the claimed kind, and a configured
+one-way delay to surface as a measured path-RTT floor (0 = unobserved,
+skipped). Both checks independently detect the fixed escapes.
+
+`max_multipath_paths=1` finally pins on iroh: the transport config floors
+the cap at 14, so the backend installs a `PathSelector` (iroh's
+visibility-only `unstable-custom-transports` feature) that keeps the
+path the handshake established per remote — the first `select` call can
+only see the dialed path, and a later clean path is never selected. On
+noq the same flag suppresses advertisement and traversal initiation; the
+relay-socket helper endpoint is pinned to its bootstrap path, which is
+what keeps relay-impaired traffic on the impaired attachment legs.
+
+noq bench worlds now run the owned `rds-relay` server, with a UDP impair
+proxy on each endpoint↔relay attachment leg for `relay-impaired`, and
+socket-level impairment (`ImpairingSocket` under the whole endpoint) for
+`direct-impaired`, which is immune to path migration by construction.
+`resolve-connect` runs on noq through the owned relay (directory +
+announce + resolve are transport-agnostic). On iroh, `impaired` emits an
+explicit `SCENARIO SKIPPED` row for `relay-impaired` — its relay leg is
+TCP, outside the UDP impairment model — instead of silently omitting the
+lane, and without `transport-noq` the lane is skipped as unavailable
+rather than absent.
+
+Verification on Linux, debug profile: `run --scenario all` passes on
+iroh (handshake/ping/transfer direct; multiconnect and impaired on
+proxied direct; relay-fallback on pure `via="relay"` counters;
+resolve-connect 10/10) and on noq (all eight lanes, including
+relay-impaired at ~280 ms RTT with ~380 proxied datagrams and
+resolve-connect 10/10 through the owned relay). Failed worlds close
+endpoints before integrity is enforced, so a rejected measurement no
+longer logs ungraceful endpoint drops; `resolve-connect` also closes its
+agent endpoint.
+
+Remaining W0.3 scope: recovery/migration scenarios (path loss → relay,
+relay → direct upgrade) are not yet lanes; iroh cannot run
+relay-impaired at all (TCP relay leg); the iroh pin is selection-level —
+an opened-but-unused learned path still exists and is disclosed via
+`paths_seen`; real-network and macOS qualification remain open.
+
+Gate evidence 2026-09-26 (commit f6c780b): `scripts/checkpoint.sh c0`
+and `c1` both pass — c0's iroh suite is reproducible (p95 ±15%) with the
+direct-impaired lane offering 947 datagrams against 612 sent, and c1's
+noq suite carries relay-impaired at 293 ms p50 (offered 2347, sent 337)
+plus `resolve-connect` 100/100 through the owned relay. The c1 gate
+itself needed one fix: its bench line ran `rds-bench` without
+`--features rds-bench/transport-noq`, so noq scenarios could never pass —
+added (the clippy line already had it). Receipts: two hash-chained
+`gate` records appended to `docs/receipts/rds-receipts.jsonl` and
+verified intact.
+
+A latent feature-unification bug surfaced in the same sweep:
+`rds-desktop`/`rds-sync` dev-depend on `rds-bench` with `transport-noq`,
+which enables `rds-relay/owned-relay` workspace-wide under
+`cargo test --workspace`. The `rds-server` binary then *has* the owned
+backend while its own `owned-relay` flag is off — and a shared test that
+spawned `--relay-backend noq` expecting "backend unavailable" instead
+started a live relay and hit the child-exit timeout (deterministic, not
+a flake: it failed only in workspace runs). Tests now probe
+`rds_relay::OWNED_BACKEND_COMPILED`, which answers for the compiled
+library rather than the including package's flag; the rejection contract
+(explicit refusal, no state) is exercised either way.
