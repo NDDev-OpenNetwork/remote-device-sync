@@ -232,6 +232,14 @@ new Rust modules only where a real ownership boundary is needed.
 | W2.7 | Own endpoint/address/service/frame types; isolate iroh/noq and native adapters; move async framing out of the documented runtime-free type layer or explicitly revise that contract. | Layer checks and feature-isolated builds; service crates do not depend on backend-specific path/address representation. |
 | W2.8 | Add session correlation and structured lifecycle events with typed reason codes, key-safe diagnostics and measured stage timestamps. | One trace explains dial→grant→service→migration→close across components without secrets or private filenames by default. |
 
+W2.2/W2.4 implementation update (2026-09-26): [managed single-file transfers](local-sessions.md)
+reuse the agent identity and pin session handles. New transfer-specific uni tags
+isolate delayed/canceled data, with bounded live routes and coordinated IPC v4
+migration. [The receipt](reports/rds-managed-sync-20260926.md) covers both
+transport backends, preserved TCP on cancellation, grants and real CLI processes.
+Viewer APIs, broader negotiation, native/installed qualification and directory
+synchronization remain open; this increment does not close `r2-session-core`.
+
 W2.3 implementation update (2026-09-25): [grant v2 and explicit renewal](grant-leases.md)
 bind subject/audience/session, preserve stable-ID revocation and continuous-clock
 expiry, and serialize managed renewal. Scope reductions currently require revoke

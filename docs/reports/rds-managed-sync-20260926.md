@@ -62,6 +62,24 @@ could win the new cancellation watcher after sending Done. The watcher and FIN
 handshake are now specific to the new tagged extension, preserving legacy
 completion behavior; the original regression and full workspace tests passed.
 
+## Supporting transport measurement
+
+The existing `rds-bench` transfer scenario ran on clean source
+`278d6d4bf456f449b5b1aa12be6064d1da824147` with both backends, debug profile,
+8 MiB over a synthetic direct loopback path:
+
+| Backend | Harness throughput | Evidence |
+|---|---:|---|
+| iroh | 8.42 MiB/s | [JSON](bench-managed-sync-20260926-iroh.json), [report](bench-managed-sync-20260926-iroh.md) |
+| noq | 13.37 MiB/s | [JSON](bench-managed-sync-20260926-noq.json), [report](bench-managed-sync-20260926-noq.md) |
+
+Reproduce with `cargo run -p rds-bench --features transport-noq -- run
+--scenario transfer --iterations 3 --transfer-mib 8 --backend <iroh|noq>`.
+This scenario transfers one bulk TCP stream; it does not use `iterations` to
+repeat the throughput sample. These are single local samples, not managed-file
+commit throughput, latency percentiles, a backend ranking or WAN acceptance.
+The managed file/session correctness evidence is the integration suite above.
+
 ## Remaining boundaries
 
 Upgrade local CLI and agent together for IPC v4; managed transfers require a
