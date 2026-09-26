@@ -18,6 +18,7 @@ use rds_core::{DesktopControl, DesktopEvent, DesktopHello, FrameHeader, read_fra
 use rds_net::{Connection, PathStats, RecvStream, SendStream};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::DesktopError;
 
@@ -214,12 +215,17 @@ pub async fn serve_desktop(
 /// (grant constraints) and substitute the frame source (tests, bench).
 pub async fn serve_desktop_with(
     conn: Connection,
-    mut send: SendStream,
+    send: SendStream,
     mut recv: RecvStream,
     hello: DesktopHello,
     config: SessionConfig,
 ) -> Result<(), DesktopError> {
-    send.set_priority(CONTROL_PRIORITY)?;
+    let mut send = SessionSend(send);
+    send.0.set_priority(CONTROL_PRIORITY)?;
+    // Dropping the serving future aborts async siblings and queued blocking
+    // work. A running capture call may finish, then sees its receiver closed.
+    let mut workers = JoinSet::new();
+    let mut capture = JoinSet::new();
     let clock = config.clock.clone().unwrap_or_default();
     let max_fps = hello.max_fps.clamp(1, 240);
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(max_fps));
@@ -233,13 +239,13 @@ pub async fn serve_desktop_with(
 
     // Capture+encode runs on a blocking thread; frames flow to the writer.
     let (tx, mut rx) = mpsc::channel::<Produced>(2);
-    let capture_task = {
+    {
         let clock = clock.clone();
         let bitrate = Arc::clone(&controls.bitrate);
         let idr = Arc::clone(&controls.idr);
         let misses = Arc::clone(&controls.deadline_misses);
         let mut producer = config.producer;
-        tokio::task::spawn_blocking(move || {
+        capture.spawn_blocking(move || {
             let producer_controls = ProducerControls {
                 bitrate,
                 idr,
@@ -279,12 +285,12 @@ pub async fn serve_desktop_with(
 
     // Pacing: sample path counters + deadline misses into the controller,
     // which writes the bitrate the producer reads each frame.
-    let pacing = {
+    {
         let conn = conn.clone();
         let bitrate = Arc::clone(&controls.bitrate);
         let misses = Arc::clone(&controls.deadline_misses);
         let mut controller = BitrateController::new(4_000_000, ceiling);
-        tokio::spawn(async move {
+        workers.spawn(async move {
             let mut tick = tokio::time::interval(PACING_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -309,7 +315,7 @@ pub async fn serve_desktop_with(
     let writer_clock = clock.clone();
     let writer_bitrate = Arc::clone(&controls.bitrate);
     let writer_idr = Arc::clone(&controls.idr);
-    let mut writer = tokio::spawn(async move {
+    workers.spawn(async move {
         // Token bucket on the paced bitrate: offering faster than the
         // path sustains only backlogs QUIC's send buffer with frames
         // that arrive stale — the collapse cannot reach them once
@@ -409,7 +415,14 @@ pub async fn serve_desktop_with(
                             seq,
                             handled_ts_ms: send_clock.now_ms(),
                         };
-                        if write_frame(&mut send, &ack).await.is_err() {
+                        if !matches!(
+                            tokio::time::timeout(
+                                FRAME_SEND_TIMEOUT,
+                                write_frame(&mut send.0, &ack)
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
                             break;
                         }
                     }
@@ -422,10 +435,14 @@ pub async fn serve_desktop_with(
                     controls.bitrate.store(bps, Ordering::Relaxed);
                 }
                 Ok(DesktopControl::Heartbeat { seq, ts_ms }) => {
-                    if write_frame(&mut send, &DesktopEvent::Heartbeat { seq, ts_ms })
-                        .await
-                        .is_err()
-                    {
+                    if !matches!(
+                        tokio::time::timeout(
+                            FRAME_SEND_TIMEOUT,
+                            write_frame(&mut send.0, &DesktopEvent::Heartbeat { seq, ts_ms })
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    ) {
                         break;
                     }
                 }
@@ -436,19 +453,25 @@ pub async fn serve_desktop_with(
 
     let result = tokio::select! {
         _ = control => Ok(()),
-        res = &mut writer => match res {
-            Ok(()) => Ok(()),
-            Err(e) => Err(DesktopError::Io(std::io::Error::other(e.to_string()))),
+        res = workers.join_next() => match res {
+            Some(Ok(())) | None => Ok(()),
+            Some(Err(e)) => Err(DesktopError::Io(std::io::Error::other(e.to_string()))),
         },
     };
-    // Teardown has to unwind every task: `writer` and `pacing` must be
-    // aborted — dropping their JoinHandles only detaches them. Once the
-    // writer stops, `rx` closes and the blocking producer exits on
-    // `tx.is_closed()` (abort() cannot interrupt spawn_blocking work).
-    writer.abort();
-    pacing.abort();
-    capture_task.abort();
+    // Normal exit joins the asynchronous siblings. Cancellation during this
+    // shutdown still drops the JoinSet and aborts its remaining children.
+    workers.shutdown().await;
+    capture.abort_all();
     result
+}
+
+/// A canceled control reply must not end with a partial, apparently clean FIN.
+struct SessionSend(SendStream);
+
+impl Drop for SessionSend {
+    fn drop(&mut self) {
+        let _ = self.0.reset(0u32.into());
+    }
 }
 
 /// Platform capture producer, or a `NullProducer` when the build has no
