@@ -439,3 +439,81 @@ The first implementation sequence is W0.1 plus W1.1/W1.2 (revocation and
 authorization), W1.3 (name trust), W1.6–W1.9 (file correctness/confinement),
 then W3.1 (dial fallback), with W0 measurement repairs alongside. Each can be
 reviewed as a bounded patch. The rest of the plan builds on these invariants.
+
+## Remaining-work ordering — verified against code 2026-09-26
+
+Every `Partial` row in the progress ledger splits into work executable on
+this Linux workspace and work gated on platform/network/GDS integration.
+The ordering below respects the wave dependency graph; an item appears
+once at its first actionable position.
+
+### Executable now (Linux, in-repo)
+
+1. **W2.7 — owned types and layer discipline** *(next)*.
+   `rds-net` publicly aliases `iroh::{EndpointAddr, EndpointId, RelayUrl,
+   SecretKey, TransportAddr}` — service crates are coupled to iroh's API
+   surface, and `rds-core` carries tokio `read_frame`/`write_frame` despite
+   the documented "no io, no async runtime" leaf contract (its callers all
+   already depend on `rds-net`). Own the identity/address/service/frame
+   types in `rds-core` as wire-identical newtypes (postcard newtype
+   transparency keeps signed `EndpointRecord` bytes stable), confine
+   `From`/`Into` adapters to `backends::*`, and move async framing into
+   `rds-net::wire`.
+2. **W2.8 — session correlation and typed lifecycle events.**
+   One structured event stream (tracing span/fields, typed reason codes,
+   stage timestamps) explaining dial→grant→service→migration→close;
+   no secrets or private filenames by default. Design against current
+   `tracing` conventions; must compose with the O-series observability
+   rows in W10.
+3. **W3.3 — warm secondary relay and measured migration.** The owned
+   relay has Drain/PeerGone/grace traffic verified; add a second
+   attachment, measured active-session migration under interruption
+   budget, and the bench lane that proves it.
+4. **W0 closures.** W0.2 phase timings (connect/auth/first-byte/payload)
+   and known-rate calibration; W0.3 recovery-path scenarios
+   (kill/rebind/path-loss mid-transfer); W0.4 historical report
+   re-qualification under the strict comparator; W0.5 live `rds info`
+   ↔ matrix agreement and per-report capability tagging; W0.6 receipt
+   backfill and `--report` coverage inside gates.
+5. **W1 closures.** W1.5 legacy-record cutover path; W1.9 explicit
+   transfer IDs/negotiation and cancellation barriers; W1.10 inactive/
+   legacy journal collection.
+6. **W2 remainder.** W2.1 role-level service/authority settings and
+   timeout policy; W2.2 version/capability/limit negotiation and
+   session/transfer IDs (depends on 2.7 types); W2.3 tenant/policy
+   binding and per-path/account scopes; W2.4 viewer-manager APIs and
+   installed-binary migration; W2.5 global RSS/FD bounds and per-service
+   fairness; W2.6 global timeout classes and retry jitter.
+7. **W3 remainder.** W3.2 hung-task/recovery policy and budgets; W3.4
+   relay federation semantics; W3.5 TLS-over-443 fallback; W3.6 churn
+   soak + flap hysteresis; W3.9 service-aware recovery over replacement
+   connection; W3.10 warm-path evaluation after correctness.
+8. **W5/W6 remainder.** W5.4 reconnectable PTY sessions, W5.5 forwarding
+   bounds, W5.6 multi-hour lease-renewed sessions; W6.3 window/event
+   loop + presentation, W6.5 Unicode/geometry, W6.6 event-driven wakeup,
+   W6.7 bitrate policy, W6.8 pixel-level harness.
+9. **W8.** Journal Done durability + seeded kill matrix (8.1),
+   changing-source/conflict policy + GC (8.2), bounded parallel
+   receive/write (8.3), directory manifest/watch/reconcile (8.4),
+   metadata/conflict model (8.5), dry-run/filters/progress API (8.6).
+10. **W10 remainder.** Queue/task adapters, phase/reason correlation
+    (depends on W2.8), support bundles, rollout, liveness, overhead.
+
+### Blocked on platform, network or estate integration — stay visibly open
+
+- Native macOS qualification everywhere it appears (W1.5/1.8/1.9/1.10,
+  W2.4, W4.4, W5.x, W6.x): needs the macOS runner/device.
+- W7 (ScreenCaptureKit, VideoToolbox, CGEvent/TCC, launchd, Wayland):
+  macOS/Wayland implementation wave, not Linux-testable.
+- Real-network qualification (W0.2/0.3 tail, W3.1 remote scope, W3.7
+  interface changes, W3.8 topology matrix): loopback evidence only today;
+  each needs its real topology.
+- W1.10 physical power loss and W9.3 hardware codecs.
+- W4.1–W4.5 and the GDS-issuer parts of W2.3/W5: cross-repository —
+  module contracts land here, authority/estate wiring lands in the
+  private estate and GDS repos.
+- Deployment receipts vs running digests (W4.5) need a real deployment.
+
+Land each wave as its own PR on top of `main`; wave-close requires the
+registered checkpoint gate (or an explicit documented reason it does not
+yet apply) plus `docs/remediation-progress.md` updated in the same PR.
