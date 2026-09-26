@@ -23,9 +23,13 @@ pub(crate) mod worker;
 
 /// First usable input backend on this machine.
 pub fn probe() -> Result<Box<dyn InputSink>, DesktopError> {
+    probe_for_display(0)
+}
+
+pub(crate) fn probe_for_display(_display: u32) -> Result<Box<dyn InputSink>, DesktopError> {
     #[cfg(all(target_os = "linux", feature = "x11"))]
     if std::env::var_os("DISPLAY").is_some() {
-        return Ok(Box::new(x11::XtestInput::new()?));
+        return Ok(Box::new(x11::XtestInput::for_display(_display)?));
     }
     Err(DesktopError::Input(
         "no input backend available on this host".into(),

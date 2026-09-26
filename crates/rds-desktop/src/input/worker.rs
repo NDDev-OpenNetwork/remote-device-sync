@@ -33,7 +33,7 @@ impl InputWorker {
                     break;
                 }
                 if sink.is_none() {
-                    match super::probe() {
+                    match super::probe_for_display(job.event.display_id) {
                         Ok(backend) => sink = Some(backend),
                         Err(error) => {
                             let _ = job.reply.send(Err(error));

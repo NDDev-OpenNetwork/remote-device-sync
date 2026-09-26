@@ -62,12 +62,13 @@ impl X11Capturer {
         let (conn, default_screen) =
             RustConnection::connect(None).map_err(|e| DesktopError::Capture(e.to_string()))?;
         let setup = conn.setup();
-        let idx = (screen as usize).min(setup.roots.len().saturating_sub(1));
-        let root = setup.roots[idx].root;
-        let (width, height) = (
-            setup.roots[idx].width_in_pixels,
-            setup.roots[idx].height_in_pixels,
-        );
+        let idx = screen as usize;
+        let display = setup
+            .roots
+            .get(idx)
+            .ok_or_else(|| DesktopError::Capture("X11 display does not exist".into()))?;
+        let root = display.root;
+        let (width, height) = (display.width_in_pixels, display.height_in_pixels);
         let _ = default_screen;
         let shm = Self::try_shm(&conn, width, height);
         let damage = Self::try_damage(&conn, root);
@@ -245,18 +246,13 @@ mod tests {
 
     use super::*;
 
-    /// Real capture needs an X server — skipped silently when `$DISPLAY`
-    /// is unset (CI has none). On a local server (`:N`) MIT-SHM must be
-    /// present; remote `host:N` displays legitimately lack it.
+    /// Explicit native fixture: never silently succeeds without capture.
     #[test]
+    #[ignore = "requires a dedicated Xvfb server; repaints its root"]
     fn capture_roundtrip() {
-        let Some(display) = std::env::var_os("DISPLAY") else {
-            return;
-        };
+        let display = std::env::var_os("DISPLAY").expect("dedicated X11 server required");
         let local = display.to_string_lossy().starts_with(':');
-        let Ok(mut cap) = X11Capturer::new(0) else {
-            return;
-        };
+        let mut cap = X11Capturer::new(0).expect("native X11 capture must open");
         if local {
             assert!(cap.shm.is_some(), "local X server without MIT-SHM 1.2?");
             assert!(cap.damage.is_some(), "local X server without DAMAGE?");

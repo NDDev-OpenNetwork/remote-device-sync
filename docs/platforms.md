@@ -90,3 +90,11 @@ remain pending; Linux tests also inject boot changes and discontinuous clocks.
   `#[cfg]` inside function bodies — gate the module declaration.
 - `unsafe` is confined to backend files and flagged by lint policy;
   each unsafe block carries a `// SAFETY:` note.
+
+## Native X11 test boundary
+
+The required Linux CI Xvfb lane runs actual capture and input tests on two
+isolated screens. Ordinary tests explicitly ignore those cases instead of
+silently passing without DISPLAY or injecting into an ambient developer seat.
+See [the X11 contract and reproduction command](x11-input.md). This fixture does
+not qualify a composited desktop, RandR monitor changes, Wayland or macOS.

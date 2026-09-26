@@ -226,7 +226,7 @@ pub enum InputKind {
     PointerMotion { dx: f64, dy: f64 },
     /// evdev button code.
     PointerButton { button: i32, pressed: bool },
-    /// High-resolution scroll deltas.
+    /// Scroll in fractional wheel steps: positive x is left, positive y is up.
     Scroll { dx: f64, dy: f64 },
 }
 
