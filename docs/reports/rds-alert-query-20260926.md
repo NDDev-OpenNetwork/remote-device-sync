@@ -36,6 +36,17 @@ logs and buffer/error metrics are now included on ingestion timeout. This
 delivery uncertainty remains under investigation rather than being attributed
 to query caching or hidden by a longer timeout.
 
+Focused formatting, clippy and all 25 `rds-observe` unit tests passed locally.
+A fixed three-run diagnostic batch of the expanded pipeline then passed all
+three times. These results strengthen regression coverage but do not disprove
+the recorded delivery stall.
+
+The [first PR pipeline run](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/36230012556)
+stopped before Rust tests because the public image registry returned
+`toomanyrequests: Rate exceeded`. CI now makes at most three pulls of each
+unchanged digest, with 0/10/30-second backoff and a 120-second cap per pull.
+Failure still fails the job; there is no mutable-tag fallback or test retry.
+
 The test still checks the real pinned Vector/OpenObserve pipeline, remote-write
 metrics, scheduled local webhook, and collector/backend restart recovery. It
 uses only disposable synthetic peers, credentials and destinations. This is
