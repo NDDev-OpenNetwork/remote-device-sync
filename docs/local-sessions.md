@@ -72,8 +72,8 @@ no accidental ephemeral-identity fallback. `desktop` still requires this explici
 mode because its manager API remains unimplemented. Send/receive default to the manager.
 The local wire version is now **4** (adds file transfers); upgrade CLI
 and agent together. Old/new local versions fail without mutating session state.
-Remote ALPN is unchanged, with an appended isolated sync greeting; signed grant v2 requires a coordinated
-issuer/agent/client migration. See [renewal contract](grant-leases.md).
+Remote ALPN is unchanged, with an appended isolated sync greeting; signed grant v3 accepts v2 payloads but a
+pinned tenant/policy binding refuses them. See [renewal contract](grant-leases.md).
 
 `list --json` returns instance ID, generation, endpoint, selected handle and
 entries. Handles print as 32 hexadecimal characters. `ping`, `info`, `ssh`,

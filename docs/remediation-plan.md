@@ -254,6 +254,16 @@ slot across ACK failures/cancellation; input ACKs require backend success.
 See the [contract](grant-leases.md) and [Linux receipt](reports/rds-service-scopes-20260926.md).
 This does not close enrollment, account/tenant isolation or native platform gates.
 
+W2.3 implementation update (2026-09-27): grant payload v3 adds `tenant` and
+`policy_revision` claims plus a `sync_paths` subtree allowlist under
+[grant-leases](grant-leases.md). Version-dispatched decode still verifies v2
+grants; agents pin the binding via `authority.tenant`/`policy_min_revision`
+(`--tenant`/`--policy-min-revision`) and refuse unscoped or mismatched grants.
+Sync `Offer`/`Request` enforce the signed path scope after relative-path
+normalization and before any filesystem access. Account-level scopes,
+automatic GDS issuance/renewal and policy reconciliation remain
+cross-repository work.
+
 ## W3 — complete owned connectivity and recovery
 
 Proposed gate: `r3-connectivity-parity`. Scope: net/noq, relay, server, bench.
