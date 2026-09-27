@@ -239,9 +239,13 @@ async fn invalid_or_misapplied_relay_flags_do_not_initialize_state() {
             0 => args(&["--relay-backend", "unknown"]),
             1 => args(&["--relay-key-file", &key]),
             2 => args(&["--relay-max-connections", "1"]),
-            3 => args(&["--development-open-relay"]),
-            4 => args(&["--tls-https-addr", "127.0.0.1:0"]),
-            5 => args(&["--tls-acme-staging"]),
+            3 => args(&["--development-open-relay", "--allow", &allow]),
+            4 => args(&[
+                "--development-open-relay",
+                "--tls-https-addr",
+                "127.0.0.1:0",
+            ]),
+            5 => args(&["--development-open-relay", "--tls-acme-staging"]),
             6 => args(&["--relay-backend", "noq", "--relay-key-file", &key]),
             7 => args(&["--relay-backend", "noq", "--development-open-relay"]),
             8 => args(&[
@@ -341,6 +345,7 @@ async fn malformed_or_oversized_relay_pem_is_rejected_before_catalog_creation() 
         let error = rejected(
             &scratch,
             args(&[
+                "--development-open-relay",
                 "--tls-cert",
                 cert.to_str().unwrap(),
                 "--tls-key",
@@ -357,7 +362,11 @@ async fn malformed_or_oversized_relay_pem_is_rejected_before_catalog_creation() 
 #[tokio::test]
 async fn explicit_iroh_mode_preserves_listener_and_shutdown_contract() {
     let scratch = Scratch::new();
-    let mut process = scratch.spawn(&args(&["--relay-backend", "iroh"]));
+    let mut process = scratch.spawn(&args(&[
+        "--relay-backend",
+        "iroh",
+        "--development-open-relay",
+    ]));
     let ready = process.ready(false).await;
     assert!(ready.id.is_none());
     if let Some(addr) = ready.directory {
@@ -397,6 +406,7 @@ async fn mismatched_or_oversized_private_key_is_rejected_before_catalog_creation
         let error = rejected(
             &scratch,
             args(&[
+                "--development-open-relay",
                 "--tls-cert",
                 cert.to_str().unwrap(),
                 "--tls-key",
@@ -415,6 +425,7 @@ async fn valid_manual_iroh_tls_starts_and_shuts_down() {
     let scratch = Scratch::new();
     let (cert, key) = tls_fixture(&scratch);
     let mut process = scratch.spawn(&args(&[
+        "--development-open-relay",
         "--tls-cert",
         cert.to_str().unwrap(),
         "--tls-key",

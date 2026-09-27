@@ -34,6 +34,9 @@ impl Scratch {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rds-server"));
         command
             .args(["--http-addr", "127.0.0.1:0", "--relay-addr", relay])
+            // These tests exercise service lifecycle, not relay admission:
+            // production runs fail closed without --allow entries.
+            .arg("--development-open-relay")
             .arg("--directory")
             .arg(self.0.join("records"))
             .env("RUST_LOG", "rds_server=info")

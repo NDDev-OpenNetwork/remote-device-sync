@@ -33,6 +33,7 @@ pub const OWNED_BACKEND_COMPILED: bool = cfg!(feature = "owned-relay");
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -110,7 +111,14 @@ async fn serve_prepared(
     tls: Option<TlsConfig>,
 ) -> anyhow::Result<Server> {
     let mut relay_config = RelayConfig::new(addr);
-    if !allow.is_empty() {
+    if allow.is_empty() {
+        // Callers through RelayArgs must opt in with --development-open-relay;
+        // a direct API caller receives the same loud signal here.
+        tracing::warn!(
+            "relay serving with open access: every endpoint id is admitted. \
+             Set --allow entries for production deployments"
+        );
+    } else {
         relay_config.access = Arc::new(AllowList(
             allow
                 .into_iter()
@@ -120,6 +128,13 @@ async fn serve_prepared(
                 .collect(),
         ));
     }
+    // Per-client RX limits mirror the owned relay's token bucket. Upstream has
+    // no implemented connection-count cap; the owned backend adds one there.
+    let mut client_rx = iroh_relay::server::ClientRateLimit::new(
+        NonZeroU32::new(64 * 1024 * 1024).expect("nonzero"),
+    );
+    client_rx.max_burst_bytes = NonZeroU32::new(4 * 1024 * 1024);
+    relay_config.limits.client_rx = Some(client_rx);
     relay_config.tls = tls;
     let mut config = ServerConfig::default();
     config.relay = Some(relay_config);

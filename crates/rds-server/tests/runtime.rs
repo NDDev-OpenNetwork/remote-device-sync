@@ -56,13 +56,15 @@ async fn invalid_host_inputs_are_rejected_before_identity_or_catalog_creation() 
         // Probe the compiled relay library — feature unification can put the
         // owned backend into the spawned binary while this package's flag is
         // off.
+        // Open-relay opt-in keeps the iroh backend admissible so the
+        // assertion below is about the case's own invalid input.
+        values.extend(args(&["--development-open-relay"]));
         if rds_relay::OWNED_BACKEND_COMPILED {
             values.extend(args(&[
                 "--relay-backend",
                 "noq",
                 "--relay-key-file",
                 &scratch.key(),
-                "--development-open-relay",
             ]));
         }
         assert!(!rejected(&scratch, values).await.is_empty());
