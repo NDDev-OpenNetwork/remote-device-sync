@@ -86,6 +86,16 @@ enum Action {
         #[arg(long, default_value = "64")]
         max_connections: std::num::NonZeroU16,
     },
+    /// Open a managed desktop channel through the selected or pinned
+    /// session; the agent relays encoded frames and the CLI decodes.
+    Desktop {
+        #[arg(long)]
+        session: Option<SessionId>,
+        #[arg(long, default_value = "0")]
+        display: u32,
+        #[arg(long, default_value = "30")]
+        max_fps: u32,
+    },
 }
 
 pub async fn run(options: Options, directory: PathBuf) -> anyhow::Result<()> {
@@ -158,6 +168,14 @@ pub async fn run(options: Options, directory: PathBuf) -> anyhow::Result<()> {
             let session = client.selected(session).await?;
             return forward(&client, session, bind, remote, max_connections).await;
         }
+        Action::Desktop {
+            session,
+            display,
+            max_fps,
+        } => {
+            let session = client.selected(session).await?;
+            return desktop(&client, session, display, max_fps).await;
+        }
     };
     match client.request(command).await? {
         Reply::Connected(id) => println!("{id}"),
@@ -226,11 +244,7 @@ pub async fn run_default(
             );
             target
         }
-        super::Command::Desktop { .. } => {
-            anyhow::bail!(
-                "desktop does not yet have a manager API; use --direct with a separate --key-file"
-            );
-        }
+        super::Command::Desktop { target, .. } => target,
         _ => anyhow::bail!("unsupported managed command"),
     };
     let grant = read_grant(grant).await?;
@@ -297,6 +311,11 @@ pub async fn run_default(
         } => {
             forward(&client, session, bind, remote, max_connections).await?;
         }
+        super::Command::Desktop {
+            display, max_fps, ..
+        } => {
+            desktop(&client, session, display, max_fps).await?;
+        }
         _ => anyhow::bail!("unsupported managed command"),
     }
     Ok(())
@@ -347,4 +366,76 @@ async fn forward(
         result = client.forward(session, listener, remote, max_connections) => result.map_err(Into::into),
         result = tokio::signal::ctrl_c() => result.map_err(Into::into),
     }
+}
+
+/// Managed desktop viewer: the agent relays encoded frames, the CLI owns
+/// decode and resync. Mirrors the direct viewer's stats output; control
+/// events (heartbeat echoes, input acks) ride the same channel.
+#[cfg(feature = "desktop")]
+async fn desktop(
+    client: &Client,
+    session: SessionId,
+    display: u32,
+    max_fps: u32,
+) -> anyhow::Result<()> {
+    use rds_client::local::ManagedMessage;
+    use rds_desktop::client::{RelayDecoder, RelayOutcome};
+
+    let mut channel = client
+        .desktop(
+            Some(session),
+            rds_core::DesktopHello {
+                display,
+                max_fps,
+                codec: rds_core::Codec::H264,
+                input_acks: false,
+            },
+        )
+        .await?;
+    println!("desktop caps: {:?}", channel.caps);
+    let mut decoder = RelayDecoder::new();
+    let mut count = 0u64;
+    let start = std::time::Instant::now();
+    loop {
+        let message = tokio::select! {
+            message = channel.recv() => match message? {
+                Some(message) => message,
+                None => break,
+            },
+            _ = tokio::signal::ctrl_c() => {
+                channel.finish().await.ok();
+                return Ok(());
+            }
+        };
+        match message {
+            ManagedMessage::Frame(frame) => match decoder.push(&frame.header, frame.payload) {
+                RelayOutcome::Frame(raw) => {
+                    count += 1;
+                    if count.is_multiple_of(30) {
+                        let secs = start.elapsed().as_secs_f64();
+                        println!(
+                            "decoded {count} frames, {:.1} fps, last {}x{}",
+                            count as f64 / secs,
+                            raw.width,
+                            raw.height
+                        );
+                    }
+                }
+                RelayOutcome::Pending => {}
+                RelayOutcome::NeedIdr => channel.request_idr().await?,
+            },
+            ManagedMessage::Event(_) => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "desktop"))]
+async fn desktop(
+    _client: &Client,
+    _session: SessionId,
+    _display: u32,
+    _max_fps: u32,
+) -> anyhow::Result<()> {
+    anyhow::bail!("rds built without desktop support; enable the `desktop` feature")
 }

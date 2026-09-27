@@ -218,10 +218,15 @@ async fn run(
     result
 }
 
+mod desktop;
+
+pub use desktop::{ManagedControl, ManagedDesktop, ManagedMessage, RelayedFrame};
+
 struct Output {
     reply: Reply,
     reservation: Option<state::Reservation>,
     tcp: Option<(RequestStreams, OwnedSemaphorePermit)>,
+    desktop: Option<(rds_desktop::client::DesktopSession, OwnedSemaphorePermit)>,
 }
 
 impl Output {
@@ -230,6 +235,7 @@ impl Output {
             reply,
             reservation: None,
             tcp: None,
+            desktop: None,
         }
     }
 }
@@ -279,6 +285,9 @@ async fn serve(
             // Both explicit byte directions finished. Preserve buffered QUIC
             // data/FIN instead of resetting a successfully completed upload.
             drop(tcp.release());
+        }
+        if let Some((session, _permit)) = output.desktop {
+            desktop::serve(&mut stream, session).await?;
         }
     }
     Ok(())
@@ -371,6 +380,7 @@ async fn execute(
                 reply: Reply::Connected(reservation.id),
                 reservation: Some(reservation),
                 tcp: None,
+                desktop: None,
             })
         }
         Command::Renew { session, grant } => {
@@ -393,6 +403,7 @@ async fn execute(
                 reply: Reply::Done,
                 reservation: Some(reservation),
                 tcp: None,
+                desktop: None,
             })
         }
         Command::Select { session } => {
@@ -438,6 +449,37 @@ async fn execute(
                 reply: Reply::Opened(session),
                 reservation: None,
                 tcp: Some((RequestStreams::new(pair), permit)),
+                desktop: None,
+            })
+        }
+        Command::Desktop { session, hello } => {
+            let permit = streams
+                .try_acquire_owned()
+                .map_err(|_| ErrorCode::Capacity)?;
+            let (session, conn) = state::lock(shared)?.connection(session)?;
+            // Relay mode publishes encoded frames for IPC forwarding; the
+            // viewer decodes, so the manager never needs a codec. A fresh
+            // v2 session ID keeps the frame route isolated from any other
+            // desktop session on this connection.
+            let remote = rds_desktop::client::DesktopSession::connect_opts(
+                &conn,
+                *hello,
+                rds_desktop::client::SessionOpts {
+                    session: Some(rand::random()),
+                    relay_encoded: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|_| ErrorCode::Remote)?;
+            Ok(Output {
+                reply: Reply::DesktopOpened {
+                    session,
+                    caps: remote.caps().clone(),
+                },
+                reservation: None,
+                tcp: None,
+                desktop: Some((remote, permit)),
             })
         }
     }
@@ -457,7 +499,7 @@ impl Client {
     }
 
     async fn exchange(&self, command: Command) -> Result<(Reply, UnixStream), Error> {
-        let body = matches!(command, Command::OpenTcp { .. });
+        let body = matches!(command, Command::OpenTcp { .. } | Command::Desktop { .. });
         let timeout = if matches!(command, Command::Sync { .. }) {
             SYNC_TIMEOUT + Duration::from_secs(10)
         } else {
@@ -493,10 +535,33 @@ impl Client {
     }
 
     pub async fn request(&self, command: Command) -> Result<Reply, Error> {
-        if matches!(command, Command::OpenTcp { .. }) {
+        if matches!(command, Command::OpenTcp { .. } | Command::Desktop { .. }) {
             return Err(Error::Protocol);
         }
         self.exchange(command).await.map(|(reply, _)| reply)
+    }
+
+    /// Open a managed desktop channel: the manager runs the remote session
+    /// and relays encoded frames; the caller decodes and sends controls.
+    /// The returned socket speaks `DesktopDown`/`DesktopUp`.
+    pub async fn desktop(
+        &self,
+        session: Option<SessionId>,
+        hello: rds_core::DesktopHello,
+    ) -> Result<ManagedDesktop, Error> {
+        let display = hello.display;
+        let (reply, stream) = self
+            .exchange(Command::Desktop {
+                session,
+                hello: Box::new(hello),
+            })
+            .await?;
+        match reply {
+            Reply::DesktopOpened { session, caps } => {
+                Ok(ManagedDesktop::new(stream, session, caps, display))
+            }
+            _ => Err(Error::Protocol),
+        }
     }
 
     pub async fn snapshot(&self) -> Result<rds_core::local::Snapshot, Error> {

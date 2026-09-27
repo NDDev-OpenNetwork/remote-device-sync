@@ -31,7 +31,8 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | service:ping | implemented | peer on `--allow` list | `rds-net` tests, CI |
 | service:info | implemented | peer on `--allow` list | `rds-cli` tests, CI |
 | service:tcp | implemented | enabled + `--allow` + grant scope for tcp | `rds-ssh` e2e, CI |
-| service:desktop | experimental | enabled + `desktop` build flag; usable capture backend; grant scope | capture→encode→decode→stats contract tests; no viewer |
+| service:desktop | experimental | enabled + `desktop` build flag; usable capture backend; grant scope | capture→encode→decode→stats contract tests |
+| service:desktop-managed | implemented | manager-owned remote session relays encoded frames over local IPC v5; viewer decodes via `RelayDecoder` (`desktop` build flag for real decode) | relay e2e + managed-channel tests; `rds desktop` defaults to it, `--direct` kept |
 | service:sync | implemented | enabled + `--sync-dir` configured | `rds-sync` tests, resumable transfer tests |
 | service:audio | stub | no codec; wire shape reserved in v2 | `ServiceKind::Audio` variant only |
 | service:sync-read | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
@@ -106,6 +107,10 @@ Notes:
   still fails closed when no capture backend probes usable. X11 init
   failure is an explicit `Err`, and the x11 CI lane fails when the
   feature cannot initialize.
+- `service:desktop-managed` is the local-IPC path: the manager forwards
+  encoded frames and controls without decoding, so it works on headless
+  manager builds; the *remote* still needs a capture backend, and the
+  viewer build needs `rds-desktop/x11` for real decode.
 - Historical `transfer` reports predate receiver-verified timing; the
   verified lane is renamed `transfer-receiver-ack-v1` on
   `fix/verified-transfer-benchmark` — update this row when it merges

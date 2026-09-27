@@ -165,7 +165,7 @@ reserved state; extra reply bytes are rejected. A lost response after successful
 publication remains an uncertain RPC outcome, inspectable through `session list`.
 Neither another device nor a remote command is selected/replayed automatically.
 
-Local IPC is now **version 4** following [managed file transfers](local-sessions.md). Upgrade CLI and local agent together; incompatible
+Local IPC is now **version 5** following the [managed desktop channel](local-sessions.md). Upgrade CLI and local agent together; incompatible
 versions fail before session mutation. Remote ALPN `rds/0` and existing service
 framing are unchanged. The signed grant is independently versioned and the new
 renewal variant is appended; old servers reject unsupported renewal without a

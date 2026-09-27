@@ -68,10 +68,13 @@ for this boundary; no package/version or external helper was added.
 Compatibility: `rds --direct --key-file <separate-key> ...` explicitly binds
 an independent endpoint and acquires the same exclusive key owner as the agent.
 An occupied key is an error. Direct mode requires a persisted key path; there is
-no accidental ephemeral-identity fallback. `desktop` still requires this explicit
-mode because its manager API remains unimplemented. Send/receive default to the manager.
-The local wire version is now **4** (adds file transfers); upgrade CLI
-and agent together. Old/new local versions fail without mutating session state.
+no accidental ephemeral-identity fallback.
+Send/receive default to the manager, and `desktop` now uses it too — the
+manager owns the remote session and relays encoded frames while the CLI
+decodes locally. `desktop --direct` remains for native/direct use.
+The local wire version is now **5** (adds the managed desktop channel);
+upgrade CLI and agent together. Old/new local versions fail without
+mutating session state.
 Remote ALPN is unchanged, with an appended isolated sync greeting; signed grant v3 accepts v2 payloads but a
 pinned tenant/policy binding refuses them. See [renewal contract](grant-leases.md).
 
@@ -153,6 +156,7 @@ broker.
 | IPC workers | 96; acceptance pauses at capacity |
 | Long-lived TCP streams | 64; leaves control worker space |
 | File transfers | 8 agent-wide; 1 per outgoing session; immediate capacity/busy refusal |
+| Managed desktop channels | one shared stream-permit slot (of 64) per channel; encoded payloads ≤ 32 MiB each, forwarded in arrival order |
 | Request prelude / reply write | 5 seconds each |
 | Resolve + dial + Authz + operation | 45 seconds total |
 | Client exchange, including connect/response and control EOF | 55 seconds for short operations |
@@ -163,7 +167,7 @@ broker.
 | CLI forwarding workers | positive 16-bit limit; default 64 |
 
 Wire types live in `rds-core::local`, with explicit request/response versions.
-Local IPC is **version 4**; upgrade CLI and agent together. Remote ALPN stays
+Local IPC is **version 5**; upgrade CLI and agent together. Remote ALPN stays
 `rds/0`, with the appended `SyncTransfer` greeting described below. There are no unbounded task/command queues; the OS
 backlog is separate. TCP bodies do not inherit the prelude deadline and use the
 existing reset/stop cancellation guard. Operations never automatically retry a
@@ -223,14 +227,49 @@ end-to-end receipt after the CLI disappears.
 
 See the [managed-transfer receipt](reports/rds-managed-sync-20260926.md).
 
+## Managed desktop channels
+
+`rds desktop <peer>` (and `rds session desktop --session <id>`) default to the
+manager like send/recv. `Command::Desktop` opens a remote `DesktopV2` session
+on the pinned connection in **relay mode** (`SessionOpts::relay_encoded`); the
+reply is `Reply::DesktopOpened` with the negotiated session and caps, then the
+socket switches to a bidirectional body channel:
+
+- Down, `DesktopDown::Frame { header }` + a big-endian u32 length + raw
+  encoded payload (≤ 32 MiB); `DesktopDown::Event(DesktopEvent)` for control
+  events; `DesktopDown::Finished` as the explicit clean end marker.
+- Up, `DesktopUp::Control(DesktopControl)` verbatim into the remote session's
+  control sender; `DesktopUp::Finished` or caller EOF ends the channel.
+
+Encoded payloads travel beside postcard framing deliberately: a
+`DesktopDown::Frame` postcard message stays under the 64 KiB control bound
+while frame bodies reach 32 MiB. The manager never decodes or links a codec —
+it republishes the remote session's encoded tap (sequence checks and
+headers still run there), so a headless manager build can serve desktop.
+The viewer owns decode: `rds_desktop::client::RelayDecoder` reapplies
+wait-for-keyframe/broken-chain discipline on `RelayedFrame` payloads and
+reports `NeedIdr`, rate-limited like the in-session path; the caller
+forwards it with `request_idr` over its own control channel. Input
+sequence numbers and heartbeat timestamps are stamped viewer-side
+(`ManagedControl`, cloneable, serialized behind one writer half so
+concurrent senders cannot interleave postcard bytes).
+
+The channel ends on viewer `Finished`/EOF, remote-session end (both taps
+close) or a body error; the manager then drops the remote
+`DesktopSession`, aborting its tasks and releasing the stream permit.
+`Client::desktop` shares the connect/response deadline; the body itself
+has no IPC timeout. `--direct` still opens a `DesktopSession` in-process
+for native/direct desktop use, unchanged.
+
 ## Remaining sequence and exit checks
 
-1. **W2.4 migration:** viewer manager APIs and coordinated installed-binary
-   migration remain. CLI connectivity defaults and cooperative same-key-inode
+1. **W2.4 migration:** the viewer manager API is implemented (managed
+   desktop channel, local wire v5); coordinated installed-binary migration
+   remains. CLI connectivity defaults and cooperative same-key-inode
    runtime ownership are implemented. Qualify native macOS credentials,
-   actual distinct-user rejection, relay-registration reuse,
-   FD/RSS budgets and manager service APIs for media. Single-file send/receive
-   are implemented; directory/two-way synchronization remains W8.
+   actual distinct-user rejection, relay-registration reuse and
+   FD/RSS budgets. Single-file send/receive are implemented;
+   directory/two-way synchronization remains W8.
 2. **W5 SSH:** native client, explicit host pins, credential selection, OS PTY
    requests and terminal restoration are implemented. Complete GDS host/account
    provisioning, broker isolation and authorized reattachment; qualify native

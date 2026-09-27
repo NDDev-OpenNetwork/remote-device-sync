@@ -955,3 +955,55 @@ async fn abandoned_silent_tcp_bodies_release_capacity_but_half_close_preserves_r
         "abandoned IPC bodies retained all 64 stream slots"
     );
 }
+
+/// `Client::desktop` exercises the whole managed path — connect, permit,
+/// stream open — and reports a clean refusal when the peer cannot serve
+/// desktop. Without the agent `desktop` feature the service gate refuses;
+/// with it but headless, capture fails — either way the channel closes
+/// and no stream slot leaks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_desktop_reports_remote_refusal_without_leaking() {
+    for backend in backends() {
+        let root = Scratch::new();
+        let path = root.0.join("control");
+        let local = bind_endpoint(config(backend)).await.unwrap();
+        let prepared = Prepared::bind(&path).await.unwrap();
+        let mut server = Server::start(Some(prepared), local.clone(), None);
+        let client = Client::new(&path);
+        let mut tasks = JoinSet::new();
+        let (peer_ep, _tcp) = peer(backend, &local, b'D', &mut tasks).await;
+        let session = connect(&client, Ticket::of(&peer_ep).to_string()).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.desktop(
+                Some(session),
+                rds_core::DesktopHello {
+                    display: 0,
+                    max_fps: 30,
+                    codec: rds_core::Codec::H264,
+                    input_acks: false,
+                },
+            ),
+        )
+        .await
+        .expect("managed desktop open hung");
+        assert!(
+            matches!(result, Err(Error::Rejected(ErrorCode::Remote))),
+            "expected clean remote refusal, got {result:?}"
+        );
+        // The refused open must not park a stream permit: open_tcp still
+        // has its full budget.
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            held.push(
+                client
+                    .open_tcp(session, _tcp.clone())
+                    .await
+                    .expect("stream slots leaked"),
+            );
+        }
+        drop(held);
+        server.close().await.unwrap();
+        tasks.abort_all();
+    }
+}
