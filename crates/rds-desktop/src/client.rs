@@ -168,6 +168,8 @@ pub struct DesktopSession {
     pub frame_headers: mailbox::Receiver<FrameHeader>,
     /// Server→client control events (input acks, heartbeat echoes).
     pub events: mailbox::Receiver<DesktopEvent>,
+    /// Encoded wire frames in relay mode; `None` on a direct session.
+    pub encoded: Option<mailbox::Receiver<EncodedDelivery>>,
     /// Send input or encoder control to the serving side.
     ctrl_tx: mpsc::Sender<DesktopControl>,
     /// Next expected frame sequence — the lowest seq still accepted.
@@ -234,6 +236,21 @@ pub struct SessionOpts {
     /// an ended session can never reach this session's inbox. `None`
     /// keeps the legacy shared `Desktop` route for old peers.
     pub session: Option<[u8; 16]>,
+    /// Relay mode (the local session manager): publish each encoded
+    /// payload to [`DesktopSession::encoded`] instead of decoding it —
+    /// no decoder is created and `frames` stays empty. Transport-level
+    /// resync (IDR on sequence gaps) still runs; decode-chain discipline
+    /// is the downstream viewer's job.
+    pub relay_encoded: bool,
+}
+
+/// One encoded frame exactly as it arrived on the wire, published in relay
+/// mode for consumers that forward rather than decode.
+#[derive(Debug)]
+pub struct EncodedDelivery {
+    pub header: FrameHeader,
+    /// Annex-B encoded payload, already bounded by the receive budget.
+    pub payload: bytes::Bytes,
 }
 
 impl DesktopSession {
@@ -307,6 +324,13 @@ impl DesktopSession {
         let (header_tx, frame_headers) = mailbox::channel(64);
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<DesktopControl>(64);
         let (events_tx, events) = mailbox::channel::<DesktopEvent>(128);
+        let (encoded_tx, encoded) = match opts.relay_encoded {
+            true => {
+                let (tx, rx) = mailbox::channel::<EncodedDelivery>(4);
+                (Some(tx), Some(rx))
+            }
+            false => (None, None),
+        };
         let next_seq = Arc::new(AtomicU64::new(0));
         // `u64::MAX` = "not measured": a loopback heartbeat can
         // legitimately round-trip in 0 ms, so 0 cannot be the sentinel.
@@ -352,6 +376,7 @@ impl DesktopSession {
             ReceiveContext {
                 frame_tx,
                 header_tx,
+                encoded_tx,
                 next_seq: next_seq.clone(),
                 ctrl: ctrl_tx.clone(),
                 clock: clock.clone(),
@@ -369,6 +394,7 @@ impl DesktopSession {
             frames,
             frame_headers,
             events,
+            encoded,
             ctrl_tx,
             next_seq,
             input_seq: AtomicU64::new(0),
@@ -456,6 +482,88 @@ impl DesktopSession {
             .await
             .map_err(|_| DesktopError::Input("control channel closed".into()))
     }
+
+    /// Queue one fully-formed control message verbatim — callers that
+    /// manage their own sequencing use this; everyone else prefers the
+    /// typed helpers.
+    pub async fn send_control(&self, control: DesktopControl) -> Result<(), DesktopError> {
+        self.ctrl_tx
+            .send(control)
+            .await
+            .map_err(|_| DesktopError::Input("control channel closed".into()))
+    }
+
+    /// Cloneable control-queue handle — the managed relay forwards a
+    /// viewer's verbatim `DesktopControl` messages through it while the
+    /// session's receivers are consumed elsewhere. Direct callers use the
+    /// typed helpers (`send_input`, `heartbeat`, `request_idr`,
+    /// `set_bitrate`) that fill sequence metadata in.
+    pub fn control_sender(&self) -> mpsc::Sender<DesktopControl> {
+        self.ctrl_tx.clone()
+    }
+}
+
+/// What [`RelayDecoder::push`] made of one relayed encoded frame.
+pub enum RelayOutcome {
+    /// A frame came out of the decoder (decoder-enabled builds only).
+    #[cfg(feature = "x11")]
+    Frame(RawFrame),
+    /// Consumed without producing a frame — the codec is still buffering
+    /// inputs, or this build has no decoder at all.
+    Pending,
+    /// The reference chain is broken; the viewer should send
+    /// `DesktopControl::RequestIdr` upstream.
+    NeedIdr,
+}
+
+/// Viewer-side decode chain for a relayed frame channel
+/// (`local::DesktopDown::Frame`): applies the same wait-for-keyframe and
+/// broken-chain discipline a direct session does, while the resync request
+/// stays with the caller's own control path. `NeedIdr` reports are rate
+/// limited like the in-session request path, so one report covers a run
+/// of broken frames.
+pub struct RelayDecoder {
+    delivery: Delivery,
+    /// Wall clock of the last `NeedIdr` report.
+    last_idr_report: Option<std::time::Instant>,
+}
+
+impl RelayDecoder {
+    pub fn new() -> Self {
+        Self {
+            delivery: Delivery::new(),
+            last_idr_report: None,
+        }
+    }
+
+    /// Feed one relayed encoded frame. Input must already have passed the
+    /// relay's sequence checks — this owns only decode-chain state.
+    pub fn push(&mut self, header: &FrameHeader, payload: Vec<u8>) -> RelayOutcome {
+        match self.delivery.decode(header, payload) {
+            #[cfg(feature = "x11")]
+            DecodeOutcome::Decoded(raw) => RelayOutcome::Frame(raw),
+            DecodeOutcome::Buffered => RelayOutcome::Pending,
+            DecodeOutcome::Failed => {
+                self.delivery.invalidate();
+                let now = std::time::Instant::now();
+                let due = self.last_idr_report.is_none_or(|last| {
+                    now.duration_since(last).as_millis() as u64 >= IDR_MIN_INTERVAL_MS
+                });
+                if due {
+                    self.last_idr_report = Some(now);
+                    RelayOutcome::NeedIdr
+                } else {
+                    RelayOutcome::Pending
+                }
+            }
+        }
+    }
+}
+
+impl Default for RelayDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn next_control_seq(sequence: &AtomicU64) -> Result<u64, DesktopError> {
@@ -469,6 +577,8 @@ fn next_control_seq(sequence: &AtomicU64) -> Result<u64, DesktopError> {
 struct ReceiveContext {
     frame_tx: mailbox::Sender<RawFrame>,
     header_tx: mailbox::Sender<FrameHeader>,
+    /// Relay-mode tap: encoded payloads publish here instead of decoding.
+    encoded_tx: Option<mailbox::Sender<EncodedDelivery>>,
     next_seq: Arc<AtomicU64>,
     ctrl: mpsc::Sender<DesktopControl>,
     clock: SessionClock,
@@ -494,6 +604,15 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 // read_one rejects u64::MAX before publishing anything.
                 ctx.next_seq.store(header.seq + 1, Ordering::Relaxed);
                 ctx.header_tx.send(header.clone());
+                if let Some(tx) = &ctx.encoded_tx {
+                    // Relay mode: forward the payload still encoded; the
+                    // downstream viewer owns decode-chain discipline.
+                    tx.send(EncodedDelivery {
+                        header,
+                        payload: body.into(),
+                    });
+                    continue;
+                }
                 let Ok(slot) = DECODE_SLOTS.acquire().await else { break; };
                 // No control/queue/connection handles escape into native work.
                 // An already running call may finish after cancellation, but

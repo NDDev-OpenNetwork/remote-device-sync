@@ -224,6 +224,7 @@ async fn harness_with_input(
         SessionOpts {
             clock: Some(clock.clone()),
             session: Some(next_session_id()),
+            ..Default::default()
         },
     )
     .await
@@ -654,6 +655,7 @@ async fn desktop_and_sync_share_one_connection() {
         SessionOpts {
             clock: Some(clock.clone()),
             session: Some(next_session_id()),
+            ..Default::default()
         },
     )
     .await
@@ -779,6 +781,7 @@ async fn stale_and_foreign_frame_routes_never_reach_the_session_inbox() {
         SessionOpts {
             clock: Some(clock.clone()),
             session: Some(session_id),
+            ..Default::default()
         },
     )
     .await
@@ -848,6 +851,7 @@ async fn legacy_shared_route_still_serves_v1_clients() {
         SessionOpts {
             clock: Some(clock.clone()),
             session: None,
+            ..Default::default()
         },
     )
     .await
@@ -873,4 +877,77 @@ fn self_rss_kb() -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn self_rss_kb() -> Option<u64> {
     None
+}
+
+/// Relay mode (the local session manager): encoded payloads publish to
+/// `session.encoded` verbatim and never touch the local decode chain;
+/// sequence discipline and headers still run. A viewer-side
+/// `RelayDecoder` then rebuilds the chain and reports `NeedIdr` on a
+/// broken one — the caller forwards it over its own control path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_mode_publishes_encoded_frames_and_viewer_decodes() {
+    use rds_desktop::client::{RelayDecoder, RelayOutcome};
+
+    let fps = 30;
+    let frame_bytes = 32 * 1024;
+    let clock = SessionClock::default();
+    let (server_ep, client_ep, _impair, target) = endpoints(None).await;
+    let server_task = spawn_serving(
+        server_ep,
+        fps,
+        frame_bytes,
+        5,
+        clock.clone(),
+        TestInput::default(),
+    )
+    .await;
+    let conn = client_ep.connect(target, rds_core::ALPN).await.unwrap();
+    let mut session = DesktopSession::connect_opts(
+        &conn,
+        DesktopHello {
+            display: 0,
+            max_fps: fps,
+            codec: Codec::H264,
+            input_acks: false,
+        },
+        SessionOpts {
+            clock: Some(clock.clone()),
+            session: Some(next_session_id()),
+            relay_encoded: true,
+        },
+    )
+    .await
+    .unwrap();
+    let mut encoded = session
+        .encoded
+        .take()
+        .expect("relay mode publishes an encoded tap");
+    let mut decoder = RelayDecoder::new();
+    let mut last_seq = None;
+    let mut outcomes = 0u32;
+    for _ in 0..20 {
+        let delivery = tokio::time::timeout(Duration::from_secs(10), encoded.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // The relay still enforces in-order monotonic headers.
+        if let Some(prev) = last_seq {
+            assert!(delivery.header.seq > prev, "out-of-order relayed seq");
+        }
+        last_seq = Some(delivery.header.seq);
+        assert!(!delivery.payload.is_empty());
+        match decoder.push(&delivery.header, delivery.payload.to_vec()) {
+            RelayOutcome::Pending | RelayOutcome::NeedIdr => outcomes += 1,
+            #[cfg(feature = "x11")]
+            RelayOutcome::Frame(raw) => {
+                assert_eq!(raw.width, delivery.header.width);
+                outcomes += 1;
+            }
+        }
+    }
+    assert!(outcomes > 0);
+    // Relay mode never publishes decoded frames locally.
+    assert!(session.frames.try_recv().is_none());
+    drop(session);
+    server_task.abort();
 }

@@ -16,6 +16,7 @@ blake3.workspace = true
 postcard = { workspace = true, features = ["use-std"] }
 rand.workspace = true
 rds-core.workspace = true
+rds-desktop.workspace = true
 rds-discovery.workspace = true
 rds-net.workspace = true
 rds-observe.workspace = true

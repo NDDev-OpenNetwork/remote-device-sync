@@ -3454,6 +3454,7 @@ dependencies = [
  "postcard",
  "rand 0.10.3",
  "rds-core",
+ "rds-desktop",
  "rds-discovery",
  "rds-net",
  "rds-observe",
