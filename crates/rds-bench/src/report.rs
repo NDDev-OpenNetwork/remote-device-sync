@@ -45,6 +45,11 @@ impl Percentiles {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchMeta {
     pub scenario: String,
+    /// Capability-matrix row this report evidences (`measure:<name>`),
+    /// so a report file is self-identifying without consulting the
+    /// emitter. Empty in reports written before the tag existed.
+    #[serde(default)]
+    pub capability: String,
     pub backend: String,
     pub path: String,
     pub impairment: Option<Impairment>,
@@ -361,6 +366,7 @@ mod tests {
     fn compare_flags_drift_and_missing() {
         let report = |name: &str, p95_ns: u64| BenchReport {
             meta: BenchMeta {
+                capability: String::new(),
                 scenario: name.into(),
                 backend: "iroh".into(),
                 path: "direct".into(),
@@ -412,6 +418,7 @@ mod tests {
         // noise, not a regression.
         let report = |name: &str, p95_ns: u64| BenchReport {
             meta: BenchMeta {
+                capability: String::new(),
                 scenario: name.into(),
                 backend: "iroh".into(),
                 path: "direct".into(),
@@ -461,6 +468,7 @@ mod tests {
     fn rtt_report(count: usize, p95_ns: u64) -> BenchReport {
         BenchReport {
             meta: BenchMeta {
+                capability: String::new(),
                 scenario: "s".into(),
                 backend: "iroh".into(),
                 path: "direct".into(),
@@ -589,5 +597,17 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn reports_without_capability_tag_still_parse() {
+        // Reports written before W0.5's per-report capability tag must
+        // remain loadable — requalification reads history.
+        let legacy = r#"{"meta":{"scenario":"ping","backend":"iroh",
+            "path":"direct","impairment":null,"unix_ts":0,"git":null},
+            "rtt":null,"throughput_mib_s":null,"attempts":null,
+            "metrics":{},"notes":[]}"#;
+        let r: BenchReport = serde_json::from_str(legacy).unwrap();
+        assert!(r.meta.capability.is_empty());
     }
 }

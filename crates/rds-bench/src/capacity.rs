@@ -54,6 +54,7 @@ impl Measurement {
         let count = self.samples.len() as u64;
         BenchReport {
             meta: BenchMeta {
+                capability: "discovery:directory".into(),
                 scenario: format!("directory-{phase}"),
                 backend: "redb".into(),
                 path: "local-file".into(),
