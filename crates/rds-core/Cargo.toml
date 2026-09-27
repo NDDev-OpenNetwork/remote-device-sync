@@ -8,7 +8,6 @@ repository.workspace = true
 
 [features]
 default = []
-desktop = []
 
 [dependencies]
 blake3.workspace = true

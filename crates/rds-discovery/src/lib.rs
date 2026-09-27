@@ -62,7 +62,31 @@ impl std::fmt::Display for EndpointKey {
 impl std::str::FromStr for EndpointKey {
     type Err = DiscoveryError;
 
+    /// Base32 (canonical display) or 64-digit hex — `rds id` prints hex,
+    /// so operators legitimately supply either spelling. Same dual
+    /// acceptance `rds_core::EndpointId` has.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() == 64 {
+            let mut key = [0u8; 32];
+            for (i, &[hi, lo]) in s.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+                let nib = |c: u8| -> Option<u8> {
+                    match c {
+                        b'0'..=b'9' => Some(c - b'0'),
+                        b'a'..=b'f' => Some(c - b'a' + 10),
+                        b'A'..=b'F' => Some(c - b'A' + 10),
+                        _ => None,
+                    }
+                };
+                let (hi, lo) = (nib(hi), nib(lo));
+                let Some((hi, lo)) = hi.zip(lo) else {
+                    return Err(DiscoveryError::InvalidRecord(
+                        "endpoint key is not hex".into(),
+                    ));
+                };
+                key[i] = (hi << 4) | lo;
+            }
+            return Ok(Self(key));
+        }
         let bytes = data_encoding::BASE32_NOPAD
             .decode(s.to_uppercase().as_bytes())
             .map_err(|_| DiscoveryError::InvalidRecord("endpoint key is not base32".into()))?;
@@ -198,6 +222,38 @@ mod tests {
         let mut record = rec(&key);
         record.payload[0] ^= 1;
         assert!(matches!(record.verify(), Err(DiscoveryError::BadSignature)));
+    }
+
+    #[test]
+    fn endpoint_key_accepts_hex_and_base32() {
+        use std::str::FromStr;
+        let bytes = [
+            0x85, 0xce, 0xb4, 0xd4, 0xab, 0xd6, 0x66, 0xb7, 0x2f, 0xce, 0x2d, 0xc9, 0x7e, 0x23,
+            0x2c, 0xe8, 0xf9, 0x03, 0x91, 0x37, 0xa3, 0x95, 0x7d, 0x11, 0x5a, 0x7b, 0x5f, 0xb7,
+            0x4f, 0xbb, 0x7e, 0xd4,
+        ];
+        let key = EndpointKey(bytes);
+        // Canonical base32 display round-trips…
+        assert_eq!(EndpointKey::from_str(&key.to_string()).unwrap(), key);
+        // …and the hex spelling `rds id` prints parses identically.
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(EndpointKey::from_str(&hex).unwrap(), key);
+        assert!(EndpointKey::from_str(&"g".repeat(64)).is_err());
+        assert!(EndpointKey::from_str("not-a-key").is_err());
+    }
+
+    #[test]
+    fn signed_record_peeks_its_leading_version() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let record = rec(&key);
+        assert_eq!(
+            record_wire::payload_version(&record.payload).unwrap(),
+            RECORD_VERSION
+        );
+        // A payload from a different schema decodes its own version
+        // rather than producing a serde error mid-struct.
+        let foreign = postcard::to_stdvec(&2u16).unwrap();
+        assert_eq!(record_wire::payload_version(&foreign).unwrap(), 2);
     }
 
     #[test]

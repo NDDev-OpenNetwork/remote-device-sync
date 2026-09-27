@@ -126,6 +126,7 @@ struct Metrics {
     gc_failures: AtomicU64,
     connections_rejected: AtomicU64,
     workers_rejected: AtomicU64,
+    task_panics: AtomicU64,
     requests: AtomicU64,
 }
 
@@ -198,6 +199,10 @@ impl DirectoryMetrics {
             (
                 "rds_directory_workers_rejected_total",
                 m.workers_rejected.load(Ordering::Relaxed),
+            ),
+            (
+                "rds_directory_task_panics_total",
+                m.task_panics.load(Ordering::Relaxed),
             ),
         ]);
         for (group, known, tasks, limit) in [
@@ -446,9 +451,19 @@ pub async fn serve(
                 let accepted = tokio::select! {
                     biased;
                     _ = stop.changed() => break,
-                    _ = connections.join_next(), if !connections.is_empty() => continue,
+                    result = connections.join_next(), if !connections.is_empty() => {
+                        if let Some(Err(error)) = result
+                            && error.is_panic()
+                        { state.metrics.task_panics.fetch_add(1, Ordering::Relaxed); }
+                        continue;
+                    },
                     _ = connections.changed() => continue,
-                    _ = state.workers.join_next(), if !state.workers.is_empty() => continue,
+                    result = state.workers.join_next(), if !state.workers.is_empty() => {
+                        if let Some(Err(error)) = result
+                            && error.is_panic()
+                        { state.metrics.task_panics.fetch_add(1, Ordering::Relaxed); }
+                        continue;
+                    },
                     _ = state.workers.changed() => continue,
                     result = maintenance.join_next(), if !maintenance.is_empty() => {
                         if let Some(Err(error)) = result

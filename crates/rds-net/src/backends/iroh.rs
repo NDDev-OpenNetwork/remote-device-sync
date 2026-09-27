@@ -225,6 +225,11 @@ impl std::fmt::Display for Ticket {
     }
 }
 
+/// A ticket carries one endpoint id plus a handful of transport addrs —
+/// a few hundred encoded bytes. Refuse oversized bodies before base32
+/// allocates and postcard decodes an unbounded address set.
+const MAX_TICKET_BODY: usize = 4096;
+
 impl FromStr for Ticket {
     type Err = anyhow::Error;
 
@@ -232,6 +237,7 @@ impl FromStr for Ticket {
         let body = s
             .strip_prefix("rds1")
             .ok_or_else(|| anyhow::anyhow!("ticket must start with 'rds1'"))?;
+        anyhow::ensure!(body.len() <= MAX_TICKET_BODY, "ticket too long");
         let bytes = data_encoding::BASE32_NOPAD
             .decode(body.to_uppercase().as_bytes())
             .map_err(|_| anyhow::anyhow!("ticket is not valid base32"))?;
@@ -248,10 +254,16 @@ impl FromStr for Ticket {
 pub fn parse_target(target: &str) -> anyhow::Result<EndpointAddr> {
     match Ticket::from_str(target) {
         Ok(ticket) => Ok(ticket.0),
-        Err(_) => Ok(EndpointAddr {
-            id: EndpointId::from_str(target)?,
-            addrs: Default::default(),
-        }),
+        Err(ticket_error) => match EndpointId::from_str(target) {
+            Ok(id) => Ok(EndpointAddr {
+                id,
+                addrs: Default::default(),
+            }),
+            // An rds1-prefixed string was meant as a ticket: surface the
+            // ticket decode error, not a misleading endpoint-id complaint.
+            Err(_) if target.starts_with("rds1") => Err(ticket_error),
+            Err(id_error) => Err(id_error.into()),
+        },
     }
 }
 
@@ -294,6 +306,33 @@ mod tests {
         let addr = parse_target(&id.to_string()).unwrap();
         assert_eq!(addr.id, id);
         assert!(addr.addrs.is_empty());
+    }
+
+    /// An `rds1` string that fails ticket decode must surface the ticket
+    /// error, not an endpoint-id complaint — the prefix already committed
+    /// the input to the ticket grammar.
+    #[test]
+    fn malformed_ticket_surfaces_ticket_error() {
+        let err = parse_target("rds1!!!not-base32!!!").unwrap_err();
+        assert!(
+            err.to_string().contains("ticket"),
+            "unexpected error: {err}"
+        );
+
+        let oversized = format!("rds1{}", "a".repeat(MAX_TICKET_BODY + 1));
+        let err = parse_target(&oversized).unwrap_err();
+        assert_eq!(err.to_string(), "ticket too long");
+    }
+
+    /// A non-prefixed string that is neither ticket nor endpoint id keeps
+    /// the endpoint-id error — it was never a ticket attempt.
+    #[test]
+    fn plain_garbage_surfaces_endpoint_error() {
+        let err = parse_target("not-a-ticket-or-key").unwrap_err();
+        assert!(
+            !err.to_string().contains("ticket"),
+            "unexpected error: {err}"
+        );
     }
 
     /// The owned types must encode byte-identically to iroh-base:

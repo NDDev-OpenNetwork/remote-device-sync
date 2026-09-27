@@ -22,8 +22,11 @@ ExecStart=/usr/local/bin/rds-server \
 #   --directory-allow <base32-device-key>   (repeat per enrolled publisher;
 #   empty denies directory record publish/fetch/delete)
 #   --registry-key <base32 verifying key> --registry /var/lib/rds/registry.json
-#   --allow <endpoint-id>…   (empty = open relay — do NOT expose open
-#   relays on a public IP beyond short-lived bring-up)
+#   --allow <endpoint-id>…   (relay packet admission — REQUIRED in
+#   production: an empty allowlist fails closed at startup. Only
+#   --development-open-relay opts into open admission, and it conflicts
+#   with --allow; it exists for isolated development, never for a
+#   public-facing relay)
 # Native directory TLS on --http-addr (docs/deployment.md):
 #   --directory-tls-cert /var/lib/rds/directory-chain.pem
 #   --directory-tls-key /var/lib/rds/directory-key.pem

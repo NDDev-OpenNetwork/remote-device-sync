@@ -297,13 +297,6 @@ impl Client {
         self.expect(resp, &[200]).map(|_| ())
     }
 
-    /// `GET /v1/metrics` — raw prometheus text.
-    pub async fn metrics(&self) -> Result<String, DiscoveryError> {
-        let resp = self.request("GET", "/v1/metrics", &[]).await?;
-        let resp = self.expect(resp, &[200])?;
-        String::from_utf8(resp.body).map_err(|e| DiscoveryError::InvalidRecord(e.to_string()))
-    }
-
     async fn request(
         &self,
         method: &str,

@@ -103,7 +103,7 @@ Each JSON record contains:
 | `run_id`, `sequence` | random 128-bit process ID and local event sequence; concurrent arrival order may differ |
 | `session_id` | numeric session ID minted by the accepting agent or the dialing client on its `rds.conn` span, scoped to `run_id`; never a peer key or distributed trace ID |
 | `level`, `target`, `line` | static source metadata |
-| `event`, `operation`, `outcome`, `elapsed_us` | allowlisted operational fields; absent fields are null |
+| `event`, `operation`, `outcome`, `reason`, `elapsed_us` | allowlisted operational fields; absent fields are null |
 | `telemetry_*_total` | cumulative queue rejection, oversized-record and output I/O error counts |
 
 No key, credential, address, user path, command, file content or remote output

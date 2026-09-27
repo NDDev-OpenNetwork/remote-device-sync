@@ -101,6 +101,15 @@ fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, DiscoveryErro
     Ok(value)
 }
 
+/// Leading schema version of a signed payload. Checked before a full
+/// typed decode commits to a layout, so a record minted by another
+/// schema reports its version instead of a serde error.
+pub(crate) fn payload_version(bytes: &[u8]) -> Result<u16, DiscoveryError> {
+    let (version, _rest) =
+        postcard::take_from_bytes::<u16>(bytes).map_err(|e| invalid(&e.to_string()))?;
+    Ok(version)
+}
+
 fn metadata(
     version: u16,
     revision: u64,
@@ -232,6 +241,10 @@ impl EndpointRecord {
             &key,
             MAX_RECORD_BYTES,
         )?;
+        let version = payload_version(&self.payload)?;
+        if version != RECORD_VERSION {
+            return Err(invalid(&format!("unsupported record version {version}")));
+        }
         let payload: Payload = decode(&self.payload)?;
         if payload.key != self.key {
             return Err(DiscoveryError::BadSignature);
@@ -288,6 +301,10 @@ impl DeleteRequest {
         let key =
             VerifyingKey::from_bytes(&self.key.0).map_err(|_| DiscoveryError::BadSignature)?;
         authority::verify(DELETE_DOMAIN, &self.payload, &self.signature, &key, 128)?;
+        let version = payload_version(&self.payload)?;
+        if version != RECORD_VERSION {
+            return Err(invalid(&format!("unsupported record version {version}")));
+        }
         let payload: DeletePayload = decode(&self.payload)?;
         if payload.key != self.key {
             return Err(DiscoveryError::BadSignature);

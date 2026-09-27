@@ -37,10 +37,11 @@ impl AgentLimits {
 
     /// Process-level ceiling: refuse admissions once the process holds
     /// `max_fds` descriptors or `max_rss_mb` resident MiB. `None` leaves
-    /// that quantity ungated.
+    /// that quantity ungated. An oversized MiB value saturates at the
+    /// byte ceiling instead of silently disabling the gate.
     pub fn with_process_budget(mut self, max_fds: Option<u64>, max_rss_mb: Option<u64>) -> Self {
         self.max_fds = max_fds;
-        self.max_rss_bytes = max_rss_mb.and_then(|mb| mb.checked_mul(1024 * 1024));
+        self.max_rss_bytes = max_rss_mb.map(|mb| mb.saturating_mul(1024 * 1024));
         self
     }
 
@@ -98,7 +99,9 @@ const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20
 pub(super) struct ResourceGate {
     max_fds: Option<u64>,
     max_rss_bytes: Option<u64>,
-    cache: std::sync::Mutex<(std::time::Instant, bool)>,
+    /// `None` forces the first check to sample immediately — subtracting
+    /// an interval from `Instant::now` can underflow on fresh processes.
+    cache: std::sync::Mutex<(Option<std::time::Instant>, bool)>,
 }
 
 impl ResourceGate {
@@ -109,7 +112,7 @@ impl ResourceGate {
         Some(Self {
             max_fds: limits.max_fds,
             max_rss_bytes: limits.max_rss_bytes,
-            cache: std::sync::Mutex::new((std::time::Instant::now() - 2 * SAMPLE_INTERVAL, true)),
+            cache: std::sync::Mutex::new((None, true)),
         })
     }
 
@@ -119,7 +122,7 @@ impl ResourceGate {
     pub fn allows(&self) -> bool {
         let mut cache = crate::lock(&self.cache);
         let (at, verdict) = *cache;
-        if at.elapsed() < SAMPLE_INTERVAL {
+        if at.is_some_and(|at| at.elapsed() < SAMPLE_INTERVAL) {
             return verdict;
         }
         let mut ok = true;
@@ -138,7 +141,7 @@ impl ResourceGate {
         }
         // Nothing observable: keep serving rather than gate on a guess.
         let verdict = ok || !observed;
-        *cache = (std::time::Instant::now(), verdict);
+        *cache = (Some(std::time::Instant::now()), verdict);
         verdict
     }
 }

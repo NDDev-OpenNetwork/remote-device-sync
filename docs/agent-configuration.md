@@ -54,9 +54,11 @@ nothing. Flag equivalents: `--tenant`, `--policy-min-revision`.
 
 ## Service enablement
 
-`Ping` and `Info` are the always-on control plane and are never gated.
-The gateable data-plane services are `tcp`, `desktop` and `sync`; `audio`
-is wire-reserved but unimplemented and is rejected rather than silently
+`Ping` and `Info` are the always-on control plane: deployment policy
+cannot disable them, though a grant's `services` scope still applies —
+a grant that does not name `ping`/`info` cannot call them. The gateable
+data-plane services are `tcp`, `desktop` and `sync`; `audio` is
+wire-reserved but unimplemented and is rejected rather than silently
 accepted.
 
 - **No `role`/`services`/`disabled_services`** — the implicit set: `tcp`,

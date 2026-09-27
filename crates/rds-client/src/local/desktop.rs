@@ -81,10 +81,13 @@ pub(super) async fn serve(
     let down = async {
         let encoded = session.encoded.as_mut().unwrap();
         let events = &mut session.events;
-        let mut open = 2u8;
-        while open > 0 {
+        // Each tap's liveness is tracked separately: `recv` answers `None`
+        // immediately and repeatedly once its senders are gone, so a shared
+        // counter would end the pump while the surviving tap is still live.
+        let (mut enc_open, mut ev_open) = (true, true);
+        while enc_open || ev_open {
             tokio::select! {
-                frame = encoded.recv() => match frame {
+                frame = encoded.recv(), if enc_open => match frame {
                     Some(f) => {
                         if f.payload.len() > MAX_DESKTOP_PAYLOAD {
                             return Err(invalid());
@@ -92,11 +95,11 @@ pub(super) async fn serve(
                         write_frame(&mut writer, &DesktopDown::Frame { header: f.header }).await?;
                         write_payload(&mut writer, &f.payload).await?;
                     }
-                    None => open -= 1,
+                    None => enc_open = false,
                 },
-                event = events.recv() => match event {
+                event = events.recv(), if ev_open => match event {
                     Some(e) => write_frame(&mut writer, &DesktopDown::Event(e)).await?,
-                    None => open -= 1,
+                    None => ev_open = false,
                 },
             }
         }

@@ -187,11 +187,14 @@ impl XtestInput {
         self.scroll_x -= f64::from(x);
         self.scroll_y -= f64::from(y);
         // Protocol convention: positive y is up, positive x is left.
+        // The single `pointer_on_screen` above covers the whole fan-out —
+        // raw fake calls skip `button`'s per-click re-query (≈128 round
+        // trips on a full scroll burst).
         for (steps, negative, positive) in [(y, 5, 4), (x, 7, 6)] {
             let button = if steps > 0 { positive } else { negative };
             for _ in 0..steps.unsigned_abs() {
-                self.button(button, true)?;
-                self.button(button, false)?;
+                self.fake(BUTTON_PRESS, button, 0, 0)?;
+                self.fake(BUTTON_RELEASE, button, 0, 0)?;
             }
         }
         Ok(())
@@ -285,17 +288,4 @@ impl Drop for XtestInput {
             let _ = cookie.reply();
         }
     }
-}
-
-/// Convenience one-shot injection used by the session control loop.
-pub fn inject(event: &InputEvent) -> Result<(), DesktopError> {
-    use std::sync::Mutex;
-    static SINK: Mutex<Option<XtestInput>> = Mutex::new(None);
-    let mut guard = SINK
-        .lock()
-        .map_err(|_| DesktopError::Input("input sink poisoned".into()))?;
-    if guard.is_none() {
-        *guard = Some(XtestInput::new()?);
-    }
-    guard.as_mut().unwrap().inject(event)
 }

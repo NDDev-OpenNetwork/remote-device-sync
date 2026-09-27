@@ -728,12 +728,14 @@ impl Incoming {
         }
     }
 
-    /// Address the attempt arrived from.
-    pub fn remote_address(&self) -> SocketAddr {
+    /// Address the attempt arrived from. `None` during the brief window
+    /// between accepting the raw attempt and owning its handshake —
+    /// fabricating a wildcard address there would masquerade as a peer.
+    pub fn remote_address(&self) -> Option<SocketAddr> {
         match (&self.incoming, &self.connecting) {
-            (Some(i), _) => i.remote_address(),
-            (None, Some(c)) => c.remote_address(),
-            (None, None) => SocketAddr::from(([0, 0, 0, 0], 0)),
+            (Some(i), _) => Some(i.remote_address()),
+            (None, Some(c)) => Some(c.remote_address()),
+            (None, None) => None,
         }
     }
 }

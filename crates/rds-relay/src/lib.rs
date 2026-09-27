@@ -33,6 +33,7 @@ pub const OWNED_BACKEND_COMPILED: bool = cfg!(feature = "owned-relay");
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -110,7 +111,14 @@ async fn serve_prepared(
     tls: Option<TlsConfig>,
 ) -> anyhow::Result<Server> {
     let mut relay_config = RelayConfig::new(addr);
-    if !allow.is_empty() {
+    if allow.is_empty() {
+        // Callers through RelayArgs must opt in with --development-open-relay;
+        // a direct API caller receives the same loud signal here.
+        tracing::warn!(
+            "relay serving with open access: every endpoint id is admitted. \
+             Set --allow entries for production deployments"
+        );
+    } else {
         relay_config.access = Arc::new(AllowList(
             allow
                 .into_iter()
@@ -120,6 +128,13 @@ async fn serve_prepared(
                 .collect(),
         ));
     }
+    // Per-client RX limits mirror the owned relay's token bucket. Upstream has
+    // no implemented connection-count cap; the owned backend adds one there.
+    let mut client_rx = iroh_relay::server::ClientRateLimit::new(
+        NonZeroU32::new(64 * 1024 * 1024).expect("nonzero"),
+    );
+    client_rx.max_burst_bytes = NonZeroU32::new(4 * 1024 * 1024);
+    relay_config.limits.client_rx = Some(client_rx);
     relay_config.tls = tls;
     let mut config = ServerConfig::default();
     config.relay = Some(relay_config);
@@ -209,10 +224,21 @@ fn tls_config(tls: RelayTls) -> anyhow::Result<TlsConfig> {
 
 fn read_bounded(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
+    // NONBLOCK plus the regular-file check refuses FIFOs/devices before the
+    // size bound is applied — a plain open on a FIFO blocks forever.
+    let file = std::fs::File::from(rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?);
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "relay PEM path is not a regular file",
+        ));
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,

@@ -3,15 +3,34 @@
 //! Platform coverage is honest: an unobservable quantity reports `None`
 //! and the corresponding gate stays open rather than pretending a bound.
 
-/// Open file descriptors owned by this process, where the kernel exposes
-/// them (`/proc/self/fd` on Linux, `/dev/fd` on macOS).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Open file descriptors owned by this process (`/proc/self/fd`).
+#[cfg(target_os = "linux")]
 pub(crate) fn open_fds() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    const FD_DIR: &str = "/proc/self/fd";
-    #[cfg(target_os = "macos")]
-    const FD_DIR: &str = "/dev/fd";
-    Some(std::fs::read_dir(FD_DIR).ok()?.count())
+    Some(std::fs::read_dir("/proc/self/fd").ok()?.count())
+}
+
+/// Open file descriptors via `proc_pidinfo` (`PROC_PIDLISTFDS`): a
+/// zero-length query returns the fd-table byte size — the true count
+/// without `/dev/fd`'s dependency on an fdesc mount or the +1 of the
+/// `read_dir` descriptor itself.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub(crate) fn open_fds() -> Option<usize> {
+    // SAFETY: a null buffer with a zero size is a documented size probe —
+    // the call writes nothing and returns the table's byte length.
+    let size = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDLISTFDS,
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if size <= 0 {
+        return None;
+    }
+    Some(size as usize / size_of::<libc::proc_fdinfo>())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

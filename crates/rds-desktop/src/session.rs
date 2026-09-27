@@ -65,12 +65,14 @@ pub struct Produced {
 }
 
 /// Live knobs the session applies while a producer runs: the pacing
-/// controller writes `bitrate`, the control stream flips `idr`, and the
-/// producer reports `deadline_misses` it observed.
+/// controller writes `bitrate`, the control stream flips `idr` and files
+/// `requested` bitrate targets (0 = none pending) for the controller to
+/// drain, and the producer reports `deadline_misses` it observed.
 pub struct ProducerControls {
     pub bitrate: Arc<AtomicU64>,
     pub idr: Arc<AtomicBool>,
     pub deadline_misses: Arc<AtomicU64>,
+    pub requested: Arc<AtomicU64>,
 }
 
 impl ProducerControls {
@@ -79,6 +81,7 @@ impl ProducerControls {
             bitrate: Arc::new(AtomicU64::new(initial_bps)),
             idr: Arc::new(AtomicBool::new(true)),
             deadline_misses: Arc::new(AtomicU64::new(0)),
+            requested: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -159,6 +162,12 @@ impl BitrateController {
     /// Current target bitrate.
     pub fn current(&self) -> u64 {
         self.current
+    }
+
+    /// Steer to a viewer-requested target, clamped to the controller's
+    /// own floor and ceiling; adaptation resumes from there.
+    pub fn steer(&mut self, bps: u64) {
+        self.current = bps.clamp(self.floor, self.ceiling);
     }
 
     /// One pacing step. `path` is the selected path's counters (delta'd
@@ -249,12 +258,17 @@ pub async fn serve_desktop_with(
         let bitrate = Arc::clone(&controls.bitrate);
         let idr = Arc::clone(&controls.idr);
         let misses = Arc::clone(&controls.deadline_misses);
+        let requested = Arc::clone(&controls.requested);
         let mut producer = config.producer;
         capture.spawn_blocking(move || {
             let producer_controls = ProducerControls {
                 bitrate,
                 idr,
                 deadline_misses: misses,
+                // Share the session's target slot — a producer observing
+                // `requested` must see what the control arm filed, not a
+                // private always-empty copy.
+                requested,
             };
             let mut source = match producer.take() {
                 Some(p) => p,
@@ -292,6 +306,7 @@ pub async fn serve_desktop_with(
     {
         let conn = conn.clone();
         let bitrate = Arc::clone(&controls.bitrate);
+        let requested = Arc::clone(&controls.requested);
         let misses = Arc::clone(&controls.deadline_misses);
         let mut controller = BitrateController::new(4_000_000, ceiling);
         workers.spawn(async move {
@@ -299,6 +314,12 @@ pub async fn serve_desktop_with(
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
+                // A viewer-filed target survives past one tick: the
+                // controller is steered to it, then adaptation resumes.
+                let req = requested.swap(0, Ordering::Relaxed);
+                if req != 0 {
+                    controller.steer(req);
+                }
                 let missed = misses.swap(0, Ordering::Relaxed);
                 let bps = controller.step(conn.current_path_stats(), missed);
                 bitrate.store(bps.min(u64::from(u32::MAX)), Ordering::Relaxed);
@@ -389,13 +410,27 @@ pub async fn serve_desktop_with(
                         );
                         continue;
                     }
-                    let input = input.get_or_insert_with(|| {
+                    let mut worker = input.take().unwrap_or_else(|| {
                         super::input::worker::InputWorker::new(input_sink.take())
                     });
                     let seq = ev.seq;
-                    if let Err(e) = input.inject(ev).await {
-                        tracing::warn!("input injection failed: {e}");
-                        continue;
+                    match tokio::time::timeout(FRAME_SEND_TIMEOUT, worker.inject(ev)).await {
+                        Ok(Ok(())) => input = Some(worker),
+                        Ok(Err(e)) => {
+                            input = Some(worker);
+                            tracing::warn!("input injection failed: {e}");
+                            continue;
+                        }
+                        Err(_) => {
+                            // The platform input call never returned (a
+                            // wedged X server). Drop the worker — its
+                            // running syscall may still finish, per its
+                            // contract — so the next event probes a fresh
+                            // sink, and count this event unacked rather
+                            // than stalling the whole control plane.
+                            tracing::warn!("input injection timed out; dropping wedged worker");
+                            continue;
+                        }
                     }
                     if acks {
                         let ack = DesktopEvent::InputAck {
@@ -419,7 +454,7 @@ pub async fn serve_desktop_with(
                 }
                 Ok(DesktopControl::SetBitrate(bps)) => {
                     let bps = u64::from(bps.max(50_000)).min(ceiling);
-                    controls.bitrate.store(bps, Ordering::Relaxed);
+                    controls.requested.store(bps, Ordering::Relaxed);
                 }
                 Ok(DesktopControl::Heartbeat { seq, ts_ms }) => {
                     if !matches!(
@@ -1247,5 +1282,33 @@ mod tests {
         // A path that already lost packets before we started watching.
         let bps = c.step(Some(path(1_000_000, 500_000, 20, 0)), 0);
         assert_eq!(bps, 4_000_000, "first sample establishes baseline only");
+    }
+
+    #[test]
+    fn steer_sets_target_inside_bounds() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.steer(2_500_000);
+        assert_eq!(c.current(), 2_500_000);
+        // Out-of-range requests clamp to the controller's own contract.
+        c.steer(50_000);
+        assert_eq!(c.current(), 100_000);
+        c.steer(50_000_000);
+        assert_eq!(c.current(), 8_000_000);
+    }
+
+    #[test]
+    fn steer_survives_adaptation_ticks() {
+        // The SetBitrate semantics the viewer sees: a filed target is not
+        // overwritten by the next pacing step — adaptation resumes *from*
+        // the steered point.
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step(Some(path(1000, 0, 20, 0)), 0); // prime baseline
+        c.steer(1_000_000);
+        let bps = c.step(Some(path(2000, 0, 20, 0)), 0);
+        // Clean window: one recovery step from 1Mbps, not a snap back to 4.
+        assert!(
+            bps > 1_000_000 && bps < 2_000_000,
+            "adaptation must resume from the steered target, got {bps}"
+        );
     }
 }

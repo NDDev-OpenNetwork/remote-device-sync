@@ -232,7 +232,7 @@ impl FileStore {
         }
         #[cfg(test)]
         let io_fault = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
-        let db = Database::builder()
+        let mut db = Database::builder()
             .set_cache_size(16 * 1024 * 1024)
             .create_with_backend(BoundedFile {
                 file,
@@ -327,6 +327,11 @@ impl FileStore {
         if !anchor.initialized()? {
             anchor.seal()?;
         }
+        // Reclaim pages freed by expired/deleted records — without periodic
+        // compaction the file only ever grows. Maintenance, not an
+        // invariant: a failed compact must not refuse a valid store, and
+        // this crate carries no logging facade to report it through.
+        let _ = db.compact();
         let observed = Published::new(record_snapshot(&metadata, true));
         Ok(Self {
             observed,

@@ -50,6 +50,12 @@ impl Fixture {
             }
             "relay" => {
                 cmd.args(["--addr", "127.0.0.1:0"]);
+                if !OWNED {
+                    // The iroh backend fails closed without admission
+                    // configuration; these fixtures are open development
+                    // relays by contract.
+                    cmd.arg("--development-open-relay");
+                }
             }
             "server" => {
                 cmd.args([
@@ -60,6 +66,9 @@ impl Fixture {
                     "--directory",
                 ])
                 .arg(self.0.join("records"));
+                if !OWNED {
+                    cmd.arg("--development-open-relay");
+                }
             }
             _ => panic!("unknown fixture role"),
         }

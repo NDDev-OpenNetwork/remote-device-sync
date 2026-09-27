@@ -15,9 +15,10 @@ dependency claim.
 | Bind | HTTP TCP; optional separate HTTPS | UDP QUIC |
 | Address flag | `--addr` in relay; `--relay-addr` in server | Same flags, interpreted as UDP |
 | Identity | Existing iroh relay behavior | Required `--relay-key-file`, separate from device/authority keys |
-| Admission | Existing `--allow`; empty retains legacy open mode | Nonempty `--allow` required; unknown keys denied |
-| Development | Existing iroh behavior | Explicit `--development-open-relay`, incompatible with `--allow` |
-| Connection cap | Existing iroh implementation | `--relay-max-connections`, positive u16, default 256 |
+| Admission | Nonempty `--allow` required; unknown keys denied; weak or duplicate keys rejected at startup | Same contract |
+| Development | Explicit `--development-open-relay`, incompatible with `--allow` | Same contract |
+| Per-client rate | 64 MiB/s RX with a 4 MiB burst per client | Token bucket at the same envelope |
+| Connection cap | Not exposed by upstream | `--relay-max-connections`, positive u16, default 256 |
 | TLS flags | Manual PEM or in-process ACME | HTTP TLS/ACME options rejected; QUIC already authenticates its pinned key |
 
 The owned cap includes in-progress handshakes and registrations. Releasing a

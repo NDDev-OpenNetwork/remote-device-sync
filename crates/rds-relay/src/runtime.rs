@@ -22,10 +22,11 @@ pub struct RelayArgs {
     /// Owned relay connections, including incomplete handshakes and registrations.
     #[arg(long)]
     pub relay_max_connections: Option<NonZeroU16>,
-    /// Explicitly allow unknown peers on an owned relay for isolated development.
+    /// Explicitly allow unknown peers for isolated development. Both relay
+    /// backends run fail-closed without this flag or --allow entries.
     #[arg(long, conflicts_with = "allow")]
     pub development_open_relay: bool,
-    /// Allowed endpoint id (repeatable). Owned production mode requires entries.
+    /// Allowed endpoint id (repeatable). Production mode requires entries.
     #[arg(long = "allow")]
     pub allow: Vec<EndpointId>,
     /// PEM certificate chain for the iroh HTTPS relay.
@@ -45,6 +46,26 @@ pub struct RelayArgs {
     pub tls_acme_cache: Option<PathBuf>,
     #[arg(long, requires = "tls_acme_domain")]
     pub tls_acme_staging: bool,
+}
+
+/// Relay allowlist entries are endpoint identities: reject weak ed25519
+/// keys like directory enrollment does, and duplicates that signal a
+/// configuration mistake.
+fn validate_allowlist(allow: &[EndpointId]) -> Result<(), RelayConfigError> {
+    let mut seen = std::collections::HashSet::new();
+    for id in allow {
+        if id.verifying_key().is_weak() {
+            return Err(RelayConfigError::Invalid(
+                "relay allowlist contains a weak key",
+            ));
+        }
+        if !seen.insert(*id) {
+            return Err(RelayConfigError::Invalid(
+                "relay allowlist contains a duplicate key",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,12 +99,20 @@ impl RelayArgs {
         use RelayConfigError::Invalid;
         match self.relay_backend {
             RelayBackend::Iroh => {
-                if self.relay_key_file.is_some()
-                    || self.relay_max_connections.is_some()
-                    || self.development_open_relay
-                {
+                if self.relay_key_file.is_some() || self.relay_max_connections.is_some() {
                     return Err(Invalid("owned-relay flags require --relay-backend noq"));
                 }
+                if self.development_open_relay && !self.allow.is_empty() {
+                    return Err(Invalid(
+                        "development-open relay mode conflicts with an allowlist",
+                    ));
+                }
+                if !self.development_open_relay && self.allow.is_empty() {
+                    return Err(Invalid(
+                        "iroh relay requires --allow entries or explicit --development-open-relay",
+                    ));
+                }
+                validate_allowlist(&self.allow)?;
                 let manual = self.tls_cert.is_some() || self.tls_key.is_some();
                 let acme = !self.tls_acme_domain.is_empty();
                 if manual && acme {
@@ -154,6 +183,7 @@ impl RelayArgs {
                             "owned relay requires --allow entries or explicit --development-open-relay",
                         ));
                     }
+                    validate_allowlist(&self.allow)?;
                     let key_file = self
                         .relay_key_file
                         .ok_or(Invalid("owned relay requires --relay-key-file"))?;
@@ -442,15 +472,18 @@ mod tests {
 
     #[tokio::test]
     async fn canceled_iroh_observer_preserves_listener_and_shutdown() {
-        let mut relay = RelayArgs::default()
-            .prepare()
-            .unwrap()
-            .initialize()
-            .await
-            .unwrap()
-            .bind("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let mut relay = RelayArgs {
+            development_open_relay: true,
+            ..Default::default()
+        }
+        .prepare()
+        .unwrap()
+        .initialize()
+        .await
+        .unwrap()
+        .bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(25), relay.stopped())
                 .await

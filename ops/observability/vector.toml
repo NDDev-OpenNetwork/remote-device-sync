@@ -27,12 +27,13 @@ r = object!(parse_json!(string!(.message)))
 assert!(r.schema_version == 1)
 assert!(includes(["rds-agent", "rds-cli", "rds-relay", "rds-server", "rds-bench"], r.service))
 assert!(includes(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"], r.level))
-assert!(includes(["diagnostic", "process_started", "process_completed", "process_failed", "heartbeat", "listener_ready", "peer_accepted", "peer_rejected", "handshake_failed", "handshake_timed_out", "connection_budget_exhausted", "operation_completed"], r.event))
+assert!(includes(["diagnostic", "process_started", "process_completed", "process_failed", "heartbeat", "listener_ready", "peer_accepted", "peer_rejected", "handshake_failed", "handshake_timed_out", "connection_budget_exhausted", "operation_completed", "session_opened", "session_closed", "path_migrated", "request_refused"], r.event))
 assert!(match(string!(r.run_id), r'^[0-9a-f]{32}$'))
 assert!(match(string!(r.target), r'^[a-zA-Z0-9_:.-]{1,128}$'))
 assert!(match(string!(r.version), r'^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$'))
 assert!(includes([null, "connect", "service_stream", "ssh_connect", "ssh_session", "grant_authorize", "grant_renew", "sync_send", "sync_recv"], r.operation))
 assert!(includes([null, "ok", "error", "cancelled"], r.outcome))
+assert!(includes([null, "completed", "cancelled", "timeout", "denied", "expired", "revoked", "budget_exhausted", "peer_closed", "local_closed", "reset", "transport", "protocol", "unsupported", "policy_unavailable", "aborted"], r.reason))
 assert!(is_null(r.session_id) || is_integer(r.session_id))
 assert!(is_null(r.elapsed_us) || is_integer(r.elapsed_us))
 assert!(is_null(r.line) || is_integer(r.line))
@@ -55,6 +56,7 @@ assert!(match(node, r'^[a-zA-Z0-9_-]{1,32}$'))
   "run_id": r.run_id, "sequence": sequence, "level": r.level,
   "target": r.target, "line": r.line, "session_id": r.session_id,
   "event": r.event, "operation": r.operation, "outcome": r.outcome,
+  "reason": r.reason,
   "elapsed_us": r.elapsed_us, "node": node,
   "telemetry_dropped_total": dropped, "telemetry_oversize_total": oversize,
   "telemetry_write_errors_total": write_errors
@@ -283,3 +285,23 @@ extract_from = "safe"
 [[tests.outputs.conditions]]
 type = "vrl"
 source = "assert!(.operation == \"sync_recv\")\nassert!(.outcome == \"cancelled\")\nassert!(!exists(.path) && !exists(.directory) && !exists(.key))"
+
+[[tests]]
+name = "session lifecycle events carry typed reasons"
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-agent\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"WARN\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": 7, \"event\": \"request_refused\", \"reason\": \"denied\", \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0, \"peer\": \"PRIVATE_SENTINEL\"}"
+[[tests.outputs]]
+extract_from = "safe"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = "assert!(.event == \"request_refused\")\nassert!(.reason == \"denied\")\nassert!(!exists(.peer))"
+
+[[tests]]
+name = "unknown reason text is rejected"
+no_outputs_from = ["safe"]
+[[tests.inputs]]
+insert_at = "safe"
+type = "log"
+log_fields.message = "{\"schema_version\": 1, \"timestamp_unix_us\": 1790300000000000, \"uptime_us\": 100, \"service\": \"rds-agent\", \"version\": \"0.1.0\", \"run_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"sequence\": 1, \"level\": \"WARN\", \"target\": \"rds_telemetry\", \"line\": 1, \"session_id\": 7, \"event\": \"session_closed\", \"reason\": \"PRIVATE_SENTINEL\", \"telemetry_dropped_total\": 0, \"telemetry_oversize_total\": 0, \"telemetry_write_errors_total\": 0}"

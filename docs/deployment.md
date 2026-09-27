@@ -43,7 +43,11 @@ APIs. Give it a separate authorized key. Updated agent, direct CLI and owned
 relay binaries refuse a seed inode already in use before binding. Upgrade all
 local binaries together; old binaries and copied/manual-replaced keys are outside
 this cooperative guarantee. See [migration and ownership](local-sessions.md).
-The relay's `--allow` covers every endpoint that may use the relay.
+The relay's `--allow` covers every endpoint that may use the relay. Both
+relay backends fail closed: without `--allow` entries a relay refuses to
+start unless `--development-open-relay` explicitly selects open admission
+for isolated development. Allowlist entries are validated like directory
+enrollment — weak or duplicate keys are rejected at startup.
 
 Agent role, service, peer, authority, limit and timeout policy can live in a
 versioned JSON file instead of flags — `--agent-config /etc/rds/agent.json`;
@@ -146,8 +150,9 @@ or HTTP fallback. The registry verifying key remains separately provisioned;
 a TLS certificate cannot authorize a name binding.
 
 Directory membership is separately provisioned with repeated
-`--directory-allow <base32-device-key>` arguments (maximum 4096 distinct,
-nonweak Ed25519 keys). An empty list denies record PUT, GET and DELETE, while
+`--directory-allow <device-key>` arguments — base32 is the canonical form,
+lowercase hexadecimal is also accepted (maximum 4096 distinct, nonweak
+Ed25519 keys). An empty list denies record PUT, GET and DELETE, while
 health and configured policy routes remain available. This is independent of
 relay `--allow` and agent peer permissions. Removing a key and restarting denies
 its record access while preserving its replay floor; it does not revoke an
