@@ -90,6 +90,8 @@ below; `README.md` must link this file.
 | measure:impaired | implemented | impairment profile | `docs/reports/` |
 | measure:resolve-connect | implemented | local registry fixture | `docs/reports/` |
 | measure:migration | implemented | two local owned relays (noq); iroh lane reports SKIPPED | `docs/reports/` |
+| measure:calibration | implemented | rate-cap impairment below the loopback ceiling; noq socket pacing or iroh proxy | `docs/reports/` |
+| measure:recovery | implemented | live socket impairment (noq); iroh lane reports SKIPPED | `docs/reports/` |
 
 Notes:
 

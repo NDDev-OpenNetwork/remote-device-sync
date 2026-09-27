@@ -30,11 +30,11 @@ Neither increment closes these product gaps or any wave.
 | Task | State | Evidence / remaining scope |
 |---|---|---|
 | W0.1 | Partial | R01/R10 are agent regressions; R02 is now covered by transactional record/delete regressions; R03/R04 are journal regressions, with failures observed before fixing. R05 is covered by planted-link and directory-substitution tests. R06 failed before the name proof fix; R07 is covered by server expiry checks. R08 has failing-before actual-client Drain/drop regressions and passing framing/grace checks. R09 has failing-before direct/relay candidate regressions and passing family/cancellation checks. Desktop byte/cancellation and lifecycle regressions now cover the W6.1/W6.2 increments; broader native/network qualification remains open. |
-| W0.2 | Partial; receiver completion barrier | Versioned transfer goodput waits for exact received byte count, BLAKE3 digest and response EOF under one operation deadline. A missing-receipt regression failed before the fix; corrupt/truncated/reordered payloads, invalid receipts, delayed reception and real iroh/noq forwarded-TCP checks cover the boundary. Known-rate calibration, connect/auth/service phase timings and topology/load qualification remain open; see [contract](benchmark-transfer.md). |
-| W0.3 | Partial; Linux bench worlds contained | `Transports` bounds peer-path kinds per endpoint: iroh removes the transport itself (`clear_ip_transports`/`clear_relay_transports`) because its in-band QNT exchange cannot be disabled; noq suppresses direct candidates from `addr()`, dialing, advertisement and learned-candidate opens while keeping the UDP socket its relay attachment rides. `max_multipath_paths=1` now actually pins iroh via a first-path selector (config floors would otherwise leave migration open); noq pins through its own policy. noq bench worlds run the owned `rds-relay` with impairment proxies on each endpoint↔relay leg; noq impaired-direct uses socket-level impairment. Integrity enforcement now requires offered-vs-observed coverage (every sent datagram entered an impairment device) and a delay floor on measured path RTT; both caught the real iroh/noq escapes this change fixed. `resolve-connect` runs on noq through the owned relay. iroh relay-impaired remains an explicit skip (TCP relay leg, no UDP impairment model); recovery-path scenarios and real-network qualification remain open. |
-| W0.4 | Partial; comparator faults refused | Absent metrics, nonfinite values, failed scenarios, insufficient samples and backend/impairment profile mismatches now refuse comparison (seed excluded from profile). `checkpoint.sh` registers `r0-evidence` with a CLI negative-fixture battery; the c1 noq suite gains its missing `transport-noq` feature flag. Gate invocation and re-qualification of historical reports remain open; see section below. |
-| W0.5 | Partial; versioned matrix landed | `docs/capability-matrix.md` v1 records implemented/experimental/stub/unavailable per capability with runtime prerequisites separate from state. Tests enforce every `ServiceKind` variant and every `rds-bench` lane name has a matrix row, the state vocabulary is closed, placeholders name what is missing and README links the matrix. Live `rds info` advertisement ↔ matrix agreement beyond enum coverage, per-report capability tagging and release-gate enforcement remain open. |
-| W0.6 | Partial; hash-chained receipt schema landed | `docs/receipts/rds-receipts.jsonl` is append-only JSONL, one receipt per gate/report: full commit SHA, dirty flag, bench-binary and Cargo.lock digests, toolchain channel, features, OS/arch, topology class, repetitions/failures/skips, budgets and cited-report digests — no host identifiers. `prev_hash`/`hash` chaining rejects tampered, reordered or mid-deleted lines with the offending line number; `rds-bench receipt`/`validate-receipts` are the writer/reader and `write_checkpoint` now records every gate run. Historical receipt backfill, `--report` coverage of bench JSONs inside gates and release-gate consumption remain open. |
+| W0.2 | Implemented; receiver completion barrier + phase timings + known-rate calibration | Versioned transfer goodput waits for exact received byte count, BLAKE3 digest and response EOF under one operation deadline. A missing-receipt regression failed before the fix; corrupt/truncated/reordered payloads, invalid receipts, delayed reception and real iroh/noq forwarded-TCP checks cover the boundary. Phase timings now split connect/service-open/payload (`phase_*` metrics) across transfer/ping/migration and per-phase percentiles in resolve-connect; `calibration` proves measured goodput tracks a known 10 Mbps cap (ratio ~0.8). Topology/load qualification on real networks remains open; see [contract](benchmark-transfer.md). |
+| W0.3 | Implemented for loopback; recovery lane landed | `Transports` bounds peer-path kinds per endpoint: iroh removes the transport itself (`clear_ip_transports`/`clear_relay_transports`) because its in-band QNT exchange cannot be disabled; noq suppresses direct candidates from `addr()`, dialing, advertisement and learned-candidate opens while keeping the UDP socket its relay attachment rides. `max_multipath_paths=1` now actually pins iroh via a first-path selector (config floors would otherwise leave migration open); noq pins through its own policy. noq bench worlds run the owned `rds-relay` with impairment proxies on each endpoint↔relay leg; noq impaired-direct uses socket-level impairment. Integrity enforcement now requires offered-vs-observed coverage (every sent datagram entered an impairment device) and a delay floor on measured path RTT; both caught the real iroh/noq escapes this change fixed. `resolve-connect` runs on noq through the owned relay. iroh relay-impaired remains an explicit skip (TCP relay leg, no UDP impairment model). `recovery` lane imposes a live loss+delay burst mid-transfer (runtime-tunable socket impairment), requires a nonzero drop counter and a verified receipt; kill/rebind mid-conn on real networks remains documented-open. |
+| W0.4 | Implemented; comparator strict + history requalified | Absent metrics, nonfinite values, failed scenarios, insufficient samples and backend/impairment profile mismatches now refuse comparison (seed excluded from profile). `checkpoint.sh` registers `r0-evidence` with a CLI negative-fixture battery; the c1 noq suite gains its missing `transport-noq` feature flag. Both committed a/b suite pairs re-qualify under the strict comparator (compare exits clean); the r0-evidence gate refuses all seven negative fixture classes. |
+| W0.5 | Implemented; matrix + live agreement + report tags | `docs/capability-matrix.md` v1 records implemented/experimental/stub/unavailable per capability with runtime prerequisites separate from state. Tests enforce every `ServiceKind` variant and every `rds-bench` lane name has a matrix row, the state vocabulary is closed, placeholders name what is missing and README links the matrix. Live `rds info` ↔ matrix agreement is tested: every advertised service must resolve to an implemented/experimental row and stub rows can never be offered (rds-cli `info_matrix` test). Every report self-identifies via `meta.capability = measure:<scenario>`, normalized at the lane exit so relabeled composite lanes stay correct. Release-gate enforcement of matrix state remains open. |
+| W0.6 | Implemented; receipts cover reports + history backfilled | `docs/receipts/rds-receipts.jsonl` is append-only JSONL, one receipt per gate/report: full commit SHA, dirty flag, bench-binary and Cargo.lock digests, toolchain channel, features, OS/arch, topology class, repetitions/failures/skips, budgets and cited-report digests — no host identifiers. `prev_hash`/`hash` chaining rejects tampered, reordered or mid-deleted lines with the offending line number; `rds-bench receipt`/`validate-receipts` are the writer/reader and `write_checkpoint` now records every gate run. Gate receipts now digest-cite every bench artifact the gate produced (not just the checkpoint file); a `report-backfill` receipt anchors all 135 historical report files by content digest. Release-gate consumption remains open. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
 | W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
@@ -1812,3 +1812,55 @@ string-or-list routes and the 8-slot bound.
 
 Verified: fmt, clippy default + x11 lanes, full workspace suite
 (`transport-noq`) green; measured report committed.
+
+## 2026-09-27 — W0 closures: phase timings, calibration, recovery, receipts
+
+W0.2: reports now carry a phase split — `phase_connect_ns` and
+`phase_service_open_ns` on transfer/migration, per-phase percentiles
+(`phase_resolve_*`, `phase_connect_*`, `phase_first_byte_*`) on
+resolve-connect, `phase_connect_ns` on ping. Authorization is measured
+inside `phase_service_open_ns`: service grant verification happens
+during OpenTcp, so no separate wire boundary exists to time. The new
+`calibration` lane proves measured goodput tracks a known ceiling:
+10 Mbps cap → 0.75-0.81 ratio, inside the declared 0.4–1.2 band; a cap
+above the transport's natural ceiling fails the lane (as it should —
+a non-binding cap is a miscalibrated measurement, not a pass).
+
+W0.3 (loopback scope): `ImpairingSocket`'s config is now live via
+`StatsHandle::set_impairment` / `World::set_socket_impairment[_at]`,
+so recovery scenarios can impose loss on an established connection.
+The `recovery` lane starts a verified upload clean, imposes a ~1.5s
+15% loss + 50ms delay burst on the client's egress at ~⅓ payload,
+then restores it; the run must still produce a verified receipt and a
+nonzero drop counter or it fails — no vacuous pass. 78 dropped, receipt
+verified. Kill-mid-transfer is already covered by the `migration`
+lane; rebind (local address change) and real-network qualification
+stay open — no socket rebind surface exists yet and honest WAN numbers
+need real hardware.
+
+W0.4: both committed a/b suite pairs (`bench-20260921-195139`,
+`bench-20260926-161247`) re-qualify under the strict comparator —
+compare exits clean. The r0-evidence gate already refuses all seven
+negative fixture classes (missing, backend/impairment mismatch,
+failed, thin, NaN, absent-metric).
+
+W0.5: `rds-cli/tests/info_matrix.rs` binds a live agent and asserts
+every advertised `ServiceKind` resolves to an `implemented`/`experimental`
+matrix row (stub/unavailable can never be offered) and that `Sync` is
+absent without `sync_dir` / present with it. Reports self-identify via
+`meta.capability = measure:<scenario>`, normalized at the single exit
+point so composite lanes that relabel `meta.scenario` (multiconnect →
+handshake body, relay-fallback/impaired → ping body) cannot tag wrong.
+
+W0.6: `write_checkpoint` takes each gate's produced artifacts and
+digest-cites every one in the gate receipt (c0: a/b suites; c1: noq
+suite; c3: resolve suite) — a gate receipt can no longer point at a
+checkpoint file alone. A `report-backfill` receipt anchors all 135
+previously committed report files by BLAKE3 digest; the chain validates
+(3 receipts). Also fixed a W3.3 leftover: `World.relays` warned under
+default features — the field is load-bearing for iroh relay lifetime
+but read only under `transport-noq`; now `cfg_attr`-annotated.
+
+Evidence: `docs/reports/noq-measurement-20260927{,-data.json}` — all
+nine lanes green on noq with phase metrics, calibration ratio 0.75–0.81
+and recovery drops=58 window=1.5s.

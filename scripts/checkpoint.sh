@@ -35,7 +35,10 @@ green_bars() {
 }
 
 write_checkpoint() {
-    local gate="$1" verdict="$2" extra="$3"
+    local gate="$1" verdict="$2" extra="$3"; shift 3
+    # Remaining args are report artifacts the gate produced; each is
+    # digest-cited in the receipt so the checkpoint cannot be appended
+    # without its evidence.
     cat > "$REPORTS/checkpoint-${gate}.md" <<EOF
 # Checkpoint ${gate^^} — ${TS}
 
@@ -53,9 +56,14 @@ EOF
     note "wrote $REPORTS/checkpoint-${gate}.md"
 
     note "append hash-chained machine receipt (docs/receipts/)"
+    local receipt_args=(--report "$REPORTS/checkpoint-${gate}.md")
+    local artifact
+    for artifact in "$@"; do
+        receipt_args+=(--report "$artifact")
+    done
     cargo run -q -p rds-bench -- receipt \
         --kind gate --subject "$gate" --status pass --topology loopback \
-        --report "$REPORTS/checkpoint-${gate}.md" \
+        "${receipt_args[@]}" \
         --note "verdict: $verdict" \
         || fail "receipt append"
     cargo run -q -p rds-bench -- validate-receipts \
@@ -88,7 +96,9 @@ c0)
 - suite A: bench-${TS}-a.{json,md}
 - suite B: bench-${TS}-b.{json,md}
 - reproducibility p95 ±15%: PASS
-- baseline: baseline-iroh.md"
+- baseline: baseline-iroh.md" \
+        "$REPORTS/bench-${TS}-a.json" "$REPORTS/bench-${TS}-a.md" \
+        "$REPORTS/bench-${TS}-b.json" "$REPORTS/bench-${TS}-b.md"
     ;;
 c1)
     note "gate c1 — owned noq transport parity"
@@ -116,7 +126,8 @@ c1)
 - clippy/tests with transport-noq: PASS
 - turmoil partition/repair sim: PASS
 - noq suite: bench-${TS}-noq.{json,md}
-- impaired-path migration: see checkpoint-c1.md measurement table"
+- impaired-path migration: see checkpoint-c1.md measurement table" \
+        "$REPORTS/bench-${TS}-noq.json" "$REPORTS/bench-${TS}-noq.md"
     ;;
 c2)
     note "gate c2 — owned relay transport"
@@ -176,7 +187,8 @@ PY
 - announce e2e (publish, TTL refresh, addr-change republish): PASS
 - resolve e2e (ticket/bare-key/name fallbacks, resolve→connect): PASS
 - record + http parser fuzz (proptest): PASS
-- G3 cold resolve→connect→first-byte ≤300ms: see bench-${TS}-resolve.{json,md}"
+- G3 cold resolve→connect→first-byte ≤300ms: see bench-${TS}-resolve.{json,md}" \
+        "$REPORTS/bench-${TS}-resolve.json" "$REPORTS/bench-${TS}-resolve.md"
     ;;
 c4)
     note "gate c4 — capability authorization"
