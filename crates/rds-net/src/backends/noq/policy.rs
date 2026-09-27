@@ -388,6 +388,24 @@ pub(super) async fn connection_driver_observed(
         }
         // Lost/lagged path events cannot accumulate stale QNT history.
         qnt_paths.retain(|id| owner.path(*id).is_some());
+        // Established/Abandoned delivery is a bounded broadcast: a lagged
+        // event must not hide a live path from selection nor keep a dead
+        // one selected. The negotiated PathId space is bounded, so
+        // reconcile by rescan rather than trusting event completeness.
+        // Adoption keeps the Established boundary: a path joins selection
+        // only after our challenge was answered, the same condition that
+        // emits the event — unvalidated candidates stay out.
+        for raw in 0..super::MAX_MULTIPATH_PATHS {
+            let id = noq::PathId::from(raw);
+            if paths.contains_key(&id) {
+                continue;
+            }
+            if let Some(path) = owner.path(id)
+                && path.stats().frame_rx.path_response > 0
+            {
+                paths.insert(id, path.weak_handle());
+            }
+        }
         drop(owner);
         reselect(
             &conn,
