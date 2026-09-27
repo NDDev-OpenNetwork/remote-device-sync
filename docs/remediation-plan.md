@@ -237,7 +237,17 @@ reuse the agent identity and pin session handles. New transfer-specific uni tags
 isolate delayed/canceled data, with bounded live routes and coordinated IPC v4
 migration. [The receipt](reports/rds-managed-sync-20260926.md) covers both
 transport backends, preserved TCP on cancellation, grants and real CLI processes.
-Viewer APIs, broader negotiation, native/installed qualification and directory
+
+W2.4 implementation update (2026-09-27): the [managed desktop channel](local-sessions.md#managed-desktop-channels)
+lands the viewer-manager API on local wire v5 — `Command::Desktop`/`Reply::DesktopOpened`
+open a relay-mode `DesktopV2` session on the pinned connection, then the socket
+speaks `DesktopDown`/`DesktopUp`: postcard headers plus u32-length-prefixed raw
+encoded payloads (≤ 32 MiB, beside the 64 KiB control bound). The manager
+forwards without decoding (no codec linkage); the viewer owns decode via
+`RelayDecoder` with in-session keyframe/broken-chain discipline and
+rate-limited `NeedIdr`. `rds desktop` defaults to the managed path and
+`session desktop` exists; `--direct` keeps native in-process sessions.
+Broader negotiation, native/installed qualification and directory
 synchronization remain open; this increment does not close `r2-session-core`.
 
 W2.3 implementation update (2026-09-25): [grant v2 and explicit renewal](grant-leases.md)

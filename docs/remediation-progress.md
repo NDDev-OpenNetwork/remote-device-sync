@@ -2004,3 +2004,47 @@ scope while sibling, traversal and write escapes refuse by name.
 
 Remaining W2.3: account-level scopes (OS identity), automatic GDS
 issuance/renewal and policy reconciliation — cross-repository, deferred.
+
+## Managed desktop viewer API — local wire v5 (2026-09-27)
+
+W2.4's viewer-manager API piece. The local wire moves to **version 5**:
+`Command::Desktop { session, hello }` opens a desktop channel on the
+pinned managed session; `Reply::DesktopOpened { session, caps }` answers
+it, then the authenticated socket becomes a bidirectional body channel
+(`DesktopDown`/`DesktopUp`). Frame bodies travel beside postcard framing —
+a `Frame { header }` message followed by a big-endian u32 length and the
+raw encoded payload (≤ `MAX_DESKTOP_PAYLOAD` = 32 MiB) — because a
+postcard control message is bound to 64 KiB while encoded frames are not.
+
+The manager runs the remote `DesktopSession` in the new **relay mode**
+(`SessionOpts::relay_encoded`): sequence checks and header publication
+still run session-side, while encoded payloads publish to a bounded tap
+instead of decoding — the manager never links a codec and stays buildable
+headless. `DesktopSession::control_sender` exposes a cloneable control
+queue and `send_control` forwards verbatim. The pump ends on viewer
+`Finished`/EOF, remote-session end, or body error; dropping the session
+aborts its remote legs and releases the stream permit it shares with TCP
+bodies.
+
+The viewer side (`rds_client::local::ManagedDesktop`) owns the
+authenticated socket: `recv` yields `ManagedMessage::{Frame,Event}` until
+`Finished`/EOF (`None`), and a cloneable `ManagedControl` serializes
+verbatim controls plus typed `send_input`/`heartbeat`/`request_idr`/
+`set_bitrate` behind one write half — concurrent senders cannot interleave
+postcard bytes. `rds_desktop::client::RelayDecoder` reapplies
+wait-for-keyframe and broken-chain discipline viewer-side, returning
+`Frame`/`Pending`/`NeedIdr` with the same 500 ms resync rate limit the
+in-session path uses. `rds desktop` defaults to the managed channel and
+`rds session desktop` exists; `desktop --direct` keeps native in-process
+sessions unchanged.
+
+Tests: local wire v5 round-trips and proptest decode-safety in rds-core;
+framing bounds, truncation, Finished/EOF and concurrent-sender
+serialization unit tests plus three real-loopback `serve` e2e tests
+(frames+heartbeat echo+clean finish, remote drop, caller EOF) in
+rds-client; a relay-mode transport e2e in `session_v2`; and a real-agent
+managed-desktop test asserting clean `Rejected(Remote)` refusal with no
+stream-permit leak on peers that cannot serve desktop.
+
+Remaining W2.4: coordinated installed-binary migration and native/installed
+qualification — cross-platform, deferred.

@@ -23,9 +23,10 @@ below was verified against vendored sources or upstream documents on
 ## 0. Doctrine
 
 The current product-facing increment is the W2.4
-[local session manager](local-sessions.md). Default CLI connectivity and local
-key-inode runtime ownership are implemented. Remaining manager work covers
-viewer APIs and installed-device qualification; single-file send/receive now
+[local session manager](local-sessions.md). Default CLI connectivity, local
+key-inode runtime ownership and the managed desktop viewer API (local wire
+v5) are implemented. Remaining manager work is installed-device
+qualification and coordinated binary migration; single-file send/receive
 use the manager. The [native SSH client](ssh.md)
 now covers standard shell/exec/PTY requests; host-key/account enrollment,
 broker/reattachment and real-network/platform qualification remain W5 work,
