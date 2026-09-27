@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+#[allow(dead_code)]
 const STATES: [&str; 4] = ["implemented", "experimental", "stub", "unavailable"];
 
 fn root() -> PathBuf {
@@ -14,6 +15,7 @@ fn root() -> PathBuf {
 }
 
 /// One row: capability id, state, prerequisites, evidence.
+#[allow(dead_code)]
 struct Row {
     capability: String,
     state: String,
@@ -57,6 +59,7 @@ fn matrix_rows() -> Vec<Row> {
 
 /// State vocabulary is closed; placeholders must name what is missing,
 /// real rows must name their evidence.
+#[allow(dead_code)]
 fn assert_row_rules(rows: &[Row]) {
     let mut seen = std::collections::HashSet::new();
     for r in rows {
@@ -87,6 +90,7 @@ fn assert_row_rules(rows: &[Row]) {
 }
 
 /// README is the public face; it must point at the matrix.
+#[allow(dead_code)]
 fn readme_links_matrix() {
     let readme = std::fs::read_to_string(root().join("README.md")).expect("README.md");
     assert!(
@@ -95,6 +99,7 @@ fn readme_links_matrix() {
     );
 }
 
+#[allow(dead_code)]
 fn row_present(rows: &[Row], capability: &str) -> bool {
     rows.iter().any(|r| r.capability == capability)
 }
