@@ -39,6 +39,28 @@ const READ_STALL: Duration = Duration::from_secs(300);
 /// Call the `*_with_timeout` entry points to select a shorter or longer budget.
 pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// Process-wide bound on blocking filesystem work (W2.5). Waiting for a
+/// permit happens on the async side, so a scan/store storm queues inside
+/// this crate instead of filling Tokio's blocking pool ahead of identity,
+/// revocation and announcement work. Generous enough that real transfers
+/// never serialize on it.
+const MAX_DISK_JOBS: usize = 32;
+static DISK_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_DISK_JOBS);
+
+/// Run `f` on the blocking pool once a disk-job permit frees. Cancelling
+/// the future before a permit never reaches the blocking pool.
+async fn disk_job<F, R>(f: F) -> Result<R, tokio::task::JoinError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let _permit = DISK_JOBS
+        .acquire()
+        .await
+        .expect("disk-job semaphore never closes");
+    tokio::task::spawn_blocking(f).await
+}
+
 /// Agent-side permissions, checked before any path or filesystem operation.
 /// Read means download from the agent; write means upload to the agent.
 #[derive(Debug, Clone, Default)]
@@ -632,7 +654,7 @@ async fn serve_inner(
             // every handle again before any state or destination I/O.
             let preflight = {
                 let (dir, rel) = (dir.clone(), rel.clone());
-                tokio::task::spawn_blocking(move || {
+                disk_job(move || {
                     match Directory::open_root(&dir, false).and_then(|root| root.read_path(&rel)) {
                         Ok(_) => Ok(()),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -694,11 +716,9 @@ async fn serve_inner(
             // same inode, even if the path is replaced after the offer.
             let source = {
                 let rel = rel.clone();
-                tokio::task::spawn_blocking(move || {
-                    Directory::open_root(&dir, false)?.read_path(&rel)
-                })
-                .await
-                .context("open source task")?
+                disk_job(move || Directory::open_root(&dir, false)?.read_path(&rel))
+                    .await
+                    .context("open source task")?
             };
             let source = match source {
                 Ok(file) => Arc::new(file),
@@ -777,7 +797,7 @@ async fn send_file_inner(
     }
     let path = path.to_path_buf();
     let source = Arc::new(
-        tokio::task::spawn_blocking(move || -> anyhow::Result<File> {
+        disk_job(move || -> anyhow::Result<File> {
             use rustix::fs::{Mode, OFlags};
             let file = File::from(rustix::fs::open(
                 &path,
@@ -954,7 +974,7 @@ where
 /// Manifest of a pinned file on the blocking pool — chunking + hashing a
 /// large file must not park an async worker.
 async fn manifest_from_file(file: Arc<File>) -> anyhow::Result<Manifest> {
-    tokio::task::spawn_blocking(move || manifest_of_reader(&*file))
+    disk_job(move || manifest_of_reader(&*file))
         .await
         .context("manifest task")?
         .context("build manifest")
@@ -990,14 +1010,22 @@ impl Drop for StoreCancellation {
 }
 
 impl JournalSink {
-    fn start(mut journal: Journal) -> (Self, tokio::sync::oneshot::Receiver<()>) {
+    async fn start(mut journal: Journal) -> (Self, tokio::sync::oneshot::Receiver<()>) {
         let (jobs, mut job_rx) = mpsc::channel::<(u32, Vec<u8>)>(FETCH_STREAMS * 4);
         let (finished, stopped) = tokio::sync::oneshot::channel();
         let error = Arc::new(std::sync::Mutex::new(None));
         let error_w = error.clone();
         let canceled = Arc::new(AtomicBool::new(false));
         let canceled_w = canceled.clone();
+        // The permit waits on the async side, then lives inside the worker
+        // for the sink's whole lifetime — a transfer's store pump is one
+        // of the bounded disk jobs, not an uncounted blocking thread.
+        let permit = DISK_JOBS
+            .acquire()
+            .await
+            .expect("disk-job semaphore never closes");
         let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             // Drop signals every exit, including panic, without depending on
             // a reader already waiting. Normal exit requires closing jobs.
             let _finished = finished;
@@ -1084,7 +1112,7 @@ async fn receive(
     // work belongs on the blocking pool, not an async worker.
     let journal = {
         let (dir, rel, manifest) = (dir.to_path_buf(), rel.to_string(), manifest.clone());
-        tokio::task::spawn_blocking(move || Journal::open(&dir, &rel, &manifest))
+        disk_job(move || Journal::open(&dir, &rel, &manifest))
             .await
             .context("journal open task")?
     };
@@ -1141,7 +1169,7 @@ async fn receive_chunks(
     // Chunk streams arrive on the already claimed transfer/service route;
     // neither other services nor different transfer IDs can consume them.
     let mut requested: std::collections::HashSet<u32> = journal.need().into_iter().collect();
-    let (sink, stopped) = JournalSink::start(journal);
+    let (sink, stopped) = JournalSink::start(journal).await;
     // Remove only requested unique indices from the bounded set. Disk stores
     // remain asynchronous; after draining the sink, require complete verified
     // journal state before assembly or a success response.
@@ -1236,7 +1264,7 @@ async fn receive_chunks(
     let fetched = journal.fetched();
     // Assembly concatenates and rehashes every part — blocking pool.
     let dest = {
-        tokio::task::spawn_blocking(move || journal.assemble())
+        disk_job(move || journal.assemble())
             .await
             .context("assemble task")?
             .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -1301,7 +1329,7 @@ async fn push_chunks(
                     // Positioned reads do not share a seek cursor across
                     // streams and never reopen the peer-controlled path.
                     let source = file.clone();
-                    buf = tokio::task::spawn_blocking(move || {
+                    buf = disk_job(move || {
                         source.read_exact_at(&mut buf, c.offset)?;
                         Ok::<_, std::io::Error>(buf)
                     })

@@ -380,6 +380,59 @@ async fn process_fd_budget_above_usage_still_serves() {
     }
 }
 
+/// The service pool keeps one JoinSet lane for control traffic: with two
+/// streams, one long-lived data service holds the pool, a second data
+/// service is refused, and Ping still answers — the data plane cannot
+/// starve observability.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saturated_data_plane_still_admits_control_streams() {
+    for backend in backends() {
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        let (agent, clients) = fixture_target(backend, 1, 2, port).await;
+        let runner = start(&agent);
+        let conn = rds_cli::connect(&clients[0], agent.endpoint.addr())
+            .await
+            .unwrap();
+        // One valid service holds the single data pool slot.
+        let (mut forwarded, _reply) = rds_cli::open_tcp(&conn, "127.0.0.1", port).await.unwrap();
+        forwarded.write_all(b"x").await.unwrap();
+        let (mut remote, _) = tcp.accept().await.unwrap();
+        use tokio::io::AsyncReadExt;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), remote.read_u8())
+                .await
+                .unwrap()
+                .unwrap(),
+            b'x'
+        );
+        // The data pool is full: a second service is refused politely.
+        let (mut raw_send, mut raw_recv) = conn.open_bi().await.unwrap();
+        rds_net::write_frame(
+            &mut raw_send,
+            &rds_core::StreamHello::TcpConnect {
+                host: "127.0.0.1".into(),
+                port,
+            },
+        )
+        .await
+        .unwrap();
+        let ack: rds_core::HelloAck =
+            tokio::time::timeout(Duration::from_secs(2), rds_net::read_frame(&mut raw_recv))
+                .await
+                .expect("no ack for refused service")
+                .unwrap();
+        assert!(
+            matches!(ack, rds_core::HelloAck::Error { ref message } if message.contains("service capacity")),
+            "{backend:?} over-capacity service was not refused: {ack:?}"
+        );
+        // Control still arrives: Ping bypasses the data pool.
+        rds_cli::ping(&conn, rand::random::<u64>()).await.unwrap();
+        state(&agent, 1, 1).await;
+        stop(&agent, &clients, runner).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_track_real_admission_streams_and_do_not_own_agent_io() {
     for backend in backends() {

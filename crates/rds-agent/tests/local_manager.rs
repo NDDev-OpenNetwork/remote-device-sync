@@ -992,9 +992,10 @@ async fn managed_desktop_reports_remote_refusal_without_leaking() {
             "expected clean remote refusal, got {result:?}"
         );
         // The refused open must not park a stream permit: open_tcp still
-        // has its full budget.
+        // has its full data budget — every slot but the lane reserved
+        // for control traffic.
         let mut held = Vec::new();
-        for _ in 0..64 {
+        for _ in 0..63 {
             held.push(
                 client
                     .open_tcp(session, _tcp.clone())
@@ -1002,6 +1003,13 @@ async fn managed_desktop_reports_remote_refusal_without_leaking() {
                     .expect("stream slots leaked"),
             );
         }
+        // One lane stays free of data services: a 64th TCP greeting is
+        // refused while that reserved slot keeps Ping reachable.
+        let overflow = client.open_tcp(session, _tcp.clone()).await.err();
+        assert!(
+            matches!(overflow, Some(Error::Rejected(ErrorCode::Remote))),
+            "expected capacity refusal past the data budget, got {overflow:?}"
+        );
         drop(held);
         server.close().await.unwrap();
         tasks.abort_all();

@@ -218,8 +218,12 @@ async fn renewal_preserves_stream(backend: Backend) {
             .is_err()
     );
     tokio::time::sleep(Duration::from_secs(5)).await; // original lease is now expired
-    // Its only service slot is held by TCP; the reserved slot still admitted renewal.
-    assert!(rds_client::ping(&conn, 3).await.is_err());
+    // TCP holds the only data slot; the reserved lane still admitted
+    // renewal and keeps Ping reachable — the data plane cannot starve
+    // control traffic.
+    rds_client::ping(&conn, rand::random::<u64>())
+        .await
+        .unwrap();
     send.write_all(b"after").await.unwrap();
     let mut last = [0; 5];
     recv.read_exact(&mut last).await.unwrap();

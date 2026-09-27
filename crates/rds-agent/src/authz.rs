@@ -103,7 +103,11 @@ impl ConnAuthz {
         Self {
             audience,
             service_slots: Arc::new(tokio::sync::Semaphore::new(
-                streams.saturating_sub(usize::from(required)),
+                // One JoinSet lane is reserved whenever a control stream
+                // could need it: grant mode must always admit renewal, and
+                // any multi-stream connection must keep observability
+                // (Ping/Info) reachable past a saturated data plane.
+                streams.saturating_sub(usize::from(required || streams > 1)),
             )),
             state: Mutex::new(if required {
                 State::Pending
