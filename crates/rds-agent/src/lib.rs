@@ -55,6 +55,7 @@ use rds_observe::{Reason, conn_span, next_session_id};
 /// bounded here so silent streams cost seconds, not the session.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const AUTHZ_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Operational deadlines on the serving side. Deployments tune these at
@@ -67,6 +68,12 @@ pub struct TimeoutPolicy {
     /// Per-stream `StreamHello` read deadline — and the reply deadline for
     /// greeting refusals that must not outlive a parked peer task.
     pub hello: Duration,
+    /// Authorization-path reply budget: refusal answers and the final
+    /// `HelloAck` write while watcher/reservation state is already owned.
+    pub authz: Duration,
+    /// Join budget for established connection tasks during shutdown; the
+    /// runner never waits unboundedly for drained peers.
+    pub shutdown: Duration,
 }
 
 impl Default for TimeoutPolicy {
@@ -74,6 +81,8 @@ impl Default for TimeoutPolicy {
         Self {
             handshake: HANDSHAKE_TIMEOUT,
             hello: HELLO_TIMEOUT,
+            authz: AUTHZ_REPLY_TIMEOUT,
+            shutdown: SHUTDOWN_TIMEOUT,
         }
     }
 }
@@ -459,7 +468,7 @@ impl Agent {
         }
         // Endpoint closure wakes established connections and handshakes. Let
         // their normal paths join service workers before this runner returns.
-        if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+        if tokio::time::timeout(self.policy.timeouts.shutdown, async {
             while let Some(result) = connections.join_next().await {
                 if let Err(error) = result {
                     debug!(%error, "connection task ended");

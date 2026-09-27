@@ -17,7 +17,9 @@ noq = { workspace = true, optional = true }
 # Non-optional: iroh runs on noq internally, so it is in the tree either
 # way — needed for transport tuning (BBRv3, windows) on the iroh backend.
 noq-proto.workspace = true
-rand = { workspace = true, optional = true }
+# Non-optional: the announce loop's publish-retry jitter uses it, which is
+# on in every build — and iroh/noq already pull rand transitively anyway.
+rand.workspace = true
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
 rds-discovery.workspace = true
@@ -47,7 +49,6 @@ transport-noq = [
     "dep:tokio-stream",
     "dep:tokio-util",
     "dep:blake3",
-    "dep:rand",
 ]
 
 [lints]
