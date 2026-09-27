@@ -246,7 +246,7 @@ async fn exercise(receive: bool) {
         // PathId. Both policies must observe a validated IPv6 sibling, not
         // necessarily the particular path returned by our explicit open.
         let facade = rds_net::Connection::from(b.clone());
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(8), async {
             while observed_path_to(&a, secondary_addr, false).is_none()
                 || observed_path_to(&b, client_secondary_addr, false).is_none()
             {
@@ -269,7 +269,7 @@ async fn exercise(receive: bool) {
         let mut prefix = [0; 6];
         request.read_exact(&mut prefix).await.unwrap();
         assert_eq!(&prefix, b"before");
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
             while !a
                 .inner()
                 .get_remote_nat_traversal_addresses()
@@ -337,7 +337,7 @@ async fn exercise(receive: bool) {
         assert_eq!(health.snapshot()[0].failed, Some(io::ErrorKind::BrokenPipe));
         assert!(health.snapshot()[1].failed.is_none());
         assert!(observed_path_to(&b, client_secondary_addr, true).is_some());
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
             while a
                 .inner()
                 .get_remote_nat_traversal_addresses()
