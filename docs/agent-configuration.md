@@ -33,7 +33,7 @@ identity creation or socket binding, alongside the endpoint preflight.
 | `disabled_services` | Services subtracted from the resolved set |
 | `service` | `ssh_target`, `tcp_targets`, `allow_any_tcp`, `sync_dir` |
 | `peers` | `allow`: endpoint-id strings, at most 256 |
-| `authority` | `issuers`, `grant_ttl_secs` (1–86400), `directory`, `directory_ca`, `record_ttl_secs`, `record_state`, `registry`, `revocations` |
+| `authority` | `issuers`, `grant_ttl_secs` (1–86400), `tenant`, `policy_min_revision`, `directory`, `directory_ca`, `record_ttl_secs`, `record_state`, `registry`, `revocations` |
 | `limits` | `max_connections`, `max_streams`; positive 16-bit |
 | `timeouts` | `handshake_secs`, `hello_secs`; each 1–3600 |
 
@@ -43,6 +43,14 @@ identity creation or socket binding, alongside the endpoint preflight.
 fields all require `authority.directory`; revocations additionally require
 at least one issuer — the same requirements the flags carried, now
 enforced on the merged document so file and flag sources mix freely.
+
+`authority.tenant` pins the grant v3 tenant claim: every grant must carry
+the same tenant, and unscoped grants (including all version-2 grants) are
+refused at authorization. `authority.policy_min_revision` sets a floor on
+the grant's claimed estate policy revision, retiring older-policy grants
+without waiting for expiry. Either binding requires at least one issuer —
+grants are not evaluated without them, so the pin would silently do
+nothing. Flag equivalents: `--tenant`, `--policy-min-revision`.
 
 ## Service enablement
 

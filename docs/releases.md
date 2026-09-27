@@ -75,7 +75,7 @@ these instructions.
 ## Compatibility and remaining acceptance gates
 
 This is the first published workspace release, but it breaks earlier
-unreleased development contracts: grant v2, local IPC v3, signed policy/name
+unreleased development contracts: grant v3 (v2 payloads still verify), local IPC v3, signed policy/name
 formats and durable directory format 3. Old peers may refuse new scopes and
 wire messages. A supported automatic old-state migration does not yet exist.
 Do not point preview executables at an existing deployment's state directory;

@@ -282,3 +282,151 @@ async fn fine_scopes_on_iroh() {
 async fn fine_scopes_on_owned_transport() {
     directional_sync(Backend::Noq).await;
 }
+
+/// Grant v3 tenant/policy-revision binding and `sync_paths` scope enforced
+/// by a real agent over loopback QUIC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v3_claims_and_path_scope_on_iroh() {
+    let root = Scratch::new();
+    std::fs::create_dir(root.0.join("docs")).unwrap();
+    std::fs::write(root.0.join("docs/ok.txt"), b"in scope").unwrap();
+    std::fs::write(root.0.join("private.txt"), b"out of scope").unwrap();
+    let client = endpoint(Backend::Iroh).await;
+    let server = endpoint(Backend::Iroh).await;
+    let issuer = SigningKey::from_bytes(&rand::random());
+    let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
+    policy.allow.insert(client.id());
+    policy.issuers.insert(issuer.verifying_key().to_bytes());
+    policy.tenant = Some("tenant-a".into());
+    policy.min_policy_revision = Some(3);
+    policy.sync_dir = Some(root.0.clone());
+    policy.use_local_revocations();
+    let agent = Arc::new(Agent::new(server.clone(), policy));
+    let runner = agent.clone();
+    let mut task = Runner(tokio::spawn(async move {
+        runner.run().await.unwrap();
+    }));
+
+    let now = rds_core::grant::now_unix();
+    let payload = |tenant: Option<&str>, revision: Option<u64>| rds_core::grant::GrantPayload {
+        version: rds_core::grant::GRANT_VERSION,
+        revision: 1,
+        issuer: issuer.verifying_key().to_bytes(),
+        subject: *client.id().as_bytes(),
+        audience: *server.id().as_bytes(),
+        nonce: rand::random(),
+        services: vec![ServiceKind::Ping, ServiceKind::Sync],
+        not_before: now,
+        expires_at: now + 120,
+        constraints: rds_core::grant::GrantConstraints {
+            sync_paths: Some(vec!["docs".into()]),
+            ..Default::default()
+        },
+        tenant: tenant.map(str::to_string),
+        policy_revision: revision,
+    };
+    // A well-signed grant without the pinned tenant is refused.
+    let grant = Grant::issue_at(&issuer, payload(None, Some(3)));
+    assert!(
+        rds_client::connect_authorized(&client, server.addr(), &grant)
+            .await
+            .is_err()
+    );
+    // A mismatched tenant is refused; so is a claim below the policy floor.
+    let grant = Grant::issue_at(&issuer, payload(Some("tenant-b"), Some(3)));
+    assert!(
+        rds_client::connect_authorized(&client, server.addr(), &grant)
+            .await
+            .is_err()
+    );
+    let grant = Grant::issue_at(&issuer, payload(Some("tenant-a"), Some(2)));
+    assert!(
+        rds_client::connect_authorized(&client, server.addr(), &grant)
+            .await
+            .is_err()
+    );
+    // The fully bound grant connects.
+    let grant = Grant::issue_at(&issuer, payload(Some("tenant-a"), Some(3)));
+    let conn = rds_client::connect_authorized(&client, server.addr(), &grant)
+        .await
+        .unwrap();
+    rds_client::ping(&conn, rand::random()).await.unwrap();
+
+    // Paths outside the signed scope are refused by name, before any
+    // filesystem work — including a component-boundary lookalike.
+    for bad in ["private.txt", "docs/../private.txt", "docsx/f"] {
+        let (mut send, mut recv) = next_sync(&conn).await;
+        write_frame(
+            &mut send,
+            &SyncMsg::Request {
+                rel_path: bad.into(),
+            },
+        )
+        .await
+        .unwrap();
+        let answer =
+            tokio::time::timeout(Duration::from_secs(3), read_frame::<_, SyncMsg>(&mut recv))
+                .await
+                .unwrap()
+                .unwrap();
+        let SyncMsg::Refuse { reason } = answer else {
+            panic!("accepted out-of-scope path {bad:?}: {answer:?}")
+        };
+        let expected = if bad.contains("..") {
+            "traversal in rel_path"
+        } else {
+            "sync path outside granted scope"
+        };
+        assert!(reason.contains(expected), "path {bad:?}: {reason}");
+        assert_eq!(
+            std::fs::read(root.0.join("private.txt")).unwrap(),
+            b"out of scope"
+        );
+    }
+    // A write outside the scope is refused; nothing is created.
+    let (mut send, mut recv) = next_sync(&conn).await;
+    write_frame(
+        &mut send,
+        &SyncMsg::Offer {
+            rel_path: "other/new.bin".into(),
+            size: 0,
+            root: [0; 32],
+            chunk_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(3), read_frame::<_, SyncMsg>(&mut recv))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(answer, SyncMsg::Refuse { ref reason } if reason == "sync path outside granted scope")
+    );
+    assert!(!root.0.join("other").exists());
+
+    // In-scope pull succeeds end to end.
+    let (send, recv) = next_sync(&conn).await;
+    let destination = Scratch::new();
+    engine::recv_file_with_timeout(
+        &conn,
+        "docs/ok.txt",
+        &destination.0,
+        send,
+        recv,
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(destination.0.join("docs/ok.txt")).unwrap(),
+        b"in scope"
+    );
+    conn.close(0u32.into(), b"done");
+    client.close().await;
+    server.close().await;
+    tokio::time::timeout(Duration::from_secs(5), &mut task.0)
+        .await
+        .unwrap()
+        .unwrap();
+}

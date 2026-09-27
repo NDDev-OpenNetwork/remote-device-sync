@@ -34,8 +34,8 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | service:desktop | experimental | enabled + `desktop` build flag; usable capture backend; grant scope | capture→encode→decode→stats contract tests; no viewer |
 | service:sync | implemented | enabled + `--sync-dir` configured | `rds-sync` tests, resumable transfer tests |
 | service:audio | stub | no codec; wire shape reserved in v2 | `ServiceKind::Audio` variant only |
-| service:sync-read | implemented | grant scope on sync root | grant/scope tests |
-| service:sync-write | implemented | grant scope on sync root | grant/scope tests |
+| service:sync-read | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
+| service:sync-write | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
 | service:desktop-view | implemented | grant scope; usable capture backend | scope tests; headless path only |
 | service:desktop-control | experimental | desktop-view + control scope; X11 input sink | input contract tests; real-session injection unqualified |
 
@@ -81,6 +81,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 |---|---|---|---|
 | discovery:directory | experimental | `--directory`, `--directory-allow` publishers; HTTPS or explicit http | discovery tests; WAN unqualified |
 | policy:grants-v2 | implemented | `--issuer` + grant files; `--revocations-key` for managed mode | grant/lease tests |
+| policy:grants-v3 | implemented | same surface; adds `tenant`/`policy_revision` claims and `sync_paths` scope; agents pin via `--tenant`/`--policy-min-revision` | grant unit tests + e2e binding/scope suite; v2 payloads still verify |
 | policy:gds-issuance | unavailable | estate GDS service wiring; not in this module | roadmap; `session renew` is manual-file only |
 | observability:export | experimental | `RDS_LOG_FORMAT=json`; Vector/OpenObserve pipeline | fixture pipeline, `docs/observability.md` |
 

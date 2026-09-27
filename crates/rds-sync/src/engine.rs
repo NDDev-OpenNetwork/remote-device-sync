@@ -41,10 +41,14 @@ pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Agent-side permissions, checked before any path or filesystem operation.
 /// Read means download from the agent; write means upload to the agent.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Access {
     pub read: bool,
     pub write: bool,
+    /// Signed grant path scope (grant v3 `sync_paths`): `Some` restricts
+    /// transfers to the listed subtrees under the sync root, `None` leaves
+    /// the whole root open. Entries are stored already-normalized.
+    pub paths: Option<Arc<[PathBuf]>>,
 }
 
 impl Access {
@@ -52,7 +56,19 @@ impl Access {
     pub const READ_WRITE: Self = Self {
         read: true,
         write: true,
+        paths: None,
     };
+
+    /// Whether a normalized `check_rel_path` result is inside the granted
+    /// path scope — the path itself or a descendant of a listed subtree.
+    pub fn permits_path(&self, rel: &Path) -> bool {
+        match &self.paths {
+            Some(paths) => paths
+                .iter()
+                .any(|scope| rel == scope.as_path() || rel.starts_with(scope)),
+            None => true,
+        }
+    }
 }
 
 /// Progress/counters a completed (or interrupted) transfer reports.
@@ -607,6 +623,10 @@ async fn serve_inner(
                     bail!("offer refused: {e}");
                 }
             };
+            if !access.permits_path(&rel) {
+                refuse(wire, send, "sync path outside granted scope").await?;
+                bail!("offer refused: path outside granted scope");
+            }
             // Preserve early refusal before requesting a manifest. This is
             // only a preflight: Journal::open independently pins and checks
             // every handle again before any state or destination I/O.
@@ -666,6 +686,10 @@ async fn serve_inner(
                     bail!("request refused: {e}");
                 }
             };
+            if !access.permits_path(&rel) {
+                refuse(wire, send, "sync path outside granted scope").await?;
+                bail!("request refused: path outside granted scope");
+            }
             // Pin the source once. Both manifest and chunk reads use this
             // same inode, even if the path is replaced after the offer.
             let source = {

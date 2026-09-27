@@ -6,18 +6,39 @@ token/local IPC update. It does not implement an authority service or close W2.
 
 ## Signed contract and issuer responsibilities
 
-`rds-core::grant::GrantPayload` version **2** contains `version`, positive
+`rds-core::grant::GrantPayload` version **3** contains `version`, positive
 `revision`, issuer, subject, audience, a 128-bit nonce, services, validity times
-and constraints. Subject must match the QUIC-authenticated peer; audience must
-match the serving agent's actual endpoint key, never a request-supplied value.
-Membership in the agent allowlist and trusted issuer set remains required.
+and constraints, plus the `tenant` and `policy_revision` claims. Subject must
+match the QUIC-authenticated peer; audience must match the serving agent's
+actual endpoint key, never a request-supplied value. Membership in the agent
+allowlist and trusted issuer set remains required.
 
-Ed25519 signs `rds/capability-grant/v2\0` followed by the postcard payload.
-Strict verification rejects raw-payload signatures, wrong versions, trailing
-bytes, signatures of the wrong size, payloads exceeding 4 KiB and excessive
-collections. Expiry must be strictly greater than `not_before`. The existing
-30-second future `not_before` tolerance does not relax expiry or the configured
-TTL cap. Clock arithmetic saturates instead of overflowing.
+Ed25519 signs `rds/capability-grant/v<N>\0` followed by the postcard payload —
+the domain string tracks the payload version, so a v3 payload signed under the
+v2 domain fails verification. The decoder dispatches on the leading version
+varint and accepts versions **2 and 3**: a v2 payload verifies with all v3
+claims absent (`tenant`/`policy_revision`/`sync_paths` unset), so
+estate-minted v2 grants stay valid across the cutover. Strict verification
+rejects raw-payload signatures, unsupported versions, trailing bytes,
+signatures of the wrong size, payloads exceeding 4 KiB, oversized collections
+and malformed claims (empty/whitespace tenants, absolute or traversing
+`sync_paths` entries). Expiry must be strictly greater than `not_before`. The
+existing 30-second future `not_before` tolerance does not relax expiry or the
+configured TTL cap. Clock arithmetic saturates instead of overflowing.
+
+### Tenant and policy-revision binding (v3)
+
+`tenant` binds the grant to an estate tenant identifier (≤64 bytes, no
+whitespace/control bytes); `policy_revision` records the estate policy revision
+the issuer minted under. An agent pins its deployment with `tenant` and
+`policy_min_revision` (agent configuration `authority.*` fields or the
+`--tenant`/`--policy-min-revision` flags): every grant must then carry the
+matching claim and a revision at or above the floor — v2 grants carry no claims
+and are refused by a pinned deployment. Pinning either binding requires at
+least one trusted issuer; a tenant pin with grants disabled would silently do
+nothing, so the agent refuses that configuration. Renewal cannot change
+either claim — a changed `tenant`/`policy_revision`/`sync_paths` is an
+`InvalidRenewal`, never a quiet scope edit.
 
 The stable revocation/replay ID is BLAKE3 over `rds/grant-session/v2\0`, issuer,
 subject, audience and nonce, in that order with fixed field widths. The issuer
@@ -46,8 +67,17 @@ The 2026-09-26 increment adds fine capabilities to the signed `services` list:
 Prefer narrow capabilities when issuing new grants. Permissions are additive:
 adding `SyncRead` to a legacy `Sync` grant does **not** remove write permission.
 `DesktopControl` alone grants neither viewing nor input. Existing display/port
-constraints still apply. These are whole-root sync permissions, not per-path
-ACLs; account, tenant and policy-revision binding remain open.
+constraints still apply.
+
+Version 3 adds the `constraints.sync_paths` scope: a list of relative paths
+(up to 64 entries) under the agent's sync root. When present, both `Request`
+(pull) and `Offer` (push) must name a path inside a listed subtree — component
+prefix matching, so `docs` covers `docs/a.txt` but not `docsx`. The check runs
+immediately after `rel_path` normalization and before any filesystem handle,
+manifest or journal work, and an out-of-scope path is refused with
+`sync path outside granted scope`. Unconstrained grants (`sync_paths` absent,
+including all v2 grants) keep whole-root access. Per-account scopes remain
+open.
 
 The sync handler checks direction immediately after decoding the first bounded
 message, before path validation, metadata reads, manifests, journals or writes.
@@ -163,7 +193,7 @@ existing private-data rules. Upgrade the Vector projection with the binaries;
 older operation allowlists drop these new records. No live collector/sink or
 alert route is changed.
 
-Required next: tenant/policy binding, per-path and account scopes;
+Required next: account-level scopes (OS identity, not just grant claims);
 automatic GDS issuance/renewal and policy reconciliation; viewer/sync manager
 integration; native macOS and suspend tests; mixed SSH/video/sync, physical
 WAN/NAT/relay and long-running resource/latency acceptance. Loopback tests and

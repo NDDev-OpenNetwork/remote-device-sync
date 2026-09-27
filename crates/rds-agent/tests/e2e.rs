@@ -460,6 +460,8 @@ async fn expired_and_wrong_service_grants_rejected() {
             not_before: 1,
             expires_at: 2,
             constraints: GrantConstraints::default(),
+            tenant: None,
+            policy_revision: None,
         },
     );
     assert!(

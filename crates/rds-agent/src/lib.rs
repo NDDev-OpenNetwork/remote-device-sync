@@ -127,6 +127,14 @@ pub struct AgentPolicy {
     pub services: Option<BTreeSet<ServiceKind>>,
     /// Admission and greeting deadlines applied per connection/stream.
     pub timeouts: TimeoutPolicy,
+    /// Tenant this agent belongs to (v3 grant claim). `Some` pins the
+    /// deployment: every grant must carry the same `tenant` claim —
+    /// unscoped and mismatched grants are refused at authorization.
+    pub tenant: Option<String>,
+    /// Minimum estate policy revision a grant must claim (v3). `Some`
+    /// retires grants minted before a policy change without waiting for
+    /// their expiry or a revocation snapshot.
+    pub min_policy_revision: Option<u64>,
 }
 
 impl std::fmt::Debug for AgentPolicy {
@@ -140,6 +148,8 @@ impl std::fmt::Debug for AgentPolicy {
             .field("sync_dir", &self.sync_dir)
             .field("services", &self.services)
             .field("timeouts", &self.timeouts)
+            .field("tenant", &self.tenant)
+            .field("min_policy_revision", &self.min_policy_revision)
             .finish_non_exhaustive()
     }
 }
@@ -157,6 +167,8 @@ impl AgentPolicy {
             sync_dir: None,
             services: None,
             timeouts: TimeoutPolicy::default(),
+            tenant: None,
+            min_policy_revision: None,
         }
     }
 
@@ -245,6 +257,22 @@ impl AgentPolicy {
             || self.timeouts.hello > MAX_TIMEOUT
         {
             return Err("timeouts must be between 1 and 3600 seconds");
+        }
+        if let Some(tenant) = &self.tenant
+            && (tenant.is_empty()
+                || tenant.len() > rds_core::grant::MAX_TENANT_LEN
+                || tenant.bytes().any(|b| b < 0x21 || b == 0x7f))
+        {
+            return Err(
+                "tenant must be nonempty, at most 64 bytes and free of control or whitespace bytes",
+            );
+        }
+        // A pinned binding with no trusted issuers never evaluates: grants
+        // are not required, so every connection would pass unscoped. Fail
+        // loudly instead of silently dropping the deployment's binding.
+        if self.issuers.is_empty() && (self.tenant.is_some() || self.min_policy_revision.is_some())
+        {
+            return Err("tenant/policy-revision binding requires grant issuers");
         }
         Ok(())
     }
@@ -827,9 +855,28 @@ async fn serve_stream(
                 let access = grant
                     .as_ref()
                     .map_or(rds_sync::engine::Access::READ_WRITE, |g| {
+                        // Grant v3 `sync_paths` entries passed the decoder's
+                        // lexical checks; normalize `.`/empty components the
+                        // same way `check_rel_path` normalizes requests so
+                        // prefix matching compares like with like.
+                        let paths = g.payload.constraints.sync_paths.as_ref().map(|list| {
+                            list.iter()
+                                .map(|scope| {
+                                    std::path::Path::new(scope)
+                                        .components()
+                                        .filter_map(|c| match c {
+                                            std::path::Component::Normal(p) => Some(p),
+                                            _ => None,
+                                        })
+                                        .collect::<PathBuf>()
+                                })
+                                .collect::<Vec<_>>()
+                                .into()
+                        });
                         rds_sync::engine::Access {
                             read: g.permits_sync_read(),
                             write: g.permits_sync_write(),
+                            paths,
                         }
                     });
                 if let Some(transfer) = transfer {

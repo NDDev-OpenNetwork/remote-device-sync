@@ -47,7 +47,7 @@ Neither increment closes these product gaps or any wave.
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Implemented; endpoint + agent settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation and preflight before identity creation are implemented. The version-1 agent JSON now carries role/service/peers/authority/limits/timeouts with the same precedence and preflight; `--role`/`--service`/`--no-service` select the gateable service set, disabled services are refused by name ahead of grant machinery, `Info` and directory announcements advertise exactly the served set, and handshake/hello deadlines come from `TimeoutPolicy`. See [agent configuration](agent-configuration.md). |
 | W2.2 | Partial; exact ALPN selection + sync/desktop session routing | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Desktop sessions mint random per-session IDs in `StreamHello::DesktopV2` and route frames through `UniHello::DesktopFrames { id }`, isolating stale streams and allowing concurrent sessions; the same display grant scope check covers both greetings. Service-wide capability negotiation remains open. |
-| W2.3 | Partial; destination-bound renewable grants and directional scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Tenant/policy binding, per-path/account scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
+| W2.3 | Partial; destination-bound renewable grants, directional scopes, tenant/policy binding and per-path sync scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Grant v3 adds the `tenant`/`policy_revision` claims and the `constraints.sync_paths` subtree scope, checked after `rel_path` normalization before any filesystem work; v2 payloads still verify with all claims absent, and agents pin the binding via `authority.tenant`/`policy_min_revision` (`--tenant`/`--policy-min-revision`), refusing unscoped or stale grants. Account-level scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
 | W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
 | W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
@@ -1965,3 +1965,42 @@ e2e proves the gate on a real agent: an explicit `{tcp}` set refuses
 sync/audio by name despite a configured sync root, `Info` lists exactly
 the enabled set, disabled-service refusal precedes grant requirements,
 and the greeting deadline follows the configured timeout.
+
+## Grant v3 — tenant/policy binding and per-path sync scopes (2026-09-27)
+
+W2.3 executable scope. `GrantPayload` advances to version 3: `tenant`
+binds a grant to an estate tenant identifier, `policy_revision` records
+the estate policy revision the issuer minted under, and
+`constraints.sync_paths` scopes Sync reads and writes to signed subtree
+allowlists (≤64 normalized relative entries). The signature domain tracks
+the payload version (`rds/capability-grant/v3`), so a v3 payload signed
+under the old domain fails verification.
+
+The decoder dispatches on the leading version varint and accepts versions
+2 and 3. Version-2 payloads verify with all v3 claims absent — grants
+minted before the estate issuer learns v3 stay valid across the cutover —
+and the enforcement point is the pinned binding, not the version number:
+an agent configured with `authority.tenant`/`policy_min_revision`
+(`--tenant`/`--policy-min-revision`) refuses unscoped, mismatched or
+stale-revision grants at authorization. Pinning a binding without any
+trusted issuer would never evaluate a grant, so validation refuses that
+combination outright. Renewal cannot alter either claim or the path
+scope — a change is an `InvalidRenewal` requiring fresh authorization.
+
+`Access` carries the grant's normalized `sync_paths` into the sync
+engine; both the `Request` (pull) and `Offer` (push) arms check the
+normalized `rel_path` against the scope after `check_rel_path` and before
+any filesystem handle, manifest or journal work. Refusal is by name
+(`sync path outside granted scope`) with no filesystem detail.
+
+Coverage: grant unit tests pin the version contract — v3 claims verify
+and carry scope, genuine v2 bytes still verify, a v3 payload relabeled v2
+fails decode, unsupported versions refuse, claim bounds are enforced, and
+renewal cannot change claims. Settings tests cover tenant/revision
+parsing, the issuer requirement and flag-over-file merge. The
+`grant_scopes` e2e drives a real pinned agent: unscoped, mismatched and
+stale-revision grants fail authorization; a bound grant syncs inside its
+scope while sibling, traversal and write escapes refuse by name.
+
+Remaining W2.3: account-level scopes (OS identity), automatic GDS
+issuance/renewal and policy reconciliation — cross-repository, deferred.

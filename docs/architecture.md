@@ -394,7 +394,7 @@ Every stream opens with a length-prefixed postcard `StreamHello`:
 
 | Service | Direction | Payload |
 | --- | --- | --- |
-| `Authz` | bi | capability grant v2 (first stream in grant mode) |
+| `Authz` | bi | capability grant v2/v3 (first stream in grant mode) |
 | `RenewAuthz` | bi | same-session, same-scope signed lease extension |
 | `Ping` | bi | nonce echo for RTT |
 | `Info` | bi | agent version, services, displays |
