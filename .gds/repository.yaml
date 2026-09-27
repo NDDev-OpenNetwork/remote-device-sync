@@ -53,7 +53,14 @@ git:
 verification:
   commands:
     lint: ["cargo fmt --check", "cargo clippy --locked --workspace --all-targets -- -D warnings"]
-    test: ["cargo test --locked --workspace"]
+    # One workspace-wide test command exceeded the per-command deadline on
+    # loaded small runners; the same coverage is split so each declared
+    # command completes well inside it. New crates fall into the exclude
+    # shard automatically.
+    test:
+      - "cargo test --locked -p rds-net"
+      - "cargo test --locked -p rds-agent -p rds-relay -p rds-server -p rds-client -p rds-desktop"
+      - "cargo test --locked --workspace --exclude rds-net --exclude rds-agent --exclude rds-relay --exclude rds-server --exclude rds-client --exclude rds-desktop"
   required: ["lint", "test"]
   required_contexts: []
 
