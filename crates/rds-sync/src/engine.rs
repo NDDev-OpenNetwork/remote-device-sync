@@ -24,8 +24,8 @@ use rds_net::{read_frame, write_frame as write_raw_frame};
 use tokio::sync::mpsc;
 
 use crate::proto::{
-    CHUNKSET_BATCH, FETCH_STREAMS, MANIFEST_BATCH, MAX_CHUNKS, SyncMsg, bits_to_indices,
-    check_manifest, check_rel_path, need_bits,
+    CHUNKSET_BATCH, FETCH_STREAMS, MANIFEST_BATCH, MAX_CHUNKS, SESSION_VERSION, SessionLimits,
+    SessionMsg, SyncMsg, bits_to_indices, check_manifest, check_rel_path, need_bits,
 };
 use crate::{MAX_CHUNK, Manifest, manifest_of_reader};
 use crate::{confined::Directory, journal::Journal};
@@ -72,11 +72,287 @@ pub struct Stats {
 #[derive(Clone, Copy)]
 pub struct Transfer(rds_core::UniHello);
 
+/// Wire profile of one transfer. v1 speaks bare `SyncMsg` frames (legacy
+/// `Sync` and managed `SyncTransfer` routes). v2 — the `SyncTransferV2`
+/// route — wraps every frame in a `Session` envelope bound to the minted
+/// transfer ID and runs at the negotiated limits. A v1 peer cannot decode
+/// a `Session` frame at all, so version mismatches refuse at greeting.
+#[derive(Clone, Copy)]
+struct Wire {
+    transfer_id: Option<[u8; 16]>,
+    limits: SessionLimits,
+}
+
+impl Wire {
+    const V1: Self = Self {
+        transfer_id: None,
+        limits: SessionLimits::LOCAL,
+    };
+
+    fn v2(transfer_id: [u8; 16], limits: SessionLimits) -> Self {
+        Self {
+            transfer_id: Some(transfer_id),
+            limits,
+        }
+    }
+
+    fn is_v2(&self) -> bool {
+        self.transfer_id.is_some()
+    }
+
+    async fn write<S, M>(&self, stream: &mut S, msg: &M) -> std::io::Result<()>
+    where
+        S: tokio::io::AsyncWrite + Unpin,
+        M: serde::Serialize,
+    {
+        write_frame(stream, msg).await
+    }
+
+    /// Write a protocol message in this wire profile. v2 translates into
+    /// the session envelope; a v1 peer receives `Cancel` as `Refuse` —
+    /// both refuse the transfer, the typed distinction is v2-only.
+    async fn send<S>(&self, stream: &mut S, msg: &SyncMsg) -> std::io::Result<()>
+    where
+        S: tokio::io::AsyncWrite + Unpin,
+    {
+        let frame = match self.transfer_id {
+            Some(transfer_id) => SyncMsg::Session {
+                transfer_id,
+                // Session/Hello frames never nest; anything untranslatable
+                // surfaces as a refusal rather than a nested envelope.
+                msg: to_session(msg).unwrap_or(SessionMsg::Refuse {
+                    reason: "internal protocol error".into(),
+                }),
+            },
+            None => match msg {
+                SyncMsg::Cancel { reason } => SyncMsg::Refuse {
+                    reason: format!("transfer aborted: {reason}"),
+                },
+                // Session envelopes must never leak onto a v1 stream.
+                SyncMsg::Session { .. } => SyncMsg::Refuse {
+                    reason: "internal protocol error".into(),
+                },
+                msg => msg.clone(),
+            },
+        };
+        self.write(stream, &frame).await
+    }
+
+    /// Read one protocol message. v2 asserts the envelope's transfer ID and
+    /// surfaces `Cancel`/`Refuse` as ordinary messages for the caller.
+    async fn recv<R>(&self, stream: &mut R) -> anyhow::Result<SyncMsg>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let msg: SyncMsg = read_timed(stream).await?;
+        let Some(transfer_id) = self.transfer_id else {
+            return Ok(msg);
+        };
+        match msg {
+            SyncMsg::Session {
+                transfer_id: got,
+                msg,
+            } if got == transfer_id => match msg {
+                SessionMsg::Hello { .. } | SessionMsg::HelloAck { .. } => {
+                    bail!("session greeting repeated mid-transfer")
+                }
+                SessionMsg::Offer {
+                    rel_path,
+                    size,
+                    root,
+                    chunk_count,
+                } => Ok(SyncMsg::Offer {
+                    rel_path,
+                    size,
+                    root,
+                    chunk_count,
+                }),
+                SessionMsg::Request { rel_path } => Ok(SyncMsg::Request { rel_path }),
+                SessionMsg::Refuse { reason } => Ok(SyncMsg::Refuse { reason }),
+                SessionMsg::Cancel { reason } => Ok(SyncMsg::Cancel { reason }),
+                SessionMsg::ManifestPart { chunks } => Ok(SyncMsg::ManifestPart { chunks }),
+                SessionMsg::Need { bits } => Ok(SyncMsg::Need { bits }),
+                SessionMsg::Done { root } => Ok(SyncMsg::Done { root }),
+                SessionMsg::ChunkSet { indices } => Ok(SyncMsg::ChunkSet { indices }),
+                SessionMsg::ChunkHdr { index, hash, len } => {
+                    Ok(SyncMsg::ChunkHdr { index, hash, len })
+                }
+                SessionMsg::SetDone => Ok(SyncMsg::SetDone),
+            },
+            SyncMsg::Session { .. } => bail!("sync frame belongs to a different transfer"),
+            _ => bail!("sync session expected an envelope-bound frame"),
+        }
+    }
+}
+
+/// One-to-one translation of transfer bodies into v2 session messages.
+/// Returns `None` for frames that cannot appear inside a session
+/// (`Session` itself).
+fn to_session(msg: &SyncMsg) -> Option<SessionMsg> {
+    Some(match msg {
+        SyncMsg::Offer {
+            rel_path,
+            size,
+            root,
+            chunk_count,
+        } => SessionMsg::Offer {
+            rel_path: rel_path.clone(),
+            size: *size,
+            root: *root,
+            chunk_count: *chunk_count,
+        },
+        SyncMsg::Request { rel_path } => SessionMsg::Request {
+            rel_path: rel_path.clone(),
+        },
+        SyncMsg::Refuse { reason } => SessionMsg::Refuse {
+            reason: reason.clone(),
+        },
+        SyncMsg::Cancel { reason } => SessionMsg::Cancel {
+            reason: reason.clone(),
+        },
+        SyncMsg::ManifestPart { chunks } => SessionMsg::ManifestPart {
+            chunks: chunks.clone(),
+        },
+        SyncMsg::Need { bits } => SessionMsg::Need { bits: bits.clone() },
+        SyncMsg::Done { root } => SessionMsg::Done { root: *root },
+        SyncMsg::ChunkSet { indices } => SessionMsg::ChunkSet {
+            indices: indices.clone(),
+        },
+        SyncMsg::ChunkHdr { index, hash, len } => SessionMsg::ChunkHdr {
+            index: *index,
+            hash: *hash,
+            len: *len,
+        },
+        SyncMsg::SetDone => SessionMsg::SetDone,
+        SyncMsg::Session { .. } => return None,
+    })
+}
+
+/// Control-opener side of a v2 session: declare limits, await the
+/// responder's declaration, run at the pairwise minimum. Version or
+/// transfer-ID mismatches fail before any filesystem operation.
+async fn session_open<W, R>(
+    transfer_id: [u8; 16],
+    send: &mut W,
+    recv: &mut R,
+) -> anyhow::Result<SessionLimits>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
+    write_frame(
+        send,
+        &SyncMsg::Session {
+            transfer_id,
+            msg: SessionMsg::Hello {
+                version: SESSION_VERSION,
+                limits: SessionLimits::LOCAL,
+            },
+        },
+    )
+    .await?;
+    match read_timed::<_, SyncMsg>(recv).await? {
+        SyncMsg::Session {
+            transfer_id: got,
+            msg: SessionMsg::HelloAck { version, limits },
+        } if got == transfer_id && version == SESSION_VERSION => {
+            Ok(SessionLimits::negotiate(SessionLimits::LOCAL, limits)?)
+        }
+        SyncMsg::Session {
+            msg: SessionMsg::HelloAck { version, .. },
+            ..
+        } => bail!("peer sync session version {version} unsupported (want {SESSION_VERSION})"),
+        SyncMsg::Session {
+            msg: SessionMsg::Refuse { reason },
+            ..
+        } => bail!("sync session refused: {reason}"),
+        SyncMsg::Session { .. } => bail!("sync session transfer ID mismatch"),
+        other => bail!("expected sync session HelloAck, got {other:?}"),
+    }
+}
+
+/// Responder side of a v2 session: assert the Hello's transfer ID equals
+/// the route tag, refuse mismatched versions with a clear error, then
+/// declare local limits.
+async fn session_accept<W, R>(
+    transfer_id: [u8; 16],
+    send: &mut W,
+    recv: &mut R,
+) -> anyhow::Result<SessionLimits>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let (version, limits) = match read_timed::<_, SyncMsg>(recv).await? {
+        SyncMsg::Session {
+            transfer_id: got,
+            msg: SessionMsg::Hello { version, limits },
+        } if got == transfer_id => (version, limits),
+        SyncMsg::Session { .. } => bail!("sync session transfer ID mismatch"),
+        other => bail!("expected sync session Hello, got {other:?}"),
+    };
+    if version != SESSION_VERSION {
+        let _ = write_frame(
+            send,
+            &SyncMsg::Session {
+                transfer_id,
+                msg: SessionMsg::Refuse {
+                    reason: format!(
+                        "peer sync session version {version} unsupported (want {SESSION_VERSION})"
+                    ),
+                },
+            },
+        )
+        .await;
+        bail!("peer sync session version {version} unsupported (want {SESSION_VERSION})");
+    }
+    write_frame(
+        send,
+        &SyncMsg::Session {
+            transfer_id,
+            msg: SessionMsg::HelloAck {
+                version: SESSION_VERSION,
+                limits: SessionLimits::LOCAL,
+            },
+        },
+    )
+    .await?;
+    Ok(SessionLimits::negotiate(SessionLimits::LOCAL, limits)?)
+}
+
+/// Best-effort typed abort: v2 peers learn the transfer was deliberately
+/// cancelled rather than crashed; v1 peers get `Refuse`. Cancellation by
+/// dropping the future cannot write — the peer still sees stream reset.
+async fn cancel_transfer(wire: Wire, send: &mut SendStream, reason: &str) {
+    let _ = wire
+        .send(
+            send,
+            &SyncMsg::Cancel {
+                reason: reason.to_string(),
+            },
+        )
+        .await;
+}
+
 impl Transfer {
     const LEGACY: Self = Self(rds_core::UniHello::Sync);
 
     pub fn new(id: [u8; 16]) -> Self {
         Self(rds_core::UniHello::SyncTransfer { id })
+    }
+
+    /// Negotiated v2 session route. Fresh ID per greeting; both chunk
+    /// streams and control frames carry it.
+    pub fn new_v2(id: [u8; 16]) -> Self {
+        Self(rds_core::UniHello::SyncTransferV2 { id })
+    }
+
+    /// The negotiated-session route variant's transfer ID, when any.
+    fn session_id(&self) -> Option<[u8; 16]> {
+        match self.0 {
+            rds_core::UniHello::SyncTransferV2 { id } => Some(id),
+            _ => None,
+        }
     }
 
     pub async fn serve(
@@ -90,10 +366,19 @@ impl Transfer {
         let mut control = Control::new(streams);
         let stopped = control.send.stopped();
         session(timeout, async {
+            // v2 negotiates before the filesystem is touched; a version or
+            // transfer-ID mismatch refuses at the greeting.
+            let wire = match self.session_id() {
+                Some(id) => Wire::v2(
+                    id,
+                    session_accept(id, &mut control.send, &mut control.recv).await?,
+                ),
+                None => Wire::V1,
+            };
             let result = tokio::select! {
                 biased;
                 _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync caller stopped receiving"),
-                result = serve_inner(conn, &mut control.send, &mut control.recv, dir, access, self.0) => result,
+                result = serve_inner(conn, &mut control.send, &mut control.recv, dir, access, self.0, wire) => result,
             };
             if let Err(error) = result {
                 // Preserve an explicitly written Refuse frame. Cancellation
@@ -118,13 +403,45 @@ impl Transfer {
         streams: (SendStream, RecvStream),
         timeout: Duration,
     ) -> anyhow::Result<Stats> {
+        self.send_file_cancel(conn, path, streams, timeout, None)
+            .await
+    }
+
+    /// Push with a caller cancellation token. A token abort writes a typed
+    /// `Cancel` on the control stream so the peer stops its side
+    /// deterministically instead of inferring crash from a reset.
+    pub async fn send_file_cancel(
+        self,
+        conn: &Connection,
+        path: &Path,
+        streams: (SendStream, RecvStream),
+        timeout: Duration,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> anyhow::Result<Stats> {
         let mut control = Control::new(streams);
         let stopped = control.send.stopped();
         session(timeout, async {
+            let wire = match self.session_id() {
+                Some(id) => Wire::v2(
+                    id,
+                    session_open(id, &mut control.send, &mut control.recv).await?,
+                ),
+                None => Wire::V1,
+            };
+            let mut cancelled = std::pin::pin!(async {
+                match &cancel {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            });
             let stats = tokio::select! {
                 biased;
                 _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync receiver stopped reading"),
-                result = send_file_inner(conn, path, &mut control.send, &mut control.recv, self.0) => result?,
+                _ = &mut cancelled => {
+                    cancel_transfer(wire, &mut control.send, "caller canceled").await;
+                    bail!("sync transfer canceled by caller")
+                }
+                result = send_file_inner(conn, path, &mut control.send, &mut control.recv, self.0, wire) => result?,
             };
             control.finish(self.0 != rds_core::UniHello::Sync).await?;
             Ok(stats)
@@ -139,13 +456,44 @@ impl Transfer {
         streams: (SendStream, RecvStream),
         timeout: Duration,
     ) -> anyhow::Result<(PathBuf, Stats)> {
+        self.recv_file_cancel(conn, rel_path, dest_dir, streams, timeout, None)
+            .await
+    }
+
+    /// Pull with a caller cancellation token; see [`send_file_cancel`].
+    pub async fn recv_file_cancel(
+        self,
+        conn: &Connection,
+        rel_path: &str,
+        dest_dir: &Path,
+        streams: (SendStream, RecvStream),
+        timeout: Duration,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> anyhow::Result<(PathBuf, Stats)> {
         let mut control = Control::new(streams);
         let stopped = control.send.stopped();
         session(timeout, async {
+            let wire = match self.session_id() {
+                Some(id) => Wire::v2(
+                    id,
+                    session_open(id, &mut control.send, &mut control.recv).await?,
+                ),
+                None => Wire::V1,
+            };
+            let mut cancelled = std::pin::pin!(async {
+                match &cancel {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            });
             let result = tokio::select! {
                 biased;
                 _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("sync sender stopped reading"),
-                result = recv_file_inner(conn, rel_path, dest_dir, &mut control.send, &mut control.recv, self.0) => result?,
+                _ = &mut cancelled => {
+                    cancel_transfer(wire, &mut control.send, "caller canceled").await;
+                    bail!("sync transfer canceled by caller")
+                }
+                result = recv_file_inner(conn, rel_path, dest_dir, &mut control.send, &mut control.recv, self.0, wire) => result?,
             };
             control.finish(self.0 != rds_core::UniHello::Sync).await?;
             Ok(result)
@@ -238,8 +586,9 @@ async fn serve_inner(
     dir: PathBuf,
     access: Access,
     route: rds_core::UniHello,
+    wire: Wire,
 ) -> anyhow::Result<()> {
-    let first = read_timed::<_, SyncMsg>(recv).await?;
+    let first = wire.recv(recv).await?;
     match first {
         SyncMsg::Offer {
             rel_path,
@@ -248,13 +597,13 @@ async fn serve_inner(
             chunk_count,
         } => {
             if !access.write {
-                refuse(send, "sync write not granted").await?;
+                refuse(wire, send, "sync write not granted").await?;
                 bail!("sync write not granted");
             }
             let rel = match check_rel_path(&rel_path) {
                 Ok(r) => r,
                 Err(e) => {
-                    refuse(send, &e.to_string()).await?;
+                    refuse(wire, send, &e.to_string()).await?;
                     bail!("offer refused: {e}");
                 }
             };
@@ -274,13 +623,13 @@ async fn serve_inner(
                 .context("destination preflight task")?
             };
             if let Err(e) = preflight {
-                refuse(send, &e.to_string()).await?;
+                refuse(wire, send, &e.to_string()).await?;
                 bail!("offer refused: {e}");
             }
-            let manifest = match read_manifest(recv, size, root, chunk_count).await {
+            let manifest = match read_manifest(recv, size, root, chunk_count, wire).await {
                 Ok(m) => m,
                 Err(e) => {
-                    refuse(send, &e.to_string()).await?;
+                    refuse(wire, send, &e.to_string()).await?;
                     return Err(e);
                 }
             };
@@ -291,20 +640,29 @@ async fn serve_inner(
                 chunks = manifest.chunks.len(),
                 "sync push accepted"
             );
-            let (_dest, stats) =
-                receive(&conn, send, &dir, &rel.to_string_lossy(), &manifest, route).await?;
+            let (_dest, stats) = receive(
+                &conn,
+                send,
+                recv,
+                &dir,
+                &rel.to_string_lossy(),
+                &manifest,
+                route,
+                wire,
+            )
+            .await?;
             tracing::info!(?stats, "push receive complete");
             Ok(())
         }
         SyncMsg::Request { rel_path } => {
             if !access.read {
-                refuse(send, "sync read not granted").await?;
+                refuse(wire, send, "sync read not granted").await?;
                 bail!("sync read not granted");
             }
             let rel = match check_rel_path(&rel_path) {
                 Ok(r) => r,
                 Err(e) => {
-                    refuse(send, &e.to_string()).await?;
+                    refuse(wire, send, &e.to_string()).await?;
                     bail!("request refused: {e}");
                 }
             };
@@ -321,7 +679,7 @@ async fn serve_inner(
             let source = match source {
                 Ok(file) => Arc::new(file),
                 Err(_) => {
-                    refuse(send, "no such file").await?;
+                    refuse(wire, send, "no such file").await?;
                     bail!("requested file absent or outside root: {}", rel.display());
                 }
             };
@@ -333,20 +691,22 @@ async fn serve_inner(
                 chunks = manifest.chunks.len(),
                 "sync pull serving"
             );
-            send_manifest(send, &rel.to_string_lossy(), &manifest).await?;
-            let SyncMsg::Need { bits } = read_timed::<_, SyncMsg>(recv).await? else {
+            send_manifest(wire, send, &rel.to_string_lossy(), &manifest).await?;
+            let SyncMsg::Need { bits } = wire.recv(recv).await? else {
                 bail!("expected Need");
             };
             let indices = bits_to_indices(&bits, manifest.chunks.len())?;
-            push_chunks(&conn, source, &manifest, &indices, route).await?;
-            match read_timed::<_, SyncMsg>(recv).await? {
+            push_chunks(&conn, source, &manifest, &indices, route, wire, recv).await?;
+            match wire.recv(recv).await? {
                 SyncMsg::Done { root } if root == manifest.root => {
                     tracing::info!(sent = indices.len(), "sync pull complete");
                     Ok(())
                 }
+                SyncMsg::Cancel { reason } => bail!("receiver canceled transfer: {reason}"),
                 other => bail!("expected Done, got {other:?}"),
             }
         }
+        SyncMsg::Cancel { reason } => bail!("caller canceled before transfer started: {reason}"),
         other => bail!("unexpected first sync message {other:?}"),
     }
 }
@@ -381,6 +741,7 @@ async fn send_file_inner(
     send: &mut SendStream,
     recv: &mut RecvStream,
     route: rds_core::UniHello,
+    wire: Wire,
 ) -> anyhow::Result<Stats> {
     let rel = path
         .file_name()
@@ -406,6 +767,17 @@ async fn send_file_inner(
         .context("open source task")??,
     );
     let manifest = manifest_from_file(source.clone()).await?;
+    // A negotiated chunk bound below the local cut makes this transfer
+    // impossible; refuse before any chunk leaves the source.
+    if wire.is_v2()
+        && manifest
+            .chunks
+            .iter()
+            .any(|c| c.len > wire.limits.max_chunk)
+    {
+        let _ = refuse(wire, send, "peer chunk bound below manifest chunk size").await;
+        bail!("peer chunk bound below manifest chunk size");
+    }
     tracing::info!(
         peer = %conn.remote_id(),
         rel = %rel,
@@ -413,16 +785,18 @@ async fn send_file_inner(
         chunks = manifest.chunks.len(),
         "sync push start"
     );
-    send_manifest(send, &rel, &manifest).await?;
-    let indices = match read_timed::<_, SyncMsg>(recv).await? {
+    send_manifest(wire, send, &rel, &manifest).await?;
+    let indices = match wire.recv(recv).await? {
         SyncMsg::Need { bits } => bits_to_indices(&bits, manifest.chunks.len())?,
         SyncMsg::Refuse { reason } => bail!("offer refused: {reason}"),
+        SyncMsg::Cancel { reason } => bail!("receiver canceled before chunks: {reason}"),
         other => bail!("expected Need, got {other:?}"),
     };
-    push_chunks(conn, source, &manifest, &indices, route).await?;
-    match read_timed::<_, SyncMsg>(recv).await? {
+    push_chunks(conn, source, &manifest, &indices, route, wire, recv).await?;
+    match wire.recv(recv).await? {
         SyncMsg::Done { root } if root == manifest.root => {}
         SyncMsg::Refuse { reason } => bail!("receiver refused: {reason}"),
+        SyncMsg::Cancel { reason } => bail!("receiver canceled transfer: {reason}"),
         other => bail!("expected Done, got {other:?}"),
     }
     let stats = Stats {
@@ -470,16 +844,17 @@ async fn recv_file_inner(
     send: &mut SendStream,
     recv: &mut RecvStream,
     route: rds_core::UniHello,
+    wire: Wire,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     let requested = check_rel_path(rel_path)?;
-    write_frame(
+    wire.send(
         send,
         &SyncMsg::Request {
             rel_path: rel_path.to_string(),
         },
     )
     .await?;
-    let (rel, size, root, chunk_count) = match read_timed::<_, SyncMsg>(recv).await? {
+    let (rel, size, root, chunk_count) = match wire.recv(recv).await? {
         SyncMsg::Offer {
             rel_path,
             size,
@@ -492,19 +867,22 @@ async fn recv_file_inner(
             chunk_count,
         ),
         SyncMsg::Refuse { reason } => bail!("request refused: {reason}"),
+        SyncMsg::Cancel { reason } => bail!("sender canceled before offer: {reason}"),
         other => bail!("expected Offer, got {other:?}"),
     };
     if rel != requested {
         bail!("offered path differs from requested path");
     }
-    let manifest = read_manifest(recv, size, root, chunk_count).await?;
+    let manifest = read_manifest(recv, size, root, chunk_count, wire).await?;
     let (dest, stats) = receive(
         conn,
         send,
+        recv,
         dest_dir,
         &rel.to_string_lossy(),
         &manifest,
         route,
+        wire,
     )
     .await?;
     tracing::info!(rel = %rel.display(), ?stats, "sync pull complete");
@@ -664,13 +1042,19 @@ impl JournalSink {
 /// Receiver half, shared by push and pull: journal the offer, answer
 /// `Need`, collect chunk streams until complete, assemble, `Done`.
 /// Returns the destination's informational path; I/O stays on held handles.
+/// v2 additionally watches the control stream for a typed `Cancel`, so a
+/// peer's deliberate abort stops collection deterministically rather than
+/// waiting for chunk-stream errors.
+#[allow(clippy::too_many_arguments)]
 async fn receive(
     conn: &Connection,
     send: &mut SendStream,
+    recv: &mut RecvStream,
     dir: &Path,
     rel: &str,
     manifest: &Manifest,
     route: rds_core::UniHello,
+    wire: Wire,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     // Journal open walks and re-verifies every stored part — disk-bound
     // work belongs on the blocking pool, not an async worker.
@@ -683,7 +1067,7 @@ async fn receive(
     let journal = match journal {
         Ok(journal) => journal,
         Err(e) => {
-            refuse(send, &e.to_string()).await?;
+            refuse(wire, send, &e.to_string()).await?;
             return Err(e.into());
         }
     };
@@ -692,13 +1076,27 @@ async fn receive(
     // use a unique transfer ID; direct compatibility retains the Sync tag.
     let uni = conn.uni_streams(route).context("claim sync uni streams")?;
     let bits = need_bits(journal.total(), journal.have_set());
-    write_frame(send, &SyncMsg::Need { bits }).await?;
+    wire.send(send, &SyncMsg::Need { bits }).await?;
 
-    let result = tokio::select! {
-        result = receive_chunks(uni, journal, manifest) => result?,
-        _ = send.stopped() => bail!("sync control stream closed during receive"),
+    // v2 control read: only Cancel is valid mid-receive; any other frame
+    // is a protocol violation.
+    let cancelled = async {
+        if wire.is_v2() {
+            wire.recv(recv).await
+        } else {
+            std::future::pending().await
+        }
     };
-    write_frame(
+    let result = tokio::select! {
+        result = receive_chunks(uni, journal, manifest, wire) => result?,
+        _ = send.stopped() => bail!("sync control stream closed during receive"),
+        msg = cancelled => match msg {
+            Ok(SyncMsg::Cancel { reason }) => bail!("peer canceled transfer: {reason}"),
+            Ok(other) => bail!("unexpected control frame during receive: {other:?}"),
+            Err(e) => return Err(e).context("sync control read during receive"),
+        },
+    };
+    wire.send(
         send,
         &SyncMsg::Done {
             root: manifest.root,
@@ -712,6 +1110,7 @@ async fn receive_chunks(
     mut uni: rds_net::UniStreams,
     journal: Journal,
     manifest: &Manifest,
+    wire: Wire,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     let total = journal.total() as u64;
 
@@ -727,7 +1126,7 @@ async fn receive_chunks(
         let mut fetched_bytes = 0u64;
         while !requested.is_empty() {
             streams += 1;
-            if streams > FETCH_STREAMS {
+            if streams > wire.limits.fetch_streams as usize {
                 bail!("too many chunk streams");
             }
             // `recv` only parks once every routed stream is consumed — a
@@ -743,7 +1142,7 @@ async fn receive_chunks(
             };
             let mut stream_chunks = 0;
             loop {
-                match read_timed::<_, SyncMsg>(&mut stream).await? {
+                match wire.recv(&mut stream).await? {
                     SyncMsg::ChunkSet { indices } => {
                         if indices.is_empty() || indices.len() > CHUNKSET_BATCH {
                             bail!("invalid ChunkSet batch length");
@@ -756,7 +1155,7 @@ async fn receive_chunks(
                                 index: i,
                                 len,
                                 hash,
-                            } = read_timed::<_, SyncMsg>(&mut stream).await?
+                            } = wire.recv(&mut stream).await?
                             else {
                                 bail!("expected ChunkHdr");
                             };
@@ -829,26 +1228,27 @@ async fn receive_chunks(
     ))
 }
 
-/// Holder half: open [`FETCH_STREAMS`] uni streams, each walking an
-/// interleaved share of `indices` in `CHUNKSET_BATCH` batches.
+/// Holder half: open the negotiated number of uni streams (v1 uses
+/// [`FETCH_STREAMS`]), each walking an interleaved share of `indices` in
+/// `CHUNKSET_BATCH` batches. v2 watches the control stream so a typed
+/// `Cancel` stops chunk production immediately instead of surfacing as
+/// write errors on half-closed streams.
 async fn push_chunks(
     conn: &Connection,
     file: Arc<File>,
     manifest: &Manifest,
     indices: &[u32],
     route: rds_core::UniHello,
+    wire: Wire,
+    recv: &mut RecvStream,
 ) -> anyhow::Result<()> {
+    let width = wire.limits.fetch_streams as usize;
     let mut tasks = tokio::task::JoinSet::new();
-    for k in 0..FETCH_STREAMS {
+    for k in 0..width {
         let conn = conn.clone();
         let file = file.clone();
         let manifest = manifest.clone();
-        let mine: Vec<u32> = indices
-            .iter()
-            .copied()
-            .skip(k)
-            .step_by(FETCH_STREAMS)
-            .collect();
+        let mine: Vec<u32> = indices.iter().copied().skip(k).step_by(width).collect();
         tasks.spawn(async move {
             if mine.is_empty() {
                 return Ok::<(), anyhow::Error>(());
@@ -863,7 +1263,7 @@ async fn push_chunks(
             // a single allocation rather than one per chunk.
             let mut buf = Vec::with_capacity(MAX_CHUNK as usize);
             for batch in mine.chunks(CHUNKSET_BATCH) {
-                write_frame(
+                wire.send(
                     &mut stream,
                     &SyncMsg::ChunkSet {
                         indices: batch.to_vec(),
@@ -883,7 +1283,7 @@ async fn push_chunks(
                     })
                     .await
                     .context("chunk read task")??;
-                    write_frame(
+                    wire.send(
                         &mut stream,
                         &SyncMsg::ChunkHdr {
                             index,
@@ -897,24 +1297,46 @@ async fn push_chunks(
                         .context("sync chunk write stalled")??;
                 }
             }
-            write_frame(&mut stream, &SyncMsg::SetDone).await?;
+            wire.send(&mut stream, &SyncMsg::SetDone).await?;
             stream.finish()?;
             Ok(())
         });
     }
-    while let Some(result) = tasks.join_next().await {
-        result??;
+    let mut cancelled = std::pin::pin!(async {
+        if wire.is_v2() {
+            wire.recv(recv).await
+        } else {
+            std::future::pending().await
+        }
+    });
+    loop {
+        tokio::select! {
+            result = tasks.join_next() => match result {
+                None => break,
+                Some(result) => result??,
+            },
+            msg = &mut cancelled => {
+                tasks.abort_all();
+                let why = match msg {
+                    Ok(SyncMsg::Cancel { reason }) => reason,
+                    Ok(other) => format!("unexpected control frame {other:?}"),
+                    Err(e) => format!("control read failed: {e}"),
+                };
+                return Err(anyhow::anyhow!("receiver aborted chunk push: {why}"));
+            }
+        }
     }
     Ok(())
 }
 
 /// Write `Offer` + `ManifestPart` frames for a built manifest.
 async fn send_manifest(
+    wire: Wire,
     send: &mut SendStream,
     rel: &str,
     manifest: &Manifest,
 ) -> anyhow::Result<()> {
-    write_frame(
+    wire.send(
         send,
         &SyncMsg::Offer {
             rel_path: rel.to_string(),
@@ -925,7 +1347,7 @@ async fn send_manifest(
     )
     .await?;
     for batch in manifest.chunks.chunks(MANIFEST_BATCH) {
-        write_frame(
+        wire.send(
             send,
             &SyncMsg::ManifestPart {
                 chunks: batch.to_vec(),
@@ -937,19 +1359,24 @@ async fn send_manifest(
 }
 
 /// Read `ManifestPart` frames until `chunk_count` entries land;
-/// reassemble and validate.
+/// reassemble and validate. v2 additionally enforces the negotiated
+/// manifest and per-chunk bounds — tighter than the wire ceilings.
 async fn read_manifest(
     recv: &mut RecvStream,
     size: u64,
     root: crate::ChunkHash,
     chunk_count: u32,
+    wire: Wire,
 ) -> anyhow::Result<Manifest> {
     if chunk_count as usize > MAX_CHUNKS {
         bail!("manifest too large: {chunk_count}");
     }
+    if wire.is_v2() && chunk_count > wire.limits.max_chunks {
+        bail!("manifest exceeds negotiated chunk bound: {chunk_count}");
+    }
     let mut chunks = Vec::with_capacity(chunk_count as usize);
     while chunks.len() < chunk_count as usize {
-        match read_timed::<_, SyncMsg>(recv).await? {
+        match wire.recv(recv).await? {
             SyncMsg::ManifestPart { chunks: part } => {
                 if part.is_empty()
                     || part.len() > MANIFEST_BATCH
@@ -960,6 +1387,7 @@ async fn read_manifest(
                 chunks.extend(part);
             }
             SyncMsg::Refuse { reason } => bail!("refused: {reason}"),
+            SyncMsg::Cancel { reason } => bail!("sender canceled mid-manifest: {reason}"),
             other => bail!("expected ManifestPart, got {other:?}"),
         }
     }
@@ -968,11 +1396,14 @@ async fn read_manifest(
     }
     let m = Manifest { size, root, chunks };
     check_manifest(&m).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if wire.is_v2() && m.chunks.iter().any(|c| c.len > wire.limits.max_chunk) {
+        bail!("manifest chunk exceeds negotiated bound");
+    }
     Ok(m)
 }
 
-async fn refuse(send: &mut SendStream, reason: &str) -> anyhow::Result<()> {
-    write_frame(
+async fn refuse(wire: Wire, send: &mut SendStream, reason: &str) -> anyhow::Result<()> {
+    wire.send(
         send,
         &SyncMsg::Refuse {
             reason: reason.to_string(),

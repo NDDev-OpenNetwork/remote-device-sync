@@ -230,7 +230,7 @@ async fn canceled_transfer_releases_its_slot_without_closing_tcp_or_the_session(
                             let _ = send.finish();
                         });
                     }
-                    StreamHello::SyncTransfer { id } => {
+                    StreamHello::SyncTransferV2 { id } => {
                         write_frame(&mut send, &HelloAck::Ok).await.unwrap();
                         let started = started.clone();
                         if let Some(old) = first_id {
@@ -239,7 +239,7 @@ async fn canceled_transfer_releases_its_slot_without_closing_tcp_or_the_session(
                             let source = source.clone();
                             workers.spawn(async move {
                                 started.send(id).await.unwrap();
-                                rds_sync::engine::Transfer::new(id)
+                                rds_sync::engine::Transfer::new_v2(id)
                                     .serve(
                                         conn,
                                         (send, recv),

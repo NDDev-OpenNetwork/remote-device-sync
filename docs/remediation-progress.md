@@ -43,10 +43,10 @@ Neither increment closes these product gaps or any wave.
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
 | W1.7 | Implemented; Linux checks passed | Exclusive staging and RAII cleanup preserve ordinary/link siblings and colliding names; failed assembly retains the old file. Current staging uses reserved names inside locked private state, allowing deterministic recovery. |
 | W1.8 | Implemented; Linux checks passed | Directory-relative no-follow journal/destination I/O and a held source file replace path-check-then-open. Link planting and substitutions after open are tested. Native macOS verification remains pending. |
-| W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Explicit transfer IDs/negotiation, stronger cancellation barriers and native macOS qualification remain open. |
+| W1.9 | Partial | Pull path and Done-root binding, exact frame decoding, canonical Need, batch bounds, requested/unique chunks, verified completion, actual wire-byte accounting and absolute session budgets are implemented. Managed transfers now run the negotiated v2 session: per-transfer route IDs bound into every frame, Hello/HelloAck limit negotiation, typed Cancel both directions. Stronger physical cancellation barriers and native macOS qualification remain open. |
 | W1.10 | Partial; Linux transaction checks passed | Root and destination-parent locks cover overlapping roots and filesystem aliases. Reserved private staging, both-parent sync and bounded known-name recovery are implemented. 23 transaction/cleanup boundaries cover process exit and two returned-error classes. Physical power loss, native macOS, large-file campaign and inactive/legacy journal collection remain open. |
 | W2.1 | Partial; endpoint settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation, preflight before identity creation, owned-relay CLI/agent selection and canonical TCP targets shared with client and agent policy are implemented. Role-level service/authority settings and timeout policy remain open. |
-| W2.2 | Partial; exact ALPN selection | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs. Capability/limit/version negotiation and desktop session routing IDs remain open. |
+| W2.2 | Partial; exact ALPN selection + sync session negotiation | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Service-wide capability negotiation and desktop session routing IDs remain open. |
 | W2.3 | Partial; destination-bound renewable grants and directional scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Tenant/policy binding, per-path/account scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
 | W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
@@ -1864,3 +1864,35 @@ but read only under `transport-noq`; now `cfg_attr`-annotated.
 Evidence: `docs/reports/noq-measurement-20260927{,-data.json}` — all
 nine lanes green on noq with phase metrics, calibration ratio 0.75–0.81
 and recovery drops=58 window=1.5s.
+
+## 2026-09-27 — negotiated sync sessions, W1.9/W2.2 executable scope
+
+Managed transfers now run a version-2 sync session. `SyncTransferV2 { id }`
+is an additive `StreamHello`/`UniHello` variant: a peer that cannot decode it
+refuses at greeting, before any filesystem operation — the tag is the version,
+matching ALPN posture. After `HelloAck::Ok`, the control stream and the
+transfer's chunk streams speak `SyncMsg::Session { transfer_id, msg }`; every
+frame re-binds the transfer ID, so a delayed stream from a canceled attempt
+can land on a fresh route but never feed a replacement transfer's frames.
+
+The first envelope is `Hello { version, limits }` / `HelloAck` answered;
+`SessionLimits` (`max_chunk`, `max_chunks`, `fetch_streams`) resolve to the
+pairwise minimum, capped by compiled bounds, and zero-valued declarations are
+refused. Negotiation completes before manifest reads or mutation. Repeated
+greetings, mismatched IDs and `Session` frames on v1 streams are protocol
+violations; `Cancel` on v1 lowers to `Refuse`.
+
+Cancellation is typed: `send_file_cancel`/`recv_file_cancel` take a
+`CancellationToken` (the managed client binds the session entry's token) and
+write `SessionMsg::Cancel`; the receiving side watches the control stream
+during collection, so a peer abort stops receive deterministically instead of
+riding the absolute deadline to timeout.
+
+Coverage: engine unit tests for min-limits negotiation, unusable-limit refusal,
+version-mismatch refusal, transfer-ID mismatch and the v1 leak guard; a new
+`session_v2` e2e suite over real endpoints covering negotiated push, pull +
+resume-after-cancel, token cancellation observed by the server, and unchanged
+v1 compatibility. The pre-existing v1 suite (`send`/`recv` e2e, impaired,
+resume) is untouched and passing. Open: physical cancellation barriers beyond
+typed abort (W2.5/W8), desktop session routing IDs (W2.2), native macOS
+qualification.

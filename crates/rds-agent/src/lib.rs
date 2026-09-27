@@ -649,9 +649,14 @@ async fn serve_stream(
                     .await?;
                 }
             }
-            StreamHello::Sync | StreamHello::SyncTransfer { .. } => {
+            StreamHello::Sync
+            | StreamHello::SyncTransfer { .. }
+            | StreamHello::SyncTransferV2 { .. } => {
                 let transfer = match hello {
                     StreamHello::SyncTransfer { id } => Some(rds_sync::engine::Transfer::new(id)),
+                    StreamHello::SyncTransferV2 { id } => {
+                        Some(rds_sync::engine::Transfer::new_v2(id))
+                    }
                     _ => None,
                 };
                 let Some(dir) = policy.sync_dir.clone() else {
@@ -745,7 +750,9 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         StreamHello::Info => ServiceKind::Info,
         StreamHello::TcpConnect { .. } => ServiceKind::Tcp,
         StreamHello::Desktop(_) => ServiceKind::Desktop,
-        StreamHello::Sync | StreamHello::SyncTransfer { .. } => ServiceKind::Sync,
+        StreamHello::Sync
+        | StreamHello::SyncTransfer { .. }
+        | StreamHello::SyncTransferV2 { .. } => ServiceKind::Sync,
         StreamHello::Audio(_) => ServiceKind::Audio,
         StreamHello::Authz(_) | StreamHello::RenewAuthz(_) => return None,
     })

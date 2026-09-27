@@ -32,7 +32,8 @@ An additional candidate with invalid port zero fails synchronously before a
 valid candidate connects; that failure cannot change the requested protocol.
 Existing owned/iroh interoperability checks retain the default `rds/0` behavior.
 
-This is only the ALPN boundary of W2.2. Service capability and limit negotiation,
-version compatibility policy, stable session/transfer routing IDs and mixed
-service admission remain separate work. No wire identifier or version changed;
-no backend was promoted and no remediation wave is closed.
+This is the ALPN boundary of W2.2. Managed sync transfers now negotiate version
+and limits inside the `SyncTransferV2` session envelope
+([sync-protocol.md](sync-protocol.md)) — the tag is the version, never a silent
+fallback. Broader service capability negotiation, desktop session routing IDs
+and mixed service admission remain separate work.
