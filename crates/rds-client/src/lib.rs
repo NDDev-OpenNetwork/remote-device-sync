@@ -7,21 +7,33 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rds_core::{AgentInfo, HelloAck, StreamHello};
-use rds_net::{Connection, Endpoint, EndpointAddr};
+use rds_net::{Connection, DeadlinePolicy, Endpoint, EndpointAddr};
 
 mod forward;
 mod request;
 pub use forward::{DEFAULT_FORWARD_LIMIT, forward_bound_listener, forward_listener};
 use request::{Authorization, bounded, exchange};
 
-/// Bound on the whole dial — hole punching and relay fallback retry
-/// internally, so the CLI gives them room but not forever.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Open a connection to `target` and return it.
+/// Open a connection to `target` and return it. The whole dial —
+/// hole punching and relay fallback included — is bounded by the
+/// `dial` deadline class ([`DeadlinePolicy::DEFAULT`]).
 pub async fn connect(endpoint: &Endpoint, target: EndpointAddr) -> anyhow::Result<Connection> {
+    connect_with_deadlines(endpoint, target, &DeadlinePolicy::DEFAULT).await
+}
+
+/// [`connect`] under a caller-chosen deadline policy. The policy is
+/// validated up front so a misconfigured deployment fails fast instead
+/// of discovering an unbounded dial mid-incident.
+pub async fn connect_with_deadlines(
+    endpoint: &Endpoint,
+    target: EndpointAddr,
+    deadlines: &DeadlinePolicy,
+) -> anyhow::Result<Connection> {
+    deadlines
+        .validate()
+        .map_err(|class| anyhow::anyhow!("invalid {class:?} deadline"))?;
     rds_observe::observe(rds_observe::Operation::Connect, async {
-        tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(target, rds_core::ALPN))
+        tokio::time::timeout(deadlines.dial, endpoint.connect(target, rds_core::ALPN))
             .await
             .context("connect timed out")?
             .context("connect to peer")
@@ -153,4 +165,76 @@ pub async fn open_sync(
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rds_net::{Backend, EndpointConfig, SecretKey, TransportAddr};
+
+    /// The `dial` class bounds the whole attempt: against a peer that
+    /// accepts nothing, startup surfaces the failure inside the
+    /// configured bound instead of parking in the transport.
+    #[tokio::test]
+    async fn dial_deadline_fails_fast_against_a_silent_peer() {
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint = rds_net::bind_endpoint(EndpointConfig {
+            backend: Backend::Iroh,
+            discovery: false,
+            bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let target = EndpointAddr {
+            id: SecretKey::from_bytes(&[7; 32]).public(),
+            addrs: [TransportAddr::Ip(silent.local_addr().unwrap())]
+                .into_iter()
+                .collect(),
+        };
+        let deadlines = DeadlinePolicy {
+            dial: Duration::from_millis(200),
+            ..DeadlinePolicy::DEFAULT
+        };
+        let started = Instant::now();
+        let error = connect_with_deadlines(&endpoint, target, &deadlines)
+            .await
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "dial class must bound a dead path"
+        );
+        assert!(
+            error.chain().any(|e| e.to_string().contains("timed out")),
+            "expected the dial bound to fire, got {error:#}"
+        );
+        endpoint.close().await;
+    }
+
+    /// A zero or effectively-unbounded deadline is rejected before the
+    /// dial starts, not discovered mid-incident.
+    #[tokio::test]
+    async fn invalid_deadline_policy_fails_before_dial() {
+        let deadlines = DeadlinePolicy {
+            dial: Duration::ZERO,
+            ..DeadlinePolicy::DEFAULT
+        };
+        let endpoint = rds_net::bind_endpoint(EndpointConfig {
+            backend: Backend::Iroh,
+            discovery: false,
+            bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let target = EndpointAddr {
+            id: SecretKey::from_bytes(&[9; 32]).public(),
+            addrs: Default::default(),
+        };
+        let error = connect_with_deadlines(&endpoint, target, &deadlines)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Dial"));
+        endpoint.close().await;
+    }
 }

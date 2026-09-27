@@ -42,6 +42,7 @@ pub mod backends {
     #[cfg(feature = "transport-noq")]
     pub mod noq;
 }
+pub mod deadline;
 mod identity;
 pub mod metrics;
 mod observation;
@@ -67,6 +68,7 @@ pub use iroh::endpoint::{
 pub use announce::{Announce, AnnounceConfig, RetryPolicy, announce};
 pub use backends::iroh::{Ticket, parse_target, relay_url_of};
 pub use config::{ConfigError, EndpointOverrides, EndpointSettings, RelayLimits, RelaySettings};
+pub use deadline::{DeadlinePolicy, RetryWait, TimeoutClass};
 pub use identity::{KeyOwner, KeyStoreError, acquire_key, default_key_path, load_or_create_key};
 pub use resolve::resolve_target;
 

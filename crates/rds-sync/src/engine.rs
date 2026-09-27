@@ -33,7 +33,8 @@ use crate::{confined::Directory, journal::Journal};
 /// No protocol read may stall longer than this — a peer that is alive
 /// but silent still must not hang a transfer forever. Generous because
 /// reads gate on the peer's disk work (manifest scans, journal
-/// rescans); a dead connection ends them regardless.
+/// rescans); a dead connection ends them regardless. This is the
+/// `Progress` deadline class (`rds_net::DeadlinePolicy`, W2.6).
 const READ_STALL: Duration = Duration::from_secs(300);
 /// Stall bound for frames that gate on the peer's own heavy local work:
 /// manifest hashing before `Offer`, journal walk before `Need`,

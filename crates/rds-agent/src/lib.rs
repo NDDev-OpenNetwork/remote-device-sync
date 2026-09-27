@@ -61,7 +61,11 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Operational deadlines on the serving side. Deployments tune these at
 /// the policy level; session and transfer internals keep their own
-/// service-scoped budgets.
+/// service-scoped budgets. These four fields are the serving-side subset
+/// of the shared deadline classes (`rds_net::DeadlinePolicy`, W2.6):
+/// `handshake`/`hello` → `Handshake`, `authz` → `Authz`, `shutdown` →
+/// `Shutdown`. `Dial`/`Idle`/`Progress` are client- and transfer-side
+/// classes owned by their own enforcement sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeoutPolicy {
     /// Inbound connection-handshake budget.

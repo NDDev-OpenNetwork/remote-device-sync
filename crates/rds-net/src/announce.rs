@@ -59,8 +59,10 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Sleep duration for the `failures`-th consecutive retryable
     /// failure (1-indexed): `min(cap, base × 2^(failures-1))` with equal
-    /// jitter inside `[delay/2, delay]`.
-    fn delay(&self, failures: u32) -> Duration {
+    /// jitter inside `[delay/2, delay]`. Public because it is the
+    /// shared bounded-backoff primitive ([`crate::deadline::retry_wait`]
+    /// builds the cancellable sleep on it).
+    pub fn delay(&self, failures: u32) -> Duration {
         let shift = failures.saturating_sub(1).min(16);
         let delay = self.base.saturating_mul(1 << shift).min(self.cap);
         let half_ms = (delay.as_millis() / 2).min(u64::MAX as u128) as u64;
