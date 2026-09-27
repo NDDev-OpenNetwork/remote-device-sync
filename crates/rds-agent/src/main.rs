@@ -116,6 +116,14 @@ struct Cli {
     /// Maximum grant lifetime accepted, in seconds (default 300).
     #[arg(long)]
     grant_ttl: Option<u64>,
+    /// Tenant this device belongs to (grant v3). When set, every grant
+    /// must carry the same `tenant` claim; unscoped grants are refused.
+    #[arg(long)]
+    tenant: Option<String>,
+    /// Minimum policy revision a grant must claim (grant v3). Grants
+    /// minted under older estate policy are refused.
+    #[arg(long)]
+    policy_min_revision: Option<u64>,
     /// Verifying key that signs the estate revocation snapshot
     /// (`GET /v1/revocations`). Required for denylist polling when
     /// `--directory` is set.
@@ -180,6 +188,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             allow: cli.allow,
             issuers: cli.issuers,
             grant_ttl: cli.grant_ttl,
+            tenant: cli.tenant,
+            policy_min_revision: cli.policy_min_revision,
             directory: cli.directory,
             directory_ca: cli.directory_ca,
             record_ttl: cli.record_ttl,
@@ -234,6 +244,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if let Some(timeouts) = resolved.timeouts {
         policy.timeouts = timeouts;
     }
+    policy.tenant = resolved.tenant;
+    policy.min_policy_revision = resolved.policy_min_revision;
     policy.issuers.extend(resolved.issuers.iter().copied());
     policy
         .validate()

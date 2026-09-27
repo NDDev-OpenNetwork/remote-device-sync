@@ -168,6 +168,13 @@ pub struct AuthoritySettings {
     /// Trusted grant issuers (base32 Ed25519 verifying keys).
     pub issuers: Vec<String>,
     pub grant_ttl_secs: Option<u64>,
+    /// Tenant this agent answers (grant v3 claim binding). When set, every
+    /// grant must carry the same `tenant`; unscoped grants are refused.
+    pub tenant: Option<String>,
+    /// Minimum `policy_revision` a grant must claim (grant v3). Grants
+    /// minted under older estate policy are refused without waiting for
+    /// expiry or revocation.
+    pub policy_min_revision: Option<u64>,
     /// Directory HTTP(S) origin or legacy IP:port.
     pub directory: Option<String>,
     pub directory_ca: Option<PathBuf>,
@@ -235,6 +242,8 @@ pub struct AgentOverrides {
     pub allow: Vec<String>,
     pub issuers: Vec<String>,
     pub grant_ttl: Option<u64>,
+    pub tenant: Option<String>,
+    pub policy_min_revision: Option<u64>,
     pub directory: Option<String>,
     pub directory_ca: Option<PathBuf>,
     pub record_ttl: Option<u64>,
@@ -267,6 +276,8 @@ pub struct ResolvedAgent {
     pub allow: Vec<EndpointId>,
     pub issuers: Vec<[u8; 32]>,
     pub grant_ttl: Option<u64>,
+    pub tenant: Option<String>,
+    pub policy_min_revision: Option<u64>,
     pub directory: Option<String>,
     pub directory_ca: Option<PathBuf>,
     pub record_ttl: Option<u64>,
@@ -380,6 +391,12 @@ impl AgentSettings {
         }
         if flags.grant_ttl.is_some() {
             self.authority.grant_ttl_secs = flags.grant_ttl;
+        }
+        if flags.tenant.is_some() {
+            self.authority.tenant = flags.tenant;
+        }
+        if flags.policy_min_revision.is_some() {
+            self.authority.policy_min_revision = flags.policy_min_revision;
         }
         if flags.directory.is_some() {
             self.authority.directory = flags.directory;
@@ -496,6 +513,22 @@ impl AgentSettings {
         {
             return Err(AgentConfigError::Invalid(
                 "grant_ttl_secs must be 1..=86400",
+            ));
+        }
+        if let Some(tenant) = &authority.tenant
+            && (tenant.is_empty()
+                || tenant.len() > rds_core::grant::MAX_TENANT_LEN
+                || tenant.bytes().any(|b| b < 0x21 || b == 0x7f))
+        {
+            return Err(AgentConfigError::Invalid(
+                "tenant must be nonempty, at most 64 bytes and free of control or whitespace bytes",
+            ));
+        }
+        if authority.issuers.is_empty()
+            && (authority.tenant.is_some() || authority.policy_min_revision.is_some())
+        {
+            return Err(AgentConfigError::Invalid(
+                "tenant/policy_min_revision require at least one grant issuer",
             ));
         }
         if authority.directory.is_none()
@@ -638,6 +671,8 @@ impl AgentSettings {
             allow,
             issuers,
             grant_ttl: authority.grant_ttl_secs,
+            tenant: authority.tenant.clone(),
+            policy_min_revision: authority.policy_min_revision,
             directory: authority.directory.clone(),
             directory_ca: authority.directory_ca.clone(),
             record_ttl: authority.record_ttl_secs,
@@ -913,5 +948,41 @@ mod tests {
             TimeoutPolicy::default().handshake
         );
         assert_eq!(resolve_ok(r#"{"schema_version":1}"#).timeouts, None);
+    }
+
+    #[test]
+    fn tenant_and_revision_binding() {
+        // Binding claims without issuers would never evaluate — refused
+        // loudly rather than silently inert.
+        for json in [
+            r#"{"schema_version":1,"authority":{"tenant":"t1"}}"#,
+            r#"{"schema_version":1,"authority":{"policy_min_revision":4}}"#,
+            r#"{"schema_version":1,"authority":{"tenant":"","issuers":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"directory":"http://localhost:9","revocations":{"key":"k"}}}"#,
+            r#"{"schema_version":1,"authority":{"tenant":"has space","issuers":["a"],"revocations":{"key":"k"}}}"#,
+        ] {
+            let settings = parse(json);
+            assert!(settings.validate().is_err(), "{json}");
+        }
+        // A valid binding resolves, and flag values override file values.
+        let resolved = resolve_ok(
+            r#"{"schema_version":1,"authority":{"issuers":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+             "tenant":"tenant-a","policy_min_revision":3,"directory":"http://localhost:9",
+             "revocations":{"key":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}"#,
+        );
+        assert_eq!(resolved.tenant.as_deref(), Some("tenant-a"));
+        assert_eq!(resolved.policy_min_revision, Some(3));
+        let settings = parse(
+            r#"{"schema_version":1,"authority":{"issuers":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+             "tenant":"tenant-a","policy_min_revision":3,"directory":"http://localhost:9",
+             "revocations":{"key":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}"#,
+        )
+        .apply(AgentOverrides {
+            tenant: Some("tenant-b".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            settings.resolve().unwrap().tenant.as_deref(),
+            Some("tenant-b")
+        );
     }
 }

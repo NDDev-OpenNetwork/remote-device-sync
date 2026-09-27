@@ -476,6 +476,21 @@ pub(crate) async fn authorize(
             return Err(error.into());
         }
     };
+    // Deployment binding: when policy pins a tenant or a policy-revision
+    // floor, the grant must carry matching v3 claims. Version-2 grants carry
+    // no claims and therefore fail any pinned binding.
+    if let Some(tenant) = &policy.tenant
+        && verified.tenant() != Some(tenant.as_str())
+    {
+        rds_observe::request_refused(rds_observe::Reason::Denied);
+        return Err(grant::GrantError::TenantMismatch.into());
+    }
+    if let Some(floor) = policy.min_policy_revision
+        && verified.policy_revision().is_none_or(|r| r < floor)
+    {
+        rds_observe::request_refused(rds_observe::Reason::Denied);
+        return Err(grant::GrantError::PolicyRevisionStale.into());
+    }
     let id = verified.id;
     let next = if renewal {
         Some(
@@ -913,6 +928,8 @@ mod tests {
                 not_before: 100,
                 expires_at: 160,
                 constraints: Default::default(),
+                tenant: None,
+                policy_revision: None,
             },
         )
         .verify(

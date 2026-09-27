@@ -36,9 +36,17 @@ use crate::ServiceKind;
 pub const SKEW_SECS: u64 = 30;
 
 /// Grant payload format, independently versioned inside the Authz envelope.
-pub const GRANT_VERSION: u16 = 2;
+/// Version 3 adds the tenant/policy-revision claims and the `sync_paths`
+/// constraint; version-2 payloads still verify with all claims absent so
+/// estate-minted grants stay valid across the cutover. A deployment that
+/// requires the binding enforces it through policy — version-2 grants simply
+/// cannot satisfy a pinned tenant or revision floor.
+pub const GRANT_VERSION: u16 = 3;
+/// Oldest payload version still accepted at verify time.
+pub const GRANT_VERSION_MIN: u16 = 2;
 pub const MAX_PAYLOAD_LEN: usize = 4096;
-const DOMAIN: &[u8] = b"rds/capability-grant/v2\0";
+const DOMAIN_V2: &[u8] = b"rds/capability-grant/v2\0";
+const DOMAIN_V3: &[u8] = b"rds/capability-grant/v3\0";
 const ID_DOMAIN: &[u8] = b"rds/grant-session/v2\0";
 
 /// Hard bounds on grant collections, checked after decode so a hostile
@@ -46,6 +54,12 @@ const ID_DOMAIN: &[u8] = b"rds/grant-session/v2\0";
 pub const MAX_SERVICES: usize = 32;
 pub const MAX_TCP_PORTS: usize = 128;
 pub const MAX_DISPLAYS: usize = 32;
+/// Bound on a tenant identifier carried by a version-3 grant.
+pub const MAX_TENANT_LEN: usize = 64;
+/// Bound on the number of `sync_paths` scope entries.
+pub const MAX_SYNC_PATHS: usize = 64;
+/// Bound on one `sync_paths` entry — same cap as a protocol rel_path.
+pub const MAX_SCOPE_PATH_LEN: usize = 512;
 
 /// Stable session identifier: domain-separated BLAKE3 of issuer, subject,
 /// destination and nonce. Revocation and concurrent-replay checks cover every
@@ -88,6 +102,60 @@ pub struct GrantPayload {
     pub expires_at: u64,
     /// Optional per-service constraints.
     pub constraints: GrantConstraints,
+    /// Tenant the issuer binds this grant to (v3+). `None` = unscoped;
+    /// agents that pin a tenant refuse unscoped and mismatched grants.
+    pub tenant: Option<String>,
+    /// Estate policy revision the issuer minted under (v3+). Agents may
+    /// enforce a floor so policy changes invalidate older grants.
+    pub policy_revision: Option<u64>,
+}
+
+/// Frozen version-2 wire layout, kept only for decode. New grants are
+/// always issued at [`GRANT_VERSION`].
+#[derive(Debug, Serialize, Deserialize)]
+struct GrantPayloadV2 {
+    version: u16,
+    revision: u64,
+    issuer: [u8; 32],
+    subject: [u8; 32],
+    audience: [u8; 32],
+    nonce: [u8; 16],
+    services: Vec<ServiceKind>,
+    not_before: u64,
+    expires_at: u64,
+    constraints: GrantConstraintsV2,
+}
+
+/// Version-2 [`GrantConstraints`] — no `sync_paths` field.
+#[derive(Debug, Serialize, Deserialize)]
+struct GrantConstraintsV2 {
+    max_bps: Option<u64>,
+    tcp_ports: Option<Vec<u16>>,
+    displays: Option<Vec<u32>>,
+}
+
+impl From<GrantPayloadV2> for GrantPayload {
+    fn from(old: GrantPayloadV2) -> Self {
+        Self {
+            version: old.version,
+            revision: old.revision,
+            issuer: old.issuer,
+            subject: old.subject,
+            audience: old.audience,
+            nonce: old.nonce,
+            services: old.services,
+            not_before: old.not_before,
+            expires_at: old.expires_at,
+            constraints: GrantConstraints {
+                max_bps: old.constraints.max_bps,
+                tcp_ports: old.constraints.tcp_ports,
+                displays: old.constraints.displays,
+                sync_paths: None,
+            },
+            tenant: None,
+            policy_revision: None,
+        }
+    }
 }
 
 /// Narrowing constraints inside a grant. `None` = unconstrained by the
@@ -101,6 +169,10 @@ pub struct GrantConstraints {
     pub tcp_ports: Option<Vec<u16>>,
     /// Allowed display indices for `Desktop`. `Some` restricts.
     pub displays: Option<Vec<u32>>,
+    /// Allowed relative sync paths (v3+). `Some` restricts `Sync` reads and
+    /// writes to the listed subtrees; each entry is a normalized relative
+    /// path under the agent's sync root.
+    pub sync_paths: Option<Vec<String>>,
 }
 
 impl GrantPayload {
@@ -135,6 +207,8 @@ impl VerifiedGrant {
         if self.id != next.id
             || self.payload.services != next.payload.services
             || self.payload.constraints != next.payload.constraints
+            || self.payload.tenant != next.payload.tenant
+            || self.payload.policy_revision != next.payload.policy_revision
             || next.payload.revision <= self.payload.revision
             || next.payload.not_before < self.payload.not_before
             || next.payload.expires_at <= self.payload.expires_at
@@ -198,6 +272,29 @@ impl VerifiedGrant {
         self.payload.constraints.max_bps
     }
 
+    /// Tenant the issuer bound this grant to, if any (v3+).
+    pub fn tenant(&self) -> Option<&str> {
+        self.payload.tenant.as_deref()
+    }
+
+    /// Estate policy revision the grant was minted under, if any (v3+).
+    pub fn policy_revision(&self) -> Option<u64> {
+        self.payload.policy_revision
+    }
+
+    /// Whether a normalized relative sync path is inside
+    /// `constraints.sync_paths` — the path itself or a descendant of a listed
+    /// subtree. `None` means the grant does not narrow the sync root.
+    pub fn permits_sync_path(&self, rel: &std::path::Path) -> bool {
+        match &self.payload.constraints.sync_paths {
+            Some(paths) => paths
+                .iter()
+                .map(std::path::Path::new)
+                .any(|scope| rel == scope || rel.starts_with(scope)),
+            None => true,
+        }
+    }
+
     /// Whether the grant is still valid at `now` (unix seconds).
     pub fn live_at(&self, now: u64) -> bool {
         now.saturating_add(SKEW_SECS) >= self.payload.not_before && now < self.payload.expires_at
@@ -216,6 +313,10 @@ pub enum GrantError {
     WrongSubject,
     #[error("grant destination does not match this device")]
     WrongAudience,
+    #[error("grant tenant does not match the agent's pinned tenant")]
+    TenantMismatch,
+    #[error("grant policy revision is below the agent's required floor")]
+    PolicyRevisionStale,
     #[error("unsupported grant version")]
     Version,
     #[error("invalid grant validity interval")]
@@ -261,14 +362,17 @@ impl Grant {
                 not_before: now,
                 expires_at: now.saturating_add(ttl.as_secs()),
                 constraints,
+                tenant: None,
+                policy_revision: None,
             },
         )
     }
 
     /// Sign an already-built payload — the deterministic path for tests.
+    /// The signature domain follows `payload.version`.
     pub fn issue_at(issuer: &SigningKey, payload: GrantPayload) -> Self {
         let bytes = postcard::to_stdvec(&payload).expect("grant payload encodes");
-        let signature = issuer.sign(&signature_message(&bytes));
+        let signature = issuer.sign(&signature_message(payload.version, &bytes));
         Self {
             payload: bytes,
             signature: signature.to_bytes().to_vec(),
@@ -307,7 +411,7 @@ impl Grant {
             .map_err(|_| GrantError::Malformed("signature is not 64 bytes".into()))?;
         issuer_key
             .verify_strict(
-                &signature_message(&self.payload),
+                &signature_message(payload.version, &self.payload),
                 &Signature::from_bytes(&sig_bytes),
             )
             .map_err(|_| GrantError::BadSignature)?;
@@ -336,14 +440,30 @@ impl Grant {
         if self.payload.len() > MAX_PAYLOAD_LEN {
             return Err(GrantError::Oversized);
         }
-        let (payload, trailing): (GrantPayload, _) = postcard::take_from_bytes(&self.payload)
+        // The version is the payload's first field; postcard encodes `u16`
+        // as a varint, so peeking decodes exactly the version bytes.
+        let (version, _) = postcard::take_from_bytes::<u16>(&self.payload)
             .map_err(|e| GrantError::Malformed(e.to_string()))?;
-        if !trailing.is_empty() {
-            return Err(GrantError::Malformed("trailing grant bytes".into()));
-        }
-        if payload.version != GRANT_VERSION {
-            return Err(GrantError::Version);
-        }
+        let payload = match version {
+            v if v == GRANT_VERSION_MIN => {
+                let (old, trailing): (GrantPayloadV2, _) = postcard::take_from_bytes(&self.payload)
+                    .map_err(|e| GrantError::Malformed(e.to_string()))?;
+                if !trailing.is_empty() {
+                    return Err(GrantError::Malformed("trailing grant bytes".into()));
+                }
+                old.into()
+            }
+            v if v == GRANT_VERSION => {
+                let (new, trailing): (GrantPayload, _) =
+                    postcard::take_from_bytes(&self.payload)
+                        .map_err(|e| GrantError::Malformed(e.to_string()))?;
+                if !trailing.is_empty() {
+                    return Err(GrantError::Malformed("trailing grant bytes".into()));
+                }
+                new
+            }
+            _ => return Err(GrantError::Version),
+        };
         if payload.revision == 0 {
             return Err(GrantError::InvalidRevision);
         }
@@ -361,16 +481,82 @@ impl Grant {
                 .displays
                 .as_ref()
                 .is_some_and(|d| d.len() > MAX_DISPLAYS)
+            || payload
+                .constraints
+                .sync_paths
+                .as_ref()
+                .is_some_and(|s| s.len() > MAX_SYNC_PATHS)
+            || payload
+                .tenant
+                .as_ref()
+                .is_some_and(|t| t.len() > MAX_TENANT_LEN)
         {
             return Err(GrantError::Oversized);
+        }
+        if let Some(tenant) = &payload.tenant
+            && (tenant.is_empty() || tenant.bytes().any(|b| b < 0x21 || b == 0x7f))
+        {
+            return Err(GrantError::Malformed(
+                "tenant contains control or whitespace bytes".into(),
+            ));
+        }
+        if let Some(paths) = &payload.constraints.sync_paths {
+            for path in paths {
+                check_scope_path(path)?;
+            }
         }
         Ok(payload)
     }
 }
 
-fn signature_message(payload: &[u8]) -> Vec<u8> {
-    let mut message = Vec::with_capacity(DOMAIN.len() + payload.len());
-    message.extend_from_slice(DOMAIN);
+/// Lexical validation of a `sync_paths` scope entry — the same rules a
+/// transfer-level `rel_path` must satisfy (relative, inside the root, no
+/// NUL or `..`, nonempty after normalization). I/O confinement is still
+/// proven by the journal's no-follow handles; this only proves the signed
+/// scope list is well-formed.
+fn check_scope_path(path: &str) -> Result<(), GrantError> {
+    if path.is_empty() || path.len() > MAX_SCOPE_PATH_LEN {
+        return Err(GrantError::Malformed(format!(
+            "bad sync_paths entry {path:?}"
+        )));
+    }
+    if path.contains('\0') {
+        return Err(GrantError::Malformed(
+            "sync_paths entry contains NUL".into(),
+        ));
+    }
+    if path.starts_with(['/', '\\']) || path.as_bytes().get(1) == Some(&b':') {
+        return Err(GrantError::Malformed(format!(
+            "absolute sync_paths entry {path:?}"
+        )));
+    }
+    let mut real_components = 0;
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                return Err(GrantError::Malformed(format!(
+                    "traversal in sync_paths entry {path:?}"
+                )));
+            }
+            _ => real_components += 1,
+        }
+    }
+    if real_components == 0 {
+        return Err(GrantError::Malformed(format!(
+            "empty sync_paths entry {path:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn signature_message(version: u16, payload: &[u8]) -> Vec<u8> {
+    let domain = match version {
+        v if v == GRANT_VERSION_MIN => DOMAIN_V2,
+        _ => DOMAIN_V3,
+    };
+    let mut message = Vec::with_capacity(domain.len() + payload.len());
+    message.extend_from_slice(domain);
     message.extend_from_slice(payload);
     message
 }
@@ -589,6 +775,8 @@ mod tests {
                 not_before: now + 3600,
                 expires_at: now + 7200,
                 constraints: GrantConstraints::default(),
+                tenant: None,
+                policy_revision: None,
             },
         );
         assert!(matches!(
@@ -618,6 +806,7 @@ mod tests {
                 max_bps: Some(2_000_000),
                 tcp_ports: Some(vec![22]),
                 displays: Some(vec![0]),
+                sync_paths: None,
             },
         );
         let v = grant
@@ -677,6 +866,8 @@ mod tests {
                 not_before: 105,
                 expires_at: 103,
                 constraints: GrantConstraints::default(),
+                tenant: None,
+                policy_revision: None,
             },
         );
         assert!(
@@ -706,6 +897,8 @@ mod tests {
             not_before: 100,
             expires_at: 160,
             constraints: GrantConstraints::default(),
+            tenant: None,
+            policy_revision: None,
         };
         let grant = Grant::issue_at(&key, payload.clone());
         let check = |grant: &Grant, audience: &[u8; 32], now| {
@@ -754,7 +947,7 @@ mod tests {
         let mut trailing = grant.clone();
         trailing.payload.push(0);
         trailing.signature = key
-            .sign(&signature_message(&trailing.payload))
+            .sign(&signature_message(GRANT_VERSION, &trailing.payload))
             .to_bytes()
             .to_vec();
         assert!(matches!(
@@ -794,6 +987,8 @@ mod tests {
                 tcp_ports: Some(vec![22]),
                 ..Default::default()
             },
+            tenant: None,
+            policy_revision: None,
         };
         let verify = |p: GrantPayload| {
             Grant::issue_at(&key, p)
@@ -880,5 +1075,304 @@ mod tests {
                 proptest::prop_assert!(bad.verify(&issuers(&key), &subject, &[8; 32], Duration::from_secs(600), now).is_err());
             }
         }
+    }
+
+    /// A v3 payload with every claim populated.
+    fn claimed_payload(key: &SigningKey) -> GrantPayload {
+        GrantPayload {
+            version: GRANT_VERSION,
+            revision: 1,
+            issuer: key.verifying_key().to_bytes(),
+            subject: [7; 32],
+            audience: [8; 32],
+            nonce: rand::random(),
+            services: vec![ServiceKind::Sync],
+            not_before: 100,
+            expires_at: 160,
+            constraints: GrantConstraints {
+                sync_paths: Some(vec!["docs".into(), "media/2026".into()]),
+                ..Default::default()
+            },
+            tenant: Some("tenant-a".into()),
+            policy_revision: Some(7),
+        }
+    }
+
+    #[test]
+    fn v3_claims_verify_and_carry_scope() {
+        let key = issuer();
+        let grant = Grant::issue_at(&key, claimed_payload(&key));
+        let verified = grant
+            .verify(
+                &issuers(&key),
+                &[7; 32],
+                &[8; 32],
+                Duration::from_secs(600),
+                100,
+            )
+            .expect("v3 grant verifies");
+        assert_eq!(verified.tenant(), Some("tenant-a"));
+        assert_eq!(verified.policy_revision(), Some(7));
+        assert!(verified.permits_sync_path(std::path::Path::new("docs/a.txt")));
+        assert!(verified.permits_sync_path(std::path::Path::new("media/2026/x")));
+        assert!(verified.permits_sync_path(std::path::Path::new("docs")));
+        // Prefix matching is component-wise: a shared name prefix does not
+        // widen the scope.
+        assert!(!verified.permits_sync_path(std::path::Path::new("docs-else/x")));
+        assert!(!verified.permits_sync_path(std::path::Path::new("other/f")));
+
+        // The same payload signed under the v2 domain must not verify.
+        let mut cross = grant.clone();
+        cross.signature = key
+            .sign(&signature_message(GRANT_VERSION_MIN, &grant.payload))
+            .to_bytes()
+            .to_vec();
+        assert!(matches!(
+            cross.verify(
+                &issuers(&key),
+                &[7; 32],
+                &[8; 32],
+                Duration::from_secs(600),
+                100
+            ),
+            Err(GrantError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn v2_grants_still_verify_with_absent_claims() {
+        let key = issuer();
+        // Hand-encode a genuine version-2 wire payload: pinned layout,
+        // v2 signature domain — exactly what an estate issuer minted
+        // before v3 produces.
+        let old = GrantPayloadV2 {
+            version: GRANT_VERSION_MIN,
+            revision: 1,
+            issuer: key.verifying_key().to_bytes(),
+            subject: [7; 32],
+            audience: [8; 32],
+            nonce: rand::random(),
+            services: vec![ServiceKind::Ping],
+            not_before: 100,
+            expires_at: 160,
+            constraints: GrantConstraintsV2 {
+                max_bps: None,
+                tcp_ports: None,
+                displays: None,
+            },
+        };
+        let bytes = postcard::to_stdvec(&old).unwrap();
+        let grant = Grant {
+            signature: key
+                .sign(&signature_message(GRANT_VERSION_MIN, &bytes))
+                .to_bytes()
+                .to_vec(),
+            payload: bytes,
+        };
+        let verified = grant
+            .verify(
+                &issuers(&key),
+                &[7; 32],
+                &[8; 32],
+                Duration::from_secs(600),
+                100,
+            )
+            .expect("v2 grant verifies");
+        assert_eq!(verified.payload.version, GRANT_VERSION_MIN);
+        assert_eq!(verified.tenant(), None);
+        assert_eq!(verified.policy_revision(), None);
+        // No path constraint narrows a v2 grant.
+        assert!(verified.permits_sync_path(std::path::Path::new("anything/at/all")));
+    }
+
+    #[test]
+    fn v2_bytes_cannot_smuggle_v3_claims() {
+        let key = issuer();
+        // A v3-encoded payload with its version field rewritten to 2 must
+        // fail — decode is layout-exact per version.
+        let mut payload = postcard::to_stdvec(&claimed_payload(&key)).unwrap();
+        assert_eq!(payload[0], GRANT_VERSION as u8);
+        payload[0] = GRANT_VERSION_MIN as u8;
+        let grant = Grant {
+            signature: key
+                .sign(&signature_message(GRANT_VERSION_MIN, &payload))
+                .to_bytes()
+                .to_vec(),
+            payload,
+        };
+        assert!(matches!(
+            grant.verify(
+                &issuers(&key),
+                &[7; 32],
+                &[8; 32],
+                Duration::from_secs(600),
+                100
+            ),
+            Err(GrantError::Malformed(_))
+        ));
+        // Unknown versions are refused outright.
+        for version in [0u16, 1, 4, u16::MAX] {
+            let mut payload = postcard::to_stdvec(&claimed_payload(&key)).unwrap();
+            payload[0] = version as u8; // versions under 0x80 are one varint byte
+            let grant = Grant {
+                signature: key
+                    .sign(&signature_message(version, &payload))
+                    .to_bytes()
+                    .to_vec(),
+                payload,
+            };
+            assert!(matches!(
+                grant.verify(
+                    &issuers(&key),
+                    &[7; 32],
+                    &[8; 32],
+                    Duration::from_secs(600),
+                    100
+                ),
+                Err(GrantError::Version) | Err(GrantError::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn v3_claim_bounds_are_enforced() {
+        let key = issuer();
+        let mut payload = claimed_payload(&key);
+        payload.tenant = Some("x".repeat(MAX_TENANT_LEN + 1));
+        let grant = Grant::issue_at(&key, payload);
+        assert!(matches!(
+            grant.verify(
+                &issuers(&key),
+                &[7; 32],
+                &[8; 32],
+                Duration::from_secs(600),
+                100
+            ),
+            Err(GrantError::Oversized)
+        ));
+        for bad in ["", "has space", "nul\0byte", "line\nbreak"] {
+            let mut payload = claimed_payload(&key);
+            payload.tenant = Some(bad.into());
+            let grant = Grant::issue_at(&key, payload);
+            assert!(
+                matches!(
+                    grant.verify(
+                        &issuers(&key),
+                        &[7; 32],
+                        &[8; 32],
+                        Duration::from_secs(600),
+                        100
+                    ),
+                    Err(GrantError::Malformed(_))
+                ),
+                "tenant {bad:?}"
+            );
+        }
+        let mut payload = claimed_payload(&key);
+        payload.constraints.sync_paths =
+            Some((0..MAX_SYNC_PATHS + 1).map(|i| format!("p{i}")).collect());
+        let grant = Grant::issue_at(&key, payload);
+        assert!(matches!(
+            grant.verify(
+                &issuers(&key),
+                &[7; 32],
+                &[8; 32],
+                Duration::from_secs(600),
+                100
+            ),
+            Err(GrantError::Oversized)
+        ));
+        for bad in [
+            "/abs",
+            "c:/win",
+            "../escape",
+            "a/../b",
+            ".",
+            ".\\..\\x",
+            "nul\0",
+        ] {
+            let mut payload = claimed_payload(&key);
+            payload.constraints.sync_paths = Some(vec![bad.into()]);
+            let grant = Grant::issue_at(&key, payload);
+            assert!(
+                matches!(
+                    grant.verify(
+                        &issuers(&key),
+                        &[7; 32],
+                        &[8; 32],
+                        Duration::from_secs(600),
+                        100
+                    ),
+                    Err(GrantError::Malformed(_))
+                ),
+                "sync_paths entry {bad:?}"
+            );
+        }
+        // Normalized-but-legal entries verify.
+        let mut payload = claimed_payload(&key);
+        payload.constraints.sync_paths = Some(vec!["a/./b".into(), "deep/sub".into()]);
+        let grant = Grant::issue_at(&key, payload);
+        assert!(
+            grant
+                .verify(
+                    &issuers(&key),
+                    &[7; 32],
+                    &[8; 32],
+                    Duration::from_secs(600),
+                    100
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn renewal_cannot_change_v3_claims() {
+        let key = issuer();
+        let grant = Grant::issue_at(&key, claimed_payload(&key))
+            .verify(
+                &issuers(&key),
+                &[7; 32],
+                &[8; 32],
+                Duration::from_secs(600),
+                100,
+            )
+            .unwrap();
+        let mut next = grant.payload.clone();
+        next.revision = 2;
+        next.expires_at += 60;
+        // Claim changes are scope changes and require fresh authorization.
+        for claim in [
+            |p: &mut GrantPayload| p.tenant = Some("tenant-b".into()),
+            |p: &mut GrantPayload| p.tenant = None,
+            |p: &mut GrantPayload| p.policy_revision = Some(8),
+            |p: &mut GrantPayload| p.constraints.sync_paths = Some(vec!["other".into()]),
+        ] {
+            let mut tampered = next.clone();
+            claim(&mut tampered);
+            let renewed = Grant::issue_at(&key, tampered)
+                .verify(
+                    &issuers(&key),
+                    &[7; 32],
+                    &[8; 32],
+                    Duration::from_secs(600),
+                    110,
+                )
+                .unwrap();
+            assert!(matches!(
+                grant.permits_renewal(&renewed),
+                Err(GrantError::InvalidRenewal)
+            ));
+        }
+        // Identical claims with an advanced lease renew cleanly.
+        let renewed = Grant::issue_at(&key, next)
+            .verify(
+                &issuers(&key),
+                &[7; 32],
+                &[8; 32],
+                Duration::from_secs(600),
+                110,
+            )
+            .unwrap();
+        assert!(matches!(grant.permits_renewal(&renewed), Ok(true)));
     }
 }
