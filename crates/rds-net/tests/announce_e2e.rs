@@ -7,7 +7,7 @@ use std::time::Duration;
 use rds_discovery::client::Client;
 use rds_discovery::service::{self, ServiceConfig};
 use rds_discovery::{EndpointKey, MemoryStore, Service};
-use rds_net::{AnnounceConfig, EndpointConfig, announce, bind_endpoint};
+use rds_net::{AnnounceConfig, EndpointConfig, RetryPolicy, announce, bind_endpoint};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn announce_publishes_and_keeps_record_live() {
@@ -38,6 +38,7 @@ async fn announce_publishes_and_keeps_record_live() {
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
+            retry: RetryPolicy::default(),
         },
     )
     .unwrap();
@@ -109,6 +110,7 @@ async fn announce_republishes_when_addrs_change() {
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
+            retry: RetryPolicy::default(),
         },
     )
     .unwrap();
@@ -332,6 +334,7 @@ async fn resolve_then_connect_by_bare_key() {
             directory: client.clone(),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
+            retry: RetryPolicy::default(),
         },
     )
     .unwrap();
@@ -368,4 +371,101 @@ async fn resolve_then_connect_by_bare_key() {
     assert_eq!(conn.remote_id(), agent.id());
     let conn_b = accept.await.unwrap().expect("agent handshake");
     assert_eq!(conn_b.remote_id(), cli_ep.id());
+}
+
+/// Publish retries must back off, not storm: a directory that answers
+/// every publish with 500 sees a bounded attempt count, and the loop
+/// keeps retrying rather than exiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn announce_retry_is_bounded_backoff_under_outage() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let attempts = Arc::new(AtomicU64::new(0));
+    tokio::spawn({
+        let attempts = attempts.clone();
+        async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        }
+    });
+
+    let key = rds_net::SecretKey::from_bytes(&[11u8; 32]);
+    let endpoint = bind_endpoint(EndpointConfig {
+        secret_key: Some(key.clone()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut announce = announce(
+        endpoint,
+        AnnounceConfig {
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+            ),
+            directory: Client::new(addr.to_string().parse().unwrap()),
+            services: vec![Service::Ping],
+            ttl: Duration::from_secs(120),
+            retry: RetryPolicy {
+                base: Duration::from_millis(500),
+                cap: Duration::from_secs(2),
+            },
+        },
+    )
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let count = attempts.load(Ordering::SeqCst);
+    // Minimum sleeps are 250ms, 500ms, 1s, 2s, 2s… — the loop cannot have
+    // attempted more often than that even at the jitter floor, while the
+    // old fixed ~1s cadence would land ~14 attempts in this window.
+    assert!(
+        (2..=7).contains(&count),
+        "bounded retries: {count} publish attempts in 3.5s"
+    );
+    // A retrying failure must not look fatal: `wait` stays pending.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), announce.wait())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn announce_rejects_inverted_retry_policy() {
+    let client = Client::new("127.0.0.1:1".parse().unwrap());
+    let key = rds_net::SecretKey::from_bytes(&[13u8; 32]);
+    let endpoint = bind_endpoint(EndpointConfig {
+        secret_key: Some(key.clone()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let result = announce(
+        endpoint,
+        AnnounceConfig {
+            issuer: rds_discovery::publisher::RecordIssuer::memory(
+                ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+            ),
+            directory: client,
+            services: vec![Service::Ping],
+            ttl: Duration::from_secs(120),
+            retry: RetryPolicy {
+                base: Duration::from_secs(30),
+                cap: Duration::from_secs(1),
+            },
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(rds_discovery::DiscoveryError::Configuration(_))
+    ));
 }

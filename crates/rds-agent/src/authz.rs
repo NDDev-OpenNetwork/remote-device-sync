@@ -14,8 +14,6 @@ use tokio::task::JoinHandle;
 
 use crate::{AgentPolicy, lock};
 
-const AUTHZ_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
-
 enum State {
     Open,
     Pending,
@@ -317,7 +315,7 @@ impl ConnAuthz {
     ) -> Result<Option<Arc<VerifiedGrant>>, ScopeError> {
         // Subscribe before reading the state so commit/close cannot be missed.
         let mut changed = self.changed.subscribe();
-        tokio::time::timeout(AUTHZ_REPLY_TIMEOUT, async {
+        tokio::time::timeout(policy.timeouts.authz, async {
             loop {
                 match self.scope(policy) {
                     Err(ScopeError::Authorizing) => {
@@ -444,7 +442,7 @@ pub(crate) async fn authorize(
     if let Err(message) = begin {
         rds_observe::request_refused(rds_observe::Reason::Denied);
         let _ = tokio::time::timeout(
-            AUTHZ_REPLY_TIMEOUT,
+            policy.timeouts.authz,
             write_frame(
                 &mut send,
                 &HelloAck::Error {
@@ -506,7 +504,7 @@ pub(crate) async fn authorize(
     };
     // Watcher and reservation are already owned while the reply is in
     // flight. Service admission remains pending until this completes.
-    tokio::time::timeout(AUTHZ_REPLY_TIMEOUT, write_frame(&mut send, &HelloAck::Ok)).await??;
+    tokio::time::timeout(policy.timeouts.authz, write_frame(&mut send, &HelloAck::Ok)).await??;
     if let Some(next) = next {
         authz
             .commit_renewal(next, policy, conn)

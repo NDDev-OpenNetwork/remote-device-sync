@@ -203,6 +203,7 @@ async fn relay_forwards_handshake_and_datagrams() {
             directory: client.clone(),
             services: vec![rds_discovery::Service::Ping],
             ttl: std::time::Duration::from_secs(120),
+            retry: rds_net::RetryPolicy::default(),
         },
     )
     .unwrap();

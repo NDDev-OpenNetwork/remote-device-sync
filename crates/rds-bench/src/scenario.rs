@@ -566,6 +566,7 @@ async fn resolve_connect(p: &Params) -> anyhow::Result<BenchReport> {
             directory: directory.clone(),
             services: vec![rds_discovery::Service::Ping],
             ttl: Duration::from_secs(120),
+            retry: rds_net::RetryPolicy::default(),
         },
     )?;
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));

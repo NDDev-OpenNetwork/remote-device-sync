@@ -64,7 +64,7 @@ pub use iroh::endpoint::{
     ReadExactError, RecvStream, SendDatagramError, SendStream, VarInt, WriteError,
 };
 
-pub use announce::{Announce, AnnounceConfig, announce};
+pub use announce::{Announce, AnnounceConfig, RetryPolicy, announce};
 pub use backends::iroh::{Ticket, parse_target, relay_url_of};
 pub use config::{ConfigError, EndpointOverrides, EndpointSettings, RelayLimits, RelaySettings};
 pub use identity::{KeyOwner, KeyStoreError, acquire_key, default_key_path, load_or_create_key};

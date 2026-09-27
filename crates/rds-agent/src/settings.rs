@@ -199,6 +199,10 @@ pub struct LimitSettings {
 pub struct TimeoutSettings {
     pub handshake_secs: Option<u64>,
     pub hello_secs: Option<u64>,
+    /// Authorization-path reply budget (refusal and `HelloAck` writes).
+    pub authz_secs: Option<u64>,
+    /// Join budget for established connection tasks during shutdown.
+    pub shutdown_secs: Option<u64>,
 }
 
 /// Agent-level file schema; holds policy identities, never secret key
@@ -261,6 +265,8 @@ pub struct AgentOverrides {
     pub max_streams: Option<NonZeroU16>,
     pub handshake_timeout: Option<u64>,
     pub hello_timeout: Option<u64>,
+    pub authz_timeout: Option<u64>,
+    pub shutdown_timeout: Option<u64>,
 }
 
 /// The merged, typed configuration the binary consumes.
@@ -467,6 +473,12 @@ impl AgentSettings {
         if flags.hello_timeout.is_some() {
             self.timeouts.hello_secs = flags.hello_timeout;
         }
+        if flags.authz_timeout.is_some() {
+            self.timeouts.authz_secs = flags.authz_timeout;
+        }
+        if flags.shutdown_timeout.is_some() {
+            self.timeouts.shutdown_secs = flags.shutdown_timeout;
+        }
         self
     }
 
@@ -562,9 +574,14 @@ impl AgentSettings {
                 ));
             }
         }
-        for secs in [self.timeouts.handshake_secs, self.timeouts.hello_secs]
-            .into_iter()
-            .flatten()
+        for secs in [
+            self.timeouts.handshake_secs,
+            self.timeouts.hello_secs,
+            self.timeouts.authz_secs,
+            self.timeouts.shutdown_secs,
+        ]
+        .into_iter()
+        .flatten()
         {
             if secs == 0 || secs > MAX_TIMEOUT.as_secs() {
                 return Err(AgentConfigError::Invalid(
@@ -646,22 +663,29 @@ impl AgentSettings {
         let authority = &self.authority;
         let registry = authority.registry.as_ref();
         let revocations = authority.revocations.as_ref();
-        let timeouts =
-            if self.timeouts.handshake_secs.is_some() || self.timeouts.hello_secs.is_some() {
-                let default = TimeoutPolicy::default();
-                Some(TimeoutPolicy {
-                    handshake: self
-                        .timeouts
-                        .handshake_secs
-                        .map_or(default.handshake, Duration::from_secs),
-                    hello: self
-                        .timeouts
-                        .hello_secs
-                        .map_or(default.hello, Duration::from_secs),
-                })
-            } else {
-                None
-            };
+        let timeouts = if self.timeouts != TimeoutSettings::default() {
+            let default = TimeoutPolicy::default();
+            Some(TimeoutPolicy {
+                handshake: self
+                    .timeouts
+                    .handshake_secs
+                    .map_or(default.handshake, Duration::from_secs),
+                hello: self
+                    .timeouts
+                    .hello_secs
+                    .map_or(default.hello, Duration::from_secs),
+                authz: self
+                    .timeouts
+                    .authz_secs
+                    .map_or(default.authz, Duration::from_secs),
+                shutdown: self
+                    .timeouts
+                    .shutdown_secs
+                    .map_or(default.shutdown, Duration::from_secs),
+            })
+        } else {
+            None
+        };
         Ok(ResolvedAgent {
             services,
             ssh_target,
@@ -831,6 +855,8 @@ mod tests {
         let bad = [
             r#"{"schema_version":1,"timeouts":{"handshake_secs":0}}"#,
             r#"{"schema_version":1,"timeouts":{"hello_secs":3601}}"#,
+            r#"{"schema_version":1,"timeouts":{"authz_secs":0}}"#,
+            r#"{"schema_version":1,"timeouts":{"shutdown_secs":3601}}"#,
             r#"{"schema_version":1,"authority":{"grant_ttl_secs":0}}"#,
             r#"{"schema_version":1,"authority":{"grant_ttl_secs":86401}}"#,
             r#"{"schema_version":1,"authority":{"directory":"http://localhost:9","issuers":["a"],"revocations":{"key":"k","interval_secs":0}}}"#,
@@ -943,11 +969,31 @@ mod tests {
         assert_eq!(policy.hello, Duration::from_secs(3));
         // Partial timeout config preserves the other default.
         let resolved = resolve_ok(r#"{"schema_version":1,"timeouts":{"hello_secs":3}}"#);
-        assert_eq!(
-            resolved.timeouts.unwrap().handshake,
-            TimeoutPolicy::default().handshake
-        );
+        let policy = resolved.timeouts.unwrap();
+        assert_eq!(policy.handshake, TimeoutPolicy::default().handshake);
+        assert_eq!(policy.authz, TimeoutPolicy::default().authz);
+        assert_eq!(policy.shutdown, TimeoutPolicy::default().shutdown);
+        // The reply/shutdown classes resolve identically.
+        let resolved =
+            resolve_ok(r#"{"schema_version":1,"timeouts":{"authz_secs":7,"shutdown_secs":2}}"#);
+        let policy = resolved.timeouts.unwrap();
+        assert_eq!(policy.authz, Duration::from_secs(7));
+        assert_eq!(policy.shutdown, Duration::from_secs(2));
+        assert_eq!(policy.handshake, TimeoutPolicy::default().handshake);
         assert_eq!(resolve_ok(r#"{"schema_version":1}"#).timeouts, None);
+    }
+
+    #[test]
+    fn timeout_flags_override_file() {
+        let settings =
+            parse(r#"{"schema_version":1,"timeouts":{"authz_secs":3}}"#).apply(AgentOverrides {
+                authz_timeout: Some(11),
+                shutdown_timeout: Some(4),
+                ..Default::default()
+            });
+        let policy = settings.resolve().unwrap().timeouts.unwrap();
+        assert_eq!(policy.authz, Duration::from_secs(11));
+        assert_eq!(policy.shutdown, Duration::from_secs(4));
     }
 
     #[test]

@@ -48,9 +48,9 @@ Neither increment closes these product gaps or any wave.
 | W2.1 | Implemented; endpoint + agent settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation and preflight before identity creation are implemented. The version-1 agent JSON now carries role/service/peers/authority/limits/timeouts with the same precedence and preflight; `--role`/`--service`/`--no-service` select the gateable service set, disabled services are refused by name ahead of grant machinery, `Info` and directory announcements advertise exactly the served set, and handshake/hello deadlines come from `TimeoutPolicy`. See [agent configuration](agent-configuration.md). |
 | W2.2 | Partial; exact ALPN selection + sync/desktop session routing | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Desktop sessions mint random per-session IDs in `StreamHello::DesktopV2` and route frames through `UniHello::DesktopFrames { id }`, isolating stale streams and allowing concurrent sessions; the same display grant scope check covers both greetings. Service-wide capability negotiation remains open. |
 | W2.3 | Partial; destination-bound renewable grants, directional scopes, tenant/policy binding and per-path sync scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Grant v3 adds the `tenant`/`policy_revision` claims and the `constraints.sync_paths` subtree scope, checked after `rel_path` normalization before any filesystem work; v2 payloads still verify with all claims absent, and agents pin the binding via `authority.tenant`/`policy_min_revision` (`--tenant`/`--policy-min-revision`), refusing unscoped or stale grants. Account-level scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
-| W2.4 | Partial; default connectivity manager | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv commands and keyless `rds session` reuse its endpoint. Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Viewer manager APIs, coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
+| W2.4 | Partial; default connectivity manager + managed desktop channel | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv/desktop commands and keyless `rds session` reuse its endpoint (local wire v5; `desktop --direct` bypasses). Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Global RSS/FD bounds, per-service fairness and broader disk/media cancellation remain open. |
-| W2.6 | Partial; client preludes bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent and owned relay handshake/shutdown budgets exist; canceling relay drain does not cancel cleanup. Agent local startup no longer waits indefinitely for an iroh relay, including disabled/unavailable relay mode. Global timeout classes, retry jitter, broader startup recovery and desktop/media deadlines remain open. |
+| W2.6 | Partial; agent timeout classes complete, publish retry bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent policy now owns all four server-side classes — handshake, hello, authz reply and shutdown join — as `TimeoutPolicy` tunables (`timeouts.*_secs`, `--*-timeout`, 1..=3600). Directory publish retries use bounded exponential backoff with equal jitter (`RetryPolicy`, 1s→30s default) instead of the fixed ~1s poll cadence; fatal 4xx still fails closed. Agent and owned relay handshake/shutdown budgets exist; agent local startup no longer waits indefinitely for an iroh relay. Client dial/idle classes, transport-level retry policy reuse, desktop/media deadlines and broader startup recovery remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
 | W3.3 | Done on Linux loopback; real-network open | Multiple owned-relay attachments (≤8 slots), slot-scoped synthetic routing, drain-before-death mask, immediate `PeerGone` invalidation, endpoint-scoped watchers; measured drain ~10ms / kill ~120-190ms recovery with 0 lost probes (`docs/reports/noq-relay-failover-20260926.md`). WAN/lossy migration timing remains unqualified. |
@@ -2048,3 +2048,33 @@ stream-permit leak on peers that cannot serve desktop.
 
 Remaining W2.4: coordinated installed-binary migration and native/installed
 qualification — cross-platform, deferred.
+
+## 2026-09-27 — agent timeout classes + bounded publish retry (W2.6)
+
+`TimeoutPolicy` now owns all four server-side deadline classes: the
+existing `handshake`/`hello` plus `authz` (authorization refusal and
+final `HelloAck` writes, previously the `AUTHZ_REPLY_TIMEOUT` constant)
+and `shutdown` (the connection-task join budget, previously
+`SHUTDOWN_TIMEOUT`). Both are configurable via `timeouts.authz_secs` /
+`timeouts.shutdown_secs` and `--authz-timeout` / `--shutdown-timeout`,
+validated 1..=3600 like the existing classes, and defaulted
+`TimeoutPolicy` keeps the prior constants so flag/file absence changes
+nothing.
+
+The announce loop's publish-failure path no longer retries on the healthy
+`min(1s, ttl/6)` poll: consecutive retryable failures sleep
+`RetryPolicy::delay` — `base × 2^(n-1)` capped at `cap` (defaults 1s→30s)
+with equal jitter inside `[delay/2, delay]`, so minimum cadence stays
+provable (`base/2`) while fleet retries decorrelate. Fatal 4xx classes,
+the 410 lease-renew path and issuer/disk failure surfacing are unchanged;
+success or lease renewal resets the backoff. `AnnounceConfig` carries the
+policy and refuses `base > cap`/`base == 0` at construction.
+
+Tests: `RetryPolicy::delay` bounds (per-failure jitter range, cap
+saturation past overflow-scale failure counts), `announce` rejecting an
+inverted policy, and an e2e where a directory answering every publish
+with HTTP 500 sees a bounded attempt count over 3.5s while the task stays
+alive — the fixed-cadence storm the criterion rules out.
+
+Remaining W2.6: client dial/idle classes, transport-level retry reuse
+beyond announce, desktop/media deadlines, broader startup recovery.

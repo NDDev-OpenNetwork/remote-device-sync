@@ -5,7 +5,8 @@ use rds_agent::{
     Agent, AgentLimits, AgentOverrides, AgentPolicy, AgentSettings, Role, ServiceName,
 };
 use rds_net::{
-    EndpointOverrides, EndpointSettings, Ticket, acquire_key, bind_endpoint, default_key_path,
+    EndpointOverrides, EndpointSettings, RetryPolicy, Ticket, acquire_key, bind_endpoint,
+    default_key_path,
 };
 
 #[derive(Parser)]
@@ -83,6 +84,12 @@ struct Cli {
     /// Per-stream greeting read deadline in seconds (1..=3600).
     #[arg(long)]
     hello_timeout: Option<u64>,
+    /// Authorization-path reply budget in seconds (1..=3600).
+    #[arg(long)]
+    authz_timeout: Option<u64>,
+    /// Join budget for established connections during shutdown (1..=3600).
+    #[arg(long)]
+    shutdown_timeout: Option<u64>,
     /// Directory HTTP(S) origin or legacy IP:port; the agent publishes its
     /// signed record and keeps it fresh.
     #[arg(long)]
@@ -207,6 +214,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             max_streams: cli.max_streams,
             handshake_timeout: cli.handshake_timeout,
             hello_timeout: cli.hello_timeout,
+            authz_timeout: cli.authz_timeout,
+            shutdown_timeout: cli.shutdown_timeout,
         });
     merged.validate()?;
     // Budget and authority cross-checks run on the merged document before
@@ -375,6 +384,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 directory: client,
                 services,
                 ttl: std::time::Duration::from_secs(resolved.record_ttl.unwrap_or(300)),
+                retry: RetryPolicy::default(),
             },
         );
         match announced {

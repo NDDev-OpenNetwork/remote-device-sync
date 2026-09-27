@@ -6,7 +6,7 @@ use rds_discovery::{
     publisher::RecordIssuer,
     service::{self, ServiceConfig},
 };
-use rds_net::{AnnounceConfig, EndpointConfig, SecretKey, announce, bind_endpoint};
+use rds_net::{AnnounceConfig, EndpointConfig, RetryPolicy, SecretKey, announce, bind_endpoint};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -85,6 +85,7 @@ async fn lost_success_reply_retries_identical_signed_bytes_through_real_director
             directory: client,
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
+            retry: RetryPolicy::default(),
         },
     )
     .unwrap();
@@ -112,6 +113,7 @@ async fn missing_publisher_history_reaches_supervisor_without_network_publicatio
             directory: Client::new(listener.local_addr().unwrap()),
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
+            retry: RetryPolicy::default(),
         },
     )
     .unwrap();
@@ -156,6 +158,7 @@ async fn stale_publisher_history_is_fatal_instead_of_guessing_server_revision() 
             directory: client,
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
+            retry: RetryPolicy::default(),
         },
     )
     .unwrap();
@@ -221,6 +224,7 @@ async fn expired_server_lease_allocates_one_durable_successor_then_retries_exact
             directory: client,
             services: vec![Service::Ping],
             ttl: Duration::from_secs(120),
+            retry: RetryPolicy::default(),
         },
     )
     .unwrap();
