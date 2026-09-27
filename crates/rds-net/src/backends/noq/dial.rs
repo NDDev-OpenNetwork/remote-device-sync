@@ -3,7 +3,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-candidate handshake bound — the `handshake` deadline class
+/// ([`crate::deadline::DeadlinePolicy`]); the whole dial envelope lives
+/// one layer up at the caller's `dial` bound.
+const HANDSHAKE_TIMEOUT: Duration = crate::DeadlinePolicy::DEFAULT.handshake;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum DialError {
