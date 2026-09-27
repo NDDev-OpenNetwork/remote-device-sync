@@ -80,6 +80,20 @@ services).
 `service.tcp_targets` permits extra `TcpConnect` destinations beyond the
 single SSH socket; the flag surface has no equivalent list flag.
 
+## Stream budgets
+
+`limits.max_streams` bounds one connection's stream tasks. Long-lived
+data services (`Tcp`, `Desktop`, `Sync`, `Audio`) hold a service slot for
+the whole body; short control greetings (`Ping`, `Info`) and the
+grant-mode `Authz`/`RenewAuthz` exchanges bypass that pool. Whenever a
+connection can carry more than one stream, one lane is kept free of data
+services — grant mode always keeps it for renewal — so a saturated data
+plane cannot starve observability or authorization turnover. A data
+service beyond capacity is refused with `HelloAck::Error` inside
+`timeouts.hello_secs`. Sync filesystem work runs under one process-wide
+bound on blocking disk jobs (32), so a transfer storm cannot fill the
+blocking pool ahead of identity, announcement or other async work.
+
 ## Timeout policy
 
 `timeouts.handshake_secs` bounds the inbound connection handshake;
@@ -106,8 +120,8 @@ observed `rds_agent_process_fds` and `rds_agent_process_rss_bytes` keys
 appear in the metrics snapshot wherever the kernel reports them.
 Platforms without an observable quantity keep serving rather than
 gating on a guess. Flags `--max-fds` and `--max-rss-mb` override file
-values. Per-service fairness and disk/media job budgets are still open
-under W2.5.
+values. Deeper per-service fairness and media/disk cancellation breadth
+are still open under W2.5.
 
 ## Example
 
