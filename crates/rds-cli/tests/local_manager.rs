@@ -77,11 +77,11 @@ async fn real_cli_uses_running_identity_without_creating_its_own_key() {
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                 let request: rds_core::StreamHello = rds_net::read_frame(&mut recv).await.unwrap();
                 match request {
-                    rds_core::StreamHello::SyncTransfer { id } => {
+                    rds_core::StreamHello::SyncTransferV2 { id } => {
                         rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
                             .await
                             .unwrap();
-                        rds_sync::engine::Transfer::new(id)
+                        rds_sync::engine::Transfer::new_v2(id)
                             .serve(
                                 conn.clone(),
                                 (send, recv),

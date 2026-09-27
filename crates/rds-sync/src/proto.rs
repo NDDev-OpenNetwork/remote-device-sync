@@ -41,6 +41,97 @@ pub const MANIFEST_BATCH: usize = 512;
 /// Chunk indices per `ChunkSet` frame on a chunk stream.
 pub const CHUNKSET_BATCH: usize = 4096;
 
+/// Negotiated sync-session protocol version. Version is bound in the
+/// route tag (`SyncTransferV2`), not negotiated downward: a peer that
+/// cannot decode the tag rejects before any filesystem operation.
+pub const SESSION_VERSION: u16 = 2;
+
+/// Per-session bounds declared in `Hello`/`HelloAck`. A session runs at
+/// the pairwise minimum — never wider than the tighter peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLimits {
+    /// Largest single chunk payload the peer accepts.
+    pub max_chunk: u32,
+    /// Largest manifest chunk count the peer accepts.
+    pub max_chunks: u32,
+    /// Parallel chunk streams the peer opens/consumes.
+    pub fetch_streams: u8,
+}
+
+impl SessionLimits {
+    /// This implementation's declared bounds.
+    pub const LOCAL: Self = Self {
+        max_chunk: MAX_CHUNK,
+        max_chunks: MAX_CHUNKS as u32,
+        fetch_streams: FETCH_STREAMS as u8,
+    };
+
+    /// Resolve the session bounds from both declarations. Zero-valued
+    /// declarations make the transfer impossible and are refused.
+    pub fn negotiate(local: Self, peer: Self) -> Result<Self, SyncError> {
+        if peer.max_chunk == 0
+            || peer.max_chunks == 0
+            || peer.fetch_streams == 0
+            || local.max_chunk == 0
+            || local.max_chunks == 0
+            || local.fetch_streams == 0
+        {
+            return Err(SyncError::Manifest(
+                "peer declared unusable sync session limits".into(),
+            ));
+        }
+        Ok(Self {
+            max_chunk: local.max_chunk.min(peer.max_chunk).min(MAX_CHUNK),
+            max_chunks: local.max_chunks.min(peer.max_chunks).min(MAX_CHUNKS as u32),
+            fetch_streams: local
+                .fetch_streams
+                .min(peer.fetch_streams)
+                .min(FETCH_STREAMS as u8),
+        })
+    }
+}
+
+/// Messages inside a [`SyncMsg::Session`] envelope (v2 flow). Every frame
+/// is bound to the negotiated transfer ID by the envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionMsg {
+    /// Control opener → responder: protocol version + declared limits.
+    Hello { version: u16, limits: SessionLimits },
+    /// Responder → opener: accepted version + declared limits.
+    HelloAck { version: u16, limits: SessionLimits },
+    /// Holder → receiver: offer `rel_path`.
+    Offer {
+        rel_path: String,
+        size: u64,
+        root: ChunkHash,
+        chunk_count: u32,
+    },
+    /// Receiver → holder: pull `rel_path`.
+    Request { rel_path: String },
+    /// Either direction: the transfer cannot proceed.
+    Refuse { reason: String },
+    /// Either direction: deliberate abort — distinguishable from a
+    /// connection failure; verified journal state remains resumable.
+    Cancel { reason: String },
+    /// Holder → receiver: a manifest slice (`MANIFEST_BATCH` per frame).
+    ManifestPart { chunks: Vec<Chunk> },
+    /// Receiver → holder: bitmap of missing chunk indices.
+    Need { bits: Vec<u64> },
+    /// Receiver → holder: transfer complete, file assembled and
+    /// root-verified.
+    Done { root: ChunkHash },
+    /// First frame of each batch on a chunk stream.
+    ChunkSet { indices: Vec<u32> },
+    /// Per chunk: header frame then `len` raw bytes.
+    ChunkHdr {
+        index: u32,
+        hash: ChunkHash,
+        len: u32,
+    },
+    /// Chunk-stream terminator.
+    SetDone,
+}
+
 /// Control-stream and chunk-stream messages (postcard-framed via
 /// `rds_net::write_frame`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +166,16 @@ pub enum SyncMsg {
     /// Receiver → holder: transfer complete, file assembled and
     /// root-verified.
     Done { root: ChunkHash },
+    /// Deliberate abort; v1 sends it as `Refuse`, v2 keeps it typed
+    /// inside the session envelope.
+    Cancel { reason: String },
+    /// Version-2 session envelope (route tag `SyncTransferV2`): every
+    /// frame binds the negotiated transfer ID. Unknown to v1 peers —
+    /// they reject at decode, before filesystem operations.
+    Session {
+        transfer_id: [u8; 16],
+        msg: SessionMsg,
+    },
 }
 
 /// Validate a peer-supplied relative path. Returns the safe

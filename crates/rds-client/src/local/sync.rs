@@ -42,7 +42,7 @@ pub(super) async fn run(
     let _budget = transfers
         .try_acquire_owned()
         .map_err(|_| ErrorCode::Capacity)?;
-    let (conn, _slot) = {
+    let (conn, _slot, session_cancel) = {
         let state = state::lock(shared)?;
         let (_, conn) = state.connection(Some(session))?;
         let entry = state.entries.get(&session).ok_or(ErrorCode::NotFound)?;
@@ -51,14 +51,16 @@ pub(super) async fn run(
             .clone()
             .try_acquire_owned()
             .map_err(|_| ErrorCode::TransferBusy)?;
-        (conn, slot)
+        (conn, slot, entry.cancel.clone())
     };
     // New route even after cancellation: delayed old tags can only be dropped,
     // never routed into a replacement transfer. Do not retry the legacy hello.
+    // Managed transfers use the negotiated v2 session; an agent that cannot
+    // decode the tag refuses the greeting before filesystem operations.
     let id = rand::random();
     let streams = crate::request::bounded("sync transfer", async {
         let (streams, ack) =
-            crate::request::exchange(&conn, &StreamHello::SyncTransfer { id }).await?;
+            crate::request::exchange(&conn, &StreamHello::SyncTransferV2 { id }).await?;
         match ack {
             HelloAck::Ok => Ok(streams.release()),
             _ => anyhow::bail!("sync transfer not accepted"),
@@ -66,19 +68,32 @@ pub(super) async fn run(
     })
     .await
     .map_err(|_| ErrorCode::Remote)?;
-    let transfer = rds_sync::engine::Transfer::new(id);
+    let transfer = rds_sync::engine::Transfer::new_v2(id);
     let timeout = rds_sync::engine::TRANSFER_TIMEOUT;
     let stats = match operation {
         SyncOperation::Send { path } => {
             transfer
-                .send_file(&conn, Path::new(&path), streams, timeout)
+                .send_file_cancel(
+                    &conn,
+                    Path::new(&path),
+                    streams,
+                    timeout,
+                    Some(session_cancel),
+                )
                 .await
         }
         SyncOperation::Recv {
             rel_path,
             directory,
         } => transfer
-            .recv_file(&conn, &rel_path, Path::new(&directory), streams, timeout)
+            .recv_file_cancel(
+                &conn,
+                &rel_path,
+                Path::new(&directory),
+                streams,
+                timeout,
+                Some(session_cancel),
+            )
             .await
             .map(|(_, stats)| stats),
     }

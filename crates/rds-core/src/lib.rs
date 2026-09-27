@@ -55,6 +55,10 @@ pub enum UniHello {
     Audio,
     /// Isolated file-transfer route. Never reuse an ID on a connection.
     SyncTransfer { id: [u8; 16] },
+    /// Negotiated (v2) file-transfer route. Chunk streams and control
+    /// frames both carry the transfer ID; older peers reject this tag
+    /// at greeting decode, before any filesystem operation.
+    SyncTransferV2 { id: [u8; 16] },
 }
 
 /// First frame on every bi-directional stream.
@@ -83,6 +87,12 @@ pub enum StreamHello {
     /// File transfer with an isolated uni-stream route. Additive extension;
     /// older agents reject this greeting before filesystem operations.
     SyncTransfer { id: [u8; 16] },
+    /// Negotiated file-transfer session: after [`HelloAck::Ok`] the
+    /// control stream speaks the version-2 `SyncMsg::Session` envelope
+    /// (transfer-ID bound frames, Hello/HelloAck limit negotiation,
+    /// typed Cancel). Older agents reject the greeting before any
+    /// filesystem operation; there is no silent version fallback.
+    SyncTransferV2 { id: [u8; 16] },
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -328,5 +338,11 @@ mod tests {
         assert_eq!(uni, [vec![3], vec![42; 16]].concat());
         assert!(postcard::from_bytes::<LegacyHello>(&hello).is_err());
         assert!(postcard::from_bytes::<LegacyUni>(&uni).is_err());
+        let hello2 = postcard::to_stdvec(&StreamHello::SyncTransferV2 { id: [43; 16] }).unwrap();
+        let uni2 = postcard::to_stdvec(&UniHello::SyncTransferV2 { id: [43; 16] }).unwrap();
+        assert_eq!(hello2, [vec![9], vec![43; 16]].concat());
+        assert_eq!(uni2, [vec![4], vec![43; 16]].concat());
+        assert!(postcard::from_bytes::<LegacyHello>(&hello2).is_err());
+        assert!(postcard::from_bytes::<LegacyUni>(&uni2).is_err());
     }
 }

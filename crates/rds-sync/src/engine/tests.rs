@@ -81,3 +81,185 @@ async fn normal_finish_drains_and_verifies_every_queued_store() {
     let path = journal.assemble().unwrap();
     assert_eq!(std::fs::read(path).unwrap(), data);
 }
+
+// ---- W1.9/W2.2 session envelope tests ---------------------------------
+
+fn pair() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+    tokio::io::duplex(64 * 1024)
+}
+
+#[test]
+fn session_limits_negotiate_pairwise_min_and_refuse_zero() {
+    let local = SessionLimits::LOCAL;
+    let peer = SessionLimits {
+        max_chunk: local.max_chunk / 2,
+        max_chunks: local.max_chunks * 2,
+        fetch_streams: 1,
+    };
+    let n = SessionLimits::negotiate(local, peer).unwrap();
+    assert_eq!(n.max_chunk, local.max_chunk / 2);
+    assert_eq!(n.max_chunks, local.max_chunks);
+    assert_eq!(n.fetch_streams, 1);
+    // Peer declarations above the wire ceiling are clamped, not trusted.
+    let over = SessionLimits {
+        max_chunk: u32::MAX,
+        max_chunks: u32::MAX,
+        fetch_streams: u8::MAX,
+    };
+    let n = SessionLimits::negotiate(local, over).unwrap();
+    assert_eq!(n, local);
+    for field in [
+        SessionLimits {
+            max_chunk: 0,
+            ..local
+        },
+        SessionLimits {
+            max_chunks: 0,
+            ..local
+        },
+        SessionLimits {
+            fetch_streams: 0,
+            ..local
+        },
+    ] {
+        assert!(SessionLimits::negotiate(local, field).is_err());
+    }
+}
+
+#[test]
+fn to_session_maps_every_transfer_variant_and_never_nests() {
+    use crate::proto::*;
+    let msgs = [
+        SyncMsg::Offer {
+            rel_path: "a".into(),
+            size: 1,
+            root: [0; 32],
+            chunk_count: 0,
+        },
+        SyncMsg::Request {
+            rel_path: "a".into(),
+        },
+        SyncMsg::Refuse { reason: "x".into() },
+        SyncMsg::Cancel { reason: "x".into() },
+        SyncMsg::ManifestPart { chunks: vec![] },
+        SyncMsg::Need { bits: vec![] },
+        SyncMsg::Done { root: [0; 32] },
+        SyncMsg::ChunkSet { indices: vec![] },
+        SyncMsg::ChunkHdr {
+            index: 0,
+            hash: [0; 32],
+            len: 0,
+        },
+        SyncMsg::SetDone,
+    ];
+    for msg in msgs {
+        assert!(to_session(&msg).is_some(), "{msg:?} must translate");
+    }
+    assert!(
+        to_session(&SyncMsg::Session {
+            transfer_id: [0; 16],
+            msg: SessionMsg::SetDone,
+        })
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn v2_envelope_asserts_transfer_id() {
+    let (mut a, mut b) = pair();
+    let wire = Wire::v2([7; 16], SessionLimits::LOCAL);
+    tokio::spawn(async move {
+        write_frame(
+            &mut b,
+            &SyncMsg::Session {
+                transfer_id: [9; 16],
+                msg: SessionMsg::Request {
+                    rel_path: "x".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let err = wire.recv(&mut a).await.unwrap_err();
+    assert!(err.to_string().contains("different transfer"));
+}
+
+#[tokio::test]
+async fn v2_repeated_greeting_mid_transfer_fails() {
+    let (mut a, mut b) = pair();
+    let wire = Wire::v2([7; 16], SessionLimits::LOCAL);
+    tokio::spawn(async move {
+        write_frame(
+            &mut b,
+            &SyncMsg::Session {
+                transfer_id: [7; 16],
+                msg: SessionMsg::Hello {
+                    version: SESSION_VERSION,
+                    limits: SessionLimits::LOCAL,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let err = wire.recv(&mut a).await.unwrap_err();
+    assert!(err.to_string().contains("repeated"));
+}
+
+#[tokio::test]
+async fn v1_wire_maps_cancel_to_refuse_and_roundtrips() {
+    let (mut a, mut b) = pair();
+    tokio::spawn(async move {
+        Wire::V1
+            .send(
+                &mut b,
+                &SyncMsg::Cancel {
+                    reason: "stop".into(),
+                },
+            )
+            .await
+            .unwrap();
+        Wire::V1
+            .send(&mut b, &SyncMsg::Need { bits: vec![3] })
+            .await
+            .unwrap();
+    });
+    match Wire::V1.recv(&mut a).await.unwrap() {
+        SyncMsg::Refuse { reason } => assert!(reason.contains("stop")),
+        other => panic!("v1 Cancel must arrive as Refuse, got {other:?}"),
+    }
+    assert!(matches!(
+        Wire::V1.recv(&mut a).await.unwrap(),
+        SyncMsg::Need { .. }
+    ));
+}
+
+#[tokio::test]
+async fn session_open_refuses_wrong_version_with_clear_error() {
+    let (a, mut b) = pair();
+    tokio::spawn(async move {
+        // Read Hello, answer a mismatched version.
+        let msg: SyncMsg = read_frame(&mut b).await.unwrap();
+        let SyncMsg::Session { transfer_id, .. } = msg else {
+            panic!("expected Session hello");
+        };
+        write_frame(
+            &mut b,
+            &SyncMsg::Session {
+                transfer_id,
+                msg: SessionMsg::HelloAck {
+                    version: 99,
+                    limits: SessionLimits::LOCAL,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let (mut recv, mut send) = tokio::io::split(a);
+    let err = session_open([7; 16], &mut send, &mut recv)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("version 99"));
+}
