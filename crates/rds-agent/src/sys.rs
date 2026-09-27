@@ -30,7 +30,7 @@ pub(crate) fn open_fds() -> Option<usize> {
     if size <= 0 {
         return None;
     }
-    Some(size as usize / std::mem::size_of::<libc::proc_fdinfo>())
+    Some(size as usize / size_of::<libc::proc_fdinfo>())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

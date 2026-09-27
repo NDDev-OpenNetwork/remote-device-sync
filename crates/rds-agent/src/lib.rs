@@ -214,10 +214,9 @@ impl AgentPolicy {
             // this binary can actually serve it, matching the implicit arm
             // and the directory announcement. `validate` still rejects the
             // flag combination at startup.
-            Some(explicit) => set.extend(explicit.iter().copied().filter(|k| match k {
-                ServiceKind::Tcp | ServiceKind::Sync => true,
-                ServiceKind::Desktop => cfg!(feature = "desktop"),
-                _ => false,
+            Some(explicit) => set.extend(explicit.iter().copied().filter(|k| {
+                matches!(k, ServiceKind::Tcp | ServiceKind::Sync)
+                    || (matches!(k, ServiceKind::Desktop) && cfg!(feature = "desktop"))
             })),
             None => {
                 set.insert(ServiceKind::Tcp);
