@@ -69,6 +69,19 @@ impl X11Capturer {
             .ok_or_else(|| DesktopError::Capture("X11 display does not exist".into()))?;
         let root = display.root;
         let (width, height) = (display.width_in_pixels, display.height_in_pixels);
+        // Frames are decoded as packed 32bpp pixels; a server whose root
+        // depth has no 32bpp pixmap format cannot produce them — refuse
+        // honestly rather than panic or emit corrupt frames.
+        let ok = setup
+            .pixmap_formats
+            .iter()
+            .any(|f| f.depth == display.root_depth && f.bits_per_pixel == 32);
+        if !ok {
+            return Err(DesktopError::Capture(format!(
+                "X11 screen {idx} root depth {} has no 32bpp format",
+                display.root_depth
+            )));
+        }
         let _ = default_screen;
         let shm = Self::try_shm(&conn, width, height);
         let damage = Self::try_damage(&conn, root);
@@ -180,6 +193,15 @@ impl Capturer for X11Capturer {
             .map_err(|e| DesktopError::Capture(e.to_string()))?
             .reply()
             .map_err(|e| DesktopError::Capture(e.to_string()))?;
+        let expected = usize::from(self.width) * usize::from(self.height) * 4;
+        if reply.data.len() != expected {
+            return Err(DesktopError::Capture(format!(
+                "X11 GetImage returned {} bytes for {}x{} (expected {expected})",
+                reply.data.len(),
+                self.width,
+                self.height
+            )));
+        }
         Ok(RawFrame {
             width: u32::from(self.width),
             height: u32::from(self.height),

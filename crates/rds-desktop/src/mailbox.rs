@@ -109,9 +109,10 @@ impl<T> Receiver<T> {
                     return Some(item);
                 }
             }
-            // All senders gone → the queue reads as closed.
+            // All senders gone → the queue reads as closed; drain any
+            // item that raced in between the failed pop and the check.
             if self.0.senders.load(Ordering::Acquire) == 0 {
-                return None;
+                return self.0.queue.lock().unwrap().pop_front();
             }
             self.0.notify.notified().await;
         }
@@ -181,6 +182,22 @@ mod tests {
                     .unwrap(),
                 None
             );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_drains_item_racing_sender_drop() {
+        // The session-end tail: the last producer pushes its final item
+        // and exits. A receiver that had just observed an empty queue
+        // must still deliver that item, not close over it.
+        for _ in 0..200 {
+            let (tx, mut rx) = channel::<u8>(4);
+            let producer = std::thread::spawn(move || {
+                tx.send(9);
+            });
+            assert_eq!(rx.recv().await, Some(9));
+            producer.join().unwrap();
+            assert_eq!(rx.recv().await, None);
         }
     }
 

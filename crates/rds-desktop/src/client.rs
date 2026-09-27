@@ -617,12 +617,29 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 // No control/queue/connection handles escape into native work.
                 // An already running call may finish after cancellation, but
                 // it cannot publish and holds both permits until it returns.
-                let decoded = tokio::task::spawn_blocking(move || {
-                    let (_slot, _budget) = (slot, budget);
-                    let result = delivery.decode(&header, body);
-                    (delivery, result)
-                }).await;
-                let Ok((state, outcome)) = decoded else { break; };
+                let decoded = tokio::time::timeout(
+                    FRAME_STREAM_TIMEOUT,
+                    tokio::task::spawn_blocking(move || {
+                        let (_slot, _budget) = (slot, budget);
+                        let result = delivery.decode(&header, body);
+                        (delivery, result)
+                    }),
+                )
+                .await;
+                let (state, outcome) = match decoded {
+                    Ok(Ok(pair)) => pair,
+                    // A decoder that never returns would stall the demux
+                    // for every service on this connection; the orphan
+                    // still holds both permits until it finishes. The
+                    // moved-out chain is gone — re-baseline on a fresh
+                    // one instead of blocking uni routing forever.
+                    Err(_) => {
+                        delivery = Delivery::new();
+                        delivery.request_idr(&ctx.ctrl, ctx.clock.now_ms());
+                        continue;
+                    }
+                    Ok(Err(_)) => break,
+                };
                 delivery = state;
                 match outcome {
                     #[cfg(feature = "x11")]
@@ -678,6 +695,10 @@ pub async fn run_desktop_client(
 ) -> Result<(), DesktopError> {
     let mut session = DesktopSession::connect(&conn, display, max_fps, Codec::H264).await?;
     println!("desktop caps: {:?}", session.caps());
+    #[cfg(not(feature = "x11"))]
+    println!(
+        "note: headless build has no decoder — frames stay encoded (use the encoded relay tap)"
+    );
     let mut count = 0u64;
     let start = std::time::Instant::now();
     while let Some(frame) = session.frames.recv().await {

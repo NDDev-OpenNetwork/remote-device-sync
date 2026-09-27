@@ -148,11 +148,13 @@ fn bitstream_has_idr(stream: &EncodedBitStream<'_>) -> bool {
             let Some(nal) = layer.nal_unit(n) else {
                 continue;
             };
-            // First non-zero byte is the start code's trailing 0x01;
-            // the byte right after it is the NAL header.
+            // Annex-B start code: ≥2 leading zeros then 0x01; the byte
+            // right after it is the NAL header. A NAL without that
+            // prefix is not a start we can interpret.
             let Some(hdr) = nal
                 .iter()
                 .position(|&b| b != 0)
+                .filter(|&i| i >= 2 && nal[i] == 1)
                 .and_then(|i| nal.get(i + 1))
             else {
                 continue;
