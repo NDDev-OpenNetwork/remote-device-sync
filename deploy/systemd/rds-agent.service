@@ -53,6 +53,7 @@ ProtectHostname=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
+MemoryDenyWriteExecute=yes
 # AF_NETLINK: interface/netmon watches (path migration on link change).
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service

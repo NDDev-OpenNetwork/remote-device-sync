@@ -150,8 +150,9 @@ or HTTP fallback. The registry verifying key remains separately provisioned;
 a TLS certificate cannot authorize a name binding.
 
 Directory membership is separately provisioned with repeated
-`--directory-allow <base32-device-key>` arguments (maximum 4096 distinct,
-nonweak Ed25519 keys). An empty list denies record PUT, GET and DELETE, while
+`--directory-allow <device-key>` arguments — base32 is the canonical form,
+lowercase hexadecimal is also accepted (maximum 4096 distinct, nonweak
+Ed25519 keys). An empty list denies record PUT, GET and DELETE, while
 health and configured policy routes remain available. This is independent of
 relay `--allow` and agent peer permissions. Removing a key and restarting denies
 its record access while preserving its replay floor; it does not revoke an
