@@ -35,7 +35,7 @@ identity creation or socket binding, alongside the endpoint preflight.
 | `peers` | `allow`: endpoint-id strings, at most 256 |
 | `authority` | `issuers`, `grant_ttl_secs` (1–86400), `tenant`, `policy_min_revision`, `directory`, `directory_ca`, `record_ttl_secs`, `record_state`, `registry`, `revocations` |
 | `limits` | `max_connections`, `max_streams`; positive 16-bit |
-| `timeouts` | `handshake_secs`, `hello_secs`; each 1–3600 |
+| `timeouts` | `handshake_secs`, `hello_secs`, `authz_secs`, `shutdown_secs`; each 1–3600 |
 
 `registry` holds `key` (required when present), `epoch`, `state` and
 `rotations`. `revocations` holds `key` (required when present), `epoch`,
@@ -84,10 +84,14 @@ single SSH socket; the flag surface has no equivalent list flag.
 
 `timeouts.handshake_secs` bounds the inbound connection handshake;
 `timeouts.hello_secs` bounds the `StreamHello` read on every new stream.
-Both default to 15 seconds and accept 1–3600. Flags `--handshake-timeout`
-and `--hello-timeout` override file values. Per-service budgets (frame
-streams, transfer deadlines, renewal windows) remain service-internal and
-are not set from this file; global timeout classes are W2.6 work.
+`timeouts.authz_secs` bounds the authorization-path replies (refusal and
+final `HelloAck` writes); `timeouts.shutdown_secs` bounds the join wait
+for established connection tasks when the agent stops. Defaults: 15s,
+15s, 15s, 5s; each accepts 1–3600. Flags `--handshake-timeout`,
+`--hello-timeout`, `--authz-timeout`, `--shutdown-timeout` override file
+values. Per-service budgets (frame streams, transfer deadlines, renewal
+windows) remain service-internal and are not set from this file; client
+dial, idle and media/progress classes are still W2.6 open items.
 
 ## Example
 
