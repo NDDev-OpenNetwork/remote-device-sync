@@ -132,8 +132,9 @@ pub struct AgentPolicy {
     /// Data-plane services this agent answers. `None` keeps the implicit
     /// set — `Tcp` plus `Desktop` when compiled and `Sync` when `sync_dir`
     /// is configured. `Some` is the explicit set; `Ping`/`Info` are the
-    /// always-on control plane and are never gated. A disabled service is
-    /// refused before any grant or service work runs.
+    /// always-on control plane — never gated by deployment policy, though
+    /// a grant's service scope may still refuse them. A disabled service
+    /// is refused before any grant or service work runs.
     pub services: Option<BTreeSet<ServiceKind>>,
     /// Admission and greeting deadlines applied per connection/stream.
     pub timeouts: TimeoutPolicy,
@@ -263,8 +264,12 @@ impl AgentPolicy {
         }
         if self.timeouts.handshake.is_zero()
             || self.timeouts.hello.is_zero()
+            || self.timeouts.authz.is_zero()
+            || self.timeouts.shutdown.is_zero()
             || self.timeouts.handshake > MAX_TIMEOUT
             || self.timeouts.hello > MAX_TIMEOUT
+            || self.timeouts.authz > MAX_TIMEOUT
+            || self.timeouts.shutdown > MAX_TIMEOUT
         {
             return Err("timeouts must be between 1 and 3600 seconds");
         }
@@ -506,6 +511,12 @@ impl Agent {
 
     /// Serve a single already-established connection.
     pub async fn serve(&self, conn: Connection) -> anyhow::Result<()> {
+        // Programmatic callers reach serve() without run()'s preflight —
+        // the same policy contract applies either way.
+        if let Err(why) = self.policy.validate() {
+            conn.close(5u32.into(), b"invalid agent policy");
+            anyhow::bail!("invalid agent policy: {why}");
+        }
         if self.policy.grants_required() && self.limits.streams() < 2 {
             conn.close(5u32.into(), b"invalid grant stream budget");
             anyhow::bail!("grant mode requires at least two stream slots");
@@ -665,13 +676,19 @@ async fn serve_stream(
         && !policy.service_enabled(kind)
     {
         rds_observe::request_refused(Reason::Denied);
-        write_frame(
-            &mut send,
-            &HelloAck::Error {
-                message: format!("service {kind:?} not enabled on this agent"),
-            },
+        // Greeting refusals are bounded by the hello deadline — a stalled
+        // peer must not park this task on a refusal write.
+        tokio::time::timeout(
+            policy.timeouts.hello,
+            write_frame(
+                &mut send,
+                &HelloAck::Error {
+                    message: format!("service {kind:?} not enabled on this agent"),
+                },
+            ),
         )
-        .await?;
+        .await??;
+        send.finish()?;
         anyhow::bail!("service {kind:?} not enabled");
     }
     let grant = match authz.service_scope(&policy).await {
@@ -682,21 +699,53 @@ async fn serve_stream(
                 conn.close(2u32.into(), why.message().as_bytes());
             }
             let why = why.message();
-            write_frame(
-                &mut send,
-                &HelloAck::Error {
-                    message: why.into(),
-                },
+            // Authorization-path answers are bounded by the authz budget.
+            tokio::time::timeout(
+                policy.timeouts.authz,
+                write_frame(
+                    &mut send,
+                    &HelloAck::Error {
+                        message: why.into(),
+                    },
+                ),
             )
-            .await?;
+            .await??;
+            send.finish()?;
             anyhow::bail!("stream refused: {why}");
         }
     };
     let scope_err = grant.as_ref().and_then(|g| scope_check(g, &hello).err());
     if let Some(why) = scope_err {
         rds_observe::request_refused(Reason::Denied);
-        write_frame(&mut send, &HelloAck::Error { message: why }).await?;
+        tokio::time::timeout(
+            policy.timeouts.authz,
+            write_frame(&mut send, &HelloAck::Error { message: why }),
+        )
+        .await??;
+        send.finish()?;
         anyhow::bail!("stream outside grant scope");
+    }
+    // TCP preflight resolves the target and policy before the slot is
+    // consumed — a refused connect must not hold a service lane while
+    // its refusal is written. The service arm re-validates on its own.
+    if let StreamHello::TcpConnect { host, port } = &hello {
+        let refusal = match rds_core::TcpTarget::new(host, *port) {
+            Ok(target) if !policy.permits_tcp_target(&target) => {
+                Some(format!("tcp target {host}:{port} not permitted"))
+            }
+            Ok(_) => None,
+            Err(error) => Some(format!("invalid TCP destination: {error}")),
+        };
+        if let Some(message) = refusal {
+            rds_observe::request_refused(Reason::Denied);
+            tokio::time::timeout(
+                policy.timeouts.hello,
+                write_frame(&mut send, &HelloAck::Error { message }),
+            )
+            .await??;
+            send.finish()?;
+            anyhow::bail!("tcp target refused at preflight");
+        }
     }
     // Control greetings (Ping/Info) are short-lived and bypass the service
     // pool; only long-lived data services consume it, so a full pool drains
@@ -903,16 +952,15 @@ async fn serve_stream(
                         // Grant v3 `sync_paths` entries passed the decoder's
                         // lexical checks; normalize `.`/empty components the
                         // same way `check_rel_path` normalizes requests so
-                        // prefix matching compares like with like.
+                        // prefix matching compares like with like. Split on
+                        // both separators — `check_scope_path` admits `\` but
+                        // `Path::components` on Unix does not.
                         let paths = g.payload.constraints.sync_paths.as_ref().map(|list| {
                             list.iter()
                                 .map(|scope| {
-                                    std::path::Path::new(scope)
-                                        .components()
-                                        .filter_map(|c| match c {
-                                            std::path::Component::Normal(p) => Some(p),
-                                            _ => None,
-                                        })
+                                    scope
+                                        .split(['/', '\\'])
+                                        .filter(|p| !p.is_empty() && *p != ".")
                                         .collect::<PathBuf>()
                                 })
                                 .collect::<Vec<_>>()
