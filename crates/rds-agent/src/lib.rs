@@ -210,11 +210,14 @@ impl AgentPolicy {
     pub fn effective_services(&self) -> BTreeSet<ServiceKind> {
         let mut set = BTreeSet::from([ServiceKind::Ping, ServiceKind::Info]);
         match &self.services {
-            Some(explicit) => set.extend(explicit.iter().copied().filter(|k| {
-                matches!(
-                    k,
-                    ServiceKind::Tcp | ServiceKind::Desktop | ServiceKind::Sync
-                )
+            // One honest source: an explicit `desktop` entry only counts when
+            // this binary can actually serve it, matching the implicit arm
+            // and the directory announcement. `validate` still rejects the
+            // flag combination at startup.
+            Some(explicit) => set.extend(explicit.iter().copied().filter(|k| match k {
+                ServiceKind::Tcp | ServiceKind::Sync => true,
+                ServiceKind::Desktop => cfg!(feature = "desktop"),
+                _ => false,
             })),
             None => {
                 set.insert(ServiceKind::Tcp);
@@ -847,13 +850,17 @@ async fn serve_stream(
                         tokio::io::copy_bidirectional(&mut tcp, &mut quic).await?;
                     }
                     Err(e) => {
+                        // ErrorKind is a fixed vocabulary — the raw OS error
+                        // string (errno text, platform internals) never
+                        // crosses the wire. The bail below logs it locally.
                         write_frame(
                             &mut send,
                             &HelloAck::Error {
-                                message: format!("connect {host}:{port} failed: {e}"),
+                                message: format!("connect {host}:{port} failed: {}", e.kind()),
                             },
                         )
                         .await?;
+                        anyhow::bail!("tcp connect {host}:{port} failed: {e}");
                     }
                 }
             }
@@ -884,10 +891,11 @@ async fn serve_stream(
                             write_frame(
                                 &mut send,
                                 &HelloAck::Error {
-                                    message: format!("desktop unavailable: {e}"),
+                                    message: "desktop unavailable".into(),
                                 },
                             )
                             .await?;
+                            anyhow::bail!("desktop capability probe failed: {e}");
                         }
                     }
                     #[cfg(not(feature = "desktop"))]

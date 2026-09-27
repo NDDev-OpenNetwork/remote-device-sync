@@ -539,6 +539,21 @@ impl AgentSettings {
         }
         let authority = &self.authority;
         if authority
+            .registry
+            .as_ref()
+            .and_then(|r| r.epoch)
+            .is_some_and(|e| e == 0)
+            || authority
+                .revocations
+                .as_ref()
+                .and_then(|r| r.epoch)
+                .is_some_and(|e| e == 0)
+        {
+            return Err(AgentConfigError::Invalid(
+                "authority epochs must be positive",
+            ));
+        }
+        if authority
             .grant_ttl_secs
             .is_some_and(|secs| secs == 0 || secs > MAX_GRANT_TTL_SECS)
         {

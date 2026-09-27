@@ -689,13 +689,15 @@ async fn serve_inner(
                 .context("destination preflight task")?
             };
             if let Err(e) = preflight {
-                refuse(wire, send, &e.to_string()).await?;
+                // Wire reasons are coarse by contract: host errno details
+                // stay in the local log, not on the peer's error chain.
+                refuse(wire, send, "sync destination not writable").await?;
                 bail!("offer refused: {e}");
             }
             let manifest = match read_manifest(recv, size, root, chunk_count, wire).await {
                 Ok(m) => m,
                 Err(e) => {
-                    refuse(wire, send, &e.to_string()).await?;
+                    refuse(wire, send, "invalid sync manifest").await?;
                     return Err(e);
                 }
             };
@@ -1152,7 +1154,7 @@ async fn receive(
     let journal = match journal {
         Ok(journal) => journal,
         Err(e) => {
-            refuse(wire, send, &e.to_string()).await?;
+            refuse(wire, send, "cannot open transfer journal").await?;
             return Err(e.into());
         }
     };

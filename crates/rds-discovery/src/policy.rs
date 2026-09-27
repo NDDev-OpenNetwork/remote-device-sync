@@ -31,8 +31,25 @@ pub fn read_rotations(paths: &[std::path::PathBuf]) -> Result<Vec<SignedRotation
     paths
         .iter()
         .map(|path| {
-            let file =
-                std::fs::File::open(path).map_err(|e| DiscoveryError::Store(e.to_string()))?;
+            use rustix::fs::{Mode, OFlags};
+            // NONBLOCK plus the regular-file check refuses FIFOs/devices
+            // before the size bound is applied.
+            let file = std::fs::File::from(
+                rustix::fs::open(
+                    path,
+                    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)
+                .map_err(|e| DiscoveryError::Store(e.to_string()))?,
+            );
+            if !file
+                .metadata()
+                .map_err(|e| DiscoveryError::Store(e.to_string()))?
+                .is_file()
+            {
+                return Err(invalid("authority rotation receipt is not a regular file"));
+            }
             let mut bytes = Vec::new();
             file.take(8193)
                 .read_to_end(&mut bytes)

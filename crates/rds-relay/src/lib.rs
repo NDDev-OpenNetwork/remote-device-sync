@@ -224,10 +224,21 @@ fn tls_config(tls: RelayTls) -> anyhow::Result<TlsConfig> {
 
 fn read_bounded(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
+    // NONBLOCK plus the regular-file check refuses FIFOs/devices before the
+    // size bound is applied — a plain open on a FIFO blocks forever.
+    let file = std::fs::File::from(rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?);
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "relay PEM path is not a regular file",
+        ));
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,

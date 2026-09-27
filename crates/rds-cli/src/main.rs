@@ -66,9 +66,9 @@ struct Cli {
     /// Required for device names; tickets and pinned keys are independent.
     #[arg(long, global = true, requires = "server")]
     registry_key: Option<String>,
-    /// Bootstrap registry authority epoch.
-    #[arg(long, global = true, default_value = "1")]
-    registry_epoch: u64,
+    /// Bootstrap registry authority epoch (default 1).
+    #[arg(long, global = true, requires = "registry_key")]
+    registry_epoch: Option<std::num::NonZeroU64>,
     /// Private name-trust state directory; default is beside the endpoint key.
     #[arg(long, global = true, requires = "registry_key")]
     registry_state: Option<std::path::PathBuf>,
@@ -280,11 +280,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         .map(|origin| -> anyhow::Result<_> {
             let mut client = rds_discovery::client::Client::from_endpoint(origin)?;
             if let Some(path) = &cli.directory_ca {
-                client = client.with_ca_pem(&std::fs::read(path)?)?;
+                client = client.with_ca_pem(&read_pem_file(path)?)?;
             }
             if let Some(key) = cli.registry_key.as_deref() {
-                let authority =
-                    rds_discovery::authority::Authority::from_base32(key, cli.registry_epoch)?;
+                let authority = rds_discovery::authority::Authority::from_base32(
+                    key,
+                    cli.registry_epoch.map_or(1, std::num::NonZeroU64::get),
+                )?;
                 let path = cli
                     .registry_state
                     .clone()
@@ -488,12 +490,30 @@ fn validate_managed(cli: &Cli) -> anyhow::Result<()> {
             && cli.server.is_none()
             && cli.directory_ca.is_none()
             && cli.registry_key.is_none()
-            && cli.registry_epoch == 1
+            && cli.registry_epoch.is_none()
             && cli.registry_state.is_none()
             && cli.authority_rotation.is_empty(),
         "managed commands use agent configuration; configure the agent or use --direct with a separate identity"
     );
     Ok(())
+}
+
+/// Bounded operator-supplied PEM read. NONBLOCK plus the regular-file
+/// check refuses FIFOs/devices before the size bound is applied — a
+/// plain open on a FIFO blocks forever.
+fn read_pem_file(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+    let file = std::fs::File::from(rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    anyhow::ensure!(file.metadata()?.is_file(), "{path:?} is not a regular file");
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= 1024 * 1024, "{path:?} exceeds 1 MiB");
+    Ok(bytes)
 }
 
 fn control_directory(cli: &Cli) -> anyhow::Result<std::path::PathBuf> {

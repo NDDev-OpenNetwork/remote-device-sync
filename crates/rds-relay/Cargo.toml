@@ -15,6 +15,7 @@ iroh-relay = { workspace = true, features = ["server"] }
 postcard = { workspace = true, features = ["alloc", "use-std"] }
 rds-core.workspace = true
 rds-net = { workspace = true, optional = true }
+rustix = { workspace = true, features = ["fs"] }
 rustls.workspace = true
 rustls-pki-types.workspace = true
 thiserror.workspace = true
@@ -28,7 +29,7 @@ noq.workspace = true
 ed25519-dalek.workspace = true
 rcgen.workspace = true
 rds-discovery.workspace = true
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["fs", "process"] }
 
 [features]
 default = []

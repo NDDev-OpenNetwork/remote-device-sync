@@ -13,7 +13,7 @@ ed25519-dalek.workspace = true
 postcard = { workspace = true, features = ["use-std"] }
 rand.workspace = true
 redb.workspace = true
-rustix = { workspace = true, features = ["time"] }
+rustix = { workspace = true, features = ["fs", "time"] }
 rustls.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true

@@ -225,6 +225,11 @@ impl std::fmt::Display for Ticket {
     }
 }
 
+/// A ticket carries one endpoint id plus a handful of transport addrs —
+/// a few hundred encoded bytes. Refuse oversized bodies before base32
+/// allocates and postcard decodes an unbounded address set.
+const MAX_TICKET_BODY: usize = 4096;
+
 impl FromStr for Ticket {
     type Err = anyhow::Error;
 
@@ -232,6 +237,7 @@ impl FromStr for Ticket {
         let body = s
             .strip_prefix("rds1")
             .ok_or_else(|| anyhow::anyhow!("ticket must start with 'rds1'"))?;
+        anyhow::ensure!(body.len() <= MAX_TICKET_BODY, "ticket too long");
         let bytes = data_encoding::BASE32_NOPAD
             .decode(body.to_uppercase().as_bytes())
             .map_err(|_| anyhow::anyhow!("ticket is not valid base32"))?;

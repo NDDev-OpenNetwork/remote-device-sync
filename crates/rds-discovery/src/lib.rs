@@ -248,7 +248,7 @@ mod tests {
         let record = rec(&key);
         assert_eq!(
             record_wire::payload_version(&record.payload).unwrap(),
-            record_wire::RECORD_VERSION
+            RECORD_VERSION
         );
         // A payload from a different schema decodes its own version
         // rather than producing a serde error mid-struct.
