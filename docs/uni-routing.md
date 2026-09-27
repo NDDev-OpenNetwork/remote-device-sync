@@ -1,10 +1,13 @@
 # Tagged uni-stream routing
 
 The current v3 protocol routes inbound uni streams by `UniHello`. The additive
-`SyncTransfer { id }` variant isolates managed file transfers by random ID.
+`SyncTransfer { id }` variant isolates managed file transfers by random ID, and
+`SyncTransferV2 { id }` routes chunk streams for the negotiated v2 session —
+the same ID is then repeated inside every `Session` frame, so a stale stream
+can reach an inbox but never satisfy a different transfer's frames.
 `Connection::uni_streams` permits one live inbox per kind. Services order their
 own payloads by frame sequence or chunk identity: parallel tag reads need not
-complete in the order streams were accepted. Desktop session IDs and negotiated limits remain W2.2 work. Legacy `Sync`
+complete in the order streams were accepted. Desktop session IDs remain W2.2 work. Legacy `Sync`
 service-kind routing remains available only for explicit direct compatibility.
 
 ## Ownership and termination

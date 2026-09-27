@@ -1,9 +1,31 @@
 # Single-file sync protocol contract
 
 Status: W1.9 request binding, wire bounds, unique chunk accounting and session
-budgets are implemented. Transfer IDs/version negotiation, physical cancellation
-and native-platform qualification remain open in W1.9/W2/W8. This document does
+budgets are implemented. Managed transfers run the negotiated version-2 session
+(`SyncTransferV2` route + `SyncMsg::Session` envelope); the version-1 routes
+(`Sync`, `SyncTransfer`) remain for compatibility. Physical cancellation and
+native-platform qualification remain open in W1.9/W2/W8. This document does
 not claim a complete directory synchronization product.
+
+## Session negotiation (v2)
+
+A managed transfer opens a `StreamHello::SyncTransferV2 { id }` control stream.
+A peer that cannot decode the variant refuses at the greeting — before any
+filesystem operation — with no silent fallback, matching ALPN posture. After
+`HelloAck::Ok`, every frame on the control stream and on the transfer's
+`UniHello::SyncTransferV2 { id }` chunk streams is wrapped in
+`SyncMsg::Session { transfer_id, msg }`; a frame carrying any other transfer ID
+fails the transfer.
+
+The first envelope is `SessionMsg::Hello { version, limits }` from the opener;
+the responder answers `SessionMsg::HelloAck { version, limits }`. The version
+is bound by the route tag (currently 2) — a mismatched `version` field refuses.
+`SessionLimits` declares `max_chunk`, `max_chunks` and `fetch_streams`; the
+session runs at the pairwise minimum, never wider than the tighter peer or this
+implementation's compiled bounds. Zero-valued limits are unusable and refused.
+Negotiation completes before any manifest read or filesystem mutation.
+`SessionMsg::Hello`/`HelloAck` after the greeting, or a `Session` frame on a
+v1 stream, is a protocol violation; on v1 a `Cancel` still maps to `Refuse`.
 
 ## Binding and completion
 
@@ -18,9 +40,12 @@ path. The source inode remains pinned through manifest and positioned chunk read
 Both push and pull senders require `Done.root` to equal the offered manifest root.
 The receiver sends Done only after draining successful chunk stores, checking
 complete journal state, assembling and verifying the root, and completing the
-[durable replacement and journal recovery sequence](sync-journal.md). Transfer completion is scoped to the
-current control stream and manifest. There is no new wire version or transfer-ID
-field in this change; explicit cross-session IDs and negotiation remain W2.2.
+[durable replacement and journal recovery sequence](sync-journal.md). On the v2
+route every transfer is additionally scoped to its negotiated transfer ID:
+frames for a different transfer fail, and a delayed chunk stream from a canceled
+transfer can only reach a fresh route (IDs are minted per attempt and never
+reused on a connection), never a replacement transfer. The legacy v1 routes
+scope completion to the control stream and manifest only.
 
 ## Reader and progress bounds
 
@@ -72,8 +97,17 @@ be canceled. Bounded queued work may drain and a started assembly may still fini
 its complete atomic replacement after timeout. No Done is emitted by that canceled
 operation. Treat completion as uncertain and reconcile destination content before
 claiming rollback or retrying conflicting work; the journal's root lock remains
-owned until disk work releases it. Stronger cancellation/publication barriers and
-per-session resource accounting remain W2.5/W8, not an implied guarantee here.
+owned until disk work releases it. Per-session resource accounting and
+publication barriers remain W2.5/W8, not an implied guarantee here.
+
+On the v2 route cancellation is additionally typed: `send_file_cancel` and
+`recv_file_cancel` take a `CancellationToken` (the managed client binds the
+session's entry token), and a triggered token writes `SessionMsg::Cancel` on
+the control stream so the peer observes a deliberate abort rather than a bare
+stream reset. The receiving side watches the control stream during collection,
+so a peer `Cancel` stops chunk receive deterministically instead of waiting for
+the absolute deadline. A v1 stream cannot express `Cancel`; sending one there
+maps to `Refuse`, and canceling still drops the owned work locally.
 
 ## Validation
 
