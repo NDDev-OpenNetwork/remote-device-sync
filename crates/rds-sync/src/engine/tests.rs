@@ -32,7 +32,7 @@ fn queued_writer(cancel_finish: bool) {
         });
         ready.await.unwrap();
         let journal = Journal::open(&root.0, "data.bin", &manifest).unwrap();
-        let (sink, stopped) = JournalSink::start(journal);
+        let (sink, stopped) = JournalSink::start(journal).await;
         sink.put(0, data).await.unwrap();
         if cancel_finish {
             assert!(
@@ -74,7 +74,7 @@ async fn normal_finish_drains_and_verifies_every_queued_store() {
     let data = vec![19u8; 4096];
     let manifest = crate::manifest_of(&data);
     let journal = Journal::open(&root.0, "data.bin", &manifest).unwrap();
-    let (sink, _stopped) = JournalSink::start(journal);
+    let (sink, _stopped) = JournalSink::start(journal).await;
     sink.put(0, data.clone()).await.unwrap();
     let journal = sink.finish().await.unwrap();
     assert!(journal.complete());
@@ -262,4 +262,28 @@ async fn session_open_refuses_wrong_version_with_clear_error() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("version 99"));
+}
+
+/// W2.5: every `spawn_blocking` in this crate funnels through `disk_job`,
+/// so a store/scan storm can never hold more than `MAX_DISK_JOBS`
+/// blocking threads at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disk_jobs_share_one_bounded_pool() {
+    use std::sync::atomic::AtomicUsize;
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..(MAX_DISK_JOBS * 2) {
+        let (a, p) = (active.clone(), peak.clone());
+        set.spawn(disk_job(move || {
+            let n = a.fetch_add(1, Ordering::SeqCst) + 1;
+            p.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(15));
+            a.fetch_sub(1, Ordering::SeqCst);
+        }));
+    }
+    while set.join_next().await.is_some() {}
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert!(peak.load(Ordering::SeqCst) <= MAX_DISK_JOBS);
+    assert!(peak.load(Ordering::SeqCst) > 1, "jobs never overlapped");
 }

@@ -698,21 +698,32 @@ async fn serve_stream(
         write_frame(&mut send, &HelloAck::Error { message: why }).await?;
         anyhow::bail!("stream outside grant scope");
     }
-    let Some(_service_slot) = authz.try_service_slot() else {
-        rds_observe::request_refused(Reason::BudgetExhausted);
-        tokio::time::timeout(
-            policy.timeouts.hello,
-            write_frame(
-                &mut send,
-                &HelloAck::Error {
-                    message: "service capacity reached; a slot is reserved for authorization"
-                        .into(),
-                },
-            ),
-        )
-        .await??;
-        send.finish()?;
-        anyhow::bail!("service capacity reached");
+    // Control greetings (Ping/Info) are short-lived and bypass the service
+    // pool; only long-lived data services consume it, so a full pool drains
+    // back to one free JoinSet lane for whatever hello arrives next.
+    let _service_slot = if matches!(
+        service_kind(&hello),
+        Some(ServiceKind::Tcp | ServiceKind::Desktop | ServiceKind::Sync | ServiceKind::Audio)
+    ) {
+        let Some(slot) = authz.try_service_slot() else {
+            rds_observe::request_refused(Reason::BudgetExhausted);
+            tokio::time::timeout(
+                policy.timeouts.hello,
+                write_frame(
+                    &mut send,
+                    &HelloAck::Error {
+                        message: "service capacity reached; a lane is reserved for control traffic"
+                            .into(),
+                    },
+                ),
+            )
+            .await??;
+            send.finish()?;
+            anyhow::bail!("service capacity reached");
+        };
+        Some(slot)
+    } else {
+        None
     };
     let span = info_span!("rds.stream", service = ?service_kind(&hello));
     // Per-session frame route for `DesktopV2`; the shared `Desktop`

@@ -49,7 +49,7 @@ Neither increment closes these product gaps or any wave.
 | W2.2 | Partial; exact ALPN selection + sync/desktop session routing | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Desktop sessions mint random per-session IDs in `StreamHello::DesktopV2` and route frames through `UniHello::DesktopFrames { id }`, isolating stale streams and allowing concurrent sessions; the same display grant scope check covers both greetings. Service-wide capability negotiation remains open. |
 | W2.3 | Partial; destination-bound renewable grants, directional scopes, tenant/policy binding and per-path sync scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Grant v3 adds the `tenant`/`policy_revision` claims and the `constraints.sync_paths` subtree scope, checked after `rel_path` normalization before any filesystem work; v2 payloads still verify with all claims absent, and agents pin the binding via `authority.tenant`/`policy_min_revision` (`--tenant`/`--policy-min-revision`), refusing unscoped or stale grants. Account-level scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
 | W2.4 | Partial; default connectivity manager + managed desktop channel | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv/desktop commands and keyless `rds session` reuse its endpoint (local wire v5; `desktop --direct` bypasses). Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
-| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Process-wide fd/RSS ceilings now gate connection admission (`limits.max_fds`/`max_rss_mb`, `--max-fds`/`--max-rss-mb`) with kernel-reported observability on Linux/macOS and honest ungated behavior elsewhere; per-service fairness, broader disk/media cancellation and storm-grade RSS/FD proof remain open. |
+| W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Process-wide fd/RSS ceilings now gate connection admission (`limits.max_fds`/`max_rss_mb`, `--max-fds`/`--max-rss-mb`) with kernel-reported observability on Linux/macOS and honest ungated behavior elsewhere. The stream budget now reserves a control lane universally (Ping/Info/Authz bypass the data-service pool, which refuses over-capacity greetings with a bounded `HelloAck::Error`), and all `rds-sync` blocking filesystem work funnels through one 32-permit disk-job bound including the long-lived journal store worker; deeper per-service fairness, broader disk/media cancellation and storm-grade RSS/FD proof remain open. |
 | W2.6 | Partial; agent timeout classes complete, publish retry bounded | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent policy now owns all four server-side classes — handshake, hello, authz reply and shutdown join — as `TimeoutPolicy` tunables (`timeouts.*_secs`, `--*-timeout`, 1..=3600). Directory publish retries use bounded exponential backoff with equal jitter (`RetryPolicy`, 1s→30s default) instead of the fixed ~1s poll cadence; fatal 4xx still fails closed. Agent and owned relay handshake/shutdown budgets exist; agent local startup no longer waits indefinitely for an iroh relay. Client dial/idle classes, transport-level retry policy reuse, desktop/media deadlines and broader startup recovery remain open. |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
 | W3.2 | Partial; owned binary runtime checked on Linux | Both server binaries share strict backend/allow/key/limit/TLS config, persistent relay identity, local readiness and checked joined shutdown. Real processes forward inner authenticated traffic and retain identity/catalog across restart. Malformed datagrams are charged before parsing, and routing uses authenticated key-table lookup. Unexpected service-runner completion now initiates joined host shutdown with retained failure. Hung-task/recovery policy, global/reconnect/control budgets and platform/network qualification remain open. |
@@ -2107,3 +2107,37 @@ above real usage admits and pings normally.
 Remaining W2.5: per-service fairness inside the stream budget, sync
 disk-job and desktop/media cancellation breadth, and storm-grade
 RSS/FD proof under adversarial slow peers.
+
+## 2026-09-27 — control-lane reservation and a process-wide disk bound (W2.5 partial)
+
+The per-connection stream budget now reserves one lane for control
+traffic universally, not only in grant mode: `service_slots` is
+`streams - 1` whenever a connection can carry more than one stream
+(grant mode still reserves even a single-stream connection for
+renewal), and the greetings that bypass the data pool are exactly the
+short-lived control exchanges — `Ping`, `Info`, `Authz`,
+`RenewAuthz`. `Tcp`, `Desktop`, `Sync` and `Audio` bodies hold a
+service slot for their lifetime; a greeting that finds the data pool
+full is refused with a `timeouts.hello_secs`-bounded `HelloAck::Error`
+("service capacity reached; a lane is reserved for control traffic").
+A saturated data plane therefore cannot starve observability or
+authorization turnover: at least one JoinSet lane always drains back
+free for the next hello. `rds-sync` filesystem work is additionally
+funneled through a single static semaphore of 32: every
+`spawn_blocking` site — destination preflight, source and file opens,
+manifest and journal writes, chunk reads — acquires a permit on the
+async side before entering the blocking pool, and the long-lived
+journal store worker holds its permit for its whole lifetime, so a
+transfer storm cannot fill the blocking pool ahead of identity,
+announcement or other async work.
+
+Tests: a saturated two-stream connection holds one live TCP forward,
+refuses a second `TcpConnect` greeting with the capacity error and
+still answers `Ping`; the renewal regression now asserts Ping succeeds
+through the reserved lane rather than failing on a full pool; and a
+64-job storm against `disk_job` never observes more than 32
+concurrently inside the blocking closure.
+
+Remaining W2.5: deeper per-service fairness (per-kind weights beyond
+the single reserved lane), disk/media cancellation breadth, and
+storm-grade RSS/FD proof under adversarial slow peers.
