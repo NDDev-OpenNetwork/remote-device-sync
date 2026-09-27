@@ -3375,6 +3375,7 @@ dependencies = [
  "data-encoding",
  "ed25519-dalek",
  "iroh-relay",
+ "rand 0.10.3",
  "rds-cli",
  "rds-client",
  "rds-core",
@@ -3384,6 +3385,9 @@ dependencies = [
  "rds-observe",
  "rds-sync",
  "rustix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
