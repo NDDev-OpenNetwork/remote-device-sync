@@ -14,7 +14,8 @@ promotion has occurred. Native macOS checks still require their platform lane.
 The historical readiness review at source `ec48d75` found an external SSH-client
 requirement; the later [native Rust SSH increment](ssh.md) removes that local
 requirement while retaining a configured remote SSH server. The repository is
-still not a completed remote access product. Frame presentation returns unavailable;
+still not a completed remote access product. Frame presentation now has an
+interim `winit`/`softbuffer` viewer (see the 2026-09-28 entry);
 ScreenCaptureKit, image-copy and PipeWire capture probes remain placeholders.
 The historical throughput scenario stopped timing at sender finish; the later
 [verified transfer increment](benchmark-transfer.md) adds a receiver byte/digest
@@ -48,7 +49,7 @@ Neither increment closes these product gaps or any wave.
 | W2.1 | Implemented; endpoint + agent settings checked on Linux | Shared version-1 endpoint JSON, explicit file/flag precedence, typed backend/relay validation and preflight before identity creation are implemented. The version-1 agent JSON now carries role/service/peers/authority/limits/timeouts with the same precedence and preflight; `--role`/`--service`/`--no-service` select the gateable service set, disabled services are refused by name ahead of grant machinery, `Info` and directory announcements advertise exactly the served set, and handshake/hello deadlines come from `TimeoutPolicy`. See [agent configuration](agent-configuration.md). |
 | W2.2 | Partial; exact ALPN selection + sync/desktop session routing | Immutable per-protocol TLS offers prevent silent fallback and concurrent request interference. Managed single-file transfers use fresh control/uni routing IDs and negotiate version/limits in the `SyncTransferV2` session envelope before any filesystem operation. Desktop sessions mint random per-session IDs in `StreamHello::DesktopV2` and route frames through `UniHello::DesktopFrames { id }`, isolating stale streams and allowing concurrent sessions; the same display grant scope check covers both greetings. Service-wide capability negotiation remains open. |
 | W2.3 | Partial; destination-bound renewable grants, directional scopes, tenant/policy binding and per-path sync scopes | Grant v2 adds a strict signature domain, audience and stable session ID across positive lease revisions. Same-scope renewal preserves streams/revocation, retains one replay slot/watchdog and enforces wall/continuous expiry. Explicit managed renewal uses IPC v3 and a control-completion barrier. `SyncRead`/`SyncWrite` and `DesktopView`/`DesktopControl` are enforced before filesystem/input operations. Grant v3 adds the `tenant`/`policy_revision` claims and the `constraints.sync_paths` subtree scope, checked after `rel_path` normalization before any filesystem work; v2 payloads still verify with all claims absent, and agents pin the binding via `authority.tenant`/`policy_min_revision` (`--tenant`/`--policy-min-revision`), refusing unscoped or stale grants. Account-level scopes and automatic GDS issuer integration remain open. See [contract](grant-leases.md). |
-| W2.4 | Partial; default connectivity manager + managed desktop channel | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv/desktop commands and keyless `rds session` reuse its endpoint (local wire v5; `desktop --direct` bypasses). Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. Coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
+| W2.4 | Partial; default connectivity manager + managed desktop channel | Agent local control is enabled by default; ordinary ticket/ping/info/SSH/forward/send/recv/desktop commands and keyless `rds session` reuse its endpoint (local wire v5; `desktop --direct` bypasses). Same-UID IPC, pinned streams, cancellation and aggregate metrics are implemented. Agent/direct CLI/owned relay acquire exclusive ownership of a validated seed inode. The managed desktop channel now presents into the interim winit/softbuffer viewer with input forwarding and clipboard typing (2026-09-28 entry). Coordinated installed-binary migration, native macOS and real multi-user/relay qualification remain open. See [contract](local-sessions.md) and [migration receipt](reports/rds-identity-migration-20260925.md). |
 | W2.5 | Partial; transport and agent task ownership | Owned policy tasks terminate, including explicit shutdown after stopped protocol I/O; uni routing is bounded and acyclic. Agent and client forwarding groups own cancellation, normal joins and positive admission budgets. Client relay queues/peer leases and server admission/owned shutdown are bounded. Metric samplers use weak backend observations, release their gauges on drop and wake on closure independently of the sampling interval. Process-wide fd/RSS ceilings now gate connection admission (`limits.max_fds`/`max_rss_mb`, `--max-fds`/`--max-rss-mb`) with kernel-reported observability on Linux/macOS and honest ungated behavior elsewhere. The stream budget now reserves a control lane universally (Ping/Info/Authz bypass the data-service pool, which refuses over-capacity greetings with a bounded `HelloAck::Error`), and all `rds-sync` blocking filesystem work funnels through one 32-permit disk-job bound including the long-lived journal store worker; deeper per-service fairness, broader disk/media cancellation and storm-grade RSS/FD proof remain open. |
 | W2.6 | Partial; all six classes named, shared retry + client dial landed | One request deadline covers stream credit, writes, replies and Ping echo; canceled Authz closes its connection. Agent policy owns all four server-side classes — handshake, hello, authz reply and shutdown join — as `TimeoutPolicy` tunables (`timeouts.*_secs`, `--*-timeout`, 1..=3600), documented as the serving-side subset of the shared classes. `rds-net::deadline` names all six W2.6 classes: `DeadlinePolicy` (dial 30s, handshake 15s, authz 15s, idle 15s, progress 300s, shutdown 5s defaults, per-class 1..=3600 validation) plus `retry_wait`, the shared bounded-backoff-with-jitter sleep that also races caller cancellation. `rds_client::connect_with_deadlines` validates the policy and bounds the whole attempt by `dial`; the noq candidate race names `DEFAULT.handshake`. Directory publish retries use the same `RetryPolicy` (now the public shared primitive). Desktop/media deadlines and cross-resource boot recovery remain open ([receipt](reports/rds-w26-deadline-classes-20260927.md)). |
 | W3.1 | Partial; fair bounded candidate race | Canonical direct candidates alternate supported families under one eight-address cap, plus attached relay; attempts share a deadline and one authenticated winner. Independent relay bootstrap, progressive probing, remote scope/interface discovery and real topology qualification remain open. |
@@ -2165,3 +2166,55 @@ refused before any network work. Receipt:
 
 Remaining W2.6: desktop/media deadlines (W6/W9 engines) and
 cross-resource boot recovery (W3 recovery-policy scope).
+
+## 2026-09-28 — interim native viewer + capture resilience + output downscale (W2.4)
+
+First presentable viewer increment. `rds-desktop` gains an optional
+`viewer` feature (`winit` + `softbuffer`): `run_desktop_client` and the
+managed relay path in `rds-cli` pump decoded BGRA frames through a
+`std::sync::mpsc` channel into a native window — winit must own the
+main thread on macOS, so decode and control-send live on worker
+tasks/threads. The window presents letterbox-scaled (integer
+aspect-preserving `fit` + nearest-neighbour blit) on an event-driven
+`ControlFlow::Wait` loop woken by `EventLoopProxy` — ~0% CPU on a
+static desktop instead of a busy poll. F11 toggles borderless
+fullscreen; `Resize` re-blits the last frame instead of leaving stale
+pixels.
+
+Input: pointer, buttons and scroll are letterbox-inverse-mapped into
+**native display coordinates** taken from `DesktopCaps` (not the wire
+frame size) and forwarded as the existing evdev-coded `InputKind`
+protocol — the wire format is unchanged and remains correct when the
+server downscales output. Moves throttle to ~120 Hz. Cmd+V /
+Ctrl+Shift+V reads the OS clipboard (`pbpaste` / `wl-paste`, no extra
+deps) and synthesizes keystrokes — the wire protocol has no clipboard
+event. `RawFrame::eof()` (zero-size sentinel) lets a pump signal end
+of stream so the window closes rather than freezing the last picture.
+
+Resilience fixes found while qualifying a live session: one transient
+`capture()` failure killed the producer thread, closed the frame
+channel and ended the whole session (observed as white-screen-then-close).
+`X11Producer` now retries capture ~5× at 50 ms before giving up, and a
+`send_frame` `Failed` outcome drops the stale frame and requests IDR
+instead of breaking the writer loop.
+
+Downscale: `SessionConfig::output_height` box-averages captured BGRA
+to a target height before encode (aspect kept) — fewer pixels to
+encode and move buys latency headroom. `rds-agent` reads
+`RDS_DESKTOP_OUTPUT_HEIGHT` (240..=4320) into it as a deployment knob,
+not per-session negotiation; input stays in native space as above.
+
+Evidence: live session against a real GNOME/Xorg `:10` display —
+1280x720 presented, pointer/scroll/key input delivered end-to-end to
+XTest injection; `cargo fmt`, workspace `clippy -D warnings`
+(macos + viewer lanes) and workspace tests green; relay `serve` e2e,
+`RelayDecoder` resync and soak tests unchanged.
+
+Open defects observed under the same live WAN link (not fixed here):
+effective present rate collapsed to ~2 fps while the wire delivered
+~12 fps — instrumentation localized the stall to the encoded-tap →
+IPC → decode boundary (mailbox(4) newest-wins starvation and/or
+writer supersede-abandon churn from `BitrateController` floor); also
+a long-lived QUIC session once closed `TimedOut` at ~9 min. Both are
+recorded for follow-up; viewer/input switching and native platform
+qualification retain their remediation gates.

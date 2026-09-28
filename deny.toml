@@ -40,4 +40,8 @@ ignore = [
     # paste (unmaintained) via netlink-packet-core <- netwatch <- iroh:
     # no safe upgrade exists; informational only.
     "RUSTSEC-2024-0436",
+    # ttf-parser (unmaintained) via ab_glyph <- sctk-adwaita <- winit —
+    # Wayland-only window decorations, not built on macOS; no safe
+    # upgrade exists until sctk-adwaita migrates to skrifa.
+    "RUSTSEC-2026-0192",
 ]
