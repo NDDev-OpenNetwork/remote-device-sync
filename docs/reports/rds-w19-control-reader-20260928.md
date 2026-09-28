@@ -95,6 +95,16 @@ packages the binaries on Apple silicon. That qualifies this wave's
 cancellation hardening on macOS; Linux and macOS now carry equal test
 evidence for the shared reader.
 
+Post-merge race fix (PR #61 CI caught it on a docs-only base):
+`send.stopped()` and in-flight `Cancel` data ride independent QUIC
+channels, so a peer `recv.stop` could resolve before its `Cancel` was
+decoded — `abort_cause` then reported the bare transport symptom
+("stopped receiving") and the strengthened e2e flaked. `abort_cause`
+now waits up to `CAUSE_GRACE` (1 s) on a `Notify` the reader signals
+when it records the terminal cause, so teardown reports the typed
+reason deterministically; a bare-stop peer pays the grace once on an
+already-terminal path.
+
 ## Still open under W1.9
 
 Physical power-loss qualification — mid-write crash journaling under
