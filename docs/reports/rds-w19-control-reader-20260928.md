@@ -86,6 +86,16 @@ Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets --
 rds-desktop/x11 -- -D warnings`, `cargo test --workspace` — all green
 locally on Linux x86_64.
 
+Post-merge (PR #60, `72a139b`): the `rust / test (macos-latest)` lane
+ran `cargo test --locked --workspace` plus the noq/metrics lanes
+natively on macOS — every control-reader and cancellation e2e above
+passes there, alongside the Ubuntu lanes. The
+`native (macos-15, aarch64-apple-darwin)` release lane also builds and
+packages the binaries on Apple silicon. That qualifies this wave's
+cancellation hardening on macOS; Linux and macOS now carry equal test
+evidence for the shared reader.
+
 ## Still open under W1.9
 
-Native macOS qualification and physical power-loss qualification.
+Physical power-loss qualification — mid-write crash journaling under
+real power events is untestable in CI and remains open.
