@@ -755,7 +755,7 @@ mod x11 {
                     }
                 }
             }
-            let Some(raw) = raw else { return None };
+            let raw = raw?;
             let raw = match self.output_height {
                 Some(h) if raw.height > h => scale_bgra(&raw, h),
                 _ => raw,
