@@ -63,6 +63,13 @@ verification:
       - "cargo test --locked --workspace --exclude rds-net --exclude rds-agent --exclude rds-relay --exclude rds-server --exclude rds-client --exclude rds-desktop"
   required: ["lint", "test"]
   required_contexts: []
+  # Per-command seconds, applied when the operator passes no explicit
+  # command timeout. Sized from observed runs on the pinned module:
+  # a lint command compiles the workspace in the isolated consumer
+  # checkout (~10min under load); each test shard runs ~5min under load.
+  timeouts:
+    lint: 1500
+    test: 900
 
 agent:
   context_profile: "project-default"
