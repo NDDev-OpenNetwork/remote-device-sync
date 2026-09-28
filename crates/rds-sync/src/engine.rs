@@ -46,6 +46,13 @@ const PHASE_STALL: Duration = Duration::from_secs(900);
 /// Call the `*_with_timeout` entry points to select a shorter or longer budget.
 pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// Grace a `send.stopped()` arm gives the control reader to record the
+/// peer's real terminal cause. `STOP_SENDING` and in-flight frame data
+/// ride independent QUIC channels, so the peer's `Cancel` can still be
+/// undecoded or in transit when the stop resolves; a bare-stop peer
+/// simply pays this once on an already-terminal path.
+const CAUSE_GRACE: Duration = Duration::from_secs(1);
+
 /// Process-wide bound on blocking filesystem work (W2.5). Waiting for a
 /// permit happens on the async side, so a scan/store storm queues inside
 /// this crate instead of filling Tokio's blocking pool ahead of identity,
@@ -444,7 +451,7 @@ impl Transfer {
             let mut frames = ControlFrames::open(wire, recv);
             let result = tokio::select! {
                 biased;
-                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("{}", frames.abort_cause("sync caller stopped receiving")),
+                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("{}", frames.abort_cause("sync caller stopped receiving").await),
                 result = serve_inner(conn, &mut send, &mut frames, dir, access, self.0, wire) => result,
             };
             if let Err(error) = result {
@@ -517,7 +524,7 @@ impl Transfer {
             });
             let stats = tokio::select! {
                 biased;
-                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("{}", frames.abort_cause("sync receiver stopped reading")),
+                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("{}", frames.abort_cause("sync receiver stopped reading").await),
                 _ = &mut cancelled => {
                     cancel_transfer(wire, &mut send, "caller canceled").await;
                     // Seal the typed Cancel with FIN — a reset would
@@ -591,7 +598,7 @@ impl Transfer {
             });
             let result = tokio::select! {
                 biased;
-                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("{}", frames.abort_cause("sync sender stopped reading")),
+                _ = stopped, if self.0 != rds_core::UniHello::Sync => bail!("{}", frames.abort_cause("sync sender stopped reading").await),
                 _ = &mut cancelled => {
                     cancel_transfer(wire, &mut send, "caller canceled").await;
                     match send.finish() {
@@ -666,6 +673,7 @@ struct ControlFrames {
     rx: mpsc::Receiver<SyncMsg>,
     stop: Arc<AtomicBool>,
     cause: Arc<std::sync::Mutex<Option<String>>>,
+    cause_notify: Arc<tokio::sync::Notify>,
     quit: tokio_util::sync::CancellationToken,
     reader: tokio::task::JoinHandle<()>,
 }
@@ -678,13 +686,23 @@ impl ControlFrames {
         let (tx, rx) = mpsc::channel(8);
         let stop = Arc::new(AtomicBool::new(false));
         let cause = Arc::new(std::sync::Mutex::new(None));
+        let cause_notify = Arc::new(tokio::sync::Notify::new());
         let quit = tokio_util::sync::CancellationToken::new();
         let reader = {
-            let (stop, quit, cause) = (stop.clone(), quit.clone(), cause.clone());
+            let (stop, quit, cause, cause_notify) = (
+                stop.clone(),
+                quit.clone(),
+                cause.clone(),
+                cause_notify.clone(),
+            );
             let record = move |why: String| {
                 let mut slot = cause.lock().unwrap_or_else(|e| e.into_inner());
                 if slot.is_none() {
                     *slot = Some(why);
+                    // Wake a `send.stopped()` arm waiting out CAUSE_GRACE
+                    // for the peer's real reason. One permit is enough:
+                    // the cause records exactly once.
+                    cause_notify.notify_one();
                 }
             };
             tokio::spawn(async move {
@@ -737,6 +755,7 @@ impl ControlFrames {
             rx,
             stop,
             cause,
+            cause_notify,
             quit,
             reader,
         }
@@ -749,11 +768,23 @@ impl ControlFrames {
         self.stop.clone()
     }
 
-    /// The earliest terminal cause the reader recorded, if any. When a
-    /// typed `Cancel` was decoded before our `STOP_SENDING` raced the
-    /// select arms, this surfaces the peer's real reason instead of the
+    /// The earliest terminal cause the reader recorded, waiting up to
+    /// `CAUSE_GRACE` for one when the transport stop fired first. The
+    /// peer's `Cancel` data and its `STOP_SENDING` arrive on independent
+    /// channels — when a typed `Cancel` was decoded (or lands within the
+    /// grace), this surfaces the peer's real reason instead of the
     /// transport symptom.
-    fn abort_cause(&self, fallback: &str) -> String {
+    async fn abort_cause(&self, fallback: &str) -> String {
+        if self
+            .cause
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
+            // A record between the check and `notified()` still wakes
+            // us: `notify_one` stores a permit when no waiter exists.
+            let _ = tokio::time::timeout(CAUSE_GRACE, self.cause_notify.notified()).await;
+        }
         self.cause
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1444,7 +1475,7 @@ async fn receive(
         result = receive_chunks(uni, journal, manifest, wire, cancel_flag, assemble_stop.clone(), peer_stop) => result?,
         _ = send.stopped() => {
             assemble_stop.store(true, Ordering::Release);
-            bail!("sync control stream closed during receive")
+            bail!("{}", frames.abort_cause("sync control stream closed during receive").await)
         }
         msg = cancelled => match msg {
             Ok(SyncMsg::Cancel { reason }) => {

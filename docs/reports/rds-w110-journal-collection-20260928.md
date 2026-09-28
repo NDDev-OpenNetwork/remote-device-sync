@@ -68,4 +68,8 @@ one); fmt, clippy and workspace lanes run before push.
 
 ## Still open under W1.10
 
-Physical power-loss qualification, native macOS, large-file campaign.
+Physical power-loss qualification and the large-file campaign. Post-merge
+(PR #58): the `test (macos-latest)` lane ran the workspace suite —
+including every journal test — natively on macOS, and the
+`native (macos-15, aarch64-apple-darwin)` release lane builds/packages
+the binaries, qualifying this wave there.
