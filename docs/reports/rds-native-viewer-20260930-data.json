@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "source_commit": "c0a37ccafd3cbbc0175746df8466abe9400f9a87",
+  "profile": {
+    "client": "macOS arm64, Metal, software H.264 decode",
+    "server": "Linux x86_64, X11/XTEST, OpenH264",
+    "capture_pixels": [
+      1920,
+      1080
+    ],
+    "video_pixels": [
+      1280,
+      720
+    ],
+    "max_fps": 60,
+    "control_rtt_ms": 86
+  },
+  "sender_after_work_cadence_fix": {
+    "observed_frames": 7194,
+    "quantile_window": "last 1024 frames",
+    "capture_encode_p50_ms": 23,
+    "capture_encode_p95_ms": 29,
+    "encode_to_send_p50_ms": 0,
+    "encode_to_send_p95_ms": 1,
+    "encode_to_send_max_ms": 5,
+    "bitrate_bps": 8000000
+  },
+  "native_presentation_previous_source": {
+    "source_commit": "57caecc4c034c7aa850bdf5c730538fc6af026a4",
+    "duration_seconds": 300,
+    "received": 1217,
+    "submitted": 1213,
+    "receive_to_submit_p50_ms": 11.418958,
+    "receive_to_submit_p95_ms": 16.165125
+  },
+  "pixel_response_upper_bound": {
+    "samples_per_run": 24,
+    "method": "native input to completed full-window screenshot of an isolated target canvas; includes approximately 200 ms screenshot overhead",
+    "before_source": "ed4ab2a72a0cab9a6e414bda504c10e5499e3a63",
+    "before_p50_ms": 1350.9272295,
+    "before_p95_ms": 1563.2445,
+    "after_source": "57caecc4c034c7aa850bdf5c730538fc6af026a4",
+    "after_p50_ms": 456.327521,
+    "after_p95_ms": 496.825875
+  },
+  "remaining": [
+    "pixel-response qualification of final work-cadence revision",
+    "controlled service-fault recovery with visible image and input",
+    "physical glass-to-glass and hardware-codec acceptance"
+  ]
+}
