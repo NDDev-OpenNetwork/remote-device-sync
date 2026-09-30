@@ -662,6 +662,19 @@ async fn serve_stream(
                 anyhow::bail!("stream hello timed out");
             }
         };
+    rds_net::wire::prioritize_control(&send, &hello)?;
+    if matches!(&hello,StreamHello::DesktopV3 { output_height,.. } if *output_height!=0 && !(16..=4320).contains(output_height))
+    {
+        write_frame(
+            &mut send,
+            &HelloAck::Error {
+                message: "video height must be 0 or 16..=4320".into(),
+            },
+        )
+        .await?;
+        send.finish()?;
+        anyhow::bail!("invalid desktop profile");
+    }
     if let StreamHello::Authz(grant) = hello {
         return rds_observe::observe(
             rds_observe::Operation::GrantAuthorize,
@@ -786,10 +799,15 @@ async fn serve_stream(
     // consumes it, and that arm is feature-gated.
     #[cfg(feature = "desktop")]
     let desktop_frame_route = match &hello {
-        StreamHello::DesktopV2 { session, .. } => {
+        StreamHello::DesktopV2 { session, .. } | StreamHello::DesktopV3 { session, .. } => {
             rds_core::UniHello::DesktopFrames { id: *session }
         }
         _ => rds_core::UniHello::Desktop,
+    };
+    #[cfg(feature = "desktop")]
+    let output_height = match &hello {
+        StreamHello::DesktopV3 { output_height, .. } => Some(*output_height),
+        _ => None,
     };
     async move {
         match hello {
@@ -867,7 +885,9 @@ async fn serve_stream(
                     }
                 }
             }
-            StreamHello::Desktop(hello) | StreamHello::DesktopV2 { hello, .. } => {
+            StreamHello::Desktop(hello)
+            | StreamHello::DesktopV2 { hello, .. }
+            | StreamHello::DesktopV3 { hello, .. } => {
                 if desktop {
                     #[cfg(feature = "desktop")]
                     match rds_desktop::capabilities() {
@@ -885,6 +905,7 @@ async fn serve_stream(
                                         .as_ref()
                                         .is_some_and(|g| !g.permits_desktop_control()),
                                     frame_route: Some(desktop_frame_route),
+                                    output_height,
                                     ..Default::default()
                                 },
                             )
@@ -1044,7 +1065,9 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         StreamHello::Ping { .. } => ServiceKind::Ping,
         StreamHello::Info => ServiceKind::Info,
         StreamHello::TcpConnect { .. } => ServiceKind::Tcp,
-        StreamHello::Desktop(_) | StreamHello::DesktopV2 { .. } => ServiceKind::Desktop,
+        StreamHello::Desktop(_) | StreamHello::DesktopV2 { .. } | StreamHello::DesktopV3 { .. } => {
+            ServiceKind::Desktop
+        }
         StreamHello::Sync
         | StreamHello::SyncTransfer { .. }
         | StreamHello::SyncTransferV2 { .. } => ServiceKind::Sync,
@@ -1060,7 +1083,9 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
         StreamHello::TcpConnect { port, .. } if !grant.permits_port(*port) => {
             return Err(format!("port {port} outside grant constraints"));
         }
-        StreamHello::Desktop(h) | StreamHello::DesktopV2 { hello: h, .. }
+        StreamHello::Desktop(h)
+        | StreamHello::DesktopV2 { hello: h, .. }
+        | StreamHello::DesktopV3 { hello: h, .. }
             if !grant.permits_display(h.display) =>
         {
             return Err(format!("display {} outside grant constraints", h.display));
@@ -1095,3 +1120,6 @@ fn hostname() -> Option<String> {
         })
         .filter(|s| !s.is_empty())
 }
+
+#[cfg(all(test, feature = "transport-noq"))]
+mod priority_tests;

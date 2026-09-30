@@ -84,6 +84,160 @@ impl Write for PrivateLog {
     }
 }
 
+/// Automatic viewer diagnostics: private files, 8 MiB per part and at most
+/// ten generated log parts in the directory. The bounded telemetry adapter
+/// calls this writer off the UI/network threads.
+pub struct ViewerLog {
+    current: PrivateLog,
+    directory: std::path::PathBuf,
+}
+
+impl ViewerLog {
+    pub fn create() -> io::Result<(Self, std::path::PathBuf)> {
+        use std::os::unix::fs::DirBuilderExt;
+        let key = rds_net::default_key_path()
+            .ok_or_else(|| io::Error::other("no viewer state directory"))?;
+        let directory = key.with_file_name("viewer-logs");
+        match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        let current = Self::part(&directory)?;
+        // Preserve a bounded set of crash snapshots as well as log parts.
+        let mut snapshots = Vec::new();
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(pid) = name
+                .strip_prefix("state-")
+                .and_then(|s| s.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if pid.parse::<u32>().is_err() {
+                continue;
+            }
+            let meta = std::fs::symlink_metadata(entry.path())?;
+            if meta.is_file()
+                && meta.uid() == rustix::process::geteuid().as_raw()
+                && meta.mode() & 0o777 == 0o600
+                && meta.nlink() == 1
+            {
+                snapshots.push((meta.modified()?, entry.path(), meta.dev(), meta.ino()));
+            }
+        }
+        snapshots.sort_by_key(|v| v.0);
+        let remove = snapshots.len().saturating_sub(9);
+        for (_, path, dev, ino) in snapshots.into_iter().take(remove) {
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_file() && meta.dev() == dev && meta.ino() == ino && meta.nlink() == 1 {
+                std::fs::remove_file(path)?;
+            }
+        }
+        Ok((
+            Self {
+                current,
+                directory: directory.clone(),
+            },
+            directory,
+        ))
+    }
+
+    fn part(directory: &Path) -> io::Result<PrivateLog> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let path = directory.join(format!("viewer-{stamp}-{}.log", std::process::id()));
+        // This validates directory ownership/modes and every component before
+        // retention examines anything. Existing files are never appended to.
+        let file = PrivateLog::create(&path)?;
+        let uid = rustix::process::geteuid().as_raw();
+        let mut owned = Vec::new();
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(rest) = name
+                .strip_prefix("viewer-")
+                .and_then(|n| n.strip_suffix(".log"))
+            else {
+                continue;
+            };
+            let Some((stamp, pid)) = rest.split_once('-') else {
+                continue;
+            };
+            let (Ok(stamp), Ok(_pid)) = (stamp.parse::<u128>(), pid.parse::<u32>()) else {
+                continue;
+            };
+            let meta = std::fs::symlink_metadata(entry.path())?;
+            if meta.is_file()
+                && meta.uid() == uid
+                && meta.mode() & 0o777 == 0o600
+                && meta.nlink() == 1
+            {
+                owned.push((stamp, entry.path(), meta.dev(), meta.ino()));
+            }
+        }
+        owned.sort_by_key(|v| v.0);
+        let remove = owned.len().saturating_sub(10);
+        for (_, path, dev, ino) in owned.into_iter().take(remove) {
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_file() && meta.dev() == dev && meta.ino() == ino && meta.nlink() == 1 {
+                std::fs::remove_file(path)?;
+            }
+        }
+        Ok(file)
+    }
+}
+
+impl Write for ViewerLog {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_BYTES - self.current.written {
+            self.current.flush()?;
+            self.current = Self::part(&self.directory)?;
+        }
+        self.current.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.current.flush()
+    }
+}
+
+/// Publish a small live snapshot atomically. Never truncate an existing inode
+/// (including a hard link) or follow a caller-provided symlink.
+pub fn viewer_snapshot(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > 65536 {
+        return Err(io::Error::other("viewer snapshot exceeds 64 KiB"));
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && (!meta.is_file()
+            || meta.uid() != rustix::process::geteuid().as_raw()
+            || meta.mode() & 0o777 != 0o600
+            || meta.nlink() != 1)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe existing viewer snapshot",
+        ));
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let temporary = path.with_extension(format!("{stamp}.pending"));
+    let mut file = PrivateLog::create(&temporary)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    std::fs::rename(temporary, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +275,39 @@ mod tests {
         assert!(PrivateLog::create(&alias.join("other")).is_err());
         assert!(!root.join("other").exists());
         assert!(PrivateLog::create(Path::new("relative.jsonl")).is_err());
+    }
+    #[test]
+    fn snapshot_never_truncates_a_hardlink_or_follows_a_symlink() {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!("rds-snapshot-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let original = root.join("original");
+        let mut writer = PrivateLog::create(&original).unwrap();
+        writer.write_all(b"preserve me").unwrap();
+        let snapshot = root.join("state.json");
+        std::fs::hard_link(&original, &snapshot).unwrap();
+        assert!(viewer_snapshot(&snapshot, b"new state").is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"preserve me");
+        std::fs::remove_file(&snapshot).unwrap();
+        symlink(&original, &snapshot).unwrap();
+        assert!(viewer_snapshot(&snapshot, b"new state").is_err());
+        std::fs::remove_file(&snapshot).unwrap();
+        viewer_snapshot(&snapshot, b"first").unwrap();
+        let prior = File::open(&snapshot).unwrap();
+        viewer_snapshot(&snapshot, b"second").unwrap();
+        assert_eq!(std::fs::read(&snapshot).unwrap(), b"second");
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let mut prior = prior;
+        prior.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"first");
+        assert_eq!(std::fs::metadata(&snapshot).unwrap().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

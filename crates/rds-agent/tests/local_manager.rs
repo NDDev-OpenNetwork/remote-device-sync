@@ -347,13 +347,25 @@ async fn stalled_dial_never_blocks_selection_and_cancel_releases_reservation() {
             })
             .await
             .unwrap();
-            let duplicate = client
-                .request(Command::Connect {
-                    target: target.clone(),
-                    grant: None,
-                })
-                .await;
-            assert!(matches!(duplicate, Err(Error::Rejected(ErrorCode::Busy))));
+            let mut duplicate = tokio::spawn({
+                let client = client.clone();
+                let target = target.clone();
+                async move {
+                    client
+                        .request(Command::Connect {
+                            target,
+                            grant: None,
+                        })
+                        .await
+                }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut duplicate)
+                    .await
+                    .is_err(),
+                "same-credential dial should join the pending owner"
+            );
+            assert_eq!(client.snapshot().await.unwrap().sessions.len(), 1);
             if explicit {
                 client
                     .request(Command::Disconnect { session: id })
@@ -367,6 +379,13 @@ async fn stalled_dial_never_blocks_selection_and_cancel_releases_reservation() {
                 pending.abort();
                 assert!(pending.await.unwrap_err().is_cancelled());
             }
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), duplicate)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Err(Error::Rejected(ErrorCode::NotFound))
+            ));
             tokio::time::timeout(Duration::from_secs(2), async {
                 while !client.snapshot().await.unwrap().sessions.is_empty() {
                     tokio::task::yield_now().await;
@@ -377,6 +396,135 @@ async fn stalled_dial_never_blocks_selection_and_cancel_releases_reservation() {
         }
         server.close().await.unwrap();
         local.close().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_connect_joins_one_owner_and_canceled_waiter_does_not_cancel_dial() {
+    for backend in backends() {
+        let root = Scratch::new();
+        let path = root.0.join("control");
+        let local = bind_endpoint(config(backend)).await.unwrap();
+        let remote = bind_endpoint(config(backend)).await.unwrap();
+        let mut manager = Server::start(
+            Some(Prepared::bind(&path).await.unwrap()),
+            local.clone(),
+            None,
+        );
+        let client = Client::new(&path);
+        let ticket = Ticket::of(&remote).to_string();
+        let pinned = remote.id().to_string();
+        let (arrived, held) = tokio::sync::oneshot::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn({
+            let remote = remote.clone();
+            async move {
+                let conn = remote.accept().await.unwrap().await.unwrap();
+                let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+                let rds_core::StreamHello::Ping { nonce } =
+                    rds_net::read_frame(&mut recv).await.unwrap()
+                else {
+                    panic!("application readiness ping expected")
+                };
+                arrived.send(()).unwrap();
+                gate.await.unwrap();
+                rds_net::write_frame(&mut send, &rds_core::HelloAck::Ok)
+                    .await
+                    .unwrap();
+                send.write_all(&nonce.to_be_bytes()).await.unwrap();
+                send.finish().unwrap();
+                conn
+            }
+        });
+        let owner = tokio::spawn({
+            let client = client.clone();
+            let ticket = ticket.clone();
+            async move {
+                client
+                    .request(Command::Connect {
+                        target: ticket,
+                        grant: None,
+                    })
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(3), held)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut canceled = tokio::spawn({
+            let client = client.clone();
+            let pinned = pinned.clone();
+            async move {
+                client
+                    .request(Command::Connect {
+                        target: pinned,
+                        grant: None,
+                    })
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut canceled)
+                .await
+                .is_err()
+        );
+        canceled.abort();
+        assert!(canceled.await.unwrap_err().is_cancelled());
+        let snapshot = client.snapshot().await.unwrap();
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].status, Status::Connecting);
+        let conflict = client
+            .request(Command::Connect {
+                target: ticket,
+                grant: Some(Box::new(rds_core::grant::Grant {
+                    payload: vec![1],
+                    signature: vec![],
+                })),
+            })
+            .await;
+        assert!(matches!(
+            conflict,
+            Err(Error::Rejected(ErrorCode::CredentialConflict))
+        ));
+        let mut joined = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .request(Command::Connect {
+                        target: pinned,
+                        grant: None,
+                    })
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut joined)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        let Reply::Connected(id) = owner.await.unwrap().unwrap() else {
+            panic!("connected owner expected")
+        };
+        assert!(matches!(joined.await.unwrap().unwrap(),Reply::Connected(other) if other==id));
+        let snapshot = client.snapshot().await.unwrap();
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].status, Status::Connected);
+        assert_eq!(
+            local.metrics().snapshot()["rds_net_connections_opened_total"],
+            1,
+            "duplicate transport association opened"
+        );
+        let retained = serving.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), remote.accept())
+                .await
+                .is_err()
+        );
+        drop(retained);
+        manager.close().await.unwrap();
+        tokio::join!(local.close(), remote.close());
     }
 }
 

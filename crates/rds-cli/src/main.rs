@@ -12,7 +12,7 @@ use tracing::Instrument;
 
 use rds_cli::desktop;
 #[cfg(unix)]
-mod logging;
+use rds_cli::logging;
 mod managed;
 mod ssh;
 

@@ -107,6 +107,14 @@ pub enum StreamHello {
         session: [u8; 16],
         hello: DesktopHello,
     },
+    /// Per-session video height. Zero preserves source resolution; positive
+    /// heights are 16..=4320, aspect preserving and never upscale the source.
+    /// Older agents reject this additive greeting without opening a session.
+    DesktopV3 {
+        session: [u8; 16],
+        hello: DesktopHello,
+        output_height: u32,
+    },
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -207,7 +215,7 @@ pub struct FrameHeader {
 }
 
 /// Client→server messages on the desktop control stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DesktopControl {
     /// Ask for a fresh IDR (after join or packet loss).
     RequestIdr,
@@ -218,6 +226,42 @@ pub enum DesktopControl {
     /// Liveness probe; the server echoes it as [`DesktopEvent::Heartbeat`].
     /// Lets the viewer measure control-plane RTT under video backlog.
     Heartbeat { seq: u64, ts_ms: u64 },
+    /// Explicit paste transfer. At most 1 MiB UTF-8 total and 32 KiB per
+    /// chunk; ordered offsets, one active transfer per session. Contents are
+    /// never diagnostics. The server publishes before later input is handled.
+    ClipboardChunk {
+        id: u64,
+        offset: u32,
+        total: u32,
+        data: Vec<u8>,
+    },
+}
+
+impl std::fmt::Debug for DesktopControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestIdr => f.write_str("RequestIdr"),
+            Self::SetBitrate(rate) => f.debug_tuple("SetBitrate").field(rate).finish(),
+            Self::Input(event) => f.debug_tuple("Input").field(event).finish(),
+            Self::Heartbeat { seq, ts_ms } => f
+                .debug_struct("Heartbeat")
+                .field("seq", seq)
+                .field("ts_ms", ts_ms)
+                .finish(),
+            Self::ClipboardChunk {
+                id,
+                offset,
+                total,
+                data,
+            } => f
+                .debug_struct("ClipboardChunk")
+                .field("id", id)
+                .field("offset", offset)
+                .field("total", total)
+                .field("bytes", &data.len())
+                .finish(),
+        }
+    }
 }
 
 /// Server→client messages on the desktop control stream (v2).
@@ -227,6 +271,8 @@ pub enum DesktopEvent {
     InputAck { seq: u64, handled_ts_ms: u64 },
     /// Echo of [`DesktopControl::Heartbeat`].
     Heartbeat { seq: u64, ts_ms: u64 },
+    /// Clipboard is owned by the target selection service; no payload echoed.
+    ClipboardReady { id: u64, bytes: u32 },
 }
 
 /// One input event plus the metadata the serving side needs to route and
@@ -323,6 +369,21 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn clipboard_debug_contains_metadata_without_text_or_raw_bytes() {
+        let text = "clipboard private payload";
+        let chunk = DesktopControl::ClipboardChunk {
+            id: 7,
+            offset: 0,
+            total: text.len() as u32,
+            data: text.as_bytes().to_vec(),
+        };
+        let debug = format!("{chunk:?}");
+        assert!(!debug.contains(text));
+        assert!(!debug.contains(&format!("{:?}", text.as_bytes())));
+        assert!(debug.contains("bytes"));
+    }
 
     #[test]
     fn isolated_sync_appends_tags_and_legacy_decoders_refuse_the_extension() {

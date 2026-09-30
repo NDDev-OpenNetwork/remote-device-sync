@@ -184,8 +184,16 @@ async fn delayed_transfer_tags_cannot_enter_replacement_inboxes_and_routes_are_b
         let mut tag = Vec::new();
         rds_net::write_frame(&mut tag, &old_tag).await.unwrap();
         delayed.write_all(&tag[1..]).await.unwrap();
-        delayed.write_all(b"stale").await.unwrap();
-        delayed.finish().unwrap();
+        // The receiver can reject the completed old tag before the tail is
+        // queued. STOP_SENDING(0) is that expected early rejection, not a
+        // failure to isolate routes. Other write failures remain failures.
+        match delayed.write_all(b"stale").await {
+            Ok(()) => {
+                let _ = delayed.finish();
+            }
+            Err(rds_net::WriteError::Stopped(code)) if code == 0u32.into() => {}
+            other => panic!("unexpected stale-route write result: {other:?}"),
+        }
         let mut valid = b.open_uni().await.unwrap();
         rds_net::write_frame(&mut valid, &new_tag).await.unwrap();
         valid.write_all(b"fresh").await.unwrap();

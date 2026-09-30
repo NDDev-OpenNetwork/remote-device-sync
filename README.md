@@ -1,5 +1,7 @@
 # remote-device-sync
 
+<img src="crates/rds-desktop/assets/app-icon.png" width="96" alt="RDS application icon">
+
 Remote device access for the GDS estate: connect from any enrolled device to
 another over SSH, with remote desktop sessions — transport is QUIC via
 [iroh](https://crates.io/crates/iroh), so peers are Ed25519 keys, direct

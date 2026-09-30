@@ -146,6 +146,13 @@ pub enum Command {
         session: Option<SessionId>,
         hello: Box<crate::DesktopHello>,
     },
+    /// Explicit profile; old managers reject this additive command. The
+    /// original desktop command/wire shape remains unchanged.
+    DesktopProfile {
+        session: Option<SessionId>,
+        hello: Box<crate::DesktopHello>,
+        output_height: u32,
+    },
 }
 
 /// Never Debug: paths may contain private information.

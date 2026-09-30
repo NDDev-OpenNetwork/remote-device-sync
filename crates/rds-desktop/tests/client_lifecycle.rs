@@ -129,6 +129,44 @@ async fn completing_a_delta_first_preserves_the_inflight_keyframe() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_keyframe_completes_while_delta_deadline_stays_short() {
+    for backend in [Backend::Iroh, Backend::Noq] {
+        let (client_ep, server_ep, a, b) = pair(backend).await;
+        let (mut client, control_send, control_recv, id) = session(&a, &b).await;
+        let mut keyframe = tagged(&b, id).await;
+        write_frame(&mut keyframe, &header(0)).await.unwrap();
+        keyframe.write_all(b"recovery prefix").await.unwrap();
+        until(|| client.receive_stats().in_flight == 1).await;
+        tokio::time::sleep(Duration::from_millis(4200)).await;
+        keyframe.write_all(b" recovery tail").await.unwrap();
+        keyframe.finish().unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), client.frame_headers.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .seq,
+            0,
+            "a progressing recovery keyframe was discarded"
+        );
+        let mut delta = tagged(&b, id).await;
+        let mut delta_header = header(1);
+        delta_header.keyframe = false;
+        write_frame(&mut delta, &delta_header).await.unwrap();
+        delta.write_all(b"unfinished delta").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(3800), delta.stopped())
+                .await
+                .expect("delta inherited the longer recovery deadline")
+                .unwrap()
+                .is_some()
+        );
+        drop((client, control_send, control_recv));
+        tokio::join!(client_ep.close(), server_ep.close());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn readers_are_bounded_and_session_owns_all_streams() {
     for backend in [Backend::Iroh, Backend::Noq] {
         tokio::time::timeout(Duration::from_secs(20), async {

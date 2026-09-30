@@ -14,8 +14,29 @@ use std::{
     path::PathBuf,
 };
 
+#[derive(clap::ValueEnum, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Resolution {
+    Hd,
+    #[default]
+    FullHd,
+    Native,
+}
+impl Resolution {
+    pub fn height(self) -> u32 {
+        match self {
+            Self::Hd => 720,
+            Self::FullHd => 1080,
+            Self::Native => 0,
+        }
+    }
+}
+
 #[derive(Args, Clone)]
 pub struct Options {
+    /// Video quality profile; preserve source aspect ratio without upscaling.
+    #[arg(long, value_enum, default_value = "full-hd")]
+    pub resolution: Resolution,
     #[arg(long, default_value = "0")]
     pub display: u32,
     #[arg(long, default_value = "60")]
@@ -29,6 +50,9 @@ pub struct Options {
     /// Write native presentation diagnostics to a new JSON file.
     #[arg(long)]
     pub report: Option<PathBuf>,
+    /// Private directory for live diagnostic snapshots.
+    #[arg(long)]
+    pub diagnostics_dir: Option<PathBuf>,
 }
 
 /// Shared bounded credential loading for CLI and native application clients.
@@ -116,6 +140,33 @@ mod native {
         let worker_stop = stop.clone();
         let worker_view = handle.clone();
         let worker_options = options.clone();
+        let diagnostic_stop = stop.clone();
+        let diagnostic_view = handle.clone();
+        let diagnostic_dir = options.diagnostics_dir.clone();
+        workers.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            let path = diagnostic_dir.map(|d| d.join(format!("state-{}.json",std::process::id())));
+            loop {
+                tokio::select! {
+                    _ = diagnostic_stop.cancelled() => break,
+                    _ = tick.tick() => {
+                        diagnostic_view.heartbeat_ui();
+                        let snapshot = diagnostic_view.snapshot();
+                        if let Ok(json) = serde_json::to_string(&snapshot) {
+                            tracing::info!(snapshot=%json, "viewer health");
+                            if let Some(path) = &path {
+                                let path = path.clone();
+                                let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                                    crate::logging::viewer_snapshot(&path,json.as_bytes())
+                                }).await;
+                                if !matches!(result,Ok(Ok(()))) { tracing::warn!(error=?result,"viewer snapshot write failed"); }
+                            }
+                        }
+                    },
+                }
+            }
+            Ok(())
+        });
         workers.spawn(async move {
             let result = network(
                 source,
@@ -195,7 +246,8 @@ mod native {
                                 // After the first authenticated connect retain the exact peer
                                 // identity, even when the initial target was a registry name.
                                 let snapshot = client.snapshot().await?;
-                                *peer = snapshot.sessions.into_iter().find(|s| s.id == id).ok_or_else(|| anyhow::anyhow!("connected session disappeared"))?.peer;
+                                let authenticated = snapshot.sessions.into_iter().find(|s| s.id == id).ok_or_else(|| anyhow::anyhow!("connected session disappeared"))?.peer;
+                                *peer = reconnect_target(peer,authenticated)?;
                                 *session = Some(id);
                             }
                             managed_session(client,session.ok_or_else(|| anyhow::anyhow!("no managed session"))?,options,view,input,&stop,started).await
@@ -212,20 +264,57 @@ mod native {
             }
             failures = failures.saturating_add(1);
             view.status("Reconnecting");
-            tracing::debug!(error = ?result.as_ref().err(),"desktop reconnecting");
+            tracing::warn!(error = ?result.as_ref().err(), attempt=failures,"desktop reconnecting");
             let wait = Duration::from_millis((250u64 << failures.min(5)).min(8000));
-            tokio::select! {
-                _ = stop.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(wait) => {},
-                message = input.recv() => {
-                    if matches!(message,Some(ViewerInput::Close)|None) { return Ok(()); }
-                }
+            if !retry_pause(wait, &stop, input).await {
+                return Ok(());
             }
             // Never replay input captured while disconnected onto a replacement.
             while let Some(message) = input.try_recv() {
                 if matches!(message, ViewerInput::Close) {
                     return Ok(());
                 }
+            }
+        }
+    }
+
+    fn reconnect_target(original: &str, authenticated: String) -> anyhow::Result<String> {
+        if let Ok(pinned) = rds_net::parse_target(original) {
+            anyhow::ensure!(
+                pinned.id.to_string() == authenticated,
+                "connected session differs from pinned endpoint"
+            );
+            // Keep explicit address hints through agent/directory outages.
+            Ok(original.to_owned())
+        } else {
+            // A verified name freezes to its authenticated identity.
+            Ok(authenticated)
+        }
+    }
+
+    trait RetryInput: Send {
+        fn close_requested(&mut self) -> impl Future<Output = bool> + Send;
+    }
+    impl RetryInput for InputReceiver {
+        async fn close_requested(&mut self) -> bool {
+            matches!(self.recv().await, Some(ViewerInput::Close) | None)
+        }
+    }
+
+    async fn retry_pause(
+        wait: Duration,
+        stop: &CancellationToken,
+        input: &mut impl RetryInput,
+    ) -> bool {
+        // Discarded input must neither complete nor restart the retry timer.
+        let deadline = tokio::time::sleep(wait);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => return false,
+                _ = &mut deadline => return true,
+                close = input.close_requested() => if close { return false; },
             }
         }
     }
@@ -239,7 +328,14 @@ mod native {
         stop: &CancellationToken,
         started: Instant,
     ) -> anyhow::Result<bool> {
-        let mut channel = client.desktop(Some(session), hello(options)).await?;
+        view.stage("opening desktop");
+        let mut channel = client
+            .desktop_profile(
+                Some(session),
+                hello(options),
+                Some(options.resolution.height()),
+            )
+            .await?;
         extent(view, &channel.caps, options.display)?;
         view.status("Waiting for screen");
         let control = channel.control_handle();
@@ -249,30 +345,32 @@ mod native {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = loop {
             tokio::select! {
-                biased;
                 _ = stop.cancelled() => break Ok(true),
                 message = input.recv() => match message {
-                    Some(ViewerInput::Control(message)) => control.control(message).await?,
+                    Some(ViewerInput::Control(message)) => tokio::time::timeout(Duration::from_secs(2), control.control(message)).await.map_err(|_|anyhow::anyhow!("desktop control write stalled"))??,
                     Some(ViewerInput::Close)|None => break Ok(true),
                 },
                 _ = tick.tick() => {
                     anyhow::ensure!(last_frame.elapsed() < Duration::from_secs(15),"remote video stopped making progress");
-                    control.control(rds_core::DesktopControl::Heartbeat { seq: 0,ts_ms: started.elapsed().as_millis() as u64 }).await?;
+                    tokio::time::timeout(Duration::from_secs(2), control.control(rds_core::DesktopControl::Heartbeat { seq: 0,ts_ms: started.elapsed().as_millis() as u64 })).await.map_err(|_|anyhow::anyhow!("desktop heartbeat write stalled"))??;
                 },
                 message = channel.recv() => match message? {
                     None => break Ok(false),
                     Some(ManagedMessage::Event(rds_core::DesktopEvent::Heartbeat { ts_ms,.. })) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
                     Some(ManagedMessage::Event(rds_core::DesktopEvent::InputAck { .. })) => view.input_ack(),
+                    Some(ManagedMessage::Event(rds_core::DesktopEvent::ClipboardReady { bytes,.. })) => {view.clipboard_ready(bytes);tracing::info!(bytes,"remote clipboard ready");},
                     Some(ManagedMessage::Frame(frame)) => {
+                        view.stage("decoding");
                         let received = Instant::now();
                         view.media_timing(&frame.header);
-                        let (next,outcome) = decoder.push_bounded(frame.header,frame.payload).await?;
+                        let (next,outcome) = tokio::time::timeout(Duration::from_secs(5), decoder.push_bounded(frame.header,frame.payload)).await.map_err(|_|anyhow::anyhow!("desktop decode stalled"))??;
                         decoder = next;
                         match outcome {
                             RelayOutcome::Frame(raw) => { last_frame = Instant::now(); view.frame(raw,received); },
                             RelayOutcome::NeedIdr => control.request_idr().await?,
                             RelayOutcome::Pending => {},
                         }
+                        view.stage("receiving");
                     }
                 }
             }
@@ -307,6 +405,7 @@ mod native {
             hello(options),
             SessionOpts {
                 session: Some(rand_id()),
+                output_height: Some(options.resolution.height()),
                 ..Default::default()
             },
         )
@@ -319,19 +418,19 @@ mod native {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = loop {
             tokio::select! {
-                biased;
                 _ = stop.cancelled() => break Ok(true),
                 message = input.recv() => match message {
-                    Some(ViewerInput::Control(message)) => ctrl.send(message).await?,
+                    Some(ViewerInput::Control(message)) => tokio::time::timeout(Duration::from_secs(2),ctrl.send(message)).await.map_err(|_|anyhow::anyhow!("direct desktop control stalled"))??,
                     Some(ViewerInput::Close)|None => break Ok(true),
                 },
                 _ = tick.tick() => {
                     anyhow::ensure!(last_frame.elapsed() < Duration::from_secs(15),"remote video stopped making progress");
-                    ctrl.send(rds_core::DesktopControl::Heartbeat { seq: 0,ts_ms: started.elapsed().as_millis() as u64 }).await?;
+                    tokio::time::timeout(Duration::from_secs(2),ctrl.send(rds_core::DesktopControl::Heartbeat { seq: 0,ts_ms: started.elapsed().as_millis() as u64 })).await.map_err(|_|anyhow::anyhow!("direct desktop heartbeat stalled"))??;
                 },
                 event = session.events.recv() => match event {
                     Some(rds_core::DesktopEvent::Heartbeat { ts_ms,.. }) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
                     Some(rds_core::DesktopEvent::InputAck { .. }) => view.input_ack(),
+                    Some(rds_core::DesktopEvent::ClipboardReady { bytes,.. }) => {view.clipboard_ready(bytes);tracing::info!(bytes,"remote clipboard ready");},
                     None => break Ok(false),
                 },
                 frame = session.frames.recv() => match frame {
@@ -385,7 +484,13 @@ mod native {
                         _ => anyhow::bail!("unexpected local connection response"),
                     },
                 };
-                let mut channel = client.desktop(Some(session), hello(&options)).await?;
+                let mut channel = client
+                    .desktop_profile(
+                        Some(session),
+                        hello(&options),
+                        Some(options.resolution.height()),
+                    )
+                    .await?;
                 let mut decoder = RelayDecoder::new();
                 let mut count = 0u64;
                 loop {
@@ -415,6 +520,74 @@ mod native {
             }
         }
         Ok(())
+    }
+    #[cfg(test)]
+    mod retry_tests {
+        use super::*;
+
+        #[test]
+        fn reconnect_preserves_pinned_hints_and_freezes_resolved_names() {
+            let id = rds_net::SecretKey::generate().public();
+            let ticket = rds_net::Ticket(
+                rds_net::EndpointAddr::new(id)
+                    .with_relay_url("https://relay.example.com/".parse().unwrap()),
+            )
+            .to_string();
+            assert_eq!(reconnect_target(&ticket, id.to_string()).unwrap(), ticket);
+            assert_eq!(
+                reconnect_target("verified-device", id.to_string()).unwrap(),
+                id.to_string()
+            );
+            assert!(
+                reconnect_target(&ticket, rds_net::SecretKey::generate().public().to_string())
+                    .is_err()
+            );
+        }
+
+        impl RetryInput for tokio::sync::mpsc::Receiver<bool> {
+            async fn close_requested(&mut self) -> bool {
+                self.recv().await.unwrap_or(true)
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn input_does_not_end_or_extend_retry_delay() {
+            let stop = CancellationToken::new();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let wait = Duration::from_secs(8);
+            let started = tokio::time::Instant::now();
+            let mut retry = Box::pin(retry_pause(wait, &stop, &mut rx));
+            tx.send(false).await.unwrap();
+            tokio::select! {
+                result = &mut retry => panic!("input bypassed retry delay: {result}"),
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+            }
+            for _ in 0..6 {
+                tx.send(false).await.unwrap();
+                tokio::select! {
+                    result = &mut retry => panic!("input bypassed retry delay: {result}"),
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                }
+            }
+            assert!(retry.await);
+            assert_eq!(started.elapsed(), wait, "input must not restart the timer");
+            assert!(
+                rx.try_recv().is_err(),
+                "disconnected input was not discarded"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn close_and_cancel_interrupt_retry_immediately() {
+            let stop = CancellationToken::new();
+            let started = tokio::time::Instant::now();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            tx.send(true).await.unwrap();
+            assert!(!retry_pause(Duration::from_secs(8), &stop, &mut rx).await);
+            stop.cancel();
+            assert!(!retry_pause(Duration::from_secs(8), &stop, &mut rx).await);
+            assert_eq!(started.elapsed(), Duration::ZERO);
+        }
     }
 }
 

@@ -22,6 +22,7 @@ use thiserror::Error;
 
 pub mod capture;
 pub mod client;
+pub mod clipboard;
 pub mod codec;
 pub mod input;
 pub mod mailbox;

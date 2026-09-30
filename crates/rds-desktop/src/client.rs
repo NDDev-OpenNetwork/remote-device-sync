@@ -38,6 +38,11 @@ const IDR_MIN_INTERVAL_MS: u64 = 500;
 /// session handshake ack — a peer that opens a tagged stream and
 /// stalls mid-send would otherwise park a task per stream.
 const FRAME_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+// A realtime frame cannot reserve a reader for a whole request deadline.
+// Even a high-resolution keyframe must finish promptly or release its budget
+// for fresh IDR recovery. Control/handshake policy remains independent.
+const FRAME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const KEYFRAME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Decode state owned by one session. Codec reference frames are chain
 /// state: a decoder shared across sessions would cross-contaminate
@@ -236,6 +241,8 @@ pub struct SessionOpts {
     /// an ended session can never reach this session's inbox. `None`
     /// keeps the legacy shared `Desktop` route for old peers.
     pub session: Option<[u8; 16]>,
+    /// Explicit video profile; zero means source, 16..=4320 selects height.
+    pub output_height: Option<u32>,
     /// Relay mode (the local session manager): publish each encoded
     /// payload to [`DesktopSession::encoded`] instead of decoding it —
     /// no decoder is created and `frames` stays empty. Transport-level
@@ -298,13 +305,31 @@ impl DesktopSession {
         let uni = conn
             .uni_streams(route)
             .map_err(|e| DesktopError::Io(std::io::Error::other(e.to_string())))?;
-        let greeting = match opts.session {
-            Some(session) => StreamHello::DesktopV2 { session, hello },
-            None => StreamHello::Desktop(hello),
+        let greeting = match (opts.session, opts.output_height) {
+            (Some(session), Some(output_height)) => {
+                if output_height != 0 && !(16..=4320).contains(&output_height) {
+                    return Err(DesktopError::Capture(
+                        "video height must be 0 or 16..=4320".into(),
+                    ));
+                }
+                StreamHello::DesktopV3 {
+                    session,
+                    hello,
+                    output_height,
+                }
+            }
+            (Some(session), None) => StreamHello::DesktopV2 { session, hello },
+            (None, None) => StreamHello::Desktop(hello),
+            (None, Some(_)) => {
+                return Err(DesktopError::Capture(
+                    "video profile requires an isolated session route".into(),
+                ));
+            }
         };
         let (mut send, mut recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
             let (send, mut recv) = conn.open_bi().await?;
             let mut send = ControlSend(send);
+            rds_net::wire::prioritize_control(&send.0, &greeting)?;
             write_frame(&mut send.0, &greeting).await?;
             let caps = match read_frame::<_, HelloAck>(&mut recv).await? {
                 HelloAck::Desktop(caps) => caps,
@@ -619,8 +644,14 @@ struct ReceiveContext {
     receiving: Arc<AtomicUsize>,
 }
 
+enum FrameRead {
+    Complete(FrameHeader, Vec<u8>, FrameBudget),
+    Rejected,
+    TimedOut,
+}
+
 async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
-    let mut readers: JoinSet<Option<(FrameHeader, Vec<u8>, FrameBudget)>> = JoinSet::new();
+    let mut readers: JoinSet<FrameRead> = JoinSet::new();
     let mut ordered: crate::order::Ordered<(Vec<u8>, FrameBudget)> =
         crate::order::Ordered::default();
     let mut repair = tokio::time::interval(std::time::Duration::from_millis(20));
@@ -628,6 +659,13 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
     // Keep the decoded queue open for the session even in a headless build.
     let _frames = &ctx.frame_tx;
     let mut delivery = Delivery::new();
+    let mut admitted = 0u64;
+    let mut completed = 0u64;
+    let mut rejected = 0u64;
+    let mut timed_out = 0u64;
+    let mut gaps = 0u64;
+    let mut received_keys = 0u64;
+    let mut health = std::time::Instant::now();
     loop {
         if let Some((header, (body, budget))) = ordered.pop() {
             let expected = ctx.next_seq.load(Ordering::Relaxed);
@@ -639,6 +677,10 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
             }
             ctx.next_seq.store(header.seq + 1, Ordering::Relaxed);
             ctx.header_tx.send(header.clone());
+            completed += 1;
+            if header.keyframe {
+                received_keys += 1;
+            }
             if let Some(tx) = &ctx.encoded_tx {
                 tx.send(EncodedDelivery {
                     header,
@@ -685,27 +727,33 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
             biased;
             _ = repair.tick() => {
                 if ordered.expire(std::time::Duration::from_millis(100)) {
+                    gaps+=1;
                     delivery.invalidate();
                     delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());
                 }
+                if health.elapsed()>=std::time::Duration::from_secs(5) {
+                    tracing::info!(admitted,completed,rejected,timed_out,gaps,received_keys,in_flight=ctx.receiving.load(Ordering::Relaxed),"desktop receiver health");
+                    health=std::time::Instant::now();
+                }
             },
             frame = readers.join_next(), if !readers.is_empty() => {
-                let Some(Ok(Some((header, body, budget)))) = frame else { continue; };
-                ordered.push(header,(body,budget));
+                match frame {
+                    Some(Ok(FrameRead::Complete(header,body,budget)))=>ordered.push(header,(body,budget)),
+                    Some(Ok(FrameRead::TimedOut))=>{timed_out+=1;delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
+                    _=>{rejected+=1;delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
+                }
             }
             stream = uni.recv() => {
                 let Some(stream) = stream else { break; };
                 // Refuse excess work immediately; don't create parked tasks
                 // or read a large body before obtaining its memory budget.
-                if ctx.receiving.load(Ordering::Relaxed) >= MAX_FRAME_READERS { continue; }
-                let Ok(slot) = FRAME_SLOTS.try_acquire() else { continue; };
+                if ctx.receiving.load(Ordering::Relaxed) >= MAX_FRAME_READERS { rejected+=1;continue; }
+                let Ok(slot) = FRAME_SLOTS.try_acquire() else { rejected+=1;continue; };
+                admitted+=1;
                 ctx.receiving.fetch_add(1, Ordering::Relaxed);
                 let budget = FrameBudget { _slot: slot, receiving: ctx.receiving.clone() };
                 let next_seq = ctx.next_seq.clone();
-                readers.spawn(async move {
-                    tokio::time::timeout(FRAME_STREAM_TIMEOUT, read_one(stream, next_seq, budget))
-                        .await.ok().flatten()
-                });
+                readers.spawn(read_one(stream, next_seq, budget));
             }
         }
     }
@@ -716,16 +764,73 @@ async fn read_one(
     mut stream: rds_net::RecvStream,
     next_seq: Arc<AtomicU64>,
     budget: FrameBudget,
-) -> Option<(FrameHeader, Vec<u8>, FrameBudget)> {
-    let header: FrameHeader = read_frame(&mut stream).await.ok()?;
-    if header.seq == u64::MAX
-        || header.seq < next_seq.load(Ordering::Relaxed)
-        || crate::frame_bytes(header.width as usize, header.height as usize).is_none()
-    {
-        return None;
+) -> FrameRead {
+    let mut body_bytes = 0usize;
+    let started = std::time::Instant::now();
+    let header: FrameHeader =
+        match tokio::time::timeout(FRAME_READ_TIMEOUT, read_frame(&mut stream)).await {
+            Ok(Ok(header)) => header,
+            Ok(Err(_)) => return FrameRead::Rejected,
+            Err(_) => {
+                tracing::warn!(
+                    stage = "header",
+                    body_bytes,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "desktop frame receive deadline exceeded"
+                );
+                return FrameRead::TimedOut;
+            }
+        };
+    let frame_seq = header.seq;
+    let keyframe = header.keyframe;
+    let deadline = if keyframe {
+        KEYFRAME_READ_TIMEOUT
+    } else {
+        FRAME_READ_TIMEOUT
+    };
+    let reading = async {
+        if header.seq == u64::MAX
+            || header.seq < next_seq.load(Ordering::Relaxed)
+            || crate::frame_bytes(header.width as usize, header.height as usize).is_none()
+        {
+            return None;
+        }
+        // Retain metadata-only progress when the future times out. read_to_end
+        // discards its partial buffer on cancellation and hid whether even a
+        // header or any media bytes arrived during observed freezes.
+        let mut body = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        while let Some(count) = stream.read(&mut chunk).await.ok()? {
+            if count > MAX_FRAME_BYTES.saturating_sub(body.len()) {
+                return None;
+            }
+            body.extend_from_slice(&chunk[..count]);
+            body_bytes = body.len();
+        }
+        Some((header, body, budget))
+    };
+    match tokio::time::timeout(deadline.saturating_sub(started.elapsed()), reading).await {
+        Ok(Some((header, body, budget))) => FrameRead::Complete(header, body, budget),
+        Ok(None) => {
+            tracing::debug!(
+                ?frame_seq,
+                keyframe,
+                body_bytes,
+                "desktop frame rejected before completion"
+            );
+            FrameRead::Rejected
+        }
+        Err(_) => {
+            tracing::warn!(
+                ?frame_seq,
+                keyframe,
+                body_bytes,
+                elapsed_ms = started.elapsed().as_millis(),
+                "desktop frame receive deadline exceeded"
+            );
+            FrameRead::TimedOut
+        }
     }
-    let body = stream.read_to_end(MAX_FRAME_BYTES).await.ok()?;
-    Some((header, body, budget))
 }
 
 /// Headless desktop run: connects, prints capabilities, streams decode

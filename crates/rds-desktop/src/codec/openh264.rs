@@ -20,13 +20,15 @@ pub struct H264Encoder {
     inner: OhEncoder,
     /// Rate the live encoder is configured for.
     bitrate: u64,
-    /// Requested rate waiting to be applied — `openh264` has no live
-    /// bitrate setter, so a change rebuilds the encoder lazily at the
-    /// next `encode` (the rebuilt encoder's first frame is an IDR with
-    /// fresh SPS/PPS, which is exactly the resync a rate shift wants).
+    /// Requested rate waiting for the next encode. Native SetOption updates
+    /// retain reference pictures and rate-control history instead of emitting
+    /// a large IDR on every adaptation step.
     pending_bitrate: Option<u32>,
+    dimensions: Option<(u32, u32)>,
     fps: f32,
     want_idr: bool,
+    started: std::time::Instant,
+    last_timestamp: Option<u64>,
     /// Recycled I420 input buffer — a 1080p frame is ~3 MiB, so a fresh
     /// allocation per frame at 60 fps is ~190 MB/s of pure alloc churn.
     /// Rebuilt only when frame dimensions change.
@@ -35,13 +37,17 @@ pub struct H264Encoder {
 
 impl H264Encoder {
     pub fn new(bitrate_bps: u64, fps: f32) -> Result<Self, DesktopError> {
+        let bitrate_bps = bitrate_bps.clamp(1, i32::MAX as u64);
         let inner = Self::build(bitrate_bps as u32, fps)?;
         Ok(Self {
             inner,
             bitrate: bitrate_bps,
             pending_bitrate: None,
+            dimensions: None,
             fps,
             want_idr: true,
+            started: std::time::Instant::now(),
+            last_timestamp: None,
             yuv_buf: None,
         })
     }
@@ -55,39 +61,64 @@ impl H264Encoder {
             // with a warning; set explicitly instead.
             .adaptive_quantization(false)
             .background_detection(false)
-            .rate_control_mode(RateControlMode::Bitrate)
+            .rate_control_mode(RateControlMode::Timestamp)
             .bitrate(BitRate::from_bps(bitrate_bps))
             .max_frame_rate(FrameRate::from_hz(fps))
-            // ~8s at 30fps: a bound on how long a client that missed
-            // every resync hint stays undecodable.
-            .intra_frame_period(IntraFramePeriod::from_num_frames(240))
+            // Reliable prioritized control requests recovery explicitly.
+            // Periodic IDRs stalled otherwise valid low-bandwidth desktop
+            // streams every 240 frames; new sessions and geometry changes
+            // still start independently and decode gaps request an IDR.
+            .intra_frame_period(IntraFramePeriod::from_num_frames(0))
             .skip_frames(true);
         let api = OpenH264API::from_source();
         OhEncoder::with_api_config(api, config).map_err(|e| DesktopError::Encode(e.to_string()))
     }
 }
 
-/// Smallest relative bitrate change worth an encoder rebuild — smaller
-/// steps are carried by the writer's token-bucket pacing alone, so the
-/// controller's gentle recovery probes don't keep resetting rate
-/// control state.
-const BITRATE_REBUILD_MIN_PCT: u64 = 15;
-
 impl Encoder for H264Encoder {
     fn encode(&mut self, frame: &RawFrame) -> Result<EncodedFrame, DesktopError> {
-        if let Some(bps) = self.pending_bitrate.take() {
-            match Self::build(bps, self.fps) {
-                Ok(inner) => {
-                    self.inner = inner;
-                    self.bitrate = u64::from(bps);
-                    self.want_idr = true;
-                }
-                Err(e) => tracing::warn!("encoder rebuild failed, keeping old rate: {e}"),
+        self.encode_timed(frame, self.started.elapsed().as_millis() as u64)
+    }
+    fn request_idr(&mut self) {
+        self.want_idr = true;
+    }
+    fn set_bitrate(&mut self, bps: u32) {
+        let bps = u64::from(bps);
+        if bps == 0 || bps == self.bitrate {
+            return;
+        }
+        self.pending_bitrate = Some(bps.min(i32::MAX as u64) as u32);
+    }
+}
+
+impl H264Encoder {
+    fn encode_timed(
+        &mut self,
+        frame: &RawFrame,
+        now_ms: u64,
+    ) -> Result<EncodedFrame, DesktopError> {
+        let dimensions = (frame.width, frame.height);
+        let target = self
+            .pending_bitrate
+            .take()
+            .map(u64::from)
+            .unwrap_or(self.bitrate);
+        if self.dimensions != Some(dimensions) {
+            // The wrapper initializes lazily and restores its construction
+            // config on geometry changes. Build with the current rate only at
+            // that genuine reference discontinuity; never call raw options on
+            // an uninitialized encoder.
+            if self.dimensions.is_some() || target != self.bitrate {
+                self.inner = Self::build(target as u32, self.fps)?;
+                self.bitrate = target;
             }
+            self.want_idr = true;
+        } else if target != self.bitrate {
+            self.update_bitrate(target as u32)?;
+            self.bitrate = target;
         }
         if self.want_idr {
             self.inner.force_intra_frame();
-            self.want_idr = false;
         }
         let (w, h) = (frame.width as usize, frame.height as usize);
         let stride = frame.stride as usize;
@@ -102,35 +133,84 @@ impl Encoder for H264Encoder {
         } else {
             bgra_to_i420_scalar(frame)
         };
+        // OpenH264's encode() supplies Timestamp::ZERO. Real screen capture
+        // is variable-rate: idle/CPU delays must replenish the bitrate budget
+        // in elapsed time, rather than a fictitious fixed-FPS clock. Clamp
+        // tightly repeated library calls to their configured FPS ceiling.
+        let step = (1000.0 / self.fps.max(1.0)).floor().max(1.0) as u64;
+        let stamp = now_ms
+            .max(
+                self.last_timestamp
+                    .map_or(0, |last| last.saturating_add(step)),
+            )
+            .min(i64::MAX as u64);
+        self.last_timestamp = Some(stamp);
         let stream = self
             .inner
-            .encode(&yuv)
+            .encode_at(&yuv, openh264::Timestamp::from_millis(stamp))
             .map_err(|e| DesktopError::Encode(e.to_string()))?;
         self.yuv_buf = Some(yuv);
+        self.dimensions = Some(dimensions);
         // The flag the writer's collapse trusts must be the truth on
         // the wire, not a schedule assumption: OpenH264 decides when
         // forced and periodic IDRs actually land, so read the NALs.
         let keyframe = bitstream_has_idr(&stream);
+        // A rate-control skip must not consume a pending recovery request.
+        // Clear only after an independent frame actually exists on the wire.
+        if keyframe {
+            self.want_idr = false;
+        }
         Ok(EncodedFrame {
             codec: Codec::H264,
             data: Bytes::from(stream.to_vec()),
             keyframe,
         })
     }
+}
 
-    fn request_idr(&mut self) {
-        self.want_idr = true;
-    }
-
-    fn set_bitrate(&mut self, bps: u32) {
-        let bps = u64::from(bps);
-        if bps == 0 || bps == self.bitrate {
-            return;
+impl H264Encoder {
+    #[allow(unsafe_code)]
+    fn update_bitrate(&mut self, bps: u32) -> Result<(), DesktopError> {
+        use openh264_sys2::{
+            ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE, SBitrateInfo, SPATIAL_LAYER_0,
+            SPATIAL_LAYER_ALL,
+        };
+        let mut target = SBitrateInfo {
+            iLayer: SPATIAL_LAYER_ALL,
+            iBitrate: bps as i32,
+        };
+        let mut maximum = SBitrateInfo {
+            iLayer: SPATIAL_LAYER_0,
+            iBitrate: bps as i32,
+        };
+        let options = if u64::from(bps) > self.bitrate {
+            [
+                (ENCODER_OPTION_MAX_BITRATE, &mut maximum),
+                (ENCODER_OPTION_BITRATE, &mut target),
+            ]
+        } else {
+            [
+                (ENCODER_OPTION_BITRATE, &mut target),
+                (ENCODER_OPTION_MAX_BITRATE, &mut maximum),
+            ]
+        };
+        for (option, value) in options {
+            // SAFETY: encode_timed calls this only after successful initialization
+            // with unchanged geometry, with exclusive &mut access. Each option
+            // accepts exactly SBitrateInfo, consumed synchronously. Both rates
+            // fit positive c_int; no layout, buffers or wrapper config change.
+            let code = unsafe {
+                self.inner
+                    .raw_api()
+                    .set_option(option, std::ptr::from_mut(value).cast())
+            };
+            if code != 0 {
+                return Err(DesktopError::Encode(format!(
+                    "live bitrate option {option} failed: {code}"
+                )));
+            }
         }
-        if bps.abs_diff(self.bitrate) * 100 < self.bitrate * BITRATE_REBUILD_MIN_PCT {
-            return;
-        }
-        self.pending_bitrate = Some(bps as u32);
+        Ok(())
     }
 }
 
@@ -322,18 +402,105 @@ mod tests {
         assert!(!enc.encode(&frame()).unwrap().keyframe);
     }
 
-    /// A bitrate change beyond the deadband rebuilds the encoder — the
-    /// next frame is an IDR carrying fresh SPS/PPS.
     #[test]
-    fn bitrate_change_rebuilds_with_idr() {
+    fn continuous_references_do_not_emit_periodic_recovery_frames() {
+        let mut encoder = H264Encoder::new(1_000_000, 30.0).unwrap();
+        let mut decoder = H264Decoder::new().unwrap();
+        for sequence in 0..300 {
+            let encoded = encoder.encode_timed(&frame(), sequence * 34).unwrap();
+            assert_eq!(
+                encoded.keyframe,
+                sequence == 0,
+                "unsolicited keyframe at {sequence}"
+            );
+            assert!(decoder.decode(&encoded).unwrap().is_some());
+        }
+        encoder.request_idr();
+        let recovered = encoder.encode_timed(&frame(), 300 * 34).unwrap();
+        assert!(recovered.keyframe);
+        assert!(decoder.decode(&recovered).unwrap().is_some());
+    }
+
+    /// Adaptation must preserve the exact decodable reference chain and apply
+    /// both target/max native rates; merely changing our Rust bookkeeping is
+    /// insufficient. Recreating an encoder here emits an IDR and fails this.
+    #[test]
+    #[allow(unsafe_code)]
+    fn bitrate_changes_preserve_references_and_update_native_rates() {
+        use openh264_sys2::{
+            ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE, SBitrateInfo, SPATIAL_LAYER_0,
+        };
         let mut enc = H264Encoder::new(1_000_000, 30.0).unwrap();
-        enc.encode(&frame()).unwrap();
-        // Below the deadband: no rebuild, no forced keyframe.
-        enc.set_bitrate(1_100_000);
-        assert!(!enc.encode(&frame()).unwrap().keyframe);
-        // Past it: the rebuilt encoder's first frame is an IDR.
-        enc.set_bitrate(2_000_000);
-        assert!(enc.encode(&frame()).unwrap().keyframe);
+        let mut dec = H264Decoder::new().unwrap();
+        dec.decode(&enc.encode_timed(&frame(), 0).unwrap())
+            .unwrap()
+            .unwrap();
+        for (i, bps) in [1_100_000, 2_000_000, 100_000, 8_000_000, 500_000]
+            .into_iter()
+            .enumerate()
+        {
+            enc.set_bitrate(bps);
+            let encoded = enc.encode_timed(&frame(), (i as u64 + 1) * 1_000).unwrap();
+            assert!(
+                !encoded.keyframe,
+                "bitrate {bps} must not restart the reference chain"
+            );
+            assert!(dec.decode(&encoded).unwrap().is_some());
+            for option in [ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE] {
+                let mut actual = SBitrateInfo {
+                    iLayer: SPATIAL_LAYER_0,
+                    iBitrate: 0,
+                };
+                // SAFETY: initialized encoder, correctly typed synchronous
+                // output pointer with exclusive access, no state mutation.
+                let code = unsafe {
+                    enc.inner
+                        .raw_api()
+                        .get_option(option, std::ptr::from_mut(&mut actual).cast())
+                };
+                assert_eq!(code, 0);
+                assert_eq!(actual.iBitrate, bps as i32);
+            }
+        }
+        enc.request_idr();
+        assert!(enc.encode_timed(&frame(), 6_000).unwrap().keyframe);
+    }
+
+    #[test]
+    fn variable_rate_capture_resumes_after_idle_without_clock_reset() {
+        let mut encoder = H264Encoder::new(500_000, 60.0).unwrap();
+        let first = encoder.encode_timed(&frame(), 0).unwrap();
+        assert!(!first.data.is_empty());
+        let mut pixels = vec![0u8; 64 * 64 * 4];
+        for (i, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            pixel.copy_from_slice(&[(i % 251) as u8, ((i / 64) * 3) as u8, 200, 255]);
+        }
+        let changed = RawFrame {
+            width: 64,
+            height: 64,
+            stride: 256,
+            data: Bytes::from(pixels),
+        };
+        let resumed = encoder.encode_timed(&changed, 5_000).unwrap();
+        assert!(
+            !resumed.data.is_empty(),
+            "idle time must replenish the encoder budget"
+        );
+        let mut decoder = H264Decoder::new().unwrap();
+        decoder.decode(&first).unwrap().unwrap();
+        assert!(
+            decoder.decode(&resumed).unwrap().is_some(),
+            "idle resume must preserve the reference chain"
+        );
+        encoder.set_bitrate(1_000_000);
+        let adapted = encoder.encode_timed(&changed, 6_000).unwrap();
+        assert!(!adapted.keyframe);
+        assert!(decoder.decode(&adapted).unwrap().is_some());
+        assert_eq!(
+            encoder.last_timestamp,
+            Some(6_000),
+            "rate adaptation must not reset its media clock"
+        );
     }
 
     /// The SIMD/dispatched converter must agree with the scalar

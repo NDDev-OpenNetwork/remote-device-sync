@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RDS
+Comment=Remote desktop and device access
+Exec=rds-viewer
+TryExec=rds-viewer
+Icon=org.nddev.opennetwork.rds
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupWMClass=rds-viewer

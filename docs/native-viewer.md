@@ -6,6 +6,12 @@ decoding stays on bounded blocking workers. The serving device needs a real
 capture/input backend; the current Linux implementation uses X11/XTEST.
 macOS capture, VideoToolbox and Wayland serving remain separate work.
 
+The viewer uses ordinary OS window stacking and can move behind other
+applications. An occluded Metal surface may pause presentation. Returning focus
+or uncovering the window requests an immediate redraw of its latest image.
+The application icon is shared by the macOS bundle, native viewer and Linux
+launcher; its source and reproducible derivatives live in the desktop assets.
+
 ```sh
 cargo build --release -p rds-cli --features desktop
 rds desktop <ticket-or-device> --max-fps 60
@@ -21,7 +27,7 @@ separate configured endpoint; no implicit direct fallback is introduced.
 The window scales video without changing its aspect ratio and translates
 pointer positions into the original display coordinates, including when video
 is downscaled. Physical keys use the wire's evdev vocabulary; the target's
-keyboard layout interprets them. IME/text composition, clipboard/audio and
+keyboard layout interprets them. IME/text composition, rich clipboard/audio and
 monitor-switching UI are not implemented. Focus loss releases held keys and
 buttons. Input queue overflow closes the session instead of silently losing
 a release. Consecutive pointer moves collapse without crossing key/click order.
@@ -36,12 +42,24 @@ IDR recovery. The existing global encoded/decode limits still apply.
 
 The viewer reopens an interrupted desktop channel with a fresh session route.
 When the managed connection disappeared, it reconnects the same pinned peer
-through the manager. Reconnect backoff is bounded to eight seconds; inputs
+through the manager. Explicit ticket address hints are retained across retries;
+a verified device name freezes to its authenticated identity. A pinned ticket
+cannot silently switch identities. Reconnect backoff is bounded to eight seconds; inputs
 queued while disconnected are discarded. No TCP/SSH exec or file operation is
 replayed by this recovery. A grant is reused only while the agent accepts it;
 automatic grant issuance/renewal remains GDS work. Fifteen seconds without a
 decoded frame triggers a new desktop session. Closing the window cancels and
 joins its network worker, leaving unrelated managed streams intact.
+
+Discarding input during a reconnect pause keeps the original retry deadline;
+pointer/key activity can neither shorten nor restart it. Window close and
+cancellation still interrupt the pause immediately.
+
+Both halves of desktop control streams use the shared highest QUIC priority.
+Ping, Info and authorization/renewal requests and replies use the same class,
+above media frames. TCP/sync bodies keep their existing priority. This local
+stream scheduling cannot overtake datagrams already emitted or bypass congestion
+and flow-control limits; complete mixed-load/renewal acceptance remains separate.
 
 The separate `rds-viewer` accepts `--control-dir` and `--grant-file`. When run
 without a target, it uses the selected managed session or an optional private
@@ -62,7 +80,9 @@ python3 scripts/package-viewer.py --binary target/release/rds-viewer \
   --output "$HOME/Applications/RDS.app"
 ```
 
-The package contains the native executable and generic Info.plist. Its local
+The package contains the native executable, generic Info.plist and the shared
+ICNS application icon. Dock and Finder use the bundle icon; direct CLI launches
+set the same application icon through the native AppKit adapter. Its local
 ad-hoc signature is not Developer ID signing or notarization. The engineering
 preview release archives retain their documented binary contents; adding a
 local viewer does not rewrite an existing published archive.
@@ -74,7 +94,7 @@ count/recovery time. Redraw/surface-skip counts distinguish a covered window
 from presentation progress. Managed sessions also report capture/encode and
 encode-to-send p50/p95 from the serving endpoint's monotonic timestamps;
 these durations do not include network transit or physical display delay.
-No screenshot, peer key, address or credentials are
+No screenshot, peer key, address, clipboard contents or credentials are
 written to this report. For actual input-to-visible measurement use a target
 test window with a known color change and observe the rendered result; do not
 present the local receive-to-submit metric as full end-to-end latency.
@@ -93,3 +113,118 @@ capture/conversion/codec work when scheduling its next frame. Fixed capture
 CPU cost cannot reduce network bitrate simply by exceeding a 60 FPS interval.
 `RUST_LOG=rds_desktop=debug` reports bitrate changes and deadline-miss counts;
 the `trace` level adds frame sizes and sender stage durations, without pixels.
+
+For a Linux desktop launcher after installing `rds-viewer` on PATH:
+
+```sh
+install -Dm644 crates/rds-desktop/assets/app-icon-512.png \
+  "$HOME/.local/share/icons/hicolor/512x512/apps/org.nddev.opennetwork.rds.png"
+install -Dm644 crates/rds-desktop/assets/org.nddev.opennetwork.rds.desktop \
+  "$HOME/.local/share/applications/org.nddev.opennetwork.rds.desktop"
+```
+
+Native Linux windows also carry the same embedded icon. Launcher installation
+contains no endpoint identity; the normal private viewer configuration applies.
+
+## Quality selection
+
+The macOS application presents a native quality chooser before opening its
+remote session. Full HD (1080p) is the default; HD (720p) and Original are also
+available. `--resolution full-hd|hd|native` skips the chooser for explicit CLI
+or automated launches. Output preserves aspect ratio and does not upscale a
+smaller source. This is encoded video geometry, not the local window's size.
+
+The additive `DesktopV3` greeting and `DesktopProfile` manager command carry the
+requested height before capture starts. They preserve existing wire tags and
+legacy greetings; older peers refuse the extension without a silent fallback.
+Install the current viewer and both agents together. An explicit session choice
+overrides `RDS_DESKTOP_OUTPUT_HEIGHT`; legacy sessions keep that deployment
+fallback. Zero selects original geometry, otherwise the bound is 16–4320 pixels.
+
+## Explicit text paste
+
+On macOS, copying text in a local app with Cmd+C and pressing Ctrl+V inside RDS
+reads the native NSPasteboard for that paste gesture. Text transfers on the
+ordered control channel before V reaches the remote application. The X11 agent
+owns the CLIPBOARD selection and serves UTF8_STRING/TARGETS/TIMESTAMP and ICCCM
+INCR for larger data, without a clipboard helper process. This is real clipboard
+publication, not typing text through keyboard-layout substitutions.
+
+One transfer is bounded to 1 MiB of UTF-8, with 32 KiB control chunks, exact
+ordered offsets and a five-second assembly deadline. There are at most four
+active native selection workers and eight outstanding INCR requests per worker.
+View-only sessions refuse publication. Publication failure ends the control
+session before subsequent paste input can consume an unrelated old clipboard.
+Contents are neither logged nor written to disk. There is no background scan or
+automatic export of every local clipboard change. Images, files, rich formats,
+reverse clipboard and macOS Cmd+V translation remain outside this text path.
+
+## Persistent viewer diagnostics
+
+`rds-viewer` automatically writes private logs under `viewer-logs` beside the
+endpoint configuration (normally `~/.config/remote-device-sync/viewer-logs`).
+Each log part is 8 MiB maximum; ten generated parts are retained. Files are 0600
+in a validated 0700 directory without symlink components. The existing bounded
+telemetry output adapter performs logging away from UI/network threads.
+
+Every two seconds a small `state-<pid>.json` snapshot is atomically replaced.
+It contains UI dispatch age, encoded/decoded/presented-frame ages, network/render
+stage, occlusion, pending CPU bytes, received/submitted/replaced frames, actual
+GPU upload count, reconnects and stage latency. Snapshots contain no image,
+clipboard, peer or credentials. Stalled input/heartbeat writes and decode waits
+are bounded separately; reconnect causes and panics are recorded. `--report`
+still emits an end-of-run receipt, while the live snapshot survives a hung or
+terminated UI. CLI desktop commands may opt in with `--diagnostics-dir` pointing
+to an existing private directory. Independent UI probes share the bounded wake
+flag; a stalled UI cannot create an unbounded event queue.
+
+Surface acquisition now precedes any GPU upload. An occluded surface retains
+only the newest CPU image, rather than queuing staging buffers without submission.
+Managed IPC framing is read by one owned bounded worker; canceling `recv()` in a
+select never loses partially consumed message bytes. Drop aborts that worker.
+
+The software encoder uses actual monotonic timestamps with OpenH264's timestamp
+rate control. Idle waits and slower real capture can replenish the bitrate budget;
+no constant-zero timestamp fabricates a fixed 60 FPS clock. An intentionally
+skipped codec frame preserves the reference sequence and does not force an IDR.
+Capture/encode errors and dropped encoded references still require recovery.
+Bitrate changes apply typed native OpenH264 target/max options after encoder
+initialization, preserving references rather than producing an adaptation IDR.
+RTT adaptation detects new increases between valid samples; an unchanged high
+RTT does not repeatedly penalize the stream against a permanent startup value.
+Incomplete delta bodies release reader permits after three seconds; a validated
+independent keyframe has eight seconds including its header. Recovery frames
+often require more initial congestion-window rounds than a delta. Missing
+headers still expire after three seconds; handshake/control deadlines remain
+separate. Receiver health logs
+include admission, completion, rejection, timeout, gap and keyframe counters.
+Timeout records include frame sequence and partial media byte count, without
+logging the payload, so stalled headers and stalled bodies can be distinguished.
+
+The sender retains at most three frame streams awaiting transport delivery
+confirmation, with five-second delta/ten-second keyframe bounds and
+reset-on-cancellation ownership. A
+queued FIN alone is not a delivery receipt. This leaves capacity below the
+receiver's four-reader budget; capture pauses before encoding when its two-slot
+queue is full. Sender health distinguishes queued, acknowledged and unconfirmed
+frames. Transport acknowledgement is not proof of decode or presentation.
+Capture also waits for an outstanding keyframe's acknowledgement before encoding
+successors. This prevents later deltas from timing out while a large recovery
+keyframe is still transferring, and prevents duplicate IDRs from competing on
+slow links. Capture obtains one of three owned media permits before acquiring
+pixels; queued, currently written and unacknowledged frames share that budget.
+Permits release on acknowledgement, rejection or cancellation. The bounded
+writer preserves queued references in order and exposes total pending work.
+Admission pauses rebase producer cadence; deliberate network waiting is excluded
+from encoder-starvation signals, so it cannot repeatedly reduce image quality.
+The software encoder disables periodic IDRs. New sessions, geometry changes and
+explicit recovery still produce independent frames; the prioritized reliable
+control stream carries resync requests and the silence watchdog reopens a stuck
+session. A valid reference chain no longer pays a large recovery transfer every
+240 frames. Automatic scene-change decisions remain the codec's responsibility.
+
+Text paste sends 16 KiB chunks while accepting the existing 32 KiB wire bound.
+Reassembly permits at most five seconds without progress and thirty seconds in
+total. A progressing large transfer is no longer rejected solely because its
+first chunk arrived more than five seconds earlier. Errors distinguish bounds,
+identity/offset changes, idle/total deadlines and invalid UTF-8 without content.

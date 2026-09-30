@@ -16,25 +16,26 @@ use bytes::Bytes;
 use rds_core::{DesktopControl, DesktopEvent, DesktopHello, FrameHeader};
 use rds_net::{Connection, PathStats, RecvStream, SendStream};
 use rds_net::{read_frame, write_frame};
+use std::borrow::Borrow;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::DesktopError;
 
-/// Highest input/control priority; video frames rank below.
-const CONTROL_PRIORITY: i32 = i32::MAX;
-/// Frame streams sit at the midpoint: strictly below control, above
-/// QUIC's default so they can't be starved by lower-priority traffic
-/// the connection might one day carry.
-const FRAME_PRIORITY: i32 = i32::MAX / 2;
+use rds_net::wire::{CONTROL_STREAM_PRIORITY, MEDIA_STREAM_PRIORITY};
 
 /// Pacing sample interval for the bitrate controller.
 const PACING_INTERVAL: Duration = Duration::from_millis(250);
 /// Loss ratio that drives the bitrate down (2%).
 const LOSS_STEP_DOWN: f64 = 0.02;
-/// RTT growth over baseline that counts as congestion (1.5×).
+/// New RTT growth over the preceding sample that counts as congestion (1.5×).
 const RTT_STEP_UP: f64 = 1.5;
+// A queued FIN is not a delivery receipt. Keep fewer unacknowledged media
+// streams than the receiver's four readers, leaving capacity for recovery.
+const MAX_PENDING_FRAME_ACKS: usize = 3;
+const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+const KEYFRAME_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Monotonic clock shared by producer and writer so `FrameHeader`
 /// timestamps are comparable within one session.
@@ -62,6 +63,33 @@ impl SessionClock {
 pub struct Produced {
     pub header: FrameHeader,
     pub payload: Bytes,
+}
+
+struct CapturePermit(Arc<AtomicU64>);
+impl Drop for CapturePermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+struct AdmittedFrame {
+    produced: Produced,
+    permit: CapturePermit,
+}
+impl Borrow<Produced> for AdmittedFrame {
+    fn borrow(&self) -> &Produced {
+        &self.produced
+    }
+}
+impl std::ops::Deref for AdmittedFrame {
+    type Target = Produced;
+    fn deref(&self) -> &Produced {
+        &self.produced
+    }
+}
+impl std::ops::DerefMut for AdmittedFrame {
+    fn deref_mut(&mut self) -> &mut Produced {
+        &mut self.produced
+    }
 }
 
 /// Live knobs the session applies while a producer runs: the pacing
@@ -93,6 +121,15 @@ impl ProducerControls {
 /// `controls.idr` each call and count a slot missed into
 /// `controls.deadline_misses` when a frame lands after its cadence slot.
 pub trait FrameProducer: Send + 'static {
+    /// Session admission deliberately paused capture. Rebase elapsed cadence
+    /// without counting that wait as capture/encoder starvation.
+    fn resume_after_backpressure(&mut self) {}
+    /// A codec may intentionally emit no frame without changing its reference
+    /// chain. Only that case preserves the encoded sequence; capture/encode
+    /// errors remain discontinuities requiring resync.
+    fn preserves_reference(&self) -> bool {
+        false
+    }
     fn produce(
         &mut self,
         seq: u64,
@@ -104,6 +141,9 @@ pub trait FrameProducer: Send + 'static {
 /// Everything `serve_desktop` needs beyond the negotiated hello.
 #[derive(Default)]
 pub struct SessionConfig {
+    /// Explicit per-session height overrides the deployment fallback. Zero
+    /// keeps native geometry; None uses RDS_DESKTOP_OUTPUT_HEIGHT if supplied.
+    pub output_height: Option<u32>,
     /// Hard ceiling for encoder bitrate — the grant's `max_bps`
     /// constraint lands here when the connection is grant-authorized.
     pub bitrate_ceiling: Option<u64>,
@@ -131,14 +171,14 @@ pub struct SessionConfig {
 ///
 /// Each `step` consumes one sample window: path counters plus the count
 /// of producer deadline misses. Loss, congestion events or RTT growth
-/// over the session baseline push bitrate down multiplicatively; clean
+/// over the previous observed sample push bitrate down multiplicatively; clean
 /// windows probe upward toward the ceiling; deadline misses push down
 /// even when the path looks clean (encoder starvation is congestion too).
 pub struct BitrateController {
     current: u64,
     floor: u64,
     ceiling: u64,
-    baseline_rtt_ms: Option<u64>,
+    previous_rtt_ms: Option<u64>,
     last_sent: u64,
     last_lost: u64,
     last_congestion: u64,
@@ -152,7 +192,7 @@ impl BitrateController {
             current: initial.min(ceiling),
             floor: 100_000.min(ceiling),
             ceiling,
-            baseline_rtt_ms: None,
+            previous_rtt_ms: None,
             last_sent: 0,
             last_lost: 0,
             last_congestion: 0,
@@ -180,7 +220,7 @@ impl BitrateController {
         if let Some(p) = path {
             if self.last_path != Some(p.path_id) {
                 self.last_path = Some(p.path_id);
-                self.baseline_rtt_ms = None;
+                self.previous_rtt_ms = None;
                 self.last_sent = 0;
                 self.last_lost = 0;
                 self.last_congestion = 0;
@@ -196,10 +236,13 @@ impl BitrateController {
             let congestion = p.congestion_events > self.last_congestion;
             let rtt_ms = p.rtt.as_millis() as u64;
             let rtt_high = self
-                .baseline_rtt_ms
+                .previous_rtt_ms
                 .is_some_and(|b| rtt_ms > (b as f64 * RTT_STEP_UP) as u64);
-            if self.baseline_rtt_ms.is_none() && rtt_ms > 0 {
-                self.baseline_rtt_ms = Some(rtt_ms);
+            if rtt_ms > 0 {
+                // A sustained propagation/path delay is not a fresh congestion
+                // signal every 250 ms. Reusing the startup RTT permanently
+                // drove otherwise clean Full HD streams to the 100 kbps floor.
+                self.previous_rtt_ms = Some(rtt_ms);
             }
             self.last_sent = p.sent;
             self.last_lost = p.lost;
@@ -245,7 +288,15 @@ pub async fn serve_desktop_with(
     config: SessionConfig,
 ) -> Result<(), DesktopError> {
     let mut send = SessionSend(send);
-    send.0.set_priority(CONTROL_PRIORITY)?;
+    if config
+        .output_height
+        .is_some_and(|h| h != 0 && !(16..=4320).contains(&h))
+    {
+        return Err(DesktopError::Capture(
+            "video height must be 0 or 16..=4320".into(),
+        ));
+    }
+    send.0.set_priority(CONTROL_STREAM_PRIORITY)?;
     // Dropping the serving future aborts async siblings and queued blocking
     // work. A running capture call may finish, then sees its receiver closed.
     let mut workers = JoinSet::new();
@@ -253,6 +304,7 @@ pub async fn serve_desktop_with(
     let clock = config.clock.clone().unwrap_or_default();
     let max_fps = hello.max_fps.clamp(1, 240);
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(max_fps));
+    tracing::info!(display=hello.display,max_fps,output_height=?config.output_height,view_only=config.view_only,"desktop serving started");
     let acks = hello.input_acks;
     if config.bitrate_ceiling.is_some_and(|rate| rate < 100_000) {
         return Err(DesktopError::Encode(
@@ -270,7 +322,9 @@ pub async fn serve_desktop_with(
     let mut input_sink = config.input_sink;
 
     // Capture+encode runs on a blocking thread; frames flow to the writer.
-    let (tx, mut rx) = mpsc::channel::<Produced>(2);
+    let (tx, mut rx) = mpsc::channel::<AdmittedFrame>(2);
+    let keyframe_pending = Arc::new(AtomicBool::new(false));
+    let capture_admission = Arc::new(AtomicU64::new(0));
     {
         let clock = clock.clone();
         let bitrate = Arc::clone(&controls.bitrate);
@@ -278,6 +332,8 @@ pub async fn serve_desktop_with(
         let misses = Arc::clone(&controls.deadline_misses);
         let requested = Arc::clone(&controls.requested);
         let mut producer = config.producer;
+        let keyframe_pending = keyframe_pending.clone();
+        let capture_admission = capture_admission.clone();
         capture.spawn_blocking(move || {
             let producer_controls = ProducerControls {
                 bitrate,
@@ -290,7 +346,7 @@ pub async fn serve_desktop_with(
             };
             let mut source = match producer.take() {
                 Some(p) => p,
-                None => platform_producer(hello.display, frame_interval),
+                None => platform_producer(hello.display, frame_interval, config.output_height),
             };
             let mut seq = 0u64;
             loop {
@@ -300,12 +356,54 @@ pub async fn serve_desktop_with(
                 if tx.is_closed() {
                     return;
                 }
+                // Reserve capture cadence through the bounded producer queue
+                // before spending CPU or changing the codec's references.
+                // Encoding into a full queue used to drop references and
+                // force repeated expensive IDRs while QUIC was backlogged.
+                let mut paused = false;
+                let permit = loop {
+                    while tx.capacity() == 0 || keyframe_pending.load(Ordering::Acquire) {
+                        paused = true;
+                        if tx.is_closed() {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    if capture_admission
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                            (count < MAX_PENDING_FRAME_ACKS as u64).then_some(count + 1)
+                        })
+                        .is_ok()
+                    {
+                        break CapturePermit(capture_admission.clone());
+                    }
+                    if tx.is_closed() {
+                        return;
+                    }
+                    paused = true;
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                if paused {
+                    source.resume_after_backpressure();
+                }
                 match source.produce(seq, &producer_controls, &clock) {
                     Some(p) => {
+                        if p.payload.is_empty() && source.preserves_reference() {
+                            continue;
+                        }
+                        if p.header.keyframe && !p.payload.is_empty() {
+                            keyframe_pending.store(true, Ordering::Release);
+                        }
                         // Losing any encoded reference breaks its successors,
                         // not only losing an IDR. Keep the two-slot bound and
                         // ask the producer for an independent replacement.
-                        if tx.try_send(p).is_err() {
+                        if tx
+                            .try_send(AdmittedFrame {
+                                produced: p,
+                                permit,
+                            })
+                            .is_err()
+                        {
                             producer_controls.idr.store(true, Ordering::Relaxed);
                         }
                         let Some(next) = seq.checked_add(1) else {
@@ -340,12 +438,19 @@ pub async fn serve_desktop_with(
                 }
                 let missed = misses.swap(0, Ordering::Relaxed);
                 let previous = controller.current();
-                let bps = controller.step(conn.current_path_stats(), missed);
+                let path = conn.current_path_stats();
+                let bps = controller.step(path, missed);
                 if bps != previous {
                     tracing::debug!(
                         previous_bps = previous,
                         bitrate_bps = bps,
                         deadline_misses = missed,
+                        path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        path_id = ?path.map(|p| p.path_id),
+                        path_via_relay = ?path.map(|p| p.via_relay),
+                        path_sent = ?path.map(|p| p.sent),
+                        path_lost = ?path.map(|p| p.lost),
+                        path_congestion_events = ?path.map(|p| p.congestion_events),
                         "desktop bitrate adapted"
                     );
                 }
@@ -354,8 +459,8 @@ pub async fn serve_desktop_with(
         })
     };
 
-    // Writer task: one uni stream per frame. Collapse stale queued work, but
-    // never send a delta whose predecessor was discarded. A broken chain
+    // Writer task: one uni stream per frame. Backpressure retains references
+    // through the bounded producer queue. A broken chain
     // requests an IDR locally instead of waiting for a client roundtrip.
     let writer_conn = conn.clone();
     let writer_clock = clock.clone();
@@ -369,9 +474,34 @@ pub async fn serve_desktop_with(
         // keyframe can't stall the writer.
         let mut budget = 0.0f64;
         let mut last = Instant::now();
-        let mut pending: Option<Produced> = None;
+        let mut pending: Option<AdmittedFrame> = None;
         let mut chain = FrameChain::default();
+        let mut sent = 0u64;
+        let mut superseded = 0u64;
+        let mut acknowledgements = JoinSet::new();
+        let mut acknowledged = 0u64;
+        let mut failed_delivery = 0u64;
+        let mut health = Instant::now();
         'writer: loop {
+            while let Some(result) = acknowledgements.try_join_next() {
+                if matches!(result, Ok(true)) {
+                    acknowledged += 1;
+                } else {
+                    failed_delivery += 1;
+                    chain.next = None;
+                    writer_idr.store(true, Ordering::Relaxed);
+                }
+            }
+            if acknowledgements.len() >= MAX_PENDING_FRAME_ACKS {
+                if matches!(acknowledgements.join_next().await, Some(Ok(true))) {
+                    acknowledged += 1;
+                } else {
+                    failed_delivery += 1;
+                    chain.next = None;
+                    writer_idr.store(true, Ordering::Relaxed);
+                }
+                continue;
+            }
             let mut produced = match pending.take() {
                 Some(p) => p,
                 None => match rx.recv().await {
@@ -379,7 +509,6 @@ pub async fn serve_desktop_with(
                     None => break,
                 },
             };
-            produced = collapse(produced, &mut rx, &writer_idr);
             if produced.payload.is_empty() {
                 chain.next = None;
                 writer_idr.store(true, Ordering::Relaxed);
@@ -394,7 +523,6 @@ pub async fn serve_desktop_with(
                 let wait = ((cost - budget) / bps).min(0.5);
                 tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                 budget = (budget - cost).max(-bps * 0.5);
-                produced = collapse(produced, &mut rx, &writer_idr);
             } else {
                 budget -= cost;
             }
@@ -420,10 +548,46 @@ pub async fn serve_desktop_with(
                     .saturating_sub(produced.header.encode_done_ts_ms),
                 "desktop frame sending"
             );
-            match send_frame(&writer_conn, frame_route, &produced, &mut rx).await {
-                SendOutcome::Sent => {}
-                SendOutcome::Superseded(newer) => pending = Some(newer),
-                SendOutcome::Done | SendOutcome::Failed => break 'writer,
+            match send_frame(
+                &writer_conn,
+                frame_route,
+                produced,
+                &mut rx,
+                &mut acknowledgements,
+                keyframe_pending.clone(),
+                writer_idr.clone(),
+            )
+            .await
+            {
+                SendOutcome::Sent => {
+                    sent += 1;
+                }
+                SendOutcome::Superseded(newer) => {
+                    superseded += 1;
+                    pending = Some(newer);
+                }
+                SendOutcome::Done => {
+                    while acknowledgements.join_next().await.is_some() {}
+                    break 'writer;
+                }
+                SendOutcome::Failed => {
+                    tracing::warn!(sent, superseded, "desktop frame writer ended");
+                    break 'writer;
+                }
+            }
+            if health.elapsed() >= Duration::from_secs(5) {
+                tracing::info!(
+                    sent,
+                    superseded,
+                    acknowledged,
+                    failed_delivery,
+                    pending_acknowledgements = acknowledgements.len(),
+                    pending_media_frames = capture_admission.load(Ordering::Acquire),
+                    keyframe_pending = keyframe_pending.load(Ordering::Acquire),
+                    bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
+                    "desktop sender health"
+                );
+                health = Instant::now();
             }
         }
     });
@@ -433,6 +597,8 @@ pub async fn serve_desktop_with(
     let send_clock = clock.clone();
     let session_display = hello.display;
     let control = async {
+        let mut assembly = crate::clipboard::Assembly::default();
+        let mut clipboard = None;
         loop {
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
@@ -510,7 +676,51 @@ pub async fn serve_desktop_with(
                         break;
                     }
                 }
-                Err(_) => break, // peer closed the control stream
+                Ok(DesktopControl::ClipboardChunk {
+                    id,
+                    offset,
+                    total,
+                    data,
+                }) => {
+                    if config.view_only {
+                        tracing::warn!("view-only clipboard refused");
+                        break;
+                    }
+                    let text = match assembly.push(id, offset, total, data) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            tracing::warn!(%error,"clipboard transfer refused");
+                            break;
+                        }
+                    };
+                    if let Some(text) = text {
+                        let owner = clipboard
+                            .get_or_insert_with(|| crate::clipboard::Worker::new(session_display));
+                        match tokio::time::timeout(Duration::from_secs(2), owner.publish(text))
+                            .await
+                        {
+                            Ok(Ok(())) => {
+                                if write_frame(
+                                    &mut send.0,
+                                    &DesktopEvent::ClipboardReady { id, bytes: total },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            result => {
+                                tracing::warn!(error=?result,"clipboard publication failed; ending control before paste input");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(%error,"desktop control ended");
+                    break;
+                }
             }
         }
     };
@@ -540,9 +750,13 @@ impl Drop for SessionSend {
 
 /// Platform capture producer, or a `NullProducer` when the build has no
 /// capture backend (session still serves control input + heartbeats).
-fn platform_producer(_display: u32, _interval: Duration) -> Box<dyn FrameProducer> {
+fn platform_producer(
+    _display: u32,
+    _interval: Duration,
+    _height: Option<u32>,
+) -> Box<dyn FrameProducer> {
     #[cfg(all(target_os = "linux", feature = "x11"))]
-    match x11::X11Producer::new(_display, _interval) {
+    match x11::X11Producer::new(_display, _interval, _height) {
         Ok(p) => return Box::new(p),
         Err(e) => tracing::warn!("capture init failed: {e}"),
     }
@@ -618,6 +832,13 @@ fn advance_cadence(
 }
 
 impl FrameProducer for SyntheticProducer {
+    fn resume_after_backpressure(&mut self) {
+        self.next_due = self.next_due.max(
+            Instant::now()
+                .checked_sub(self.interval)
+                .unwrap_or_else(Instant::now),
+        );
+    }
     fn produce(
         &mut self,
         seq: u64,
@@ -672,28 +893,37 @@ mod x11 {
         next_due: Instant,
         output_height: Option<u32>,
         last_work: Duration,
+        skipped: bool,
     }
 
     impl X11Producer {
-        pub fn new(display: u32, interval: Duration) -> Result<Self, DesktopError> {
-            let output_height = match std::env::var("RDS_DESKTOP_OUTPUT_HEIGHT") {
-                Ok(value) => Some(
-                    value
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|height| (16..=4320).contains(height))
-                        .ok_or_else(|| {
-                            DesktopError::Capture(
-                                "RDS_DESKTOP_OUTPUT_HEIGHT must be 16..=4320".into(),
-                            )
-                        })?,
-                ),
-                Err(std::env::VarError::NotPresent) => None,
-                Err(_) => {
-                    return Err(DesktopError::Capture(
-                        "RDS_DESKTOP_OUTPUT_HEIGHT must be valid Unicode".into(),
-                    ));
-                }
+        pub fn new(
+            display: u32,
+            interval: Duration,
+            requested: Option<u32>,
+        ) -> Result<Self, DesktopError> {
+            let output_height = match requested {
+                Some(0) => None,
+                Some(height) => Some(height),
+                None => match std::env::var("RDS_DESKTOP_OUTPUT_HEIGHT") {
+                    Ok(value) => Some(
+                        value
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|height| (16..=4320).contains(height))
+                            .ok_or_else(|| {
+                                DesktopError::Capture(
+                                    "RDS_DESKTOP_OUTPUT_HEIGHT must be 16..=4320".into(),
+                                )
+                            })?,
+                    ),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(_) => {
+                        return Err(DesktopError::Capture(
+                            "RDS_DESKTOP_OUTPUT_HEIGHT must be valid Unicode".into(),
+                        ));
+                    }
+                },
             };
             let capturer = X11Capturer::new(display)?;
             let fps = 1.0 / interval.as_secs_f32();
@@ -705,6 +935,7 @@ mod x11 {
                 next_due: Instant::now(),
                 output_height,
                 last_work: Duration::ZERO,
+                skipped: false,
             })
         }
     }
@@ -737,6 +968,20 @@ mod x11 {
     }
 
     impl FrameProducer for X11Producer {
+        fn resume_after_backpressure(&mut self) {
+            let interval = self
+                .interval
+                .max(self.last_work)
+                .min(Duration::from_millis(500));
+            self.next_due = self.next_due.max(
+                Instant::now()
+                    .checked_sub(interval)
+                    .unwrap_or_else(Instant::now),
+            );
+        }
+        fn preserves_reference(&self) -> bool {
+            self.skipped
+        }
         fn produce(
             &mut self,
             seq: u64,
@@ -755,6 +1000,7 @@ mod x11 {
                 std::thread::sleep(sleep);
             }
             let capture_ts_ms = clock.now_ms();
+            self.skipped = false;
             let work_started = Instant::now();
             let raw = match self.capturer.capture() {
                 Ok(f) => f,
@@ -781,6 +1027,7 @@ mod x11 {
             );
             let (width, height) = (raw.width, raw.height);
             let encoded = self.encoder.encode(&raw);
+            self.skipped = encoded.as_ref().is_ok_and(|frame| frame.data.is_empty());
             self.last_work = work_started.elapsed();
             match encoded {
                 Ok(frame) => Some(Produced {
@@ -815,35 +1062,6 @@ mod x11 {
             }
         }
     }
-}
-
-/// Prefer a recent independent frame, otherwise the latest queued candidate.
-/// FrameChain rejects candidates with a missing reference. If a keyframe is
-/// retained while later deltas are discarded, request recovery for that gap too.
-fn collapse(
-    mut produced: Produced,
-    rx: &mut mpsc::Receiver<Produced>,
-    idr: &AtomicBool,
-) -> Produced {
-    // The producer queue has two slots. Bound this drain even if the producer
-    // refills while we select; selection must not starve actual frame writes.
-    let mut discarded_reference = false;
-    for _ in 0..2 {
-        let Ok(newer) = rx.try_recv() else { break };
-        if newer.header.keyframe {
-            produced = newer;
-            discarded_reference = false;
-        } else {
-            discarded_reference = true;
-            if !produced.header.keyframe {
-                produced = newer;
-            }
-        }
-    }
-    if discarded_reference {
-        idr.store(true, Ordering::Relaxed);
-    }
-    produced
 }
 
 /// Conservative reference contract: every delta may depend on its predecessor.
@@ -894,7 +1112,7 @@ enum SendOutcome {
     /// Frame fully sent.
     Sent,
     /// A fresher decodable frame supersedes — send it next.
-    Superseded(Produced),
+    Superseded(AdmittedFrame),
     /// Producer closed mid-send; the final frame was finished.
     Done,
     /// Transport failure — the writer ends.
@@ -907,12 +1125,23 @@ enum SendOutcome {
 async fn send_frame(
     conn: &Connection,
     route: rds_core::UniHello,
-    produced: &Produced,
-    rx: &mut mpsc::Receiver<Produced>,
+    produced: AdmittedFrame,
+    rx: &mut mpsc::Receiver<AdmittedFrame>,
+    acknowledgements: &mut JoinSet<bool>,
+    keyframe_pending: Arc<AtomicBool>,
+    idr: Arc<AtomicBool>,
 ) -> SendOutcome {
     match tokio::time::timeout(
         FRAME_SEND_TIMEOUT,
-        send_frame_inner(conn, route, produced, rx),
+        send_frame_inner(
+            conn,
+            route,
+            produced,
+            rx,
+            acknowledgements,
+            keyframe_pending,
+            idr,
+        ),
     )
     .await
     {
@@ -927,9 +1156,13 @@ async fn send_frame(
 async fn send_frame_inner(
     conn: &Connection,
     route: rds_core::UniHello,
-    produced: &Produced,
-    rx: &mut mpsc::Receiver<Produced>,
+    produced: AdmittedFrame,
+    rx: &mut mpsc::Receiver<AdmittedFrame>,
+    acknowledgements: &mut JoinSet<bool>,
+    keyframe_pending: Arc<AtomicBool>,
+    idr: Arc<AtomicBool>,
 ) -> SendOutcome {
+    let AdmittedFrame { produced, permit } = produced;
     let mut sending = match conn.open_uni().await {
         Ok(stream) => FrameSend {
             stream,
@@ -943,7 +1176,7 @@ async fn send_frame_inner(
     let stream = &mut sending.stream;
     // Frame streams rank below the control stream — a stale frame
     // must never delay an input event or a resync request.
-    if let Err(e) = stream.set_priority(FRAME_PRIORITY) {
+    if let Err(e) = stream.set_priority(MEDIA_STREAM_PRIORITY) {
         tracing::debug!("frame stream priority failed: {e}");
     }
     // Every uni stream leads with its UniHello tag — the receiver's
@@ -957,7 +1190,7 @@ async fn send_frame_inner(
         tracing::debug!("frame header write failed: {e}");
         return SendOutcome::Failed;
     }
-    let outcome = match send_payload(stream, produced, rx).await {
+    let outcome = match send_payload(stream, &produced, rx).await {
         Ok(PayloadOutcome::Abandoned(next)) => {
             return SendOutcome::Superseded(next);
         }
@@ -973,23 +1206,52 @@ async fn send_frame_inner(
         tracing::debug!("frame finish failed: {e}");
         return SendOutcome::Failed;
     }
-    sending.finished = true;
+    let seq = produced.header.seq;
+    let keyframe = produced.header.keyframe;
+    let payload_bytes = produced.payload.len();
+    // Retain the reset-on-drop owner until delivery is acknowledged. The
+    // bounded task group is owned by this writer; cancellation resets its
+    // outstanding frames without closing unrelated connection services.
+    acknowledgements.spawn(async move {
+        let started = Instant::now();
+        let deadline = if keyframe {KEYFRAME_ACK_TIMEOUT} else {FRAME_ACK_TIMEOUT};
+        let acknowledged = match tokio::time::timeout(deadline, sending.stream.stopped()).await {
+            Ok(Ok(None)) => {
+                sending.finished = true;
+                tracing::trace!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop frame transport acknowledged");
+                true
+            }
+            result => {
+                idr.store(true, Ordering::Relaxed);
+                tracing::warn!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),outcome=?result,"desktop frame delivery unconfirmed");
+                false
+            }
+        };
+        // Capture the complete reset owner, including its Drop implementation,
+        // rather than allowing disjoint field captures in the async closure.
+        drop(sending);
+        drop(permit);
+        if keyframe {
+            keyframe_pending.store(false, Ordering::Release);
+        }
+        acknowledged
+    });
     outcome
 }
 
 /// Completed payloads may FIN; abandoned ones must RESET.
-enum PayloadOutcome {
+enum PayloadOutcome<T> {
     Sent,
-    Superseded(Produced),
+    Superseded(T),
     ProducerEnded,
-    Abandoned(Produced),
+    Abandoned(T),
 }
 
-async fn send_payload<W: AsyncWrite + Unpin>(
+async fn send_payload<W: AsyncWrite + Unpin, T: Borrow<Produced>>(
     stream: &mut W,
     produced: &Produced,
-    rx: &mut mpsc::Receiver<Produced>,
-) -> std::io::Result<PayloadOutcome> {
+    rx: &mut mpsc::Receiver<T>,
+) -> std::io::Result<PayloadOutcome<T>> {
     // write_all is not cancellation-safe: keep its progress alive across a
     // producer event. Starting another write_all would duplicate the prefix.
     let writing = stream.write_all(&produced.payload);
@@ -1004,7 +1266,7 @@ async fn send_payload<W: AsyncWrite + Unpin>(
                 writing.await?;
                 Ok(PayloadOutcome::ProducerEnded)
             }
-            Some(newer) if produced.header.keyframe || !newer.header.keyframe => {
+            Some(newer) if produced.header.keyframe || !newer.borrow().header.keyframe => {
                 writing.await?;
                 Ok(PayloadOutcome::Superseded(newer))
             }
@@ -1055,6 +1317,24 @@ mod tests {
             controller.step(None, u64::from(missed));
         }
         assert_eq!(controller.current(), 4_000_000);
+    }
+
+    #[test]
+    fn admission_pause_does_not_report_encoder_starvation() {
+        let controls = ProducerControls::new(4_000_000);
+        let mut source = SyntheticProducer::new(60, 64, 64, 256);
+        source.next_due = Instant::now() - Duration::from_secs(2);
+        source.resume_after_backpressure();
+        assert!(
+            source
+                .produce(0, &controls, &SessionClock::default())
+                .is_some()
+        );
+        assert_eq!(controls.deadline_misses.load(Ordering::Relaxed), 0);
+        // Real lateness without a deliberate admission pause still reports.
+        source.next_due = Instant::now() - Duration::from_secs(2);
+        source.produce(1, &controls, &SessionClock::default());
+        assert_eq!(controls.deadline_misses.load(Ordering::Relaxed), 1);
     }
 
     fn produced(seq: u64, keyframe: bool) -> Produced {
@@ -1220,37 +1500,6 @@ mod tests {
         assert!(!chain.admit(&produced(0, false)));
     }
 
-    #[test]
-    fn collapsed_references_request_recovery_and_never_admit_a_broken_delta() {
-        let (tx, mut rx) = mpsc::channel(2);
-        let idr = AtomicBool::new(false);
-        let mut chain = FrameChain::default();
-        assert!(chain.admit(&produced(0, true)));
-        tx.try_send(produced(2, false))
-            .unwrap_or_else(|_| panic!("fixture queue full"));
-        let selected = collapse(produced(1, false), &mut rx, &idr);
-        assert_eq!(selected.header.seq, 2);
-        assert!(!chain.admit(&selected));
-        assert!(idr.swap(false, Ordering::Relaxed));
-
-        // A queued IDR replaces the broken prefix without dropping its own
-        // references; no redundant request is needed when it is the last item.
-        tx.try_send(produced(4, true))
-            .unwrap_or_else(|_| panic!("fixture queue full"));
-        let selected = collapse(produced(3, false), &mut rx, &idr);
-        assert!(chain.admit(&selected));
-        assert!(!idr.load(Ordering::Relaxed));
-
-        // Retaining a keyframe while shedding a successor also loses a
-        // reference: a later delta must wait for another independent frame.
-        tx.try_send(produced(6, false))
-            .unwrap_or_else(|_| panic!("fixture queue full"));
-        let selected = collapse(produced(5, true), &mut rx, &idr);
-        assert!(chain.admit(&selected));
-        assert!(idr.load(Ordering::Relaxed));
-        assert!(!chain.admit(&produced(7, false)));
-    }
-
     #[cfg(feature = "x11")]
     #[test]
     fn native_h264_chain_recovers_after_a_lost_reference() {
@@ -1410,6 +1659,19 @@ mod tests {
         c.step(Some(path(1000, 0, 20, 0)), 0);
         let bps = c.step(Some(path(2000, 0, 60, 0)), 0); // 3× baseline RTT
         assert!(bps < 4_000_000, "RTT growth must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn sustained_rtt_change_without_loss_does_not_collapse_bitrate() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step(Some(path(1000, 0, 90, 0)), 0);
+        let reduced = c.step(Some(path(2000, 0, 240, 0)), 0);
+        assert!(reduced < 4_000_000, "a new delay increase must react");
+        for i in 0..40 {
+            c.step(Some(path(3000 + i * 1000, 0, 240, 0)), 0);
+        }
+        assert_eq!(c.current(), 8_000_000, "stable delay is not new congestion");
+        assert!(c.step(Some(path(44000, 0, 500, 0)), 0) < 8_000_000);
     }
 
     #[test]

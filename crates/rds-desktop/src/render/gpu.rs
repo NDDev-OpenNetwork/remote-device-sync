@@ -36,6 +36,7 @@ pub(super) struct Gpu {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     picture: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
+    uploads: u64,
 }
 
 impl Gpu {
@@ -118,6 +119,7 @@ impl Gpu {
             pipeline,
             sampler,
             picture: None,
+            uploads: 0,
         })
     }
 
@@ -130,7 +132,7 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
-    pub(super) fn upload(&mut self, frame: &RawFrame) -> Result<(), DesktopError> {
+    fn upload(&mut self, frame: &RawFrame) -> Result<(), DesktopError> {
         let row = frame
             .width
             .checked_mul(4)
@@ -205,10 +207,15 @@ impl Gpu {
                 },
             );
         }
+        self.uploads += 1;
         Ok(())
     }
 
-    pub(super) fn draw(&mut self) -> Result<bool, DesktopError> {
+    pub(super) fn uploads(&self) -> u64 {
+        self.uploads
+    }
+
+    pub(super) fn draw(&mut self, frame: Option<&RawFrame>) -> Result<bool, DesktopError> {
         let surface = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -232,6 +239,12 @@ impl Gpu {
                 return Err(error("surface validation failed"));
             }
         };
+        // Queue writes retain staging allocations until submit. Never upload
+        // while an occluded/unavailable surface cannot submit: one retained
+        // CPU frame must not become an unbounded queue of GPU upload buffers.
+        if let Some(frame) = frame {
+            self.upload(frame)?;
+        }
         let view = surface.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {

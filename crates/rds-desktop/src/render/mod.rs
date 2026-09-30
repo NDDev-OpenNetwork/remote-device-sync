@@ -8,9 +8,11 @@ mod input;
 #[cfg(feature = "viewer")]
 mod platform;
 #[cfg(feature = "viewer")]
+pub use platform::choose_resolution;
+#[cfg(feature = "viewer")]
 mod viewer;
 #[cfg(feature = "viewer")]
-pub use viewer::{InputReceiver, Viewer, ViewerHandle, ViewerInput, ViewerReport};
+pub use viewer::{InputReceiver, Viewer, ViewerHandle, ViewerInput, ViewerReport, ViewerSnapshot};
 
 /// The native viewer was compiled; actual adapter/window creation can still fail.
 pub fn available() -> bool {
