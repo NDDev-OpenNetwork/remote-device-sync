@@ -8,7 +8,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use x11rb::{
-    connection::Connection,
+    connection::{Connection, RequestConnection},
     protocol::{Event, xproto::*},
     rust_connection::RustConnection,
     wrapper::ConnectionExt as _,

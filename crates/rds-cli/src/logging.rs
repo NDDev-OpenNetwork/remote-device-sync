@@ -242,4 +242,38 @@ mod tests {
         assert!(!root.join("other").exists());
         assert!(PrivateLog::create(Path::new("relative.jsonl")).is_err());
     }
+    #[test]
+    fn snapshot_never_truncates_a_hardlink_or_follows_a_symlink() {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!("rds-snapshot-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let original = root.join("original");
+        let mut writer = PrivateLog::create(&original).unwrap();
+        writer.write_all(b"preserve me").unwrap();
+        let snapshot = root.join("state.json");
+        std::fs::hard_link(&original, &snapshot).unwrap();
+        assert!(viewer_snapshot(&snapshot, b"new state").is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"preserve me");
+        std::fs::remove_file(&snapshot).unwrap();
+        std::os::unix::fs::symlink(&original, &snapshot).unwrap();
+        assert!(viewer_snapshot(&snapshot, b"new state").is_err());
+        std::fs::remove_file(&snapshot).unwrap();
+        viewer_snapshot(&snapshot, b"first").unwrap();
+        let prior = std::fs::File::open(&snapshot).unwrap();
+        viewer_snapshot(&snapshot, b"second").unwrap();
+        assert_eq!(std::fs::read(&snapshot).unwrap(), b"second");
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let mut prior = prior;
+        prior.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"first");
+        assert_eq!(std::fs::metadata(&snapshot).unwrap().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
