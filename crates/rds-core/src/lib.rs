@@ -107,6 +107,14 @@ pub enum StreamHello {
         session: [u8; 16],
         hello: DesktopHello,
     },
+    /// Per-session video height. Zero preserves source resolution; positive
+    /// heights are 16..=4320, aspect preserving and never upscale the source.
+    /// Older agents reject this additive greeting without opening a session.
+    DesktopV3 {
+        session: [u8; 16],
+        hello: DesktopHello,
+        output_height: u32,
+    },
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -218,6 +226,15 @@ pub enum DesktopControl {
     /// Liveness probe; the server echoes it as [`DesktopEvent::Heartbeat`].
     /// Lets the viewer measure control-plane RTT under video backlog.
     Heartbeat { seq: u64, ts_ms: u64 },
+    /// Explicit paste transfer. At most 1 MiB UTF-8 total and 32 KiB per
+    /// chunk; ordered offsets, one active transfer per session. Contents are
+    /// never diagnostics. The server publishes before later input is handled.
+    ClipboardChunk {
+        id: u64,
+        offset: u32,
+        total: u32,
+        data: Vec<u8>,
+    },
 }
 
 /// Server→client messages on the desktop control stream (v2).
@@ -227,6 +244,8 @@ pub enum DesktopEvent {
     InputAck { seq: u64, handled_ts_ms: u64 },
     /// Echo of [`DesktopControl::Heartbeat`].
     Heartbeat { seq: u64, ts_ms: u64 },
+    /// Clipboard is owned by the target selection service; no payload echoed.
+    ClipboardReady { id: u64, bytes: u32 },
 }
 
 /// One input event plus the metadata the serving side needs to route and

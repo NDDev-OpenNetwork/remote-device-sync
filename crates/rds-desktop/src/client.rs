@@ -236,6 +236,8 @@ pub struct SessionOpts {
     /// an ended session can never reach this session's inbox. `None`
     /// keeps the legacy shared `Desktop` route for old peers.
     pub session: Option<[u8; 16]>,
+    /// Explicit video profile; zero means source, 16..=4320 selects height.
+    pub output_height: Option<u32>,
     /// Relay mode (the local session manager): publish each encoded
     /// payload to [`DesktopSession::encoded`] instead of decoding it —
     /// no decoder is created and `frames` stays empty. Transport-level
@@ -298,9 +300,26 @@ impl DesktopSession {
         let uni = conn
             .uni_streams(route)
             .map_err(|e| DesktopError::Io(std::io::Error::other(e.to_string())))?;
-        let greeting = match opts.session {
-            Some(session) => StreamHello::DesktopV2 { session, hello },
-            None => StreamHello::Desktop(hello),
+        let greeting = match (opts.session, opts.output_height) {
+            (Some(session), Some(output_height)) => {
+                if output_height != 0 && !(16..=4320).contains(&output_height) {
+                    return Err(DesktopError::Capture(
+                        "video height must be 0 or 16..=4320".into(),
+                    ));
+                }
+                StreamHello::DesktopV3 {
+                    session,
+                    hello,
+                    output_height,
+                }
+            }
+            (Some(session), None) => StreamHello::DesktopV2 { session, hello },
+            (None, None) => StreamHello::Desktop(hello),
+            (None, Some(_)) => {
+                return Err(DesktopError::Capture(
+                    "video profile requires an isolated session route".into(),
+                ));
+            }
         };
         let (mut send, mut recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
             let (send, mut recv) = conn.open_bi().await?;

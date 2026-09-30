@@ -102,6 +102,8 @@ impl Drop for InputSender {
 pub struct ViewerReport {
     pub frames_received: u64,
     pub frames_submitted: u64,
+    pub gpu_uploads: u64,
+    pub last_submission_ms: Option<u64>,
     pub frames_replaced: u64,
     pub redraws: u64,
     pub surface_skips: u64,
@@ -121,6 +123,22 @@ pub struct ViewerReport {
     pub video_height: u32,
 }
 
+#[derive(serde::Serialize)]
+pub struct ViewerSnapshot {
+    pub pid: u32,
+    pub elapsed_ms: u64,
+    pub status: String,
+    pub network_stage: String,
+    pub render_stage: String,
+    pub ui_event_age_ms: u64,
+    pub decoded_frame_age_ms: Option<u64>,
+    pub encoded_frame_age_ms: Option<u64>,
+    pub submission_age_ms: Option<u64>,
+    pub pending_frame_bytes: usize,
+    pub occluded: bool,
+    pub report: ViewerReport,
+}
+
 struct Pending {
     raw: RawFrame,
     received: Instant,
@@ -136,6 +154,11 @@ struct State {
     sending: Vec<f64>,
     close: bool,
     interrupted: Option<Instant>,
+    network_stage: String,
+    render_stage: String,
+    last_ui_ms: u64,
+    last_encoded_ms: Option<u64>,
+    occluded: bool,
 }
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state
@@ -168,6 +191,34 @@ pub struct ViewerHandle {
     started: Instant,
 }
 impl ViewerHandle {
+    /// An independent diagnostic tick probes UI dispatch even when no media
+    /// arrives. The existing coalescing flag keeps a stalled loop bounded.
+    pub fn heartbeat_ui(&self) {
+        let mut state = lock(&self.state);
+        self.wake(&mut state);
+    }
+    pub fn stage(&self, stage: &str) {
+        lock(&self.state).network_stage = stage.into();
+    }
+    pub fn snapshot(&self) -> ViewerSnapshot {
+        let report = self.report();
+        let state = lock(&self.state);
+        let elapsed = self.started.elapsed().as_millis() as u64;
+        ViewerSnapshot {
+            pid: std::process::id(),
+            elapsed_ms: elapsed,
+            status: state.status.clone(),
+            network_stage: state.network_stage.clone(),
+            render_stage: state.render_stage.clone(),
+            ui_event_age_ms: elapsed.saturating_sub(state.last_ui_ms),
+            decoded_frame_age_ms: report.last_frame_ms.map(|v| elapsed.saturating_sub(v)),
+            encoded_frame_age_ms: state.last_encoded_ms.map(|v| elapsed.saturating_sub(v)),
+            submission_age_ms: report.last_submission_ms.map(|v| elapsed.saturating_sub(v)),
+            pending_frame_bytes: state.pending.as_ref().map_or(0, |p| p.raw.data.len()),
+            occluded: state.occluded,
+            report,
+        }
+    }
     fn wake(&self, state: &mut State) {
         if !state.wake_pending {
             state.wake_pending = true;
@@ -211,6 +262,7 @@ impl ViewerHandle {
     /// are separate from network transit and local receive-to-submit timing.
     pub fn media_timing(&self, header: &rds_core::FrameHeader) {
         let mut state = lock(&self.state);
+        state.last_encoded_ms = Some(self.started.elapsed().as_millis() as u64);
         sample(
             &mut state.encoding,
             header
@@ -267,6 +319,11 @@ impl Viewer {
                 sending: Vec::new(),
                 close: false,
                 interrupted: None,
+                network_stage: "starting".into(),
+                render_stage: "starting".into(),
+                last_ui_ms: 0,
+                last_encoded_ms: None,
+                occluded: false,
             })),
             proxy: event_loop.create_proxy(),
             started: Instant::now(),
@@ -358,16 +415,18 @@ impl App {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
-        let result = match &pending {
-            Some(frame) => gpu.upload(&frame.raw).and_then(|()| gpu.draw()),
-            None => gpu.draw(),
-        };
+        lock(&self.handle.state).render_stage = "acquiring surface".into();
+        let result = gpu.draw(pending.as_ref().map(|frame| &frame.raw));
+        lock(&self.handle.state).report.gpu_uploads = gpu.uploads();
         match result {
             Err(error) => self.fail(event_loop, error),
             Ok(true) => {
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
                     state.report.frames_submitted += 1;
+                    state.report.last_submission_ms =
+                        Some(self.handle.started.elapsed().as_millis() as u64);
+                    state.render_stage = "presented".into();
                     state
                         .report
                         .first_frame_ms
@@ -379,6 +438,7 @@ impl App {
                 }
             }
             Ok(false) => {
+                lock(&self.handle.state).render_stage = "surface unavailable".into();
                 lock(&self.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
@@ -431,11 +491,13 @@ impl ApplicationHandler<()> for App {
         let mut state = lock(&self.handle.state);
         state.wake_pending = false;
         let close = state.close;
+        state.last_ui_ms = self.handle.started.elapsed().as_millis() as u64;
+        let status = state.status.clone();
+        drop(state);
         if let Some(window) = &self.window {
-            window.set_title(&format!("RDS — {}", state.status));
+            window.set_title(&format!("RDS — {status}"));
             window.request_redraw();
         }
-        drop(state);
         if close {
             self.release(event_loop);
             event_loop.exit();
@@ -447,6 +509,7 @@ impl ApplicationHandler<()> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        lock(&self.handle.state).last_ui_ms = self.handle.started.elapsed().as_millis() as u64;
         match event {
             WindowEvent::CloseRequested => {
                 self.release(event_loop);
@@ -463,7 +526,13 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(false) => self.release(event_loop),
-            WindowEvent::Focused(true) | WindowEvent::Occluded(false) => {
+            WindowEvent::Occluded(hidden) => {
+                lock(&self.handle.state).occluded = hidden;
+                if !hidden && let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Focused(true) => {
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -473,6 +542,66 @@ impl ApplicationHandler<()> for App {
                     && let Some(code) = evdev(key)
                 {
                     if event.state == ElementState::Pressed {
+                        if code == 47 && self.keys.contains(&29) {
+                            match super::platform::paste_text() {
+                                Ok(Some(text)) => {
+                                    let id = rand::random();
+                                    let total = text.len() as u32;
+                                    let chunks =
+                                        text.as_bytes().chunks(crate::clipboard::CHUNK_BYTES);
+                                    for (index, chunk) in chunks.enumerate() {
+                                        if self
+                                            .input
+                                            .send(ViewerInput::Control(
+                                                DesktopControl::ClipboardChunk {
+                                                    id,
+                                                    offset: (index * crate::clipboard::CHUNK_BYTES)
+                                                        as u32,
+                                                    total,
+                                                    data: chunk.to_vec(),
+                                                },
+                                            ))
+                                            .is_err()
+                                        {
+                                            self.fail(
+                                                event_loop,
+                                                DesktopError::Input(
+                                                    "clipboard input queue full".into(),
+                                                ),
+                                            );
+                                            return;
+                                        }
+                                    }
+                                    if total == 0
+                                        && self
+                                            .input
+                                            .send(ViewerInput::Control(
+                                                DesktopControl::ClipboardChunk {
+                                                    id,
+                                                    offset: 0,
+                                                    total,
+                                                    data: vec![],
+                                                },
+                                            ))
+                                            .is_err()
+                                    {
+                                        self.fail(
+                                            event_loop,
+                                            DesktopError::Input(
+                                                "clipboard input queue full".into(),
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    self.handle
+                                        .status(format!("Clipboard unavailable: {error}"));
+                                    return;
+                                }
+                            }
+                        }
                         self.keys.insert(code);
                         self.input(event_loop, InputKind::KeyDown { code });
                     } else if self.keys.remove(&code) {

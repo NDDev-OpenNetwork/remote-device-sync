@@ -914,6 +914,7 @@ async fn relay_mode_publishes_encoded_frames_and_viewer_decodes() {
             clock: Some(clock.clone()),
             session: Some(next_session_id()),
             relay_encoded: true,
+            output_height: None,
         },
     )
     .await

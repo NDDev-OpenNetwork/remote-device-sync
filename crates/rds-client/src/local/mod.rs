@@ -452,7 +452,14 @@ async fn execute(
                 desktop: None,
             })
         }
-        Command::Desktop { session, hello } => {
+        Command::Desktop { session, ref hello }
+        | Command::DesktopProfile {
+            session, ref hello, ..
+        } => {
+            let output_height = match &command {
+                Command::DesktopProfile { output_height, .. } => Some(*output_height),
+                _ => None,
+            };
             let permit = streams
                 .try_acquire_owned()
                 .map_err(|_| ErrorCode::Capacity)?;
@@ -463,9 +470,10 @@ async fn execute(
             // desktop session on this connection.
             let remote = rds_desktop::client::DesktopSession::connect_opts(
                 &conn,
-                *hello,
+                (**hello).clone(),
                 rds_desktop::client::SessionOpts {
                     session: Some(rand::random()),
+                    output_height,
                     relay_encoded: true,
                     ..Default::default()
                 },
@@ -499,7 +507,10 @@ impl Client {
     }
 
     async fn exchange(&self, command: Command) -> Result<(Reply, UnixStream), Error> {
-        let body = matches!(command, Command::OpenTcp { .. } | Command::Desktop { .. });
+        let body = matches!(
+            command,
+            Command::OpenTcp { .. } | Command::Desktop { .. } | Command::DesktopProfile { .. }
+        );
         let timeout = if matches!(command, Command::Sync { .. }) {
             SYNC_TIMEOUT + Duration::from_secs(10)
         } else {
@@ -535,7 +546,10 @@ impl Client {
     }
 
     pub async fn request(&self, command: Command) -> Result<Reply, Error> {
-        if matches!(command, Command::OpenTcp { .. } | Command::Desktop { .. }) {
+        if matches!(
+            command,
+            Command::OpenTcp { .. } | Command::Desktop { .. } | Command::DesktopProfile { .. }
+        ) {
             return Err(Error::Protocol);
         }
         self.exchange(command).await.map(|(reply, _)| reply)
@@ -549,11 +563,27 @@ impl Client {
         session: Option<SessionId>,
         hello: rds_core::DesktopHello,
     ) -> Result<ManagedDesktop, Error> {
+        self.desktop_profile(session, hello, None).await
+    }
+
+    pub async fn desktop_profile(
+        &self,
+        session: Option<SessionId>,
+        hello: rds_core::DesktopHello,
+        output_height: Option<u32>,
+    ) -> Result<ManagedDesktop, Error> {
         let display = hello.display;
         let (reply, stream) = self
-            .exchange(Command::Desktop {
-                session,
-                hello: Box::new(hello),
+            .exchange(match output_height {
+                Some(output_height) => Command::DesktopProfile {
+                    session,
+                    hello: Box::new(hello),
+                    output_height,
+                },
+                None => Command::Desktop {
+                    session,
+                    hello: Box::new(hello),
+                },
             })
             .await?;
         match reply {

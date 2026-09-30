@@ -84,6 +84,126 @@ impl Write for PrivateLog {
     }
 }
 
+/// Automatic viewer diagnostics: private files, 8 MiB per part and at most
+/// ten generated log parts in the directory. The bounded telemetry adapter
+/// calls this writer off the UI/network threads.
+pub struct ViewerLog {
+    current: PrivateLog,
+    directory: std::path::PathBuf,
+}
+
+impl ViewerLog {
+    pub fn create() -> io::Result<(Self, std::path::PathBuf)> {
+        use std::os::unix::fs::DirBuilderExt;
+        let key = rds_net::default_key_path()
+            .ok_or_else(|| io::Error::other("no viewer state directory"))?;
+        let directory = key.with_file_name("viewer-logs");
+        match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        let current = Self::part(&directory)?;
+        Ok((
+            Self {
+                current,
+                directory: directory.clone(),
+            },
+            directory,
+        ))
+    }
+
+    fn part(directory: &Path) -> io::Result<PrivateLog> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let path = directory.join(format!("viewer-{stamp}-{}.log", std::process::id()));
+        // This validates directory ownership/modes and every component before
+        // retention examines anything. Existing files are never appended to.
+        let file = PrivateLog::create(&path)?;
+        let uid = rustix::process::geteuid().as_raw();
+        let mut owned = Vec::new();
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(rest) = name
+                .strip_prefix("viewer-")
+                .and_then(|n| n.strip_suffix(".log"))
+            else {
+                continue;
+            };
+            let Some((stamp, pid)) = rest.split_once('-') else {
+                continue;
+            };
+            let (Ok(stamp), Ok(_pid)) = (stamp.parse::<u128>(), pid.parse::<u32>()) else {
+                continue;
+            };
+            let meta = std::fs::symlink_metadata(entry.path())?;
+            if meta.is_file()
+                && meta.uid() == uid
+                && meta.mode() & 0o777 == 0o600
+                && meta.nlink() == 1
+            {
+                owned.push((stamp, entry.path(), meta.dev(), meta.ino()));
+            }
+        }
+        owned.sort_by_key(|v| v.0);
+        let remove = owned.len().saturating_sub(10);
+        for (_, path, dev, ino) in owned.into_iter().take(remove) {
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_file() && meta.dev() == dev && meta.ino() == ino && meta.nlink() == 1 {
+                std::fs::remove_file(path)?;
+            }
+        }
+        Ok(file)
+    }
+}
+
+impl Write for ViewerLog {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_BYTES - self.current.written {
+            self.current.flush()?;
+            self.current = Self::part(&self.directory)?;
+        }
+        self.current.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.current.flush()
+    }
+}
+
+/// Publish a small live snapshot atomically. Never truncate an existing inode
+/// (including a hard link) or follow a caller-provided symlink.
+pub fn viewer_snapshot(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > 65536 {
+        return Err(io::Error::other("viewer snapshot exceeds 64 KiB"));
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && (!meta.is_file()
+            || meta.uid() != rustix::process::geteuid().as_raw()
+            || meta.mode() & 0o777 != 0o600
+            || meta.nlink() != 1)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe existing viewer snapshot",
+        ));
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let temporary = path.with_extension(format!("{stamp}.pending"));
+    let mut file = PrivateLog::create(&temporary)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    std::fs::rename(temporary, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -99,6 +99,9 @@ pub trait FrameProducer: Send + 'static {
 /// Everything `serve_desktop` needs beyond the negotiated hello.
 #[derive(Default)]
 pub struct SessionConfig {
+    /// Explicit per-session height overrides the deployment fallback. Zero
+    /// keeps native geometry; None uses RDS_DESKTOP_OUTPUT_HEIGHT if supplied.
+    pub output_height: Option<u32>,
     /// Hard ceiling for encoder bitrate — the grant's `max_bps`
     /// constraint lands here when the connection is grant-authorized.
     pub bitrate_ceiling: Option<u64>,
@@ -240,6 +243,14 @@ pub async fn serve_desktop_with(
     config: SessionConfig,
 ) -> Result<(), DesktopError> {
     let mut send = SessionSend(send);
+    if config
+        .output_height
+        .is_some_and(|h| h != 0 && !(16..=4320).contains(&h))
+    {
+        return Err(DesktopError::Capture(
+            "video height must be 0 or 16..=4320".into(),
+        ));
+    }
     send.0.set_priority(CONTROL_STREAM_PRIORITY)?;
     // Dropping the serving future aborts async siblings and queued blocking
     // work. A running capture call may finish, then sees its receiver closed.
@@ -248,6 +259,7 @@ pub async fn serve_desktop_with(
     let clock = config.clock.clone().unwrap_or_default();
     let max_fps = hello.max_fps.clamp(1, 240);
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(max_fps));
+    tracing::info!(display=hello.display,max_fps,output_height=?config.output_height,view_only=config.view_only,"desktop serving started");
     let acks = hello.input_acks;
     if config.bitrate_ceiling.is_some_and(|rate| rate < 100_000) {
         return Err(DesktopError::Encode(
@@ -285,7 +297,7 @@ pub async fn serve_desktop_with(
             };
             let mut source = match producer.take() {
                 Some(p) => p,
-                None => platform_producer(hello.display, frame_interval),
+                None => platform_producer(hello.display, frame_interval, config.output_height),
             };
             let mut seq = 0u64;
             loop {
@@ -366,6 +378,9 @@ pub async fn serve_desktop_with(
         let mut last = Instant::now();
         let mut pending: Option<Produced> = None;
         let mut chain = FrameChain::default();
+        let mut sent = 0u64;
+        let mut superseded = 0u64;
+        let mut health = Instant::now();
         'writer: loop {
             let mut produced = match pending.take() {
                 Some(p) => p,
@@ -416,9 +431,26 @@ pub async fn serve_desktop_with(
                 "desktop frame sending"
             );
             match send_frame(&writer_conn, frame_route, &produced, &mut rx).await {
-                SendOutcome::Sent => {}
-                SendOutcome::Superseded(newer) => pending = Some(newer),
-                SendOutcome::Done | SendOutcome::Failed => break 'writer,
+                SendOutcome::Sent => {
+                    sent += 1;
+                }
+                SendOutcome::Superseded(newer) => {
+                    superseded += 1;
+                    pending = Some(newer);
+                }
+                SendOutcome::Done | SendOutcome::Failed => {
+                    tracing::warn!(sent, superseded, "desktop frame writer ended");
+                    break 'writer;
+                }
+            }
+            if health.elapsed() >= Duration::from_secs(5) {
+                tracing::info!(
+                    sent,
+                    superseded,
+                    bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
+                    "desktop sender health"
+                );
+                health = Instant::now();
             }
         }
     });
@@ -428,6 +460,8 @@ pub async fn serve_desktop_with(
     let send_clock = clock.clone();
     let session_display = hello.display;
     let control = async {
+        let mut assembly = crate::clipboard::Assembly::default();
+        let mut clipboard = None;
         loop {
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
@@ -505,7 +539,51 @@ pub async fn serve_desktop_with(
                         break;
                     }
                 }
-                Err(_) => break, // peer closed the control stream
+                Ok(DesktopControl::ClipboardChunk {
+                    id,
+                    offset,
+                    total,
+                    data,
+                }) => {
+                    if config.view_only {
+                        tracing::warn!("view-only clipboard refused");
+                        break;
+                    }
+                    let text = match assembly.push(id, offset, total, data) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            tracing::warn!(%error,"clipboard transfer refused");
+                            break;
+                        }
+                    };
+                    if let Some(text) = text {
+                        let owner = clipboard
+                            .get_or_insert_with(|| crate::clipboard::Worker::new(session_display));
+                        match tokio::time::timeout(Duration::from_secs(2), owner.publish(text))
+                            .await
+                        {
+                            Ok(Ok(())) => {
+                                if write_frame(
+                                    &mut send.0,
+                                    &DesktopEvent::ClipboardReady { id, bytes: total },
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            result => {
+                                tracing::warn!(error=?result,"clipboard publication failed; ending control before paste input");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(%error,"desktop control ended");
+                    break;
+                }
             }
         }
     };
@@ -535,9 +613,13 @@ impl Drop for SessionSend {
 
 /// Platform capture producer, or a `NullProducer` when the build has no
 /// capture backend (session still serves control input + heartbeats).
-fn platform_producer(_display: u32, _interval: Duration) -> Box<dyn FrameProducer> {
+fn platform_producer(
+    _display: u32,
+    _interval: Duration,
+    _height: Option<u32>,
+) -> Box<dyn FrameProducer> {
     #[cfg(all(target_os = "linux", feature = "x11"))]
-    match x11::X11Producer::new(_display, _interval) {
+    match x11::X11Producer::new(_display, _interval, _height) {
         Ok(p) => return Box::new(p),
         Err(e) => tracing::warn!("capture init failed: {e}"),
     }
@@ -670,25 +752,33 @@ mod x11 {
     }
 
     impl X11Producer {
-        pub fn new(display: u32, interval: Duration) -> Result<Self, DesktopError> {
-            let output_height = match std::env::var("RDS_DESKTOP_OUTPUT_HEIGHT") {
-                Ok(value) => Some(
-                    value
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|height| (16..=4320).contains(height))
-                        .ok_or_else(|| {
-                            DesktopError::Capture(
-                                "RDS_DESKTOP_OUTPUT_HEIGHT must be 16..=4320".into(),
-                            )
-                        })?,
-                ),
-                Err(std::env::VarError::NotPresent) => None,
-                Err(_) => {
-                    return Err(DesktopError::Capture(
-                        "RDS_DESKTOP_OUTPUT_HEIGHT must be valid Unicode".into(),
-                    ));
-                }
+        pub fn new(
+            display: u32,
+            interval: Duration,
+            requested: Option<u32>,
+        ) -> Result<Self, DesktopError> {
+            let output_height = match requested {
+                Some(0) => None,
+                Some(height) => Some(height),
+                None => match std::env::var("RDS_DESKTOP_OUTPUT_HEIGHT") {
+                    Ok(value) => Some(
+                        value
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|height| (16..=4320).contains(height))
+                            .ok_or_else(|| {
+                                DesktopError::Capture(
+                                    "RDS_DESKTOP_OUTPUT_HEIGHT must be 16..=4320".into(),
+                                )
+                            })?,
+                    ),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(_) => {
+                        return Err(DesktopError::Capture(
+                            "RDS_DESKTOP_OUTPUT_HEIGHT must be valid Unicode".into(),
+                        ));
+                    }
+                },
             };
             let capturer = X11Capturer::new(display)?;
             let fps = 1.0 / interval.as_secs_f32();

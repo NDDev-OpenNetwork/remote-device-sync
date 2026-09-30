@@ -3,6 +3,64 @@
 use winit::event_loop::EventLoop;
 
 #[cfg(target_os = "macos")]
+pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    let main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
+        crate::DesktopError::Input("clipboard access requires the main thread".into())
+    })?;
+    let _main = main;
+    // SAFETY: called for an explicit paste gesture on AppKit's verified main
+    // thread. Retained Cocoa objects live through the copy; nothing is logged.
+    let text = unsafe { NSPasteboard::generalPasteboard().stringForType(NSPasteboardTypeString) }
+        .map(|s| s.to_string());
+    if text
+        .as_ref()
+        .is_some_and(|s| s.len() > crate::clipboard::MAX_TEXT_BYTES)
+    {
+        return Err(crate::DesktopError::Input(
+            "clipboard text exceeds 1 MiB".into(),
+        ));
+    }
+    Ok(text)
+}
+#[cfg(not(target_os = "macos"))]
+pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+pub fn choose_resolution() -> Option<u32> {
+    use objc2_app_kit::{NSAlert, NSApplication};
+    use objc2_foundation::{MainThreadMarker, NSString};
+    let main = MainThreadMarker::new()?;
+    let app = NSApplication::sharedApplication(main);
+    // SAFETY: all AppKit operations run on its verified main thread, with
+    // retained strings/buttons for the modal lifetime; no user data is parsed.
+    let response = unsafe {
+        let alert = NSAlert::new(main);
+        app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
+        alert.setMessageText(&NSString::from_str("RDS — Video quality"));
+        alert.setInformativeText(&NSString::from_str("Full HD is the default. Choose 720p for a slower connection, or Original for the remote screen's native resolution."));
+        for title in ["Full HD · 1080p", "HD · 720p", "Original", "Cancel"] {
+            alert.addButtonWithTitle(&NSString::from_str(title));
+        }
+        app.activate();
+        alert.runModal()
+    };
+    match response {
+        1000 => Some(1080),
+        1001 => Some(720),
+        1002 => Some(0),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn choose_resolution() -> Option<u32> {
+    Some(1080)
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
     use objc2::ClassType;
     use objc2_app_kit::{NSApplication, NSImage};

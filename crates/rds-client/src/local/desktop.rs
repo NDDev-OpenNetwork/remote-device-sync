@@ -210,12 +210,35 @@ impl ManagedControl {
 /// socket; `None` from `recv` means the remote session ended cleanly or the
 /// manager went away.
 pub struct ManagedDesktop {
-    reader: OwnedReadHalf,
+    messages: tokio::sync::mpsc::Receiver<io::Result<Option<ManagedMessage>>>,
+    reading: tokio::task::JoinHandle<()>,
     state: Arc<ControlState>,
     /// The manager session this channel is pinned to.
     pub session: SessionId,
     /// Negotiated capabilities the remote agent reported.
     pub caps: DesktopCaps,
+}
+
+impl Drop for ManagedDesktop {
+    fn drop(&mut self) {
+        self.reading.abort();
+    }
+}
+
+async fn read_message(reader: &mut OwnedReadHalf) -> io::Result<Option<ManagedMessage>> {
+    match read_frame::<_, DesktopDown>(reader).await {
+        Ok(DesktopDown::Frame { header }) => {
+            let payload = read_payload(reader).await?;
+            Ok(Some(ManagedMessage::Frame(RelayedFrame {
+                header,
+                payload,
+            })))
+        }
+        Ok(DesktopDown::Event(event)) => Ok(Some(ManagedMessage::Event(event))),
+        Ok(DesktopDown::Finished) => Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 impl std::fmt::Debug for ManagedDesktop {
@@ -234,9 +257,23 @@ impl ManagedDesktop {
         caps: DesktopCaps,
         display: u32,
     ) -> Self {
-        let (reader, writer) = stream.into_split();
+        let (mut reader, writer) = stream.into_split();
+        // read_exact/framing is not cancellation safe. One owned reader
+        // retains its parse state independently of a caller's select branch.
+        // At most one message is queued and one is being read (bounded payload).
+        let (tx, messages) = tokio::sync::mpsc::channel(1);
+        let reading = tokio::spawn(async move {
+            loop {
+                let message = read_message(&mut reader).await;
+                let done = !matches!(&message, Ok(Some(_)));
+                if tx.send(message).await.is_err() || done {
+                    break;
+                }
+            }
+        });
         Self {
-            reader,
+            messages,
+            reading,
             state: Arc::new(ControlState {
                 writer: Mutex::new(writer),
                 display,
@@ -259,21 +296,10 @@ impl ManagedDesktop {
 
     /// Next manager→viewer message; `None` after the channel ends. EOF
     /// between messages means the manager went away — also `None` — while
-    /// EOF inside a frame payload stays an error.
+    /// EOF inside a frame payload stays an error. Canceling this wait never
+    /// discards a partially consumed header/body; Drop aborts the owned reader.
     pub async fn recv(&mut self) -> io::Result<Option<ManagedMessage>> {
-        match read_frame::<_, DesktopDown>(&mut self.reader).await {
-            Ok(DesktopDown::Frame { header }) => {
-                let payload = read_payload(&mut self.reader).await?;
-                Ok(Some(ManagedMessage::Frame(RelayedFrame {
-                    header,
-                    payload,
-                })))
-            }
-            Ok(DesktopDown::Event(event)) => Ok(Some(ManagedMessage::Event(event))),
-            Ok(DesktopDown::Finished) => Ok(None),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(e),
-        }
+        self.messages.recv().await.unwrap_or(Ok(None))
     }
 
     /// Shorthand for `control_handle().send_input(...)`.
@@ -333,6 +359,43 @@ mod tests {
             ManagedDesktop::new(viewer, SessionId([0x11; 16]), caps, 0),
             peer,
         )
+    }
+
+    #[tokio::test]
+    async fn canceled_receive_preserves_partial_header_and_payload() {
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &DesktopDown::Frame { header: header(7) })
+            .await
+            .unwrap();
+        let header_length = bytes.len();
+        let body = vec![0xff; 257];
+        write_payload(&mut bytes, &body).await.unwrap();
+        for split in [
+            1,
+            3,
+            4,
+            header_length - 1,
+            header_length + 1,
+            header_length + 4 + 129,
+        ] {
+            let (mut channel, mut peer) = pair();
+            peer.write_all(&bytes[..split]).await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(5), channel.recv())
+                    .await
+                    .is_err()
+            );
+            peer.write_all(&bytes[split..]).await.unwrap();
+            let message = tokio::time::timeout(std::time::Duration::from_secs(1), channel.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let Some(ManagedMessage::Frame(frame)) = message else {
+                panic!("canceled read lost the frame boundary");
+            };
+            assert_eq!(frame.header.seq, 7);
+            assert_eq!(frame.payload, body);
+        }
     }
 
     #[tokio::test]

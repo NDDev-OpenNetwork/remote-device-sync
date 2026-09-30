@@ -24,13 +24,41 @@ struct Config {
     display: Option<u32>,
     max_fps: Option<NonZeroU32>,
     grant_file: Option<PathBuf>,
+    resolution: Option<rds_cli::desktop::Resolution>,
 }
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let matches = Cli::command().get_matches();
-    let cli = Cli::from_arg_matches(&matches).expect("validated CLI arguments");
-    rds_observe::run_main(rds_observe::Service::Cli, "warn", run(cli, &matches)).await
+    let mut cli = Cli::from_arg_matches(&matches).expect("validated CLI arguments");
+    let setup = (|| -> anyhow::Result<_> {
+        let (log, directory) = rds_cli::logging::ViewerLog::create()?;
+        cli.options.diagnostics_dir = Some(directory);
+        Ok(rds_observe::install_with_writer(
+            rds_observe::Service::Cli,
+            rds_observe::Config::from_env("warn,rds_cli=info,rds_desktop=info")?,
+            log,
+        )?)
+    })();
+    match setup {
+        Ok(telemetry) => {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                tracing::error!(panic=%info,"native viewer panic");
+                previous(info);
+            }));
+            tracing::info!(
+                pid = std::process::id(),
+                "native viewer started with persistent diagnostics"
+            );
+            let result = telemetry.run(run(cli, &matches)).await;
+            telemetry.finish(result)
+        }
+        Err(error) => {
+            eprintln!("could not initialize viewer diagnostics: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
@@ -88,10 +116,26 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                 if cli.grant_file.is_none() {
                     cli.grant_file = config.grant_file;
                 }
+                if let Some(resolution) = config.resolution
+                    && matches.value_source("resolution") != Some(ValueSource::CommandLine)
+                {
+                    cli.options.resolution = resolution;
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    if !cli.options.headless && matches.value_source("resolution") != Some(ValueSource::CommandLine)
+    {
+        let Some(height) = rds_desktop::render::choose_resolution() else {
+            return Ok(());
+        };
+        cli.options.resolution = match height {
+            720 => rds_cli::desktop::Resolution::Hd,
+            0 => rds_cli::desktop::Resolution::Native,
+            _ => rds_cli::desktop::Resolution::FullHd,
+        };
     }
     let client = Client::new(directory);
     let grant = rds_cli::desktop::read_grant(cli.grant_file).await?;

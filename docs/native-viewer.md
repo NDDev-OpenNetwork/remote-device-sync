@@ -27,7 +27,7 @@ separate configured endpoint; no implicit direct fallback is introduced.
 The window scales video without changing its aspect ratio and translates
 pointer positions into the original display coordinates, including when video
 is downscaled. Physical keys use the wire's evdev vocabulary; the target's
-keyboard layout interprets them. IME/text composition, clipboard/audio and
+keyboard layout interprets them. IME/text composition, rich clipboard/audio and
 monitor-switching UI are not implemented. Focus loss releases held keys and
 buttons. Input queue overflow closes the session instead of silently losing
 a release. Consecutive pointer moves collapse without crossing key/click order.
@@ -92,7 +92,7 @@ count/recovery time. Redraw/surface-skip counts distinguish a covered window
 from presentation progress. Managed sessions also report capture/encode and
 encode-to-send p50/p95 from the serving endpoint's monotonic timestamps;
 these durations do not include network transit or physical display delay.
-No screenshot, peer key, address or credentials are
+No screenshot, peer key, address, clipboard contents or credentials are
 written to this report. For actual input-to-visible measurement use a target
 test window with a known color change and observe the rendered result; do not
 present the local receive-to-submit metric as full end-to-end latency.
@@ -123,3 +123,60 @@ install -Dm644 crates/rds-desktop/assets/org.nddev.opennetwork.rds.desktop \
 
 Native Linux windows also carry the same embedded icon. Launcher installation
 contains no endpoint identity; the normal private viewer configuration applies.
+
+## Quality selection
+
+The macOS application presents a native quality chooser before opening its
+remote session. Full HD (1080p) is the default; HD (720p) and Original are also
+available. `--resolution full-hd|hd|native` skips the chooser for explicit CLI
+or automated launches. Output preserves aspect ratio and does not upscale a
+smaller source. This is encoded video geometry, not the local window's size.
+
+The additive `DesktopV3` greeting and `DesktopProfile` manager command carry the
+requested height before capture starts. They preserve existing wire tags and
+legacy greetings; older peers refuse the extension without a silent fallback.
+Install the current viewer and both agents together. An explicit session choice
+overrides `RDS_DESKTOP_OUTPUT_HEIGHT`; legacy sessions keep that deployment
+fallback. Zero selects original geometry, otherwise the bound is 16–4320 pixels.
+
+## Explicit text paste
+
+On macOS, copying text in a local app with Cmd+C and pressing Ctrl+V inside RDS
+reads the native NSPasteboard for that paste gesture. Text transfers on the
+ordered control channel before V reaches the remote application. The X11 agent
+owns the CLIPBOARD selection and serves UTF8_STRING/TARGETS/TIMESTAMP and ICCCM
+INCR for larger data, without a clipboard helper process. This is real clipboard
+publication, not typing text through keyboard-layout substitutions.
+
+One transfer is bounded to 1 MiB of UTF-8, with 32 KiB control chunks, exact
+ordered offsets and a five-second assembly deadline. There are at most four
+active native selection workers and eight outstanding INCR requests per worker.
+View-only sessions refuse publication. Publication failure ends the control
+session before subsequent paste input can consume an unrelated old clipboard.
+Contents are neither logged nor written to disk. There is no background scan or
+automatic export of every local clipboard change. Images, files, rich formats,
+reverse clipboard and macOS Cmd+V translation remain outside this text path.
+
+## Persistent viewer diagnostics
+
+`rds-viewer` automatically writes private logs under `viewer-logs` beside the
+endpoint configuration (normally `~/.config/remote-device-sync/viewer-logs`).
+Each log part is 8 MiB maximum; ten generated parts are retained. Files are 0600
+in a validated 0700 directory without symlink components. The existing bounded
+telemetry output adapter performs logging away from UI/network threads.
+
+Every two seconds a small `state-<pid>.json` snapshot is atomically replaced.
+It contains UI dispatch age, encoded/decoded/presented-frame ages, network/render
+stage, occlusion, pending CPU bytes, received/submitted/replaced frames, actual
+GPU upload count, reconnects and stage latency. Snapshots contain no image,
+clipboard, peer or credentials. Stalled input/heartbeat writes and decode waits
+are bounded separately; reconnect causes and panics are recorded. `--report`
+still emits an end-of-run receipt, while the live snapshot survives a hung or
+terminated UI. CLI desktop commands may opt in with `--diagnostics-dir` pointing
+to an existing private directory. Independent UI probes share the bounded wake
+flag; a stalled UI cannot create an unbounded event queue.
+
+Surface acquisition now precedes any GPU upload. An occluded surface retains
+only the newest CPU image, rather than queuing staging buffers without submission.
+Managed IPC framing is read by one owned bounded worker; canceling `recv()` in a
+select never loses partially consumed message bytes. Drop aborts that worker.

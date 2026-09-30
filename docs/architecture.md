@@ -624,3 +624,17 @@ requires a new run for qualification.
 - No SSH protocol implementation (TCP forward only).
 - No unattended access control model beyond the EndpointId allowlist.
 - No file transfer, audio, multi-monitor.
+
+### Native viewer stability, video profile and text paste increment
+
+The additive `DesktopV3` remote greeting and `DesktopProfile` local IPC command
+carry a per-session video-height choice while keeping prior tags and formats.
+See [the native contract](native-viewer.md) for default Full HD, bounds and
+coordinated agent migration. Text paste uses bounded, ordered control chunks and
+an X11 session-owned CLIPBOARD service with INCR; clipboard contents never enter
+observability. Native macOS paste access occurs only on the explicit paste gesture.
+
+Managed desktop IPC has one bounded read worker independent of canceled caller
+waits. The renderer acquires a usable surface before queuing GPU writes. Private
+rotating startup logs and live snapshots distinguish dispatch, transport, decode,
+GPU submission and OS occlusion; stages remain measurements, not physical pixels.
