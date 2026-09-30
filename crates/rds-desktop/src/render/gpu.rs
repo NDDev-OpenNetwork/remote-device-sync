@@ -225,6 +225,7 @@ impl Gpu {
                 return Ok(false);
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                tracing::debug!("native surface unavailable for presentation");
                 return Ok(false);
             }
             wgpu::CurrentSurfaceTexture::Validation => {

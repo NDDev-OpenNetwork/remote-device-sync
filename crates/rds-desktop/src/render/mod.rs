@@ -6,6 +6,8 @@ mod gpu;
 #[cfg(feature = "viewer")]
 mod input;
 #[cfg(feature = "viewer")]
+mod platform;
+#[cfg(feature = "viewer")]
 mod viewer;
 #[cfg(feature = "viewer")]
 pub use viewer::{InputReceiver, Viewer, ViewerHandle, ViewerInput, ViewerReport};

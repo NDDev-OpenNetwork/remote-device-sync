@@ -46,9 +46,10 @@ negotiate only after both endpoints probe them.
 
 ## Render / audio
 
-- Render: `wgpu` surface on both OSes; Vulkan Video decode lands as
-  `wgpu::Texture`; software path uploads BGRA. Linux console client
-  option: DRM atomic direct present.
+- Render: the optional native viewer implements a `wgpu` surface with a
+  `winit` window (Metal on macOS, supported GPU backends on Linux), uploading
+  software-decoded BGRA and presenting the newest pending image. Vulkan Video
+  texture decode and Linux console DRM direct presentation remain planned.
 - Audio: PipeWire on Linux, `cpal`→CoreAudio on macOS; Opus (`opus`
   crate) both sides.
 

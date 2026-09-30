@@ -103,6 +103,8 @@ pub struct ViewerReport {
     pub frames_received: u64,
     pub frames_submitted: u64,
     pub frames_replaced: u64,
+    pub redraws: u64,
+    pub surface_skips: u64,
     pub first_frame_ms: Option<u64>,
     pub receive_to_submit_p50_ms: Option<f64>,
     pub receive_to_submit_p95_ms: Option<f64>,
@@ -207,9 +209,8 @@ impl Viewer {
     /// Must be constructed and run on the OS main thread. No identity or socket
     /// is owned by the viewer; the caller owns its asynchronous session task.
     pub fn new(display: u32) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
-        let event_loop = EventLoop::with_user_event()
-            .build()
-            .map_err(|e| DesktopError::Capture(e.to_string()))?;
+        let event_loop =
+            super::platform::event_loop().map_err(|e| DesktopError::Capture(e.to_string()))?;
         let queue = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
@@ -311,6 +312,7 @@ impl App {
         }
     }
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        lock(&self.handle.state).report.redraws += 1;
         let pending = lock(&self.handle.state).pending.take();
         let Some(gpu) = &mut self.gpu else {
             return;
@@ -338,6 +340,7 @@ impl App {
                 }
             }
             Ok(false) => {
+                lock(&self.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
                     if state.pending.is_none() {
@@ -367,6 +370,7 @@ impl ApplicationHandler<()> for App {
             });
         match result {
             Ok((window, gpu)) => {
+                window.request_redraw();
                 self.window = Some(window);
                 self.gpu = Some(gpu);
             }
