@@ -606,9 +606,13 @@ fn advance_cadence(
         return false;
     }
     *next_due += interval;
-    if now.saturating_duration_since(*next_due) >= interval {
+    let lateness = now.saturating_duration_since(*next_due);
+    if lateness >= interval {
         *next_due = now;
         return true;
+    }
+    if now > *next_due {
+        *next_due = now;
     }
     false
 }
@@ -667,6 +671,7 @@ mod x11 {
         interval: Duration,
         next_due: Instant,
         output_height: Option<u32>,
+        last_work: Duration,
     }
 
     impl X11Producer {
@@ -699,6 +704,7 @@ mod x11 {
                 interval,
                 next_due: Instant::now(),
                 output_height,
+                last_work: Duration::ZERO,
             })
         }
     }
@@ -738,13 +744,18 @@ mod x11 {
             clock: &SessionClock,
         ) -> Option<Produced> {
             let resumed = self.idle_wait(&controls.idr);
-            if advance_cadence(&mut self.next_due, self.interval, Instant::now(), resumed) {
+            // Capture/conversion has a fixed CPU cost that lowering encoded
+            // bitrate cannot remove. Honor max_fps while using the achievable
+            // cadence, rather than collapsing bitrate for every slow frame.
+            let interval = self.interval.max(self.last_work);
+            if advance_cadence(&mut self.next_due, interval, Instant::now(), resumed) {
                 controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
             }
             if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
                 std::thread::sleep(sleep);
             }
             let capture_ts_ms = clock.now_ms();
+            let work_started = Instant::now();
             let raw = match self.capturer.capture() {
                 Ok(f) => f,
                 Err(e) => {
@@ -769,7 +780,9 @@ mod x11 {
                     .min(u64::from(u32::MAX)) as u32,
             );
             let (width, height) = (raw.width, raw.height);
-            match self.encoder.encode(&raw) {
+            let encoded = self.encoder.encode(&raw);
+            self.last_work = work_started.elapsed();
+            match encoded {
                 Ok(frame) => Some(Produced {
                     header: FrameHeader {
                         seq,
@@ -1023,6 +1036,25 @@ mod tests {
         assert!(advance_cadence(&mut due, interval, now, false));
         assert_eq!(due, now, "real starvation starts a fresh schedule");
         assert!(controller.step(None, 1) < 4_000_000);
+    }
+
+    #[test]
+    fn software_work_slower_than_max_fps_preserves_network_bitrate() {
+        let maximum_fps_interval = Duration::from_millis(16);
+        let mut due = Instant::now();
+        let mut controller = BitrateController::new(4_000_000, 8_000_000);
+        for work in [22, 24, 55, 3].into_iter().cycle().take(64) {
+            let work = Duration::from_millis(work);
+            let now = due + work;
+            let missed = advance_cadence(&mut due, maximum_fps_interval.max(work), now, false);
+            assert!(
+                !missed,
+                "known capture/codec cost is an achievable cadence, not network congestion"
+            );
+            assert!(due >= now);
+            controller.step(None, u64::from(missed));
+        }
+        assert_eq!(controller.current(), 4_000_000);
     }
 
     fn produced(seq: u64, keyframe: bool) -> Produced {
