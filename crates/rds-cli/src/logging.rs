@@ -104,6 +104,40 @@ impl ViewerLog {
             Err(e) => return Err(e),
         }
         let current = Self::part(&directory)?;
+        // Preserve a bounded set of crash snapshots as well as log parts.
+        let mut snapshots = Vec::new();
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(pid) = name
+                .strip_prefix("state-")
+                .and_then(|s| s.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if pid.parse::<u32>().is_err() {
+                continue;
+            }
+            let meta = std::fs::symlink_metadata(entry.path())?;
+            if meta.is_file()
+                && meta.uid() == rustix::process::geteuid().as_raw()
+                && meta.mode() & 0o777 == 0o600
+                && meta.nlink() == 1
+            {
+                snapshots.push((meta.modified()?, entry.path(), meta.dev(), meta.ino()));
+            }
+        }
+        snapshots.sort_by_key(|v| v.0);
+        let remove = snapshots.len().saturating_sub(9);
+        for (_, path, dev, ino) in snapshots.into_iter().take(remove) {
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_file() && meta.dev() == dev && meta.ino() == ino && meta.nlink() == 1 {
+                std::fs::remove_file(path)?;
+            }
+        }
         Ok((
             Self {
                 current,
