@@ -295,11 +295,11 @@ mod tests {
         assert!(viewer_snapshot(&snapshot, b"new state").is_err());
         assert_eq!(std::fs::read(&original).unwrap(), b"preserve me");
         std::fs::remove_file(&snapshot).unwrap();
-        std::os::unix::fs::symlink(&original, &snapshot).unwrap();
+        symlink(&original, &snapshot).unwrap();
         assert!(viewer_snapshot(&snapshot, b"new state").is_err());
         std::fs::remove_file(&snapshot).unwrap();
         viewer_snapshot(&snapshot, b"first").unwrap();
-        let prior = std::fs::File::open(&snapshot).unwrap();
+        let prior = File::open(&snapshot).unwrap();
         viewer_snapshot(&snapshot, b"second").unwrap();
         assert_eq!(std::fs::read(&snapshot).unwrap(), b"second");
         use std::io::Read;
