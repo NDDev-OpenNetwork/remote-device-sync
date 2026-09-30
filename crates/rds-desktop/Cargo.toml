@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 default = []
-x11 = ["dep:x11rb", "dep:openh264", "dep:memmap2", "dep:rustix"]
+x11 = ["dep:x11rb", "dep:openh264", "dep:openh264-sys2", "dep:memmap2", "dep:rustix"]
 viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
@@ -16,6 +16,9 @@ bytes.workspace = true
 rand.workspace = true
 memmap2 = { version = "0.9", optional = true }
 openh264 = { version = "0.9", optional = true }
+# Already supplied by openh264; its typed native options expose live rate
+# updates without restarting the encoder and breaking its reference chain.
+openh264-sys2 = { version = "0.9", default-features = false, optional = true }
 rds-core.workspace = true
 rds-net.workspace = true
 thiserror.workspace = true

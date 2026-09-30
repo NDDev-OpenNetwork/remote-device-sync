@@ -186,6 +186,12 @@ rate control. Idle waits and slower real capture can replenish the bitrate budge
 no constant-zero timestamp fabricates a fixed 60 FPS clock. An intentionally
 skipped codec frame preserves the reference sequence and does not force an IDR.
 Capture/encode errors and dropped encoded references still require recovery.
+Bitrate changes apply typed native OpenH264 target/max options after encoder
+initialization, preserving references rather than producing an adaptation IDR.
+RTT adaptation detects new increases between valid samples; an unchanged high
+RTT does not repeatedly penalize the stream against a permanent startup value.
 Incomplete media bodies release reader permits after three seconds and request
 IDR recovery; handshake/control deadlines remain separate. Receiver health logs
 include admission, completion, rejection, timeout, gap and keyframe counters.
+Timeout records include frame sequence and partial media byte count, without
+logging the payload, so stalled headers and stalled bodies can be distinguished.

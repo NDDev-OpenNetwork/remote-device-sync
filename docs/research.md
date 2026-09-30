@@ -507,6 +507,15 @@ Primary-source checks reinforce the implemented bounded media design:
   producer now supplies monotonic time to `encode_at()` and uses timestamp rate
   control for variable-rate desktop capture. A skipped frame emits no encoded
   reference and must not create a protocol sequence gap or request an IDR.
+- [Cisco's live rate update implementation](https://github.com/cisco/openh264/blob/master/module/gmp-openh264.cpp)
+  uses `SetOption(ENCODER_OPTION_BITRATE)` on the initialized encoder. RDS uses
+  the existing OpenH264 sys bindings for typed target/max updates, preserving
+  reference pictures across adaptation. Geometry changes still initialize a
+  fresh encoder. A codec regression reads back both native rates and decodes
+  the continuous stream through upward/downward changes without forced IDRs.
+  New RTT growth is compared to the preceding valid sample; an unchanged high
+  RTT no longer repeatedly penalizes a stream against its startup RTT. This
+  application signal supplements QUIC congestion control, not replaces it.
 - [Current Sunshine encoder options](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2configuration.html)
   distinguish latency, compression/quality and hardware availability. Increasing
   buffering or disabling bitrate constraints is not a substitute for measuring

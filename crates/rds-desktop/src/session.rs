@@ -28,7 +28,7 @@ use rds_net::wire::{CONTROL_STREAM_PRIORITY, MEDIA_STREAM_PRIORITY};
 const PACING_INTERVAL: Duration = Duration::from_millis(250);
 /// Loss ratio that drives the bitrate down (2%).
 const LOSS_STEP_DOWN: f64 = 0.02;
-/// RTT growth over baseline that counts as congestion (1.5×).
+/// New RTT growth over the preceding sample that counts as congestion (1.5×).
 const RTT_STEP_UP: f64 = 1.5;
 
 /// Monotonic clock shared by producer and writer so `FrameHeader`
@@ -135,14 +135,14 @@ pub struct SessionConfig {
 ///
 /// Each `step` consumes one sample window: path counters plus the count
 /// of producer deadline misses. Loss, congestion events or RTT growth
-/// over the session baseline push bitrate down multiplicatively; clean
+/// over the previous observed sample push bitrate down multiplicatively; clean
 /// windows probe upward toward the ceiling; deadline misses push down
 /// even when the path looks clean (encoder starvation is congestion too).
 pub struct BitrateController {
     current: u64,
     floor: u64,
     ceiling: u64,
-    baseline_rtt_ms: Option<u64>,
+    previous_rtt_ms: Option<u64>,
     last_sent: u64,
     last_lost: u64,
     last_congestion: u64,
@@ -156,7 +156,7 @@ impl BitrateController {
             current: initial.min(ceiling),
             floor: 100_000.min(ceiling),
             ceiling,
-            baseline_rtt_ms: None,
+            previous_rtt_ms: None,
             last_sent: 0,
             last_lost: 0,
             last_congestion: 0,
@@ -184,7 +184,7 @@ impl BitrateController {
         if let Some(p) = path {
             if self.last_path != Some(p.path_id) {
                 self.last_path = Some(p.path_id);
-                self.baseline_rtt_ms = None;
+                self.previous_rtt_ms = None;
                 self.last_sent = 0;
                 self.last_lost = 0;
                 self.last_congestion = 0;
@@ -200,10 +200,13 @@ impl BitrateController {
             let congestion = p.congestion_events > self.last_congestion;
             let rtt_ms = p.rtt.as_millis() as u64;
             let rtt_high = self
-                .baseline_rtt_ms
+                .previous_rtt_ms
                 .is_some_and(|b| rtt_ms > (b as f64 * RTT_STEP_UP) as u64);
-            if self.baseline_rtt_ms.is_none() && rtt_ms > 0 {
-                self.baseline_rtt_ms = Some(rtt_ms);
+            if rtt_ms > 0 {
+                // A sustained propagation/path delay is not a fresh congestion
+                // signal every 250 ms. Reusing the startup RTT permanently
+                // drove otherwise clean Full HD streams to the 100 kbps floor.
+                self.previous_rtt_ms = Some(rtt_ms);
             }
             self.last_sent = p.sent;
             self.last_lost = p.lost;
@@ -356,12 +359,17 @@ pub async fn serve_desktop_with(
                 }
                 let missed = misses.swap(0, Ordering::Relaxed);
                 let previous = controller.current();
-                let bps = controller.step(conn.current_path_stats(), missed);
+                let path = conn.current_path_stats();
+                let bps = controller.step(path, missed);
                 if bps != previous {
                     tracing::debug!(
                         previous_bps = previous,
                         bitrate_bps = bps,
                         deadline_misses = missed,
+                        path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        path_sent = ?path.map(|p| p.sent),
+                        path_lost = ?path.map(|p| p.lost),
+                        path_congestion_events = ?path.map(|p| p.congestion_events),
                         "desktop bitrate adapted"
                     );
                 }
@@ -1511,6 +1519,19 @@ mod tests {
         c.step(Some(path(1000, 0, 20, 0)), 0);
         let bps = c.step(Some(path(2000, 0, 60, 0)), 0); // 3× baseline RTT
         assert!(bps < 4_000_000, "RTT growth must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn sustained_rtt_change_without_loss_does_not_collapse_bitrate() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step(Some(path(1000, 0, 90, 0)), 0);
+        let reduced = c.step(Some(path(2000, 0, 240, 0)), 0);
+        assert!(reduced < 4_000_000, "a new delay increase must react");
+        for i in 0..40 {
+            c.step(Some(path(3000 + i * 1000, 0, 240, 0)), 0);
+        }
+        assert_eq!(c.current(), 8_000_000, "stable delay is not new congestion");
+        assert!(c.step(Some(path(44000, 0, 500, 0)), 0) < 8_000_000);
     }
 
     #[test]

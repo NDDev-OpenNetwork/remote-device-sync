@@ -739,7 +739,7 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 match frame {
                     Some(Ok(FrameRead::Complete(header,body,budget)))=>ordered.push(header,(body,budget)),
                     Some(Ok(FrameRead::TimedOut))=>{timed_out+=1;delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
-                    _=>{rejected+=1;},
+                    _=>{rejected+=1;delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
                 }
             }
             stream = uni.recv() => {
@@ -752,11 +752,7 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 ctx.receiving.fetch_add(1, Ordering::Relaxed);
                 let budget = FrameBudget { _slot: slot, receiving: ctx.receiving.clone() };
                 let next_seq = ctx.next_seq.clone();
-                readers.spawn(async move {
-                    match tokio::time::timeout(FRAME_READ_TIMEOUT, read_one(stream, next_seq, budget)).await {
-                        Ok(Some((header,body,budget)))=>FrameRead::Complete(header,body,budget),Ok(None)=>FrameRead::Rejected,Err(_)=>FrameRead::TimedOut,
-                    }
-                });
+                readers.spawn(read_one(stream, next_seq, budget));
             }
         }
     }
@@ -767,16 +763,53 @@ async fn read_one(
     mut stream: rds_net::RecvStream,
     next_seq: Arc<AtomicU64>,
     budget: FrameBudget,
-) -> Option<(FrameHeader, Vec<u8>, FrameBudget)> {
-    let header: FrameHeader = read_frame(&mut stream).await.ok()?;
-    if header.seq == u64::MAX
-        || header.seq < next_seq.load(Ordering::Relaxed)
-        || crate::frame_bytes(header.width as usize, header.height as usize).is_none()
-    {
-        return None;
+) -> FrameRead {
+    let mut frame_seq = None;
+    let mut body_bytes = 0usize;
+    let started = std::time::Instant::now();
+    let reading = async {
+        let header: FrameHeader = read_frame(&mut stream).await.ok()?;
+        frame_seq = Some(header.seq);
+        if header.seq == u64::MAX
+            || header.seq < next_seq.load(Ordering::Relaxed)
+            || crate::frame_bytes(header.width as usize, header.height as usize).is_none()
+        {
+            return None;
+        }
+        // Retain metadata-only progress when the future times out. read_to_end
+        // discards its partial buffer on cancellation and hid whether even a
+        // header or any media bytes arrived during observed freezes.
+        let mut body = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        while let Some(count) = stream.read(&mut chunk).await.ok()? {
+            if count > MAX_FRAME_BYTES.saturating_sub(body.len()) {
+                return None;
+            }
+            body.extend_from_slice(&chunk[..count]);
+            body_bytes = body.len();
+        }
+        Some((header, body, budget))
+    };
+    match tokio::time::timeout(FRAME_READ_TIMEOUT, reading).await {
+        Ok(Some((header, body, budget))) => FrameRead::Complete(header, body, budget),
+        Ok(None) => {
+            tracing::debug!(
+                ?frame_seq,
+                body_bytes,
+                "desktop frame rejected before completion"
+            );
+            FrameRead::Rejected
+        }
+        Err(_) => {
+            tracing::warn!(
+                ?frame_seq,
+                body_bytes,
+                elapsed_ms = started.elapsed().as_millis(),
+                "desktop frame receive deadline exceeded"
+            );
+            FrameRead::TimedOut
+        }
     }
-    let body = stream.read_to_end(MAX_FRAME_BYTES).await.ok()?;
-    Some((header, body, budget))
 }
 
 /// Headless desktop run: connects, prints capabilities, streams decode

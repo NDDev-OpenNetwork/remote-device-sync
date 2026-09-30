@@ -34,7 +34,17 @@ OpenH264 now receives real monotonic timestamps with timestamp rate control.
 Intentional codec skips retain the encoded sequence. The preceding serving-loop
 policy produced sequences `(0, 2)` and unnecessary resync; the real-QUIC
 regression now observes `(0, 1)` with an ordinary delta. A codec test verifies
-reference decoding after a long idle period and monotonic time across rebuilds.
+reference decoding after a long idle period and monotonic time across rate updates.
+
+The repeated-freeze follow-up removes rate-driven encoder rebuilds. Live native
+target/max options retain codec references and avoid large adaptation IDRs;
+only geometry changes reinitialize. The direct dependency on OpenH264's already
+locked sys crate supplies the exact option types and adds no new codec library.
+A sustained RTT increase without packet loss previously reached 100 kbps in the
+regression; delay growth now compares successive valid samples. Loss/congestion
+and capture deadline signals, the grant ceiling and original floor remain active.
+Receive timeouts report frame sequence and partial body byte count, never media
+content; rejected incomplete frames also request bounded IDR recovery.
 
 ## Verification boundary
 

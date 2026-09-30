@@ -4273,6 +4273,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation 0.2.2",
  "openh264",
+ "openh264-sys2",
  "pollster",
  "rand 0.10.3",
  "rds-bench",
