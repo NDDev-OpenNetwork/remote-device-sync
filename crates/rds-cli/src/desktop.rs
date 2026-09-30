@@ -343,7 +343,7 @@ mod native {
                     None => break Ok(false),
                     Some(ManagedMessage::Event(rds_core::DesktopEvent::Heartbeat { ts_ms,.. })) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
                     Some(ManagedMessage::Event(rds_core::DesktopEvent::InputAck { .. })) => view.input_ack(),
-                    Some(ManagedMessage::Event(rds_core::DesktopEvent::ClipboardReady { bytes,.. })) => tracing::info!(bytes,"remote clipboard ready"),
+                    Some(ManagedMessage::Event(rds_core::DesktopEvent::ClipboardReady { bytes,.. })) => {view.clipboard_ready(bytes);tracing::info!(bytes,"remote clipboard ready");},
                     Some(ManagedMessage::Frame(frame)) => {
                         view.stage("decoding");
                         let received = Instant::now();
@@ -415,7 +415,7 @@ mod native {
                 event = session.events.recv() => match event {
                     Some(rds_core::DesktopEvent::Heartbeat { ts_ms,.. }) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
                     Some(rds_core::DesktopEvent::InputAck { .. }) => view.input_ack(),
-                    Some(rds_core::DesktopEvent::ClipboardReady { bytes,.. }) => tracing::info!(bytes,"remote clipboard ready"),
+                    Some(rds_core::DesktopEvent::ClipboardReady { bytes,.. }) => {view.clipboard_ready(bytes);tracing::info!(bytes,"remote clipboard ready");},
                     None => break Ok(false),
                 },
                 frame = session.frames.recv() => match frame {

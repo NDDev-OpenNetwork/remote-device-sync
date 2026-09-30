@@ -116,6 +116,8 @@ pub struct ViewerReport {
     pub encode_to_send_p95_ms: Option<f64>,
     pub control_rtt_ms: Option<u64>,
     pub input_acks: u64,
+    pub clipboard_transfers: u64,
+    pub last_clipboard_bytes: u32,
     pub reconnects: u64,
     pub last_recovery_ms: Option<u64>,
     pub last_frame_ms: Option<u64>,
@@ -257,6 +259,11 @@ impl ViewerHandle {
     }
     pub fn input_ack(&self) {
         lock(&self.state).report.input_acks += 1;
+    }
+    pub fn clipboard_ready(&self, bytes: u32) {
+        let mut state = lock(&self.state);
+        state.report.clipboard_transfers += 1;
+        state.report.last_clipboard_bytes = bytes;
     }
     /// Sender stage durations use only that sender's monotonic clock. They
     /// are separate from network transit and local receive-to-submit timing.
@@ -542,7 +549,7 @@ impl ApplicationHandler<()> for App {
                     && let Some(code) = evdev(key)
                 {
                     if event.state == ElementState::Pressed {
-                        if code == 47 && self.keys.contains(&29) {
+                        if code == 47 && (self.keys.contains(&29) || self.keys.contains(&97)) {
                             match super::platform::paste_text() {
                                 Ok(Some(text)) => {
                                     let id = rand::random();
