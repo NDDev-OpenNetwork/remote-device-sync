@@ -246,7 +246,8 @@ mod native {
                                 // After the first authenticated connect retain the exact peer
                                 // identity, even when the initial target was a registry name.
                                 let snapshot = client.snapshot().await?;
-                                *peer = snapshot.sessions.into_iter().find(|s| s.id == id).ok_or_else(|| anyhow::anyhow!("connected session disappeared"))?.peer;
+                                let authenticated = snapshot.sessions.into_iter().find(|s| s.id == id).ok_or_else(|| anyhow::anyhow!("connected session disappeared"))?.peer;
+                                *peer = reconnect_target(peer,authenticated)?;
                                 *session = Some(id);
                             }
                             managed_session(client,session.ok_or_else(|| anyhow::anyhow!("no managed session"))?,options,view,input,&stop,started).await
@@ -274,6 +275,20 @@ mod native {
                     return Ok(());
                 }
             }
+        }
+    }
+
+    fn reconnect_target(original: &str, authenticated: String) -> anyhow::Result<String> {
+        if let Ok(pinned) = rds_net::parse_target(original) {
+            anyhow::ensure!(
+                pinned.id.to_string() == authenticated,
+                "connected session differs from pinned endpoint"
+            );
+            // Keep explicit address hints through agent/directory outages.
+            Ok(original.to_owned())
+        } else {
+            // A verified name freezes to its authenticated identity.
+            Ok(authenticated)
         }
     }
 
@@ -509,6 +524,25 @@ mod native {
     #[cfg(test)]
     mod retry_tests {
         use super::*;
+
+        #[test]
+        fn reconnect_preserves_pinned_hints_and_freezes_resolved_names() {
+            let id = rds_net::SecretKey::generate().public();
+            let ticket = rds_net::Ticket(
+                rds_net::EndpointAddr::new(id)
+                    .with_relay_url("https://relay.example.com/".parse().unwrap()),
+            )
+            .to_string();
+            assert_eq!(reconnect_target(&ticket, id.to_string()).unwrap(), ticket);
+            assert_eq!(
+                reconnect_target("verified-device", id.to_string()).unwrap(),
+                id.to_string()
+            );
+            assert!(
+                reconnect_target(&ticket, rds_net::SecretKey::generate().public().to_string())
+                    .is_err()
+            );
+        }
 
         impl RetryInput for tokio::sync::mpsc::Receiver<bool> {
             async fn close_requested(&mut self) -> bool {

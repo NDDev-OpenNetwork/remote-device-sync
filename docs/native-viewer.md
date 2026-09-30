@@ -42,7 +42,9 @@ IDR recovery. The existing global encoded/decode limits still apply.
 
 The viewer reopens an interrupted desktop channel with a fresh session route.
 When the managed connection disappeared, it reconnects the same pinned peer
-through the manager. Reconnect backoff is bounded to eight seconds; inputs
+through the manager. Explicit ticket address hints are retained across retries;
+a verified device name freezes to its authenticated identity. A pinned ticket
+cannot silently switch identities. Reconnect backoff is bounded to eight seconds; inputs
 queued while disconnected are discarded. No TCP/SSH exec or file operation is
 replayed by this recovery. A grant is reused only while the agent accepts it;
 automatic grant issuance/renewal remains GDS work. Fifteen seconds without a
