@@ -70,7 +70,11 @@ local viewer does not rewrite an existing published archive.
 For a bounded run, use `--duration 30 --report <new-file.json>`. Reports contain
 received/submitted/replaced frames, first/last frame timing, video dimensions,
 receive-to-GPU-submission p50/p95, control RTT, input ACK count and reconnect
-count/recovery time. No screenshot, peer key, address or credentials are
+count/recovery time. Redraw/surface-skip counts distinguish a covered window
+from presentation progress. Managed sessions also report capture/encode and
+encode-to-send p50/p95 from the serving endpoint's monotonic timestamps;
+these durations do not include network transit or physical display delay.
+No screenshot, peer key, address or credentials are
 written to this report. For actual input-to-visible measurement use a target
 test window with a known color change and observe the rendered result; do not
 present the local receive-to-submit metric as full end-to-end latency.
@@ -81,3 +85,8 @@ retains native resolution. Original display capabilities and input coordinates
 remain unchanged. This reduces capture conversion/codec/network cost at the
 explicit resolution tradeoff. Capture timestamps precede capture/conversion;
 damage readiness wakes via the X socket rather than a fixed 25 ms poll delay.
+An idle wake starts capture immediately without counting skipped idle slots
+or sub-slot scheduling jitter as encoder starvation. This prevents an idle
+desktop from reducing its bitrate solely because it resumed after waiting.
+`RUST_LOG=rds_desktop=debug` reports bitrate changes and deadline-miss counts;
+the `trace` level adds frame sizes and sender stage durations, without pixels.

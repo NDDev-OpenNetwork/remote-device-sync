@@ -265,6 +265,7 @@ mod native {
                     Some(ManagedMessage::Event(rds_core::DesktopEvent::InputAck { .. })) => view.input_ack(),
                     Some(ManagedMessage::Frame(frame)) => {
                         let received = Instant::now();
+                        view.media_timing(&frame.header);
                         let (next,outcome) = decoder.push_bounded(frame.header,frame.payload).await?;
                         decoder = next;
                         match outcome {

@@ -108,6 +108,10 @@ pub struct ViewerReport {
     pub first_frame_ms: Option<u64>,
     pub receive_to_submit_p50_ms: Option<f64>,
     pub receive_to_submit_p95_ms: Option<f64>,
+    pub capture_encode_p50_ms: Option<f64>,
+    pub capture_encode_p95_ms: Option<f64>,
+    pub encode_to_send_p50_ms: Option<f64>,
+    pub encode_to_send_p95_ms: Option<f64>,
     pub control_rtt_ms: Option<u64>,
     pub input_acks: u64,
     pub reconnects: u64,
@@ -128,6 +132,8 @@ struct State {
     extent: (u32, u32),
     report: ViewerReport,
     delays: Vec<f64>,
+    encoding: Vec<f64>,
+    sending: Vec<f64>,
     close: bool,
     interrupted: Option<Instant>,
 }
@@ -135,6 +141,24 @@ fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn sample(samples: &mut Vec<f64>, value: f64) {
+    if samples.len() == 1024 {
+        samples.remove(0);
+    }
+    samples.push(value);
+}
+fn quantiles(samples: &[f64]) -> (Option<f64>, Option<f64>) {
+    if samples.is_empty() {
+        return (None, None);
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    (
+        Some(sorted[(sorted.len() - 1) * 50 / 100]),
+        Some(sorted[(sorted.len() - 1) * 95 / 100]),
+    )
 }
 
 #[derive(Clone)]
@@ -183,6 +207,21 @@ impl ViewerHandle {
     pub fn input_ack(&self) {
         lock(&self.state).report.input_acks += 1;
     }
+    /// Sender stage durations use only that sender's monotonic clock. They
+    /// are separate from network transit and local receive-to-submit timing.
+    pub fn media_timing(&self, header: &rds_core::FrameHeader) {
+        let mut state = lock(&self.state);
+        sample(
+            &mut state.encoding,
+            header
+                .encode_done_ts_ms
+                .saturating_sub(header.capture_ts_ms) as f64,
+        );
+        sample(
+            &mut state.sending,
+            header.send_ts_ms.saturating_sub(header.encode_done_ts_ms) as f64,
+        );
+    }
     pub fn close(&self) {
         let mut state = lock(&self.state);
         state.close = true;
@@ -191,12 +230,12 @@ impl ViewerHandle {
     pub fn report(&self) -> ViewerReport {
         let state = lock(&self.state);
         let mut report = state.report.clone();
-        if !state.delays.is_empty() {
-            let mut samples = state.delays.clone();
-            samples.sort_by(f64::total_cmp);
-            report.receive_to_submit_p50_ms = Some(samples[(samples.len() - 1) * 50 / 100]);
-            report.receive_to_submit_p95_ms = Some(samples[(samples.len() - 1) * 95 / 100]);
-        }
+        (
+            report.receive_to_submit_p50_ms,
+            report.receive_to_submit_p95_ms,
+        ) = quantiles(&state.delays);
+        (report.capture_encode_p50_ms, report.capture_encode_p95_ms) = quantiles(&state.encoding);
+        (report.encode_to_send_p50_ms, report.encode_to_send_p95_ms) = quantiles(&state.sending);
         report
     }
 }
@@ -224,6 +263,8 @@ impl Viewer {
                 extent: (0, 0),
                 report: ViewerReport::default(),
                 delays: Vec::new(),
+                encoding: Vec::new(),
+                sending: Vec::new(),
                 close: false,
                 interrupted: None,
             })),
@@ -331,12 +372,10 @@ impl App {
                         .report
                         .first_frame_ms
                         .get_or_insert(self.handle.started.elapsed().as_millis() as u64);
-                    if state.delays.len() == 1024 {
-                        state.delays.remove(0);
-                    }
-                    state
-                        .delays
-                        .push(frame.received.elapsed().as_secs_f64() * 1000.);
+                    sample(
+                        &mut state.delays,
+                        frame.received.elapsed().as_secs_f64() * 1000.,
+                    );
                 }
             }
             Ok(false) => {

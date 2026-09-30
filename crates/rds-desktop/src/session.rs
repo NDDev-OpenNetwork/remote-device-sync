@@ -339,7 +339,16 @@ pub async fn serve_desktop_with(
                     controller.steer(req);
                 }
                 let missed = misses.swap(0, Ordering::Relaxed);
+                let previous = controller.current();
                 let bps = controller.step(conn.current_path_stats(), missed);
+                if bps != previous {
+                    tracing::debug!(
+                        previous_bps = previous,
+                        bitrate_bps = bps,
+                        deadline_misses = missed,
+                        "desktop bitrate adapted"
+                    );
+                }
                 bitrate.store(bps.min(u64::from(u32::MAX)), Ordering::Relaxed);
             }
         })
@@ -396,6 +405,21 @@ pub async fn serve_desktop_with(
                 continue;
             }
             produced.header.send_ts_ms = writer_clock.now_ms();
+            tracing::trace!(
+                frame_seq = produced.header.seq,
+                keyframe = produced.header.keyframe,
+                payload_bytes = produced.payload.len(),
+                bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
+                capture_encode_ms = produced
+                    .header
+                    .encode_done_ts_ms
+                    .saturating_sub(produced.header.capture_ts_ms),
+                encode_to_send_ms = produced
+                    .header
+                    .send_ts_ms
+                    .saturating_sub(produced.header.encode_done_ts_ms),
+                "desktop frame sending"
+            );
             match send_frame(&writer_conn, frame_route, &produced, &mut rx).await {
                 SendOutcome::Sent => {}
                 SendOutcome::Superseded(newer) => pending = Some(newer),
@@ -569,6 +593,26 @@ impl SyntheticProducer {
     }
 }
 
+/// Idle wakeups start a new slot immediately. Scheduler jitter smaller than a
+/// whole slot is not encoder starvation and must not reduce the bitrate.
+fn advance_cadence(
+    next_due: &mut Instant,
+    interval: Duration,
+    now: Instant,
+    resumed: bool,
+) -> bool {
+    if resumed {
+        *next_due = now;
+        return false;
+    }
+    *next_due += interval;
+    if now.saturating_duration_since(*next_due) >= interval {
+        *next_due = now;
+        return true;
+    }
+    false
+}
+
 impl FrameProducer for SyntheticProducer {
     fn produce(
         &mut self,
@@ -576,14 +620,11 @@ impl FrameProducer for SyntheticProducer {
         controls: &ProducerControls,
         clock: &SessionClock,
     ) -> Option<Produced> {
-        self.next_due += self.interval;
+        if advance_cadence(&mut self.next_due, self.interval, Instant::now(), false) {
+            controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
+        }
         if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
             std::thread::sleep(sleep);
-        } else {
-            // Landed after our slot — count the deadline miss for the
-            // pacing controller and resync the cadence.
-            controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
-            self.next_due = Instant::now();
         }
         let capture_ts_ms = clock.now_ms();
         // Synthetic encode: bitrate hint throttles frame size (clamped),
@@ -670,11 +711,11 @@ mod x11 {
         /// (the caller's `is_closed` check) is never deferred past it.
         /// `idr` wakes the loop early: a viewer joining or recovering
         /// from loss asks for a keyframe and must not wait out the cap.
-        fn idle_wait(&mut self, idr: &AtomicBool) {
+        fn idle_wait(&mut self, idr: &AtomicBool) -> bool {
             const IDLE_POLL: Duration = Duration::from_millis(10);
             const IDLE_MAX: Duration = Duration::from_secs(1);
             if self.capturer.changed() || idr.load(Ordering::Relaxed) {
-                return;
+                return false;
             }
             let deadline = Instant::now() + IDLE_MAX;
             loop {
@@ -685,10 +726,7 @@ mod x11 {
                     break;
                 }
             }
-            // Idle time is not a cadence miss: reset the schedule so
-            // the skipped slots don't count as deadline misses.
-            let now = Instant::now();
-            self.next_due = now.checked_sub(self.interval).unwrap_or(now);
+            true
         }
     }
 
@@ -699,13 +737,12 @@ mod x11 {
             controls: &ProducerControls,
             clock: &SessionClock,
         ) -> Option<Produced> {
-            self.idle_wait(&controls.idr);
-            self.next_due += self.interval;
+            let resumed = self.idle_wait(&controls.idr);
+            if advance_cadence(&mut self.next_due, self.interval, Instant::now(), resumed) {
+                controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
                 std::thread::sleep(sleep);
-            } else {
-                controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
-                self.next_due = Instant::now();
             }
             let capture_ts_ms = clock.now_ms();
             let raw = match self.capturer.capture() {
@@ -966,6 +1003,27 @@ async fn send_payload<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_wakes_and_subslot_jitter_do_not_collapse_bitrate() {
+        let interval = Duration::from_millis(16);
+        let mut due = Instant::now();
+        let mut controller = BitrateController::new(4_000_000, 8_000_000);
+        for _ in 0..64 {
+            let now = due + Duration::from_secs(1);
+            let missed = advance_cadence(&mut due, interval, now, true);
+            assert_eq!(due, now, "damage wake must capture immediately");
+            assert!(!missed, "idle wake must not count as encoder starvation");
+            controller.step(None, u64::from(missed));
+            let now = due + interval + Duration::from_micros(100);
+            assert!(!advance_cadence(&mut due, interval, now, false));
+        }
+        assert_eq!(controller.current(), 4_000_000);
+        let now = due + interval * 3;
+        assert!(advance_cadence(&mut due, interval, now, false));
+        assert_eq!(due, now, "real starvation starts a fresh schedule");
+        assert!(controller.step(None, 1) < 4_000_000);
+    }
 
     fn produced(seq: u64, keyframe: bool) -> Produced {
         Produced {
