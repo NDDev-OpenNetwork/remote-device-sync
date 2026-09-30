@@ -56,6 +56,16 @@ resumes on the same connection when ACKs return. This bound trades maximum WAN
 frame rate for controlled outstanding work; installed network latency and
 recovery remain separate acceptance evidence.
 
+The slow-link follow-up serializes capture behind an outstanding keyframe and
+removes reference-discarding queue collapse from the bounded writer. All queued,
+written and unacknowledged frames share three owned permits, acquired before
+capture, so limiting the network window does not introduce a capture queue.
+The initial acknowledgement-only implementation failed the existing impaired
+queue-latency gate (173 ms p95 against 100 ms); that failure is retained. The
+unchanged gate is rerun after moving admission before capture. A blocked-ACK
+regression also requires only one initial keyframe to be produced before its
+delivery is confirmed, then same-connection progress after answers return.
+
 ## Verification boundary
 
 Local regression receipts include strict feature compilation, complete workspace

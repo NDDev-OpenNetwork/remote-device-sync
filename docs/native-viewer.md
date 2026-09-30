@@ -202,3 +202,10 @@ queued FIN alone is not a delivery receipt. This leaves capacity below the
 receiver's four-reader budget; capture pauses before encoding when its two-slot
 queue is full. Sender health distinguishes queued, acknowledged and unconfirmed
 frames. Transport acknowledgement is not proof of decode or presentation.
+Capture also waits for an outstanding keyframe's acknowledgement before encoding
+successors. This prevents later deltas from timing out while a large recovery
+keyframe is still transferring, and prevents duplicate IDRs from competing on
+slow links. Capture obtains one of three owned media permits before acquiring
+pixels; queued, currently written and unacknowledged frames share that budget.
+Permits release on acknowledgement, rejection or cancellation. The bounded
+writer preserves queued references in order and exposes total pending work.

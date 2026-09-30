@@ -191,15 +191,15 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
         .unwrap();
         gate.close();
         start.send(()).unwrap();
-        while calls.load(Ordering::SeqCst) < 3 {
+        while calls.load(Ordering::SeqCst) < 1 {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         let held = calls.load(Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            held <= 14,
-            "frames buffered without acknowledgements: {held}"
+        assert_eq!(
+            held, 1,
+            "a recovery keyframe must finish before encoding successors"
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),

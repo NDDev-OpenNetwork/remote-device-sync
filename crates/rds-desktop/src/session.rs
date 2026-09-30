@@ -16,6 +16,7 @@ use bytes::Bytes;
 use rds_core::{DesktopControl, DesktopEvent, DesktopHello, FrameHeader};
 use rds_net::{Connection, PathStats, RecvStream, SendStream};
 use rds_net::{read_frame, write_frame};
+use std::borrow::Borrow;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -61,6 +62,33 @@ impl SessionClock {
 pub struct Produced {
     pub header: FrameHeader,
     pub payload: Bytes,
+}
+
+struct CapturePermit(Arc<AtomicU64>);
+impl Drop for CapturePermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+struct AdmittedFrame {
+    produced: Produced,
+    permit: CapturePermit,
+}
+impl Borrow<Produced> for AdmittedFrame {
+    fn borrow(&self) -> &Produced {
+        &self.produced
+    }
+}
+impl std::ops::Deref for AdmittedFrame {
+    type Target = Produced;
+    fn deref(&self) -> &Produced {
+        &self.produced
+    }
+}
+impl std::ops::DerefMut for AdmittedFrame {
+    fn deref_mut(&mut self) -> &mut Produced {
+        &mut self.produced
+    }
 }
 
 /// Live knobs the session applies while a producer runs: the pacing
@@ -290,7 +318,9 @@ pub async fn serve_desktop_with(
     let mut input_sink = config.input_sink;
 
     // Capture+encode runs on a blocking thread; frames flow to the writer.
-    let (tx, mut rx) = mpsc::channel::<Produced>(2);
+    let (tx, mut rx) = mpsc::channel::<AdmittedFrame>(2);
+    let keyframe_pending = Arc::new(AtomicBool::new(false));
+    let capture_admission = Arc::new(AtomicU64::new(0));
     {
         let clock = clock.clone();
         let bitrate = Arc::clone(&controls.bitrate);
@@ -298,6 +328,8 @@ pub async fn serve_desktop_with(
         let misses = Arc::clone(&controls.deadline_misses);
         let requested = Arc::clone(&controls.requested);
         let mut producer = config.producer;
+        let keyframe_pending = keyframe_pending.clone();
+        let capture_admission = capture_admission.clone();
         capture.spawn_blocking(move || {
             let producer_controls = ProducerControls {
                 bitrate,
@@ -324,21 +356,44 @@ pub async fn serve_desktop_with(
                 // before spending CPU or changing the codec's references.
                 // Encoding into a full queue used to drop references and
                 // force repeated expensive IDRs while QUIC was backlogged.
-                while tx.capacity() == 0 {
+                let permit = loop {
+                    while tx.capacity() == 0 || keyframe_pending.load(Ordering::Acquire) {
+                        if tx.is_closed() {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    if capture_admission
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                            (count < MAX_PENDING_FRAME_ACKS as u64).then_some(count + 1)
+                        })
+                        .is_ok()
+                    {
+                        break CapturePermit(capture_admission.clone());
+                    }
                     if tx.is_closed() {
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(1));
-                }
+                };
                 match source.produce(seq, &producer_controls, &clock) {
                     Some(p) => {
                         if p.payload.is_empty() && source.preserves_reference() {
                             continue;
                         }
+                        if p.header.keyframe && !p.payload.is_empty() {
+                            keyframe_pending.store(true, Ordering::Release);
+                        }
                         // Losing any encoded reference breaks its successors,
                         // not only losing an IDR. Keep the two-slot bound and
                         // ask the producer for an independent replacement.
-                        if tx.try_send(p).is_err() {
+                        if tx
+                            .try_send(AdmittedFrame {
+                                produced: p,
+                                permit,
+                            })
+                            .is_err()
+                        {
                             producer_controls.idr.store(true, Ordering::Relaxed);
                         }
                         let Some(next) = seq.checked_add(1) else {
@@ -394,8 +449,8 @@ pub async fn serve_desktop_with(
         })
     };
 
-    // Writer task: one uni stream per frame. Collapse stale queued work, but
-    // never send a delta whose predecessor was discarded. A broken chain
+    // Writer task: one uni stream per frame. Backpressure retains references
+    // through the bounded producer queue. A broken chain
     // requests an IDR locally instead of waiting for a client roundtrip.
     let writer_conn = conn.clone();
     let writer_clock = clock.clone();
@@ -409,7 +464,7 @@ pub async fn serve_desktop_with(
         // keyframe can't stall the writer.
         let mut budget = 0.0f64;
         let mut last = Instant::now();
-        let mut pending: Option<Produced> = None;
+        let mut pending: Option<AdmittedFrame> = None;
         let mut chain = FrameChain::default();
         let mut sent = 0u64;
         let mut superseded = 0u64;
@@ -444,7 +499,6 @@ pub async fn serve_desktop_with(
                     None => break,
                 },
             };
-            produced = collapse(produced, &mut rx, &writer_idr);
             if produced.payload.is_empty() {
                 chain.next = None;
                 writer_idr.store(true, Ordering::Relaxed);
@@ -459,7 +513,6 @@ pub async fn serve_desktop_with(
                 let wait = ((cost - budget) / bps).min(0.5);
                 tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                 budget = (budget - cost).max(-bps * 0.5);
-                produced = collapse(produced, &mut rx, &writer_idr);
             } else {
                 budget -= cost;
             }
@@ -488,9 +541,11 @@ pub async fn serve_desktop_with(
             match send_frame(
                 &writer_conn,
                 frame_route,
-                &produced,
+                produced,
                 &mut rx,
                 &mut acknowledgements,
+                keyframe_pending.clone(),
+                writer_idr.clone(),
             )
             .await
             {
@@ -517,6 +572,8 @@ pub async fn serve_desktop_with(
                     acknowledged,
                     failed_delivery,
                     pending_acknowledgements = acknowledgements.len(),
+                    pending_media_frames = capture_admission.load(Ordering::Acquire),
+                    keyframe_pending = keyframe_pending.load(Ordering::Acquire),
                     bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
                     "desktop sender health"
                 );
@@ -979,35 +1036,6 @@ mod x11 {
     }
 }
 
-/// Prefer a recent independent frame, otherwise the latest queued candidate.
-/// FrameChain rejects candidates with a missing reference. If a keyframe is
-/// retained while later deltas are discarded, request recovery for that gap too.
-fn collapse(
-    mut produced: Produced,
-    rx: &mut mpsc::Receiver<Produced>,
-    idr: &AtomicBool,
-) -> Produced {
-    // The producer queue has two slots. Bound this drain even if the producer
-    // refills while we select; selection must not starve actual frame writes.
-    let mut discarded_reference = false;
-    for _ in 0..2 {
-        let Ok(newer) = rx.try_recv() else { break };
-        if newer.header.keyframe {
-            produced = newer;
-            discarded_reference = false;
-        } else {
-            discarded_reference = true;
-            if !produced.header.keyframe {
-                produced = newer;
-            }
-        }
-    }
-    if discarded_reference {
-        idr.store(true, Ordering::Relaxed);
-    }
-    produced
-}
-
 /// Conservative reference contract: every delta may depend on its predecessor.
 /// A producer must identify independent keyframes from the encoded bitstream.
 #[derive(Default)]
@@ -1056,7 +1084,7 @@ enum SendOutcome {
     /// Frame fully sent.
     Sent,
     /// A fresher decodable frame supersedes — send it next.
-    Superseded(Produced),
+    Superseded(AdmittedFrame),
     /// Producer closed mid-send; the final frame was finished.
     Done,
     /// Transport failure — the writer ends.
@@ -1069,13 +1097,23 @@ enum SendOutcome {
 async fn send_frame(
     conn: &Connection,
     route: rds_core::UniHello,
-    produced: &Produced,
-    rx: &mut mpsc::Receiver<Produced>,
+    produced: AdmittedFrame,
+    rx: &mut mpsc::Receiver<AdmittedFrame>,
     acknowledgements: &mut JoinSet<bool>,
+    keyframe_pending: Arc<AtomicBool>,
+    idr: Arc<AtomicBool>,
 ) -> SendOutcome {
     match tokio::time::timeout(
         FRAME_SEND_TIMEOUT,
-        send_frame_inner(conn, route, produced, rx, acknowledgements),
+        send_frame_inner(
+            conn,
+            route,
+            produced,
+            rx,
+            acknowledgements,
+            keyframe_pending,
+            idr,
+        ),
     )
     .await
     {
@@ -1090,10 +1128,13 @@ async fn send_frame(
 async fn send_frame_inner(
     conn: &Connection,
     route: rds_core::UniHello,
-    produced: &Produced,
-    rx: &mut mpsc::Receiver<Produced>,
+    produced: AdmittedFrame,
+    rx: &mut mpsc::Receiver<AdmittedFrame>,
     acknowledgements: &mut JoinSet<bool>,
+    keyframe_pending: Arc<AtomicBool>,
+    idr: Arc<AtomicBool>,
 ) -> SendOutcome {
+    let AdmittedFrame { produced, permit } = produced;
     let mut sending = match conn.open_uni().await {
         Ok(stream) => FrameSend {
             stream,
@@ -1121,7 +1162,7 @@ async fn send_frame_inner(
         tracing::debug!("frame header write failed: {e}");
         return SendOutcome::Failed;
     }
-    let outcome = match send_payload(stream, produced, rx).await {
+    let outcome = match send_payload(stream, &produced, rx).await {
         Ok(PayloadOutcome::Abandoned(next)) => {
             return SendOutcome::Superseded(next);
         }
@@ -1138,6 +1179,7 @@ async fn send_frame_inner(
         return SendOutcome::Failed;
     }
     let seq = produced.header.seq;
+    let keyframe = produced.header.keyframe;
     let payload_bytes = produced.payload.len();
     // Retain the reset-on-drop owner until delivery is acknowledged. The
     // bounded task group is owned by this writer; cancellation resets its
@@ -1151,6 +1193,7 @@ async fn send_frame_inner(
                 true
             }
             result => {
+                idr.store(true, Ordering::Relaxed);
                 tracing::warn!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),outcome=?result,"desktop frame delivery unconfirmed");
                 false
             }
@@ -1158,24 +1201,28 @@ async fn send_frame_inner(
         // Capture the complete reset owner, including its Drop implementation,
         // rather than allowing disjoint field captures in the async closure.
         drop(sending);
+        drop(permit);
+        if keyframe {
+            keyframe_pending.store(false, Ordering::Release);
+        }
         acknowledged
     });
     outcome
 }
 
 /// Completed payloads may FIN; abandoned ones must RESET.
-enum PayloadOutcome {
+enum PayloadOutcome<T> {
     Sent,
-    Superseded(Produced),
+    Superseded(T),
     ProducerEnded,
-    Abandoned(Produced),
+    Abandoned(T),
 }
 
-async fn send_payload<W: AsyncWrite + Unpin>(
+async fn send_payload<W: AsyncWrite + Unpin, T: Borrow<Produced>>(
     stream: &mut W,
     produced: &Produced,
-    rx: &mut mpsc::Receiver<Produced>,
-) -> std::io::Result<PayloadOutcome> {
+    rx: &mut mpsc::Receiver<T>,
+) -> std::io::Result<PayloadOutcome<T>> {
     // write_all is not cancellation-safe: keep its progress alive across a
     // producer event. Starting another write_all would duplicate the prefix.
     let writing = stream.write_all(&produced.payload);
@@ -1190,7 +1237,7 @@ async fn send_payload<W: AsyncWrite + Unpin>(
                 writing.await?;
                 Ok(PayloadOutcome::ProducerEnded)
             }
-            Some(newer) if produced.header.keyframe || !newer.header.keyframe => {
+            Some(newer) if produced.header.keyframe || !newer.borrow().header.keyframe => {
                 writing.await?;
                 Ok(PayloadOutcome::Superseded(newer))
             }
@@ -1404,37 +1451,6 @@ mod tests {
         assert!(chain.admit(&produced(u64::MAX - 1, true)));
         assert!(!chain.admit(&produced(u64::MAX, false)));
         assert!(!chain.admit(&produced(0, false)));
-    }
-
-    #[test]
-    fn collapsed_references_request_recovery_and_never_admit_a_broken_delta() {
-        let (tx, mut rx) = mpsc::channel(2);
-        let idr = AtomicBool::new(false);
-        let mut chain = FrameChain::default();
-        assert!(chain.admit(&produced(0, true)));
-        tx.try_send(produced(2, false))
-            .unwrap_or_else(|_| panic!("fixture queue full"));
-        let selected = collapse(produced(1, false), &mut rx, &idr);
-        assert_eq!(selected.header.seq, 2);
-        assert!(!chain.admit(&selected));
-        assert!(idr.swap(false, Ordering::Relaxed));
-
-        // A queued IDR replaces the broken prefix without dropping its own
-        // references; no redundant request is needed when it is the last item.
-        tx.try_send(produced(4, true))
-            .unwrap_or_else(|_| panic!("fixture queue full"));
-        let selected = collapse(produced(3, false), &mut rx, &idr);
-        assert!(chain.admit(&selected));
-        assert!(!idr.load(Ordering::Relaxed));
-
-        // Retaining a keyframe while shedding a successor also loses a
-        // reference: a later delta must wait for another independent frame.
-        tx.try_send(produced(6, false))
-            .unwrap_or_else(|_| panic!("fixture queue full"));
-        let selected = collapse(produced(5, true), &mut rx, &idr);
-        assert!(chain.admit(&selected));
-        assert!(idr.load(Ordering::Relaxed));
-        assert!(!chain.admit(&produced(7, false)));
     }
 
     #[cfg(feature = "x11")]
