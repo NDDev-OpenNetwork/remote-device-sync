@@ -30,6 +30,10 @@ const PACING_INTERVAL: Duration = Duration::from_millis(250);
 const LOSS_STEP_DOWN: f64 = 0.02;
 /// New RTT growth over the preceding sample that counts as congestion (1.5×).
 const RTT_STEP_UP: f64 = 1.5;
+// A queued FIN is not a delivery receipt. Keep fewer unacknowledged media
+// streams than the receiver's four readers, leaving capacity for recovery.
+const MAX_PENDING_FRAME_ACKS: usize = 3;
+const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Monotonic clock shared by producer and writer so `FrameHeader`
 /// timestamps are comparable within one session.
@@ -316,6 +320,16 @@ pub async fn serve_desktop_with(
                 if tx.is_closed() {
                     return;
                 }
+                // Reserve capture cadence through the bounded producer queue
+                // before spending CPU or changing the codec's references.
+                // Encoding into a full queue used to drop references and
+                // force repeated expensive IDRs while QUIC was backlogged.
+                while tx.capacity() == 0 {
+                    if tx.is_closed() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 match source.produce(seq, &producer_controls, &clock) {
                     Some(p) => {
                         if p.payload.is_empty() && source.preserves_reference() {
@@ -367,6 +381,8 @@ pub async fn serve_desktop_with(
                         bitrate_bps = bps,
                         deadline_misses = missed,
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        path_id = ?path.map(|p| p.path_id),
+                        path_via_relay = ?path.map(|p| p.via_relay),
                         path_sent = ?path.map(|p| p.sent),
                         path_lost = ?path.map(|p| p.lost),
                         path_congestion_events = ?path.map(|p| p.congestion_events),
@@ -397,8 +413,30 @@ pub async fn serve_desktop_with(
         let mut chain = FrameChain::default();
         let mut sent = 0u64;
         let mut superseded = 0u64;
+        let mut acknowledgements = JoinSet::new();
+        let mut acknowledged = 0u64;
+        let mut failed_delivery = 0u64;
         let mut health = Instant::now();
         'writer: loop {
+            while let Some(result) = acknowledgements.try_join_next() {
+                if matches!(result, Ok(true)) {
+                    acknowledged += 1;
+                } else {
+                    failed_delivery += 1;
+                    chain.next = None;
+                    writer_idr.store(true, Ordering::Relaxed);
+                }
+            }
+            if acknowledgements.len() >= MAX_PENDING_FRAME_ACKS {
+                if matches!(acknowledgements.join_next().await, Some(Ok(true))) {
+                    acknowledged += 1;
+                } else {
+                    failed_delivery += 1;
+                    chain.next = None;
+                    writer_idr.store(true, Ordering::Relaxed);
+                }
+                continue;
+            }
             let mut produced = match pending.take() {
                 Some(p) => p,
                 None => match rx.recv().await {
@@ -447,7 +485,15 @@ pub async fn serve_desktop_with(
                     .saturating_sub(produced.header.encode_done_ts_ms),
                 "desktop frame sending"
             );
-            match send_frame(&writer_conn, frame_route, &produced, &mut rx).await {
+            match send_frame(
+                &writer_conn,
+                frame_route,
+                &produced,
+                &mut rx,
+                &mut acknowledgements,
+            )
+            .await
+            {
                 SendOutcome::Sent => {
                     sent += 1;
                 }
@@ -455,7 +501,11 @@ pub async fn serve_desktop_with(
                     superseded += 1;
                     pending = Some(newer);
                 }
-                SendOutcome::Done | SendOutcome::Failed => {
+                SendOutcome::Done => {
+                    while acknowledgements.join_next().await.is_some() {}
+                    break 'writer;
+                }
+                SendOutcome::Failed => {
                     tracing::warn!(sent, superseded, "desktop frame writer ended");
                     break 'writer;
                 }
@@ -464,6 +514,9 @@ pub async fn serve_desktop_with(
                 tracing::info!(
                     sent,
                     superseded,
+                    acknowledged,
+                    failed_delivery,
+                    pending_acknowledgements = acknowledgements.len(),
                     bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
                     "desktop sender health"
                 );
@@ -1018,10 +1071,11 @@ async fn send_frame(
     route: rds_core::UniHello,
     produced: &Produced,
     rx: &mut mpsc::Receiver<Produced>,
+    acknowledgements: &mut JoinSet<bool>,
 ) -> SendOutcome {
     match tokio::time::timeout(
         FRAME_SEND_TIMEOUT,
-        send_frame_inner(conn, route, produced, rx),
+        send_frame_inner(conn, route, produced, rx, acknowledgements),
     )
     .await
     {
@@ -1038,6 +1092,7 @@ async fn send_frame_inner(
     route: rds_core::UniHello,
     produced: &Produced,
     rx: &mut mpsc::Receiver<Produced>,
+    acknowledgements: &mut JoinSet<bool>,
 ) -> SendOutcome {
     let mut sending = match conn.open_uni().await {
         Ok(stream) => FrameSend {
@@ -1082,7 +1137,29 @@ async fn send_frame_inner(
         tracing::debug!("frame finish failed: {e}");
         return SendOutcome::Failed;
     }
-    sending.finished = true;
+    let seq = produced.header.seq;
+    let payload_bytes = produced.payload.len();
+    // Retain the reset-on-drop owner until delivery is acknowledged. The
+    // bounded task group is owned by this writer; cancellation resets its
+    // outstanding frames without closing unrelated connection services.
+    acknowledgements.spawn(async move {
+        let started = Instant::now();
+        let acknowledged = match tokio::time::timeout(FRAME_ACK_TIMEOUT, sending.stream.stopped()).await {
+            Ok(Ok(None)) => {
+                sending.finished = true;
+                tracing::trace!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop frame transport acknowledged");
+                true
+            }
+            result => {
+                tracing::warn!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),outcome=?result,"desktop frame delivery unconfirmed");
+                false
+            }
+        };
+        // Capture the complete reset owner, including its Drop implementation,
+        // rather than allowing disjoint field captures in the async closure.
+        drop(sending);
+        acknowledged
+    });
     outcome
 }
 

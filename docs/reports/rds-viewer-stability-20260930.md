@@ -46,6 +46,16 @@ and capture deadline signals, the grant ceiling and original floor remain active
 Receive timeouts report frame sequence and partial body byte count, never media
 content; rejected incomplete frames also request bounded IDR recovery.
 
+Frame delivery now owns a three-stream transport-acknowledgement budget, below
+the receiver's four-reader limit. Outstanding frames reset after five seconds
+or writer cancellation. Capture waits for its bounded queue before encoding,
+avoiding reference loss and IDR production into a blocked transport. A real
+UDP/QUIC regression suppresses peer ACKs after the desktop handshake: the old
+implementation continued producing frames, while the bounded sender stops and
+resumes on the same connection when ACKs return. This bound trades maximum WAN
+frame rate for controlled outstanding work; installed network latency and
+recovery remain separate acceptance evidence.
+
 ## Verification boundary
 
 Local regression receipts include strict feature compilation, complete workspace
