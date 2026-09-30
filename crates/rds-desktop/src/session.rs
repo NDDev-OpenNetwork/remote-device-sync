@@ -120,6 +120,9 @@ impl ProducerControls {
 /// `controls.idr` each call and count a slot missed into
 /// `controls.deadline_misses` when a frame lands after its cadence slot.
 pub trait FrameProducer: Send + 'static {
+    /// Session admission deliberately paused capture. Rebase elapsed cadence
+    /// without counting that wait as capture/encoder starvation.
+    fn resume_after_backpressure(&mut self) {}
     /// A codec may intentionally emit no frame without changing its reference
     /// chain. Only that case preserves the encoded sequence; capture/encode
     /// errors remain discontinuities requiring resync.
@@ -356,8 +359,10 @@ pub async fn serve_desktop_with(
                 // before spending CPU or changing the codec's references.
                 // Encoding into a full queue used to drop references and
                 // force repeated expensive IDRs while QUIC was backlogged.
+                let mut paused = false;
                 let permit = loop {
                     while tx.capacity() == 0 || keyframe_pending.load(Ordering::Acquire) {
+                        paused = true;
                         if tx.is_closed() {
                             return;
                         }
@@ -374,8 +379,12 @@ pub async fn serve_desktop_with(
                     if tx.is_closed() {
                         return;
                     }
+                    paused = true;
                     std::thread::sleep(Duration::from_millis(1));
                 };
+                if paused {
+                    source.resume_after_backpressure();
+                }
                 match source.produce(seq, &producer_controls, &clock) {
                     Some(p) => {
                         if p.payload.is_empty() && source.preserves_reference() {
@@ -822,6 +831,13 @@ fn advance_cadence(
 }
 
 impl FrameProducer for SyntheticProducer {
+    fn resume_after_backpressure(&mut self) {
+        self.next_due = self.next_due.max(
+            Instant::now()
+                .checked_sub(self.interval)
+                .unwrap_or_else(Instant::now),
+        );
+    }
     fn produce(
         &mut self,
         seq: u64,
@@ -951,6 +967,17 @@ mod x11 {
     }
 
     impl FrameProducer for X11Producer {
+        fn resume_after_backpressure(&mut self) {
+            let interval = self
+                .interval
+                .max(self.last_work)
+                .min(Duration::from_millis(500));
+            self.next_due = self.next_due.max(
+                Instant::now()
+                    .checked_sub(interval)
+                    .unwrap_or_else(Instant::now),
+            );
+        }
         fn preserves_reference(&self) -> bool {
             self.skipped
         }
@@ -1288,6 +1315,24 @@ mod tests {
             controller.step(None, u64::from(missed));
         }
         assert_eq!(controller.current(), 4_000_000);
+    }
+
+    #[test]
+    fn admission_pause_does_not_report_encoder_starvation() {
+        let controls = ProducerControls::new(4_000_000);
+        let mut source = SyntheticProducer::new(60, 64, 64, 256);
+        source.next_due = Instant::now() - Duration::from_secs(2);
+        source.resume_after_backpressure();
+        assert!(
+            source
+                .produce(0, &controls, &SessionClock::default())
+                .is_some()
+        );
+        assert_eq!(controls.deadline_misses.load(Ordering::Relaxed), 0);
+        // Real lateness without a deliberate admission pause still reports.
+        source.next_due = Instant::now() - Duration::from_secs(2);
+        source.produce(1, &controls, &SessionClock::default());
+        assert_eq!(controls.deadline_misses.load(Ordering::Relaxed), 1);
     }
 
     fn produced(seq: u64, keyframe: bool) -> Produced {

@@ -209,3 +209,11 @@ slow links. Capture obtains one of three owned media permits before acquiring
 pixels; queued, currently written and unacknowledged frames share that budget.
 Permits release on acknowledgement, rejection or cancellation. The bounded
 writer preserves queued references in order and exposes total pending work.
+Admission pauses rebase producer cadence; deliberate network waiting is excluded
+from encoder-starvation signals, so it cannot repeatedly reduce image quality.
+
+Text paste sends 16 KiB chunks while accepting the existing 32 KiB wire bound.
+Reassembly permits at most five seconds without progress and thirty seconds in
+total. A progressing large transfer is no longer rejected solely because its
+first chunk arrived more than five seconds earlier. Errors distinguish bounds,
+identity/offset changes, idle/total deadlines and invalid UTF-8 without content.

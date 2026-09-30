@@ -555,14 +555,15 @@ impl ApplicationHandler<()> for App {
                                     let id = rand::random();
                                     let total = text.len() as u32;
                                     let chunks =
-                                        text.as_bytes().chunks(crate::clipboard::CHUNK_BYTES);
+                                        text.as_bytes().chunks(crate::clipboard::SEND_CHUNK_BYTES);
                                     for (index, chunk) in chunks.enumerate() {
                                         if self
                                             .input
                                             .send(ViewerInput::Control(
                                                 DesktopControl::ClipboardChunk {
                                                     id,
-                                                    offset: (index * crate::clipboard::CHUNK_BYTES)
+                                                    offset: (index
+                                                        * crate::clipboard::SEND_CHUNK_BYTES)
                                                         as u32,
                                                     total,
                                                     data: chunk.to_vec(),

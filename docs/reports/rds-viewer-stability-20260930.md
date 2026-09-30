@@ -66,6 +66,14 @@ unchanged gate is rerun after moving admission before capture. A blocked-ACK
 regression also requires only one initial keyframe to be produced before its
 delivery is confirmed, then same-connection progress after answers return.
 
+Admission pauses now explicitly rebase source cadence rather than becoming
+encoder deadline misses. The regression separates an intentional pause from
+actual late production. The progressing-clipboard follow-up uses smaller
+outgoing chunks and separate five-second idle/thirty-second total deadlines;
+the one-transfer/1 MiB/32 KiB receive bounds remain. Tests retain rejection of
+idle, overlong, overlapping, malformed and non-progressing transfers. Installed
+large-paste failures remain diagnostic evidence until requalified successfully.
+
 ## Verification boundary
 
 Local regression receipts include strict feature compilation, complete workspace
