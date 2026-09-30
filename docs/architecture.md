@@ -38,7 +38,9 @@ selection, bounded requests and TCP streams. Ordinary connectivity commands use
 it without loading a key. Explicit `--direct` commands, the agent and the owned
 relay acquire cooperative exclusive ownership of the validated seed inode.
 Single-file send/receive also use the manager and an isolated transfer route.
-Viewer manager APIs and installed-binary/platform qualification remain W2.4.
+The native viewer also uses that manager through a keyless application entry
+point. Installed-binary/platform qualification is recorded separately from the
+remaining W2.4 multi-user and grant-issuer integration.
 TCP service flags, client requests and agent policy use the same canonical
 `rds-core::TcpTarget`; IPv6 spelling and IPv4-mapped addresses normalize before
 policy comparison and dialing. Parsing has no DNS or socket side effects.
@@ -73,8 +75,11 @@ owns a bounded worker group with connection-close joins and cancellation cleanup
 
 The [desktop client boundary](desktop-client-lifecycle.md) owns its control,
 event and bounded frame-reader tasks. Native decoding uses globally limited
-blocking work with retained cancellation budgets. This is separate from the
-still-required viewer UI, per-session media routing and native media acceptance.
+blocking work with retained cancellation budgets. The optional
+[native viewer](native-viewer.md) owns a winit event loop on the OS main thread,
+a wgpu surface and one pending BGRA image. The CLI owns the cancelable network
+worker and reopens a desktop session on the same authenticated peer after loss.
+Per-session wire routing and broader native media acceptance remain separate.
 
 Owned path policy now uses [validated eligibility](path-selection.md): only the
 handshake path is seeded; application-opened candidates stay Backup until an
@@ -282,6 +287,8 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   Unix terminal adapters and feeds managed/direct streams into this library.
 - **`rds`** — operator CLI. `rds id`, `rds ticket`, `rds ping`, `rds ssh`,
   `rds forward`, `rds desktop` (feature-gated), single-file `rds send/recv`.
+  The same crate provides `rds-viewer`, a native application entry point using
+  the local manager without reading an endpoint seed.
   `rds session` connects/lists/selects/pings/opens SSH/forwards through the local agent
   without loading a key or binding a network endpoint.
 
@@ -430,7 +437,9 @@ emitted NAL units (forced IDRs, periodic IDRs at the configured
 all mark real IDRs) — never assumed from a schedule. The receiver drops
 anything below a "next expected seq" watermark, decodes with a
 session-local decoder (a shared one would cross-contaminate reference
-chains), and auto-requests an IDR on a delivered-seq gap or a decode
+chains). A bounded completion-order queue preserves an unfinished reference
+keyframe when a dependent delta completes first, retaining at most three
+successors. A 100 ms gap initiates IDR recovery. The client also requests an IDR on a delivered-seq gap or a decode
 failure, rate-limited so a corrupt stretch cannot storm. Frame stream
 headers and bodies are bounded (32 MiB cap, 30s stall); every stream
 leads with its `UniHello` tag under a 10s bound. The control stream

@@ -2165,3 +2165,14 @@ refused before any network work. Receipt:
 
 Remaining W2.6: desktop/media deadlines (W6/W9 engines) and
 cross-resource boot recovery (W3 recovery-policy scope).
+
+## 2026-09-30 — native viewer and achievable software cadence (W6 increment)
+
+The optional native window, bounded GPU/input queues, pinned desktop recovery,
+reference completion ordering and X11 readiness/scaling are implemented. Idle
+wakes and measured software work no longer spuriously collapse network bitrate.
+Native pixel tests demonstrated mouse/key delivery and the first cadence
+improvement; final-revision visible fault recovery remains pending. The same
+increment repairs sync empty/final publication cancellation and blocking-work
+permit retention. See [the scoped receipt](reports/rds-native-viewer-20260930.md)
+and [viewer contract](native-viewer.md). This does not close W6 or W9.

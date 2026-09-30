@@ -67,14 +67,14 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | codec:vaapi | stub | libva driver; unwritten | doc-only module |
 | codec:vulkan-video | stub | ash `vk::Video*`; unwritten | doc-only module |
 | codec:videotoolbox | stub | macOS; unwritten | doc-only module |
-| render:wgpu | stub | GPU surface; unwritten | `available()` returns `false` |
+| render:wgpu | experimental | `viewer` build feature; native window and usable GPU surface | native window, bounded newest-frame presentation; [viewer contract](native-viewer.md) |
 
 ## Platforms
 
 | Capability | State | Runtime prerequisites | Evidence |
 |---|---|---|---|
 | platform:linux-x86_64 | implemented | — | CI ubuntu lane |
-| platform:macos-arm64 | experimental | macOS runner/hardware; desktop stubbed; signing/notarization open | CI macos lane compiles+tests |
+| platform:macos-arm64 | experimental | native viewer; capture/input backends still stubbed; signing/notarization open | CI macos lane compiles+tests, Metal viewer qualification |
 
 ## Discovery, policy, observability
 

@@ -242,6 +242,35 @@ fn canceled_assembly_never_installs_destination() {
     assert_eq!(std::fs::read(dir.0.join("data.bin")).unwrap(), NEW);
 }
 
+#[test]
+fn empty_and_final_chunk_cancellation_preserve_the_destination() {
+    for bytes in [b"".as_slice(), NEW] {
+        let dir = Scratch::new();
+        let manifest = crate::manifest_of(bytes);
+        let mut journal = Journal::open(&dir.0, "data.bin", &manifest).unwrap();
+        for (index, chunk) in manifest.chunks.iter().enumerate() {
+            let offset = chunk.offset as usize;
+            journal
+                .store(index as u32, &bytes[offset..offset + chunk.len as usize])
+                .unwrap();
+        }
+        let checks = std::cell::Cell::new(0);
+        let before_publish = manifest.chunks.len() + 1;
+        let result = journal.assemble_cancellable(&|| {
+            let previous = checks.get();
+            checks.set(previous + 1);
+            previous == before_publish
+        });
+        assert!(result.unwrap_err().to_string().contains("canceled"));
+        assert_eq!(std::fs::read(dir.0.join("data.bin")).unwrap(), OLD);
+        Journal::open(&dir.0, "data.bin", &manifest)
+            .unwrap()
+            .assemble()
+            .unwrap();
+        assert_eq!(std::fs::read(dir.0.join("data.bin")).unwrap(), bytes);
+    }
+}
+
 /// Plant a well-formed journal directory without running `Journal::open`,
 /// so several dead journals can coexist for the same destination.
 fn plant_journal(state: &Path, rel: &str, root: ChunkHash, parts: &[(&ChunkHash, &[u8])]) {

@@ -6,6 +6,12 @@ Current execution order and reopened gates are in the
 The milestones below preserve the original direction; historical checkpoint
 completion does not establish that the audited defects or product gaps are closed.
 
+The [native viewer](native-viewer.md) now implements W6.3 window/input and
+newest-frame GPU presentation, with bounded reconnect and media-gap recovery.
+The X11 serving increment removes fixed idle polling and supports explicit
+software downscaling. This advances W6.1–W6.4/W6.6/W6.7; it does not close the
+v0.3 hardware-codec, geometry, quality or glass-to-glass acceptance gates.
+
 The [native SSH client](ssh.md) now uses russh and standard remote PTY requests
 over managed/direct TCP streams. W5 remains open for host/account enrollment,
 broker/reattachment and macOS/real-network/mixed-load qualification.

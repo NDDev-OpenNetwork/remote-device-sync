@@ -304,6 +304,48 @@ async fn cancel_flag_watcher_projects_token_state() {
     watcher.unwrap().abort();
 }
 
+#[tokio::test]
+async fn dropping_cancel_projection_stops_its_waiter() {
+    let token = tokio_util::sync::CancellationToken::new();
+    let (_, watcher) = cancel_flag_watcher(&Some(token));
+    let handle = watcher.as_ref().unwrap().0.abort_handle();
+    drop(watcher);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canceled_disk_waiter_retains_running_work_budget() {
+    let _other = DISK_JOBS
+        .acquire_many((MAX_DISK_JOBS - 1) as u32)
+        .await
+        .unwrap();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let worker = tokio::spawn(disk_job(move || {
+        let _ = entered.send(());
+        let _ = released.recv_timeout(Duration::from_secs(5));
+    }));
+    ready.await.unwrap();
+    worker.abort();
+    let _ = worker.await;
+    assert!(
+        DISK_JOBS.try_acquire().is_err(),
+        "running work lost its permit"
+    );
+    release.send(()).unwrap();
+    let permit = tokio::time::timeout(Duration::from_secs(2), DISK_JOBS.acquire())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(permit);
+}
+
 async fn flag_watcher_wait(flag: &Arc<AtomicBool>) {
     for _ in 0..200 {
         if flag.load(Ordering::Acquire) {

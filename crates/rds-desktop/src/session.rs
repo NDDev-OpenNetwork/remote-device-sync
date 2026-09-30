@@ -143,19 +143,21 @@ pub struct BitrateController {
     last_lost: u64,
     last_congestion: u64,
     primed: bool,
+    last_path: Option<u64>,
 }
 
 impl BitrateController {
     pub fn new(initial: u64, ceiling: u64) -> Self {
         Self {
             current: initial.min(ceiling),
-            floor: 100_000,
+            floor: 100_000.min(ceiling),
             ceiling,
             baseline_rtt_ms: None,
             last_sent: 0,
             last_lost: 0,
             last_congestion: 0,
             primed: false,
+            last_path: None,
         }
     }
 
@@ -176,6 +178,14 @@ impl BitrateController {
     pub fn step(&mut self, path: Option<PathStats>, deadline_misses: u64) -> u64 {
         let mut next = self.current;
         if let Some(p) = path {
+            if self.last_path != Some(p.path_id) {
+                self.last_path = Some(p.path_id);
+                self.baseline_rtt_ms = None;
+                self.last_sent = 0;
+                self.last_lost = 0;
+                self.last_congestion = 0;
+                self.primed = false;
+            }
             let d_sent = p.sent.saturating_sub(self.last_sent);
             let d_lost = p.lost.saturating_sub(self.last_lost);
             let loss = if d_sent > 0 {
@@ -198,15 +208,15 @@ impl BitrateController {
             // First sample only establishes the baseline — never react
             // to counters we didn't watch accumulate.
             if self.primed && (loss > LOSS_STEP_DOWN || congestion || rtt_high) {
-                next = (next * 7 / 10).max(self.floor);
+                next = (next / 10 * 7 + next % 10 * 7 / 10).max(self.floor);
             } else if self.primed && deadline_misses > 0 {
-                next = (next * 85 / 100).max(self.floor);
+                next = (next / 100 * 85 + next % 100 * 85 / 100).max(self.floor);
             } else if self.primed {
-                next = (next * 11 / 10).min(self.ceiling);
+                next = next.saturating_add(next / 10).min(self.ceiling);
             }
             self.primed = true;
         } else if deadline_misses > 0 {
-            next = (next * 85 / 100).max(self.floor);
+            next = (next / 100 * 85 + next % 100 * 85 / 100).max(self.floor);
         }
         self.current = next;
         next
@@ -244,7 +254,15 @@ pub async fn serve_desktop_with(
     let max_fps = hello.max_fps.clamp(1, 240);
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(max_fps));
     let acks = hello.input_acks;
-    let ceiling = config.bitrate_ceiling.unwrap_or(8_000_000).max(100_000);
+    if config.bitrate_ceiling.is_some_and(|rate| rate < 100_000) {
+        return Err(DesktopError::Encode(
+            "granted bitrate is below the supported 100000 bps floor".into(),
+        ));
+    }
+    let ceiling = config
+        .bitrate_ceiling
+        .unwrap_or(8_000_000)
+        .min(u64::from(u32::MAX));
     let controls = ProducerControls::new(4_000_000_u64.min(ceiling));
     // No backend is opened for a view-only session. Blocking platform calls
     // run on one bounded, session-owned worker, outside the async executor.
@@ -321,7 +339,16 @@ pub async fn serve_desktop_with(
                     controller.steer(req);
                 }
                 let missed = misses.swap(0, Ordering::Relaxed);
+                let previous = controller.current();
                 let bps = controller.step(conn.current_path_stats(), missed);
+                if bps != previous {
+                    tracing::debug!(
+                        previous_bps = previous,
+                        bitrate_bps = bps,
+                        deadline_misses = missed,
+                        "desktop bitrate adapted"
+                    );
+                }
                 bitrate.store(bps.min(u64::from(u32::MAX)), Ordering::Relaxed);
             }
         })
@@ -378,6 +405,21 @@ pub async fn serve_desktop_with(
                 continue;
             }
             produced.header.send_ts_ms = writer_clock.now_ms();
+            tracing::trace!(
+                frame_seq = produced.header.seq,
+                keyframe = produced.header.keyframe,
+                payload_bytes = produced.payload.len(),
+                bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
+                capture_encode_ms = produced
+                    .header
+                    .encode_done_ts_ms
+                    .saturating_sub(produced.header.capture_ts_ms),
+                encode_to_send_ms = produced
+                    .header
+                    .send_ts_ms
+                    .saturating_sub(produced.header.encode_done_ts_ms),
+                "desktop frame sending"
+            );
             match send_frame(&writer_conn, frame_route, &produced, &mut rx).await {
                 SendOutcome::Sent => {}
                 SendOutcome::Superseded(newer) => pending = Some(newer),
@@ -551,6 +593,30 @@ impl SyntheticProducer {
     }
 }
 
+/// Idle wakeups start a new slot immediately. Scheduler jitter smaller than a
+/// whole slot is not encoder starvation and must not reduce the bitrate.
+fn advance_cadence(
+    next_due: &mut Instant,
+    interval: Duration,
+    now: Instant,
+    resumed: bool,
+) -> bool {
+    if resumed {
+        *next_due = now;
+        return false;
+    }
+    *next_due += interval;
+    let lateness = now.saturating_duration_since(*next_due);
+    if lateness >= interval {
+        *next_due = now;
+        return true;
+    }
+    if now > *next_due {
+        *next_due = now;
+    }
+    false
+}
+
 impl FrameProducer for SyntheticProducer {
     fn produce(
         &mut self,
@@ -558,14 +624,11 @@ impl FrameProducer for SyntheticProducer {
         controls: &ProducerControls,
         clock: &SessionClock,
     ) -> Option<Produced> {
-        self.next_due += self.interval;
+        if advance_cadence(&mut self.next_due, self.interval, Instant::now(), false) {
+            controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
+        }
         if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
             std::thread::sleep(sleep);
-        } else {
-            // Landed after our slot — count the deadline miss for the
-            // pacing controller and resync the cadence.
-            controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
-            self.next_due = Instant::now();
         }
         let capture_ts_ms = clock.now_ms();
         // Synthetic encode: bitrate hint throttles frame size (clamped),
@@ -607,10 +670,31 @@ mod x11 {
         encoder: H264Encoder,
         interval: Duration,
         next_due: Instant,
+        output_height: Option<u32>,
+        last_work: Duration,
     }
 
     impl X11Producer {
         pub fn new(display: u32, interval: Duration) -> Result<Self, DesktopError> {
+            let output_height = match std::env::var("RDS_DESKTOP_OUTPUT_HEIGHT") {
+                Ok(value) => Some(
+                    value
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|height| (16..=4320).contains(height))
+                        .ok_or_else(|| {
+                            DesktopError::Capture(
+                                "RDS_DESKTOP_OUTPUT_HEIGHT must be 16..=4320".into(),
+                            )
+                        })?,
+                ),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(_) => {
+                    return Err(DesktopError::Capture(
+                        "RDS_DESKTOP_OUTPUT_HEIGHT must be valid Unicode".into(),
+                    ));
+                }
+            };
             let capturer = X11Capturer::new(display)?;
             let fps = 1.0 / interval.as_secs_f32();
             let encoder = H264Encoder::new(4_000_000, fps)?;
@@ -619,6 +703,8 @@ mod x11 {
                 encoder,
                 interval,
                 next_due: Instant::now(),
+                output_height,
+                last_work: Duration::ZERO,
             })
         }
     }
@@ -631,25 +717,22 @@ mod x11 {
         /// (the caller's `is_closed` check) is never deferred past it.
         /// `idr` wakes the loop early: a viewer joining or recovering
         /// from loss asks for a keyframe and must not wait out the cap.
-        fn idle_wait(&mut self, idr: &AtomicBool) {
-            const IDLE_POLL: Duration = Duration::from_millis(25);
+        fn idle_wait(&mut self, idr: &AtomicBool) -> bool {
+            const IDLE_POLL: Duration = Duration::from_millis(10);
             const IDLE_MAX: Duration = Duration::from_secs(1);
             if self.capturer.changed() || idr.load(Ordering::Relaxed) {
-                return;
+                return false;
             }
             let deadline = Instant::now() + IDLE_MAX;
             loop {
-                std::thread::sleep(IDLE_POLL);
-                if self.capturer.changed()
+                if self.capturer.wait_for_change(IDLE_POLL)
                     || idr.load(Ordering::Relaxed)
                     || Instant::now() >= deadline
                 {
                     break;
                 }
             }
-            // Idle time is not a cadence miss: reset the schedule so
-            // the skipped slots don't count as deadline misses.
-            self.next_due = Instant::now();
+            true
         }
     }
 
@@ -660,14 +743,19 @@ mod x11 {
             controls: &ProducerControls,
             clock: &SessionClock,
         ) -> Option<Produced> {
-            self.idle_wait(&controls.idr);
-            self.next_due += self.interval;
+            let resumed = self.idle_wait(&controls.idr);
+            // Capture/conversion has a fixed CPU cost that lowering encoded
+            // bitrate cannot remove. Honor max_fps while using the achievable
+            // cadence, rather than collapsing bitrate for every slow frame.
+            let interval = self.interval.max(self.last_work);
+            if advance_cadence(&mut self.next_due, interval, Instant::now(), resumed) {
+                controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(sleep) = self.next_due.checked_duration_since(Instant::now()) {
                 std::thread::sleep(sleep);
-            } else {
-                controls.deadline_misses.fetch_add(1, Ordering::Relaxed);
-                self.next_due = Instant::now();
             }
+            let capture_ts_ms = clock.now_ms();
+            let work_started = Instant::now();
             let raw = match self.capturer.capture() {
                 Ok(f) => f,
                 Err(e) => {
@@ -675,7 +763,13 @@ mod x11 {
                     return None;
                 }
             };
-            let capture_ts_ms = clock.now_ms();
+            let raw = match crate::scaling::downscale(raw, self.output_height) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    tracing::warn!(%error,"capture scaling failed");
+                    return None;
+                }
+            };
             if controls.idr.swap(false, Ordering::Relaxed) {
                 self.encoder.request_idr();
             }
@@ -686,7 +780,9 @@ mod x11 {
                     .min(u64::from(u32::MAX)) as u32,
             );
             let (width, height) = (raw.width, raw.height);
-            match self.encoder.encode(&raw) {
+            let encoded = self.encoder.encode(&raw);
+            self.last_work = work_started.elapsed();
+            match encoded {
                 Ok(frame) => Some(Produced {
                     header: FrameHeader {
                         seq,
@@ -920,6 +1016,46 @@ async fn send_payload<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_wakes_and_subslot_jitter_do_not_collapse_bitrate() {
+        let interval = Duration::from_millis(16);
+        let mut due = Instant::now();
+        let mut controller = BitrateController::new(4_000_000, 8_000_000);
+        for _ in 0..64 {
+            let now = due + Duration::from_secs(1);
+            let missed = advance_cadence(&mut due, interval, now, true);
+            assert_eq!(due, now, "damage wake must capture immediately");
+            assert!(!missed, "idle wake must not count as encoder starvation");
+            controller.step(None, u64::from(missed));
+            let now = due + interval + Duration::from_micros(100);
+            assert!(!advance_cadence(&mut due, interval, now, false));
+        }
+        assert_eq!(controller.current(), 4_000_000);
+        let now = due + interval * 3;
+        assert!(advance_cadence(&mut due, interval, now, false));
+        assert_eq!(due, now, "real starvation starts a fresh schedule");
+        assert!(controller.step(None, 1) < 4_000_000);
+    }
+
+    #[test]
+    fn software_work_slower_than_max_fps_preserves_network_bitrate() {
+        let maximum_fps_interval = Duration::from_millis(16);
+        let mut due = Instant::now();
+        let mut controller = BitrateController::new(4_000_000, 8_000_000);
+        for work in [22, 24, 55, 3].into_iter().cycle().take(64) {
+            let work = Duration::from_millis(work);
+            let now = due + work;
+            let missed = advance_cadence(&mut due, maximum_fps_interval.max(work), now, false);
+            assert!(
+                !missed,
+                "known capture/codec cost is an achievable cadence, not network congestion"
+            );
+            assert!(due >= now);
+            controller.step(None, u64::from(missed));
+        }
+        assert_eq!(controller.current(), 4_000_000);
+    }
 
     fn produced(seq: u64, keyframe: bool) -> Produced {
         Produced {

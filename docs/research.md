@@ -400,6 +400,15 @@ interop option, not a dependency.
 
 ### 9.7 Render/audio/sync — our own
 
+- Native viewer implementation (2026-09-30): `winit` 0.30.13 supplies the OS
+  window/event loop and physical input events; `wgpu` 30.0.1 supplies GPU
+  upload/presentation. RDS owns the shader, viewport, input mapping, bounded
+  queues, media ordering and session recovery. `pollster` bridges GPU setup on
+  the main event thread, while Tokio remains the network runtime. These are
+  platform primitives, with no remote-desktop helper or replacement protocol.
+  Winit's optional Adwaita/font decoration stack is disabled; the selected
+  X11/Wayland window backends do not require a font parser. See
+  [the native viewer contract](native-viewer.md) for implemented limits.
 - Render: `wgpu` surface, own YUV→RGB fragment/compute path, present
   newest-frame-only. Fullscreen-console client option: DRM atomic
   direct present.

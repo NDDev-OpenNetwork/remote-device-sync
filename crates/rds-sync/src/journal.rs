@@ -238,6 +238,9 @@ impl Journal {
         if !self.complete() {
             return Err(SyncError::Manifest("assemble before complete".into()));
         }
+        if stop() {
+            return Err(SyncError::Manifest("assembly canceled".into()));
+        }
         let mut stage = self.dest_state.stage_named(ASSEMBLY.into())?;
         let mut root = blake3::Hasher::new();
         for c in &self.manifest.chunks {
@@ -259,6 +262,11 @@ impl Journal {
             ));
         }
         hit(Point::Written)?;
+        // Empty files and a cancellation during the final write still cross
+        // this publication barrier. Once rename begins the commit is uncertain.
+        if stop() {
+            return Err(SyncError::Manifest("assembly canceled".into()));
+        }
         stage.install_in(&self.dest_parent, &self.dest_name)?;
         // Publication is durable now. A cleanup failure does not turn a
         // committed file into a failed transfer; the next open re-verifies

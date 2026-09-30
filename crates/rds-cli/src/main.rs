@@ -10,6 +10,7 @@ use rds_net::{
 };
 use tracing::Instrument;
 
+use rds_cli::desktop;
 #[cfg(unix)]
 mod logging;
 mod managed;
@@ -127,10 +128,8 @@ enum Command {
     /// Open a remote desktop session (requires the `desktop` feature).
     Desktop {
         target: String,
-        #[arg(long, default_value = "0")]
-        display: u32,
-        #[arg(long, default_value = "30")]
-        max_fps: u32,
+        #[command(flatten)]
+        options: desktop::Options,
     },
     /// Push a file into the peer's sync directory (resumable).
     Send {
@@ -399,30 +398,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .instrument(session.session.span())
                     .await?;
             }
-            Command::Desktop {
-                target,
-                display,
-                max_fps,
-            } => {
-                #[cfg(feature = "desktop")]
-                {
-                    let session = dial(
-                        &endpoint,
-                        resolve(&directory, &target).await?,
-                        grant.clone(),
-                    )
-                    .await?;
-                    rds_desktop::client::run_desktop_client(session.conn.clone(), display, max_fps)
-                        .instrument(session.session.span())
-                        .await?;
-                }
-                #[cfg(not(feature = "desktop"))]
-                {
-                    let _ = (target, display, max_fps);
-                    anyhow::bail!(
-                        "rds built without desktop support; enable the `desktop` feature"
-                    );
-                }
+            Command::Desktop { target, options } => {
+                desktop::direct(
+                    &endpoint,
+                    resolve(&directory, &target).await?,
+                    grant.clone(),
+                    options,
+                )
+                .await?;
             }
             Command::Send { target, path } => {
                 let conn = dial(
