@@ -20,9 +20,6 @@ pub struct Options {
     pub display: u32,
     #[arg(long, default_value = "60")]
     pub max_fps: NonZeroU32,
-    /// Keep the native desktop visible above other application windows.
-    #[arg(long)]
-    pub always_on_top: bool,
     /// Decode/statistics without opening a native window.
     #[arg(long, conflicts_with = "report")]
     pub headless: bool,
@@ -113,7 +110,7 @@ mod native {
                 _ = async { match duration { Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds.get())).await, None => std::future::pending().await } } => Ok(()),
             };
         }
-        let (viewer, handle, mut input) = Viewer::new(options.display, options.always_on_top)?;
+        let (viewer, handle, mut input) = Viewer::new(options.display)?;
         let stop = CancellationToken::new();
         let mut workers = tokio::task::JoinSet::new();
         let worker_stop = stop.clone();

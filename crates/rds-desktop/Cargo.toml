@@ -9,7 +9,7 @@ repository.workspace = true
 [features]
 default = []
 x11 = ["dep:x11rb", "dep:openh264", "dep:memmap2", "dep:rustix"]
-viewer = ["dep:wgpu", "dep:winit", "dep:pollster"]
+viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
 bytes.workspace = true
@@ -29,6 +29,13 @@ winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "
 pollster = { version = "0.4", optional = true }
 serde.workspace = true
 rustix = { workspace = true, features = ["event"], optional = true }
+
+# The same thin AppKit bindings already used by winit, for a Dock icon when
+# launched directly from the CLI as well as from a packaged application.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.5.2", optional = true }
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["std", "NSApplication", "NSImage"], optional = true }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["std", "NSData", "NSObject"], optional = true }
 
 [dev-dependencies]
 noq.workspace = true

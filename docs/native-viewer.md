@@ -6,11 +6,11 @@ decoding stays on bounded blocking workers. The serving device needs a real
 capture/input backend; the current Linux implementation uses X11/XTEST.
 macOS capture, VideoToolbox and Wayland serving remain separate work.
 
-`--always-on-top` keeps the remote screen visible above other application
-windows. This is useful while using a local app alongside the remote desktop
-or observing pixels during qualification. Normal windows retain the OS stacking
-behavior, and an occluded Metal surface may pause presentation. Returning focus
+The viewer uses ordinary OS window stacking and can move behind other
+applications. An occluded Metal surface may pause presentation. Returning focus
 or uncovering the window requests an immediate redraw of its latest image.
+The application icon is shared by the macOS bundle, native viewer and Linux
+launcher; its source and reproducible derivatives live in the desktop assets.
 
 ```sh
 cargo build --release -p rds-cli --features desktop
@@ -78,7 +78,9 @@ python3 scripts/package-viewer.py --binary target/release/rds-viewer \
   --output "$HOME/Applications/RDS.app"
 ```
 
-The package contains the native executable and generic Info.plist. Its local
+The package contains the native executable, generic Info.plist and the shared
+ICNS application icon. Dock and Finder use the bundle icon; direct CLI launches
+set the same application icon through the native AppKit adapter. Its local
 ad-hoc signature is not Developer ID signing or notarization. The engineering
 preview release archives retain their documented binary contents; adding a
 local viewer does not rewrite an existing published archive.
@@ -109,3 +111,15 @@ capture/conversion/codec work when scheduling its next frame. Fixed capture
 CPU cost cannot reduce network bitrate simply by exceeding a 60 FPS interval.
 `RUST_LOG=rds_desktop=debug` reports bitrate changes and deadline-miss counts;
 the `trace` level adds frame sizes and sender stage durations, without pixels.
+
+For a Linux desktop launcher after installing `rds-viewer` on PATH:
+
+```sh
+install -Dm644 crates/rds-desktop/assets/app-icon.png \
+  "$HOME/.local/share/icons/hicolor/512x512/apps/org.nddev.opennetwork.rds.png"
+install -Dm644 crates/rds-desktop/assets/org.nddev.opennetwork.rds.desktop \
+  "$HOME/.local/share/applications/org.nddev.opennetwork.rds.desktop"
+```
+
+Native Linux windows also carry the same embedded icon. Launcher installation
+contains no endpoint identity; the normal private viewer configuration applies.

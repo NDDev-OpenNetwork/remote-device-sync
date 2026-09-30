@@ -23,11 +23,16 @@ def main():
     executable.parent.mkdir(parents=True)
     shutil.copy2(args.binary, executable)
     executable.chmod(0o755)
+    resources = contents / "Resources"
+    resources.mkdir()
+    icon = pathlib.Path(__file__).resolve().parent.parent / "crates/rds-desktop/assets/app-icon.icns"
+    shutil.copy2(icon, resources / "RDS.icns")
     info = {
         "CFBundleName": "RDS",
         "CFBundleDisplayName": "RDS",
         "CFBundleIdentifier": "org.nddev.opennetwork.rds",
         "CFBundleExecutable": "rds-viewer",
+        "CFBundleIconFile": "RDS.icns",
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,

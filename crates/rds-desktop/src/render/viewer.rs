@@ -12,7 +12,7 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::PhysicalKey,
-    window::{Window, WindowId, WindowLevel},
+    window::{Icon, Window, WindowId, WindowLevel},
 };
 
 use super::{
@@ -247,10 +247,7 @@ pub struct Viewer {
 impl Viewer {
     /// Must be constructed and run on the OS main thread. No identity or socket
     /// is owned by the viewer; the caller owns its asynchronous session task.
-    pub fn new(
-        display: u32,
-        always_on_top: bool,
-    ) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
+    pub fn new(display: u32) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
         let event_loop =
             super::platform::event_loop().map_err(|e| DesktopError::Capture(e.to_string()))?;
         let queue = Arc::new(InputState {
@@ -280,7 +277,6 @@ impl Viewer {
             handle: handle.clone(),
             input,
             display,
-            always_on_top,
             seq: 0,
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
@@ -306,7 +302,6 @@ struct App {
     handle: ViewerHandle,
     input: InputSender,
     display: u32,
-    always_on_top: bool,
     seq: u64,
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
@@ -401,18 +396,24 @@ impl ApplicationHandler<()> for App {
         if self.window.is_some() {
             return;
         }
-        let result = event_loop
-            .create_window(
-                Window::default_attributes()
-                    .with_title("RDS — Connecting")
-                    .with_window_level(if self.always_on_top {
-                        WindowLevel::AlwaysOnTop
-                    } else {
-                        WindowLevel::Normal
-                    })
-                    .with_inner_size(LogicalSize::new(1280., 720.)),
-            )
-            .map_err(|e| DesktopError::Capture(e.to_string()))
+        let icon = Icon::from_rgba(
+            include_bytes!("../../assets/app-icon-256.rgba").to_vec(),
+            256,
+            256,
+        );
+        let result = icon
+            .map_err(|e| DesktopError::Capture(format!("application icon: {e}")))
+            .and_then(|icon| {
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("RDS — Connecting")
+                            .with_window_level(WindowLevel::Normal)
+                            .with_window_icon(Some(icon))
+                            .with_inner_size(LogicalSize::new(1280., 720.)),
+                    )
+                    .map_err(|e| DesktopError::Capture(e.to_string()))
+            })
             .and_then(|window| {
                 let window = Arc::new(window);
                 Gpu::new(window.clone(), event_loop.owned_display_handle()).map(|gpu| (window, gpu))
