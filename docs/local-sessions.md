@@ -107,8 +107,13 @@ Unix control-socket UID checks do not authenticate those TCP clients.
 - Snapshot generation changes on transitions. Short state transactions never
   hold a lock across resolution, dialing or service I/O.
 - One session per peer. Repeated connect with the same credential fingerprint
-  reuses a connected session without another dial/Authz. A pending duplicate
-  returns `Busy`; different credentials require explicit renewal or disconnect. The table
+  reuses a connected session without another dial/Authz. A same-credential
+  pending duplicate joins the original bounded dial, waiting until its owning
+  response publishes readiness. Canceling a waiter does not cancel that owner;
+  canceling/failing the owner or explicitly disconnecting wakes waiters with
+  an unavailable-session result. Different credentials still conflict; renewal
+  remains serialized. A pinned key/ticket reuses live/pending state before another
+  directory lookup, while names still require verified resolution. The table
   stores a digest, not the grant payload. Requests/grants/upstream errors are
   not logged or used as metric labels.
 - `session renew --session <id> --grant-file <path>` preserves the connection and
@@ -120,6 +125,8 @@ Unix control-socket UID checks do not authenticate those TCP clients.
 - Remote Authz validates managed admission; plain allowlist mode uses one Ping
   reply to establish readiness. TCP-only grants need no Ping permission. Existing
   remote scope, expiry and revocation enforcement continues to apply.
+  Snapshot/connection readiness is published after the owning reply is written;
+  an authenticated association awaiting publication still appears Connecting.
 - The first successful connection is selected when selection is empty. `use`
   changes defaults for new operations; existing streams keep their peer. A
   forward pins a handle before listening, including for later accepted sockets.

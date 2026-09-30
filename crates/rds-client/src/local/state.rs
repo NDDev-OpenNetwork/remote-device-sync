@@ -13,6 +13,7 @@ pub(super) struct Entry {
     pub renewing: bool,
     pub cancel: CancellationToken,
     pub conn: Option<Connection>,
+    pub ready: tokio::sync::watch::Receiver<bool>,
     pub sampler: Option<ConnSampler>,
     pub sync: Arc<tokio::sync::Semaphore>,
 }
@@ -81,6 +82,9 @@ impl State {
     pub fn connection(&self, id: Option<SessionId>) -> Result<(SessionId, Connection), ErrorCode> {
         let id = id.or(self.selected).ok_or(ErrorCode::NoSelection)?;
         let entry = self.entries.get(&id).ok_or(ErrorCode::NotFound)?;
+        if !*entry.ready.borrow() {
+            return Err(ErrorCode::Busy);
+        }
         let conn = entry.conn.as_ref().ok_or(ErrorCode::Busy)?;
         Ok((id, conn.clone()))
     }
@@ -97,7 +101,7 @@ impl State {
                 .map(|(id, entry)| Session {
                     id: *id,
                     peer: entry.peer.to_string(),
-                    status: if entry.conn.is_some() {
+                    status: if entry.conn.is_some() && *entry.ready.borrow() {
                         Status::Connected
                     } else {
                         Status::Connecting
@@ -138,11 +142,68 @@ pub(super) struct Reservation {
     pub id: SessionId,
     pub cancel: CancellationToken,
     pub committed: bool,
+    ready: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 pub(super) enum Reserved {
     Existing(SessionId),
+    Pending(Pending),
     New(Reservation),
+}
+
+pub(super) struct Pending {
+    id: SessionId,
+    ready: tokio::sync::watch::Receiver<bool>,
+    cancel: CancellationToken,
+}
+impl Pending {
+    pub(super) async fn wait(mut self, shared: &Shared) -> Result<SessionId, ErrorCode> {
+        loop {
+            if *self.ready.borrow_and_update() {
+                lock(shared)?.connection(Some(self.id))?;
+                return Ok(self.id);
+            }
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => return Err(ErrorCode::NotFound),
+                result = self.ready.changed() => result.map_err(|_|ErrorCode::NotFound)?,
+            }
+        }
+    }
+}
+
+fn existing_in(
+    state: &State,
+    peer: EndpointId,
+    credential: Option<[u8; 32]>,
+) -> Result<Option<Reserved>, ErrorCode> {
+    let Some((id, entry)) = state.entries.iter().find(|(_, entry)| entry.peer == peer) else {
+        return Ok(None);
+    };
+    if entry.renewing {
+        return Err(ErrorCode::Busy);
+    }
+    if entry.credential != credential {
+        return Err(ErrorCode::CredentialConflict);
+    }
+    Ok(Some(if entry.conn.is_some() && *entry.ready.borrow() {
+        Reserved::Existing(*id)
+    } else {
+        Reserved::Pending(Pending {
+            id: *id,
+            ready: entry.ready.clone(),
+            cancel: entry.cancel.clone(),
+        })
+    }))
+}
+
+pub(super) fn existing(
+    shared: &Shared,
+    peer: EndpointId,
+    credential: Option<[u8; 32]>,
+) -> Result<Option<Reserved>, ErrorCode> {
+    let state = lock(shared)?;
+    existing_in(&state, peer, credential)
 }
 
 pub(super) fn reserve(
@@ -151,18 +212,8 @@ pub(super) fn reserve(
     credential: Option<[u8; 32]>,
 ) -> Result<Reserved, ErrorCode> {
     let mut state = lock(shared)?;
-    if let Some((id, entry)) = state.entries.iter().find(|(_, e)| e.peer == peer) {
-        if entry.renewing {
-            return Err(ErrorCode::Busy);
-        }
-        if entry.credential != credential {
-            return Err(ErrorCode::CredentialConflict);
-        }
-        return if entry.conn.is_some() {
-            Ok(Reserved::Existing(*id))
-        } else {
-            Err(ErrorCode::Busy)
-        };
+    if let Some(existing) = existing_in(&state, peer, credential)? {
+        return Ok(existing);
     }
     if state.entries.len() >= MAX_SESSIONS {
         return Err(ErrorCode::Capacity);
@@ -174,6 +225,7 @@ pub(super) fn reserve(
         }
     };
     let cancel = CancellationToken::new();
+    let (ready_tx, ready) = tokio::sync::watch::channel(false);
     state.entries.insert(
         id,
         Entry {
@@ -182,6 +234,7 @@ pub(super) fn reserve(
             renewing: false,
             cancel: cancel.clone(),
             conn: None,
+            ready,
             sampler: None,
             sync: Arc::new(tokio::sync::Semaphore::new(1)),
         },
@@ -192,6 +245,7 @@ pub(super) fn reserve(
         id,
         cancel,
         committed: false,
+        ready: Some(ready_tx),
     }))
 }
 
@@ -201,6 +255,9 @@ pub(super) fn renew(
 ) -> Result<(Reservation, Connection), ErrorCode> {
     let mut state = lock(shared)?;
     let entry = state.entries.get_mut(&id).ok_or(ErrorCode::NotFound)?;
+    if !*entry.ready.borrow() {
+        return Err(ErrorCode::Busy);
+    }
     if entry.renewing {
         return Err(ErrorCode::Busy);
     }
@@ -217,6 +274,7 @@ pub(super) fn renew(
             id,
             cancel,
             committed: false,
+            ready: None,
         },
         conn,
     ))
@@ -231,6 +289,10 @@ impl Reservation {
             state.changed();
         }
         self.committed = true;
+        if let Some(ready) = &self.ready {
+            ready.send_replace(true);
+            state.changed();
+        }
         Ok(())
     }
 }
@@ -268,9 +330,13 @@ impl Observer {
         let connected = state
             .entries
             .values()
-            .filter(|e| e.conn.as_ref().is_some_and(|c| !c.is_closed()))
+            .filter(|e| *e.ready.borrow() && e.conn.as_ref().is_some_and(|c| !c.is_closed()))
             .count();
-        let connecting = state.entries.values().filter(|e| e.conn.is_none()).count();
+        let connecting = state
+            .entries
+            .values()
+            .filter(|e| !*e.ready.borrow())
+            .count();
         result.extend([
             ("rds_agent_local_manager_snapshot_available", 1),
             ("rds_agent_local_manager_connected", connected as u64),

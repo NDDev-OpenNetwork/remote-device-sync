@@ -85,6 +85,15 @@ IDR, then confirms an explicit request still produces a decodable recovery frame
 Startup and geometry changes remain independent. This relies on the existing
 reliable prioritized resync controls and bounded video-silence reopening.
 
+Concurrent native-viewer/forward startup now joins one pending managed dial for
+the same pinned identity and credential fingerprint. Readiness publishes after
+the owning reply, and a canceled waiter cannot cancel that dial. Owner failure,
+explicit disconnect and manager shutdown wake joined callers. Cached pinned
+identities avoid redundant directory resolution; verified name resolution and
+credential conflicts remain unchanged. A real IPC/QUIC regression checks one
+association, canceled-waiter isolation, same session result and credential
+conflict on both transports; the prior implementation rejects the join as Busy.
+
 ## Verification boundary
 
 Local regression receipts include strict feature compilation, complete workspace

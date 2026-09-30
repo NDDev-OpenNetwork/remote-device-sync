@@ -330,19 +330,36 @@ async fn execute(
             if target.len() > 8192 {
                 return Err(ErrorCode::InvalidRequest);
             }
+            let credential = grant
+                .as_ref()
+                .map(|g| postcard::to_stdvec(g).map(|b| *blake3::hash(&b).as_bytes()))
+                .transpose()
+                .map_err(|_| ErrorCode::InvalidRequest)?;
+            // A pinned peer's live/pending authenticated association does not
+            // need another directory lookup. Names still resolve through their
+            // verified registry boundary before any identity is reused.
+            if let Ok(pinned) = rds_net::parse_target(&target)
+                && let Some(existing) = state::existing(shared, pinned.id, credential)?
+            {
+                return match existing {
+                    state::Reserved::Existing(id) => Ok(Output::reply(Reply::Connected(id))),
+                    state::Reserved::Pending(pending) => {
+                        Ok(Output::reply(Reply::Connected(pending.wait(shared).await?)))
+                    }
+                    state::Reserved::New(_) => Err(ErrorCode::Internal),
+                };
+            }
             let addr = rds_net::resolve_target(directory, &target)
                 .await
                 .map_err(|_| ErrorCode::Resolve)?;
             if addr.id == endpoint.id() {
                 return Err(ErrorCode::InvalidRequest);
             }
-            let credential = grant
-                .as_ref()
-                .map(|g| postcard::to_stdvec(g).map(|b| *blake3::hash(&b).as_bytes()))
-                .transpose()
-                .map_err(|_| ErrorCode::InvalidRequest)?;
             let reservation = match state::reserve(shared, addr.id, credential)? {
                 state::Reserved::Existing(id) => return Ok(Output::reply(Reply::Connected(id))),
+                state::Reserved::Pending(pending) => {
+                    return Ok(Output::reply(Reply::Connected(pending.wait(shared).await?)));
+                }
                 state::Reserved::New(reservation) => reservation,
             };
             let conn = tokio::select! {
