@@ -726,7 +726,10 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
         tokio::select! {
             biased;
             _ = repair.tick() => {
-                if ordered.expire(std::time::Duration::from_millis(100)) {
+                // An admitted reference still has its own bounded reader
+                // deadline. Discarding completed successors at 100 ms while
+                // it is progressing generates avoidable large IDRs on jitter.
+                if readers.is_empty() && ordered.expire(std::time::Duration::from_millis(100)) {
                     gaps+=1;
                     delivery.invalidate();
                     delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());

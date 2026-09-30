@@ -37,8 +37,20 @@ requests `AutoNoVsync` and one frame of latency, with the backend's supported
 fallback. Submission timing does not prove when a physical pixel becomes
 visible. Completed encoded frames are briefly ordered before decode so a delta
 that finishes first cannot discard its in-flight reference keyframe. Ordering
-retains at most three successor bodies; a gap lasting 100 ms requests bounded
-IDR recovery. The existing global encoded/decode limits still apply.
+retains at most three successor bodies. The 100 ms missing-reference timer
+requests IDR recovery only after admitted readers finish or reach their own
+bounded deadlines. Jitter does not discard successors of a reference still
+being received. The existing global encoded/decode limits still apply.
+
+The sender also measures frame delivery receipts independently of QUIC packet
+loss counters, which may look clean while a reliable relay queues traffic.
+A receipt delayed beyond three sampled path RTTs (bounded to 250–1000 ms), or
+a failed delivery, reduces the encoder target. A five-second recovery hold and
+growth of at most 1% per 250 ms sample with fresh media receipts prevent an
+immediate return to the same backlog. Existing bitrate bounds, frame deadlines,
+three-frame admission and reference-preserving live encoder updates still apply.
+Sender health includes delayed-delivery counts and latest receipt duration;
+diagnostics contain frame metadata, never pixels or clipboard contents.
 
 The viewer reopens an interrupted desktop channel with a fresh session route.
 When the managed connection disappeared, it reconnects the same pinned peer

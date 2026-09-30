@@ -10,6 +10,10 @@ use rds_net::{
     Backend, Connection, Endpoint, EndpointConfig, RecvStream, SendStream, read_frame, write_frame,
 };
 
+// These scenarios intentionally consume the process-wide eight-reader budget.
+// Isolate fixtures while retaining concurrency within each real connection.
+static SESSION_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn pair(backend: Backend) -> (Endpoint, Endpoint, Connection, Connection) {
     let config = EndpointConfig {
         backend,
@@ -94,6 +98,7 @@ async fn rejected_header(b: &Connection, session: [u8; 16], h: FrameHeader) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completing_a_delta_first_preserves_the_inflight_keyframe() {
+    let _isolation = SESSION_TEST.lock().await;
     for backend in [Backend::Iroh, Backend::Noq] {
         let (client_ep, server_ep, a, b) = pair(backend).await;
         let (mut client, control_send, control_recv, id) = session(&a, &b).await;
@@ -107,7 +112,7 @@ async fn completing_a_delta_first_preserves_the_inflight_keyframe() {
         delta.write_all(b"later delta").await.unwrap();
         delta.finish().unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(30), client.frame_headers.recv())
+            tokio::time::timeout(Duration::from_millis(350), client.frame_headers.recv())
                 .await
                 .is_err()
         );
@@ -129,7 +134,54 @@ async fn completing_a_delta_first_preserves_the_inflight_keyframe() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_progressing_delta_reference_survives_the_reorder_window() {
+    let _isolation = SESSION_TEST.lock().await;
+    for backend in [Backend::Iroh, Backend::Noq] {
+        let (client_ep, server_ep, a, b) = pair(backend).await;
+        let (mut client, control_send, control_recv, id) = session(&a, &b).await;
+        let mut keyframe = tagged(&b, id).await;
+        write_frame(&mut keyframe, &header(0)).await.unwrap();
+        keyframe.write_all(b"initial keyframe").await.unwrap();
+        keyframe.finish().unwrap();
+        assert_eq!(client.frame_headers.recv().await.unwrap().seq, 0);
+
+        let mut reference = tagged(&b, id).await;
+        let mut h = header(1);
+        h.keyframe = false;
+        write_frame(&mut reference, &h).await.unwrap();
+        reference.write_all(b"reference prefix").await.unwrap();
+        until(|| client.receive_stats().in_flight == 1).await;
+        let mut successor = tagged(&b, id).await;
+        h.seq = 2;
+        write_frame(&mut successor, &h).await.unwrap();
+        successor.write_all(b"successor").await.unwrap();
+        successor.finish().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(350), client.frame_headers.recv())
+                .await
+                .is_err()
+        );
+        reference.write_all(b" reference tail").await.unwrap();
+        reference.finish().unwrap();
+        for seq in [1, 2] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), client.frame_headers.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .seq,
+                seq,
+                "a later completed frame discarded its admitted reference"
+            );
+        }
+        drop((client, control_send, control_recv));
+        tokio::join!(client_ep.close(), server_ep.close());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_keyframe_completes_while_delta_deadline_stays_short() {
+    let _isolation = SESSION_TEST.lock().await;
     for backend in [Backend::Iroh, Backend::Noq] {
         let (client_ep, server_ep, a, b) = pair(backend).await;
         let (mut client, control_send, control_recv, id) = session(&a, &b).await;
@@ -168,6 +220,7 @@ async fn slow_keyframe_completes_while_delta_deadline_stays_short() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn readers_are_bounded_and_session_owns_all_streams() {
+    let _isolation = SESSION_TEST.lock().await;
     for backend in [Backend::Iroh, Backend::Noq] {
         tokio::time::timeout(Duration::from_secs(20), async {
             let (client_ep, server_ep, a, b) = pair(backend).await;
