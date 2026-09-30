@@ -77,6 +77,14 @@ the one-transfer/1 MiB/32 KiB receive bounds remain. Tests retain rejection of
 idle, overlong, overlapping, malformed and non-progressing transfers. Installed
 large-paste failures remain diagnostic evidence until requalified successfully.
 
+The continuous-stream follow-up disables periodic software IDRs. In the real
+motion observation, large independent frames repeated at exactly 240-frame
+intervals despite an intact chain; those transfers add avoidable pauses on a
+constrained path. A real codec regression decodes 300 frames without a scheduled
+IDR, then confirms an explicit request still produces a decodable recovery frame.
+Startup and geometry changes remain independent. This relies on the existing
+reliable prioritized resync controls and bounded video-silence reopening.
+
 ## Verification boundary
 
 Local regression receipts include strict feature compilation, complete workspace

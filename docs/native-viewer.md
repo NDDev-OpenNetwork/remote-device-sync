@@ -215,6 +215,11 @@ Permits release on acknowledgement, rejection or cancellation. The bounded
 writer preserves queued references in order and exposes total pending work.
 Admission pauses rebase producer cadence; deliberate network waiting is excluded
 from encoder-starvation signals, so it cannot repeatedly reduce image quality.
+The software encoder disables periodic IDRs. New sessions, geometry changes and
+explicit recovery still produce independent frames; the prioritized reliable
+control stream carries resync requests and the silence watchdog reopens a stuck
+session. A valid reference chain no longer pays a large recovery transfer every
+240 frames. Automatic scene-change decisions remain the codec's responsibility.
 
 Text paste sends 16 KiB chunks while accepting the existing 32 KiB wire bound.
 Reassembly permits at most five seconds without progress and thirty seconds in

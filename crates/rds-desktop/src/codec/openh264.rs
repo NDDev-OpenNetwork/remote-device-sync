@@ -64,9 +64,11 @@ impl H264Encoder {
             .rate_control_mode(RateControlMode::Timestamp)
             .bitrate(BitRate::from_bps(bitrate_bps))
             .max_frame_rate(FrameRate::from_hz(fps))
-            // ~8s at 30fps: a bound on how long a client that missed
-            // every resync hint stays undecodable.
-            .intra_frame_period(IntraFramePeriod::from_num_frames(240))
+            // Reliable prioritized control requests recovery explicitly.
+            // Periodic IDRs stalled otherwise valid low-bandwidth desktop
+            // streams every 240 frames; new sessions and geometry changes
+            // still start independently and decode gaps request an IDR.
+            .intra_frame_period(IntraFramePeriod::from_num_frames(0))
             .skip_frames(true);
         let api = OpenH264API::from_source();
         OhEncoder::with_api_config(api, config).map_err(|e| DesktopError::Encode(e.to_string()))
@@ -398,6 +400,25 @@ mod tests {
             "forced IDR not flagged"
         );
         assert!(!enc.encode(&frame()).unwrap().keyframe);
+    }
+
+    #[test]
+    fn continuous_references_do_not_emit_periodic_recovery_frames() {
+        let mut encoder = H264Encoder::new(1_000_000, 30.0).unwrap();
+        let mut decoder = H264Decoder::new().unwrap();
+        for sequence in 0..300 {
+            let encoded = encoder.encode_timed(&frame(), sequence * 34).unwrap();
+            assert_eq!(
+                encoded.keyframe,
+                sequence == 0,
+                "unsolicited keyframe at {sequence}"
+            );
+            assert!(decoder.decode(&encoded).unwrap().is_some());
+        }
+        encoder.request_idr();
+        let recovered = encoder.encode_timed(&frame(), 300 * 34).unwrap();
+        assert!(recovered.keyframe);
+        assert!(decoder.decode(&recovered).unwrap().is_some());
     }
 
     /// Adaptation must preserve the exact decodable reference chain and apply
