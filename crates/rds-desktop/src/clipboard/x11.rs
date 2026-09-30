@@ -347,8 +347,7 @@ impl Clipboard {
                         .transfers
                         .iter()
                         .any(|t| t.window == e.requestor && t.property == property)
-                {
-                    if self
+                    && self
                         .conn
                         .change_window_attributes(
                             e.requestor,
@@ -358,29 +357,28 @@ impl Clipboard {
                         .map_err(error)?
                         .check()
                         .is_ok()
-                    {
-                        accepted = self
-                            .conn
-                            .change_property32(
-                                PropMode::REPLACE,
-                                e.requestor,
-                                property,
-                                self.incr,
-                                &[self.text.len() as u32],
-                            )
-                            .map_err(error)?
-                            .check()
-                            .is_ok();
-                        if accepted {
-                            self.transfers.push(Transfer {
-                                window: e.requestor,
-                                property,
-                                kind: e.target,
-                                bytes: self.text.clone(),
-                                offset: 0,
-                                started: Instant::now(),
-                            });
-                        }
+                {
+                    accepted = self
+                        .conn
+                        .change_property32(
+                            PropMode::REPLACE,
+                            e.requestor,
+                            property,
+                            self.incr,
+                            &[self.text.len() as u32],
+                        )
+                        .map_err(error)?
+                        .check()
+                        .is_ok();
+                    if accepted {
+                        self.transfers.push(Transfer {
+                            window: e.requestor,
+                            property,
+                            kind: e.target,
+                            bytes: self.text.clone(),
+                            offset: 0,
+                            started: Instant::now(),
+                        });
                     }
                 }
             }
