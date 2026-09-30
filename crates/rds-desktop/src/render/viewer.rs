@@ -12,7 +12,7 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::PhysicalKey,
-    window::{Window, WindowId},
+    window::{Window, WindowId, WindowLevel},
 };
 
 use super::{
@@ -247,7 +247,10 @@ pub struct Viewer {
 impl Viewer {
     /// Must be constructed and run on the OS main thread. No identity or socket
     /// is owned by the viewer; the caller owns its asynchronous session task.
-    pub fn new(display: u32) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
+    pub fn new(
+        display: u32,
+        always_on_top: bool,
+    ) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
         let event_loop =
             super::platform::event_loop().map_err(|e| DesktopError::Capture(e.to_string()))?;
         let queue = Arc::new(InputState {
@@ -277,6 +280,7 @@ impl Viewer {
             handle: handle.clone(),
             input,
             display,
+            always_on_top,
             seq: 0,
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
@@ -302,6 +306,7 @@ struct App {
     handle: ViewerHandle,
     input: InputSender,
     display: u32,
+    always_on_top: bool,
     seq: u64,
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
@@ -400,6 +405,11 @@ impl ApplicationHandler<()> for App {
             .create_window(
                 Window::default_attributes()
                     .with_title("RDS — Connecting")
+                    .with_window_level(if self.always_on_top {
+                        WindowLevel::AlwaysOnTop
+                    } else {
+                        WindowLevel::Normal
+                    })
                     .with_inner_size(LogicalSize::new(1280., 720.)),
             )
             .map_err(|e| DesktopError::Capture(e.to_string()))
@@ -452,6 +462,11 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(false) => self.release(event_loop),
+            WindowEvent::Focused(true) | WindowEvent::Occluded(false) => {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
                 if let PhysicalKey::Code(key) = event.physical_key
                     && let Some(code) = evdev(key)

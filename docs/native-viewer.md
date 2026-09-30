@@ -6,6 +6,12 @@ decoding stays on bounded blocking workers. The serving device needs a real
 capture/input backend; the current Linux implementation uses X11/XTEST.
 macOS capture, VideoToolbox and Wayland serving remain separate work.
 
+`--always-on-top` keeps the remote screen visible above other application
+windows. This is useful while using a local app alongside the remote desktop
+or observing pixels during qualification. Normal windows retain the OS stacking
+behavior, and an occluded Metal surface may pause presentation. Returning focus
+or uncovering the window requests an immediate redraw of its latest image.
+
 ```sh
 cargo build --release -p rds-cli --features desktop
 rds desktop <ticket-or-device> --max-fps 60
