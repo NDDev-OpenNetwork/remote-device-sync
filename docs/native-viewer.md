@@ -180,3 +180,12 @@ Surface acquisition now precedes any GPU upload. An occluded surface retains
 only the newest CPU image, rather than queuing staging buffers without submission.
 Managed IPC framing is read by one owned bounded worker; canceling `recv()` in a
 select never loses partially consumed message bytes. Drop aborts that worker.
+
+The software encoder uses actual monotonic timestamps with OpenH264's timestamp
+rate control. Idle waits and slower real capture can replenish the bitrate budget;
+no constant-zero timestamp fabricates a fixed 60 FPS clock. An intentionally
+skipped codec frame preserves the reference sequence and does not force an IDR.
+Capture/encode errors and dropped encoded references still require recovery.
+Incomplete media bodies release reader permits after three seconds and request
+IDR recovery; handshake/control deadlines remain separate. Receiver health logs
+include admission, completion, rejection, timeout, gap and keyframe counters.

@@ -27,6 +27,8 @@ pub struct H264Encoder {
     pending_bitrate: Option<u32>,
     fps: f32,
     want_idr: bool,
+    started: std::time::Instant,
+    last_timestamp: Option<u64>,
     /// Recycled I420 input buffer — a 1080p frame is ~3 MiB, so a fresh
     /// allocation per frame at 60 fps is ~190 MB/s of pure alloc churn.
     /// Rebuilt only when frame dimensions change.
@@ -42,6 +44,8 @@ impl H264Encoder {
             pending_bitrate: None,
             fps,
             want_idr: true,
+            started: std::time::Instant::now(),
+            last_timestamp: None,
             yuv_buf: None,
         })
     }
@@ -55,7 +59,7 @@ impl H264Encoder {
             // with a warning; set explicitly instead.
             .adaptive_quantization(false)
             .background_detection(false)
-            .rate_control_mode(RateControlMode::Bitrate)
+            .rate_control_mode(RateControlMode::Timestamp)
             .bitrate(BitRate::from_bps(bitrate_bps))
             .max_frame_rate(FrameRate::from_hz(fps))
             // ~8s at 30fps: a bound on how long a client that missed
@@ -75,6 +79,29 @@ const BITRATE_REBUILD_MIN_PCT: u64 = 15;
 
 impl Encoder for H264Encoder {
     fn encode(&mut self, frame: &RawFrame) -> Result<EncodedFrame, DesktopError> {
+        self.encode_timed(frame, self.started.elapsed().as_millis() as u64)
+    }
+    fn request_idr(&mut self) {
+        self.want_idr = true;
+    }
+    fn set_bitrate(&mut self, bps: u32) {
+        let bps = u64::from(bps);
+        if bps == 0 || bps == self.bitrate {
+            return;
+        }
+        if bps.abs_diff(self.bitrate) * 100 < self.bitrate * BITRATE_REBUILD_MIN_PCT {
+            return;
+        }
+        self.pending_bitrate = Some(bps as u32);
+    }
+}
+
+impl H264Encoder {
+    fn encode_timed(
+        &mut self,
+        frame: &RawFrame,
+        now_ms: u64,
+    ) -> Result<EncodedFrame, DesktopError> {
         if let Some(bps) = self.pending_bitrate.take() {
             match Self::build(bps, self.fps) {
                 Ok(inner) => {
@@ -102,9 +129,21 @@ impl Encoder for H264Encoder {
         } else {
             bgra_to_i420_scalar(frame)
         };
+        // OpenH264's encode() supplies Timestamp::ZERO. Real screen capture
+        // is variable-rate: idle/CPU delays must replenish the bitrate budget
+        // in elapsed time, rather than a fictitious fixed-FPS clock. Clamp
+        // tightly repeated library calls to their configured FPS ceiling.
+        let step = (1000.0 / self.fps.max(1.0)).floor().max(1.0) as u64;
+        let stamp = now_ms
+            .max(
+                self.last_timestamp
+                    .map_or(0, |last| last.saturating_add(step)),
+            )
+            .min(i64::MAX as u64);
+        self.last_timestamp = Some(stamp);
         let stream = self
             .inner
-            .encode(&yuv)
+            .encode_at(&yuv, openh264::Timestamp::from_millis(stamp))
             .map_err(|e| DesktopError::Encode(e.to_string()))?;
         self.yuv_buf = Some(yuv);
         // The flag the writer's collapse trusts must be the truth on
@@ -116,21 +155,6 @@ impl Encoder for H264Encoder {
             data: Bytes::from(stream.to_vec()),
             keyframe,
         })
-    }
-
-    fn request_idr(&mut self) {
-        self.want_idr = true;
-    }
-
-    fn set_bitrate(&mut self, bps: u32) {
-        let bps = u64::from(bps);
-        if bps == 0 || bps == self.bitrate {
-            return;
-        }
-        if bps.abs_diff(self.bitrate) * 100 < self.bitrate * BITRATE_REBUILD_MIN_PCT {
-            return;
-        }
-        self.pending_bitrate = Some(bps as u32);
     }
 }
 
@@ -334,6 +358,41 @@ mod tests {
         // Past it: the rebuilt encoder's first frame is an IDR.
         enc.set_bitrate(2_000_000);
         assert!(enc.encode(&frame()).unwrap().keyframe);
+    }
+
+    #[test]
+    fn variable_rate_capture_resumes_after_idle_without_clock_reset() {
+        let mut encoder = H264Encoder::new(500_000, 60.0).unwrap();
+        let first = encoder.encode_timed(&frame(), 0).unwrap();
+        assert!(!first.data.is_empty());
+        let mut pixels = vec![0u8; 64 * 64 * 4];
+        for (i, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            pixel.copy_from_slice(&[(i % 251) as u8, ((i / 64) * 3) as u8, 200, 255]);
+        }
+        let changed = RawFrame {
+            width: 64,
+            height: 64,
+            stride: 256,
+            data: Bytes::from(pixels),
+        };
+        let resumed = encoder.encode_timed(&changed, 5_000).unwrap();
+        assert!(
+            !resumed.data.is_empty(),
+            "idle time must replenish the encoder budget"
+        );
+        let mut decoder = H264Decoder::new().unwrap();
+        decoder.decode(&first).unwrap().unwrap();
+        assert!(
+            decoder.decode(&resumed).unwrap().is_some(),
+            "idle resume must preserve the reference chain"
+        );
+        encoder.set_bitrate(1_000_000);
+        assert!(encoder.encode_timed(&changed, 6_000).unwrap().keyframe);
+        assert_eq!(
+            encoder.last_timestamp,
+            Some(6_000),
+            "encoder rebuild must not reset its media clock"
+        );
     }
 
     /// The SIMD/dispatched converter must agree with the scalar

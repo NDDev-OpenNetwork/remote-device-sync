@@ -215,7 +215,7 @@ pub struct FrameHeader {
 }
 
 /// Client→server messages on the desktop control stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DesktopControl {
     /// Ask for a fresh IDR (after join or packet loss).
     RequestIdr,
@@ -235,6 +235,33 @@ pub enum DesktopControl {
         total: u32,
         data: Vec<u8>,
     },
+}
+
+impl std::fmt::Debug for DesktopControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestIdr => f.write_str("RequestIdr"),
+            Self::SetBitrate(rate) => f.debug_tuple("SetBitrate").field(rate).finish(),
+            Self::Input(event) => f.debug_tuple("Input").field(event).finish(),
+            Self::Heartbeat { seq, ts_ms } => f
+                .debug_struct("Heartbeat")
+                .field("seq", seq)
+                .field("ts_ms", ts_ms)
+                .finish(),
+            Self::ClipboardChunk {
+                id,
+                offset,
+                total,
+                data,
+            } => f
+                .debug_struct("ClipboardChunk")
+                .field("id", id)
+                .field("offset", offset)
+                .field("total", total)
+                .field("bytes", &data.len())
+                .finish(),
+        }
+    }
 }
 
 /// Server→client messages on the desktop control stream (v2).
@@ -342,6 +369,21 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn clipboard_debug_contains_metadata_without_text_or_raw_bytes() {
+        let text = "clipboard private payload";
+        let chunk = DesktopControl::ClipboardChunk {
+            id: 7,
+            offset: 0,
+            total: text.len() as u32,
+            data: text.as_bytes().to_vec(),
+        };
+        let debug = format!("{chunk:?}");
+        assert!(!debug.contains(text));
+        assert!(!debug.contains(&format!("{:?}", text.as_bytes())));
+        assert!(debug.contains("bytes"));
+    }
 
     #[test]
     fn isolated_sync_appends_tags_and_legacy_decoders_refuse_the_extension() {

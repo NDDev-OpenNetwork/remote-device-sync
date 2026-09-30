@@ -22,6 +22,11 @@ use rds_desktop::{SessionClock, SessionConfig, SyntheticProducer, serve_desktop_
 use rds_net::read_frame;
 use rds_net::{Endpoint, EndpointAddr, EndpointConfig, bind_noq_with_socket};
 
+// Each case owns its own load profile. Unrelated concurrent cases otherwise
+// compete for the process-global frame/decode budgets and contaminate clean
+// loopback/soak measurements. Concurrency inside each scenario is unchanged.
+static SESSION_CASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Deterministic unique session IDs for the tests — uniqueness within a
 /// connection is what the route isolates, not entropy.
 fn next_session_id() -> [u8; 16] {
@@ -263,6 +268,7 @@ fn p99(v: Vec<u64>) -> u64 {
 /// `request_idr` must carry `keyframe = true`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyframe_request_roundtrip() {
+    let _case = SESSION_CASE.lock().await;
     let mut h = harness(60, 2048, 10_000, None, false).await;
 
     // The session-open frame is already a keyframe — request only
@@ -298,6 +304,7 @@ async fn keyframe_request_roundtrip() {
 /// keeps advancing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bounded_queue_newest_wins() {
+    let _case = SESSION_CASE.lock().await;
     // 240 fps of small frames — deliberately faster than we consume.
     let mut h = harness(240, 1024, 60, None, false).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
@@ -345,6 +352,7 @@ async fn bounded_queue_newest_wins() {
 /// C5: heartbeat + input acks — server-side measurement mode round-trips.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn input_acks_and_heartbeat_roundtrip() {
+    let _case = SESSION_CASE.lock().await;
     let input = TestInput::default();
     let calls = input.calls.clone();
     let mut h = harness_with_input(30, 1024, 60, None, true, input).await;
@@ -378,6 +386,7 @@ async fn input_acks_and_heartbeat_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn view_only_and_failed_injection_never_ack_but_keep_control_alive() {
+    let _case = SESSION_CASE.lock().await;
     for impair in [None, Some(Impairment::clean())] {
         for view_only in [true, false] {
             let input = TestInput {
@@ -422,6 +431,7 @@ async fn view_only_and_failed_injection_never_ack_but_keep_control_alive() {
 /// not the clean-link 150 ms gate or an input-to-visible measurement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn impaired_link_latency_gate() {
+    let _case = SESSION_CASE.lock().await;
     // 60 fps of ~1 KB frames ≈ one datagram per frame — enough samples
     // to make percentiles meaningful without saturating the lossy link.
     let mut h = harness(60, 1024, 60, Some(Impairment::lossy()), true).await;
@@ -521,6 +531,7 @@ async fn impaired_link_latency_gate() {
 /// age, zero unbounded-queue events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn soak_60fps() {
+    let _case = SESSION_CASE.lock().await;
     let secs: u64 = std::env::var("RDS_SOAK_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -569,6 +580,7 @@ async fn soak_60fps() {
 /// each could swallow the other's streams.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn desktop_and_sync_share_one_connection() {
+    let _case = SESSION_CASE.lock().await;
     let clock = SessionClock::default();
     let (server_ep, client_ep, _imp, target) = endpoints(None).await;
 
@@ -699,6 +711,7 @@ async fn desktop_and_sync_share_one_connection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_and_foreign_frame_routes_never_reach_the_session_inbox() {
+    let _case = SESSION_CASE.lock().await;
     let clock = SessionClock::default();
     let (server_ep, client_ep, _imp, target) = endpoints(None).await;
     let session_id = next_session_id();
@@ -801,6 +814,7 @@ async fn stale_and_foreign_frame_routes_never_reach_the_session_inbox() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_shared_route_still_serves_v1_clients() {
+    let _case = SESSION_CASE.lock().await;
     let clock = SessionClock::default();
     let (server_ep, client_ep, _imp, target) = endpoints(None).await;
     let server_task = tokio::spawn({
@@ -886,6 +900,7 @@ fn self_rss_kb() -> Option<u64> {
 /// broken one — the caller forwards it over its own control path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn relay_mode_publishes_encoded_frames_and_viewer_decodes() {
+    let _case = SESSION_CASE.lock().await;
     use rds_desktop::client::{RelayDecoder, RelayOutcome};
 
     let fps = 30;

@@ -88,6 +88,12 @@ impl ProducerControls {
 /// `controls.idr` each call and count a slot missed into
 /// `controls.deadline_misses` when a frame lands after its cadence slot.
 pub trait FrameProducer: Send + 'static {
+    /// A codec may intentionally emit no frame without changing its reference
+    /// chain. Only that case preserves the encoded sequence; capture/encode
+    /// errors remain discontinuities requiring resync.
+    fn preserves_reference(&self) -> bool {
+        false
+    }
     fn produce(
         &mut self,
         seq: u64,
@@ -309,6 +315,9 @@ pub async fn serve_desktop_with(
                 }
                 match source.produce(seq, &producer_controls, &clock) {
                     Some(p) => {
+                        if p.payload.is_empty() && source.preserves_reference() {
+                            continue;
+                        }
                         // Losing any encoded reference breaks its successors,
                         // not only losing an IDR. Keep the two-slot bound and
                         // ask the producer for an independent replacement.
@@ -749,6 +758,7 @@ mod x11 {
         next_due: Instant,
         output_height: Option<u32>,
         last_work: Duration,
+        skipped: bool,
     }
 
     impl X11Producer {
@@ -790,6 +800,7 @@ mod x11 {
                 next_due: Instant::now(),
                 output_height,
                 last_work: Duration::ZERO,
+                skipped: false,
             })
         }
     }
@@ -822,6 +833,9 @@ mod x11 {
     }
 
     impl FrameProducer for X11Producer {
+        fn preserves_reference(&self) -> bool {
+            self.skipped
+        }
         fn produce(
             &mut self,
             seq: u64,
@@ -840,6 +854,7 @@ mod x11 {
                 std::thread::sleep(sleep);
             }
             let capture_ts_ms = clock.now_ms();
+            self.skipped = false;
             let work_started = Instant::now();
             let raw = match self.capturer.capture() {
                 Ok(f) => f,
@@ -866,6 +881,7 @@ mod x11 {
             );
             let (width, height) = (raw.width, raw.height);
             let encoded = self.encoder.encode(&raw);
+            self.skipped = encoded.as_ref().is_ok_and(|frame| frame.data.is_empty());
             self.last_work = work_started.elapsed();
             match encoded {
                 Ok(frame) => Some(Produced {
