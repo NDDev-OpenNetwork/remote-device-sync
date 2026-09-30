@@ -57,6 +57,34 @@ pub struct X11Capturer {
 }
 
 impl X11Capturer {
+    /// Wait for X socket readiness instead of periodically polling damage.
+    /// The bounded timeout also lets IDR and teardown be observed promptly.
+    pub fn wait_for_change(&mut self, timeout: std::time::Duration) -> bool {
+        if self.changed() {
+            return true;
+        }
+        let mut fds = [rustix::event::PollFd::new(
+            self.conn.stream(),
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: timeout.as_secs() as i64,
+            tv_nsec: i64::from(timeout.subsec_nanos()),
+        };
+        match rustix::event::poll(&mut fds, Some(&timeout)) {
+            Ok(_)
+                if fds[0].revents().intersects(
+                    rustix::event::PollFlags::ERR
+                        | rustix::event::PollFlags::HUP
+                        | rustix::event::PollFlags::NVAL,
+                ) =>
+            {
+                true
+            }
+            Ok(_) => self.changed(),
+            Err(_) => true,
+        }
+    }
     /// Connect to `$DISPLAY` and select `screen`.
     pub fn new(screen: u32) -> Result<Self, DesktopError> {
         let (conn, default_screen) =

@@ -66,11 +66,15 @@ rds session list
 rds session use <session-id>   # switch defaults; existing streams stay pinned
 rds session ssh --user <account> --host-key /private/device-host.pub --identity /private/operator-key
 
-# Sync/desktop still need explicit direct mode and a separately authorized key:
+# File transfer and native desktop reuse the operator agent:
+rds send <ticket> <file>
+rds recv <ticket> <name>
+rds desktop <ticket> --max-fps 60
+# Explicit direct mode uses a separately authorized identity:
 rds --direct --key-file /private/path/client.key send <ticket> <file>
 rds --direct --key-file /private/path/client.key recv <ticket> <name>
 rds --direct --key-file /private/path/client.key desktop <ticket>
-# desktop is currently headless decode/stats; build both ends with --features desktop
+# Build both ends with --features desktop; --headless keeps decode/stats.
 
 # Self-hosted relay instead of the public n0 relays:
 rds-relay --addr 0.0.0.0:3340
@@ -169,9 +173,9 @@ in the architecture doc.
 ## Status
 
 v0.1 foundation: SSH/TCP forwarding, a single-file transfer engine, a
-feature-gated X11 capture/H.264/headless-decode pipeline, discovery and grant
-primitives, and transport metrics. The desktop viewer and native macOS/Wayland
-backends remain incomplete. Known correctness and security blockers are
+feature-gated X11 capture/H.264 pipeline and [native GPU viewer](docs/native-viewer.md),
+discovery and grant primitives, and transport metrics. Native macOS/Wayland
+serving backends remain incomplete. Known correctness and security blockers are
 tracked in the audit above; this is not a production-readiness claim.
 Public API and wire protocol are not stable. What each part actually
 claims — implemented, experimental, stub or unavailable, with runtime

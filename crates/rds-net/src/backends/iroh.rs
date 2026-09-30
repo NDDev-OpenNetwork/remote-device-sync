@@ -151,8 +151,19 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     builder = builder.transport_config(transport.build());
     // iroh manages its own sockets; a single bind address is all it
     // accepts. Multi-interface binding is a `noq`-backend capability.
-    if let Some(addr) = config.bind_addrs.first() {
-        builder = builder.bind_addr(*addr)?;
+    if config.transports != crate::Transports::RelayOnly
+        && let Some(addr) = config.bind_addrs.first()
+    {
+        // An explicit bind is the complete interface contract. Iroh's
+        // builder otherwise keeps its unspecified socket in the other
+        // family, advertising additional interfaces during bring-up.
+        builder = builder.clear_ip_transports().bind_addr(*addr)?;
+        if addr.ip().is_loopback() {
+            // Port mapping of a loopback-only socket cannot make that socket
+            // reachable on a gateway. It can advertise an unrelated mapping
+            // from another local endpoint during asynchronous startup.
+            builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
+        }
     }
     let endpoint = builder.alpns(config.alpns).bind().await?;
     Ok(endpoint)

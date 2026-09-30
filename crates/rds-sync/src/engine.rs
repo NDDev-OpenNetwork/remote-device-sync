@@ -68,11 +68,15 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    let _permit = DISK_JOBS
+    let permit = DISK_JOBS
         .acquire()
         .await
         .expect("disk-job semaphore never closes");
-    tokio::task::spawn_blocking(f).await
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
 }
 
 /// Agent-side permissions, checked before any path or filesystem operation.
@@ -637,7 +641,7 @@ impl Transfer {
 /// watcher is aborted by the caller once the transfer future resolves.
 fn cancel_flag_watcher(
     cancel: &Option<tokio_util::sync::CancellationToken>,
-) -> (Option<Arc<AtomicBool>>, Option<tokio::task::JoinHandle<()>>) {
+) -> (Option<Arc<AtomicBool>>, Option<CancelFlagWatcher>) {
     match cancel {
         Some(token) => {
             let flag = Arc::new(AtomicBool::new(false));
@@ -647,9 +651,21 @@ fn cancel_flag_watcher(
                 t.cancelled().await;
                 f.store(true, Ordering::Release);
             });
-            (Some(flag), Some(watcher))
+            (Some(flag), Some(CancelFlagWatcher(watcher)))
         }
         None => (None, None),
+    }
+}
+
+struct CancelFlagWatcher(tokio::task::JoinHandle<()>);
+impl CancelFlagWatcher {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+impl Drop for CancelFlagWatcher {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

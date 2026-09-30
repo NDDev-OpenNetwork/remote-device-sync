@@ -93,6 +93,42 @@ async fn rejected_header(b: &Connection, session: [u8; 16], h: FrameHeader) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completing_a_delta_first_preserves_the_inflight_keyframe() {
+    for backend in [Backend::Iroh, Backend::Noq] {
+        let (client_ep, server_ep, a, b) = pair(backend).await;
+        let (mut client, control_send, control_recv, id) = session(&a, &b).await;
+        let mut keyframe = tagged(&b, id).await;
+        write_frame(&mut keyframe, &header(0)).await.unwrap();
+        keyframe.write_all(b"keyframe prefix").await.unwrap();
+        let mut delta = tagged(&b, id).await;
+        let mut delta_header = header(1);
+        delta_header.keyframe = false;
+        write_frame(&mut delta, &delta_header).await.unwrap();
+        delta.write_all(b"later delta").await.unwrap();
+        delta.finish().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), client.frame_headers.recv())
+                .await
+                .is_err()
+        );
+        keyframe.write_all(b" keyframe tail").await.unwrap();
+        keyframe.finish().unwrap();
+        for seq in [0, 1] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), client.frame_headers.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .seq,
+                seq
+            );
+        }
+        drop((client, control_send, control_recv));
+        tokio::join!(client_ep.close(), server_ep.close());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn readers_are_bounded_and_session_owns_all_streams() {
     for backend in [Backend::Iroh, Backend::Noq] {
         tokio::time::timeout(Duration::from_secs(20), async {

@@ -520,7 +520,7 @@ fn reselect(
     if let Some(current) = *selected
         && current != choice
         && let Some((_, cur_rtt)) = rtts.iter().find(|(id, _)| *id == current)
-        && best_rtt + RTT_SWITCHING_MIN > *cur_rtt
+        && best_rtt.saturating_add(RTT_SWITCHING_MIN) > *cur_rtt
     {
         choice = current;
     }

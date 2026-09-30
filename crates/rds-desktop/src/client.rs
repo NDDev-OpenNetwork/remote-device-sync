@@ -526,6 +526,7 @@ pub struct RelayDecoder {
     delivery: Delivery,
     /// Wall clock of the last `NeedIdr` report.
     last_idr_report: Option<std::time::Instant>,
+    next_seq: Option<u64>,
 }
 
 impl RelayDecoder {
@@ -533,12 +534,20 @@ impl RelayDecoder {
         Self {
             delivery: Delivery::new(),
             last_idr_report: None,
+            next_seq: None,
         }
     }
 
     /// Feed one relayed encoded frame. Input must already have passed the
     /// relay's sequence checks — this owns only decode-chain state.
     pub fn push(&mut self, header: &FrameHeader, payload: Vec<u8>) -> RelayOutcome {
+        if header.seq == u64::MAX || self.next_seq.is_some_and(|next| header.seq < next) {
+            return RelayOutcome::Pending;
+        }
+        if self.next_seq.is_some_and(|next| header.seq != next) {
+            self.delivery.invalidate();
+        }
+        self.next_seq = header.seq.checked_add(1);
         match self.delivery.decode(header, payload) {
             #[cfg(feature = "x11")]
             DecodeOutcome::Decoded(raw) => RelayOutcome::Frame(raw),
@@ -557,6 +566,31 @@ impl RelayDecoder {
                 }
             }
         }
+    }
+
+    /// Cancellation retains the global decoder permit in native work. No
+    /// connection/control handle is moved into the blocking decoder.
+    pub async fn push_bounded(
+        self,
+        header: FrameHeader,
+        payload: Vec<u8>,
+    ) -> Result<(Self, RelayOutcome), DesktopError> {
+        let slot = DECODE_SLOTS
+            .acquire()
+            .await
+            .map_err(|_| DesktopError::Decode("decoder budget closed".into()))?;
+        tokio::time::timeout(
+            FRAME_STREAM_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                let mut decoder = self;
+                let outcome = decoder.push(&header, payload);
+                (decoder, outcome)
+            }),
+        )
+        .await
+        .map_err(|_| DesktopError::Decode("decoder timed out".into()))?
+        .map_err(|e| DesktopError::Decode(e.to_string()))
     }
 }
 
@@ -587,75 +621,83 @@ struct ReceiveContext {
 
 async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
     let mut readers: JoinSet<Option<(FrameHeader, Vec<u8>, FrameBudget)>> = JoinSet::new();
+    let mut ordered: crate::order::Ordered<(Vec<u8>, FrameBudget)> =
+        crate::order::Ordered::default();
+    let mut repair = tokio::time::interval(std::time::Duration::from_millis(20));
+    repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Keep the decoded queue open for the session even in a headless build.
     let _frames = &ctx.frame_tx;
     let mut delivery = Delivery::new();
     loop {
-        tokio::select! {
-            biased;
-            frame = readers.join_next(), if !readers.is_empty() => {
-                let Some(Ok(Some((header, body, budget)))) = frame else { continue; };
-                let expected = ctx.next_seq.load(Ordering::Relaxed);
-                if header.seq < expected { continue; }
-                if header.seq > expected {
+        if let Some((header, (body, budget))) = ordered.pop() {
+            let expected = ctx.next_seq.load(Ordering::Relaxed);
+            if header.seq < expected {
+                continue;
+            }
+            if header.seq > expected {
+                delivery.invalidate();
+            }
+            ctx.next_seq.store(header.seq + 1, Ordering::Relaxed);
+            ctx.header_tx.send(header.clone());
+            if let Some(tx) = &ctx.encoded_tx {
+                tx.send(EncodedDelivery {
+                    header,
+                    payload: body.into(),
+                });
+                continue;
+            }
+            let Ok(slot) = DECODE_SLOTS.acquire().await else {
+                break;
+            };
+            let decoded = tokio::time::timeout(
+                FRAME_STREAM_TIMEOUT,
+                tokio::task::spawn_blocking(move || {
+                    let (_slot, _budget) = (slot, budget);
+                    let result = delivery.decode(&header, body);
+                    (delivery, result)
+                }),
+            )
+            .await;
+            let (state, outcome) = match decoded {
+                Ok(Ok(pair)) => pair,
+                Err(_) => {
+                    delivery = Delivery::new();
+                    delivery.request_idr(&ctx.ctrl, ctx.clock.now_ms());
+                    continue;
+                }
+                Ok(Err(_)) => break,
+            };
+            delivery = state;
+            match outcome {
+                #[cfg(feature = "x11")]
+                DecodeOutcome::Decoded(raw) => {
+                    ctx.frame_tx.send(raw);
+                }
+                DecodeOutcome::Buffered => {}
+                DecodeOutcome::Failed => {
                     delivery.invalidate();
                     delivery.request_idr(&ctx.ctrl, ctx.clock.now_ms());
                 }
-                // read_one rejects u64::MAX before publishing anything.
-                ctx.next_seq.store(header.seq + 1, Ordering::Relaxed);
-                ctx.header_tx.send(header.clone());
-                if let Some(tx) = &ctx.encoded_tx {
-                    // Relay mode: forward the payload still encoded; the
-                    // downstream viewer owns decode-chain discipline.
-                    tx.send(EncodedDelivery {
-                        header,
-                        payload: body.into(),
-                    });
-                    continue;
+            }
+            continue;
+        }
+        tokio::select! {
+            biased;
+            _ = repair.tick() => {
+                if ordered.expire(std::time::Duration::from_millis(100)) {
+                    delivery.invalidate();
+                    delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());
                 }
-                let Ok(slot) = DECODE_SLOTS.acquire().await else { break; };
-                // No control/queue/connection handles escape into native work.
-                // An already running call may finish after cancellation, but
-                // it cannot publish and holds both permits until it returns.
-                let decoded = tokio::time::timeout(
-                    FRAME_STREAM_TIMEOUT,
-                    tokio::task::spawn_blocking(move || {
-                        let (_slot, _budget) = (slot, budget);
-                        let result = delivery.decode(&header, body);
-                        (delivery, result)
-                    }),
-                )
-                .await;
-                let (state, outcome) = match decoded {
-                    Ok(Ok(pair)) => pair,
-                    // A decoder that never returns would stall the demux
-                    // for every service on this connection; the orphan
-                    // still holds both permits until it finishes. The
-                    // moved-out chain is gone — re-baseline on a fresh
-                    // one instead of blocking uni routing forever.
-                    Err(_) => {
-                        delivery = Delivery::new();
-                        delivery.request_idr(&ctx.ctrl, ctx.clock.now_ms());
-                        continue;
-                    }
-                    Ok(Err(_)) => break,
-                };
-                delivery = state;
-                match outcome {
-                    #[cfg(feature = "x11")]
-                    DecodeOutcome::Decoded(raw) => { ctx.frame_tx.send(raw); }
-                    DecodeOutcome::Buffered => {}
-                    DecodeOutcome::Failed => {
-                        delivery.invalidate();
-                        delivery.request_idr(&ctx.ctrl, ctx.clock.now_ms());
-                    }
-                }
+            },
+            frame = readers.join_next(), if !readers.is_empty() => {
+                let Some(Ok(Some((header, body, budget)))) = frame else { continue; };
+                ordered.push(header,(body,budget));
             }
             stream = uni.recv() => {
                 let Some(stream) = stream else { break; };
                 // Refuse excess work immediately; don't create parked tasks
                 // or read a large body before obtaining its memory budget.
-                if readers.len() >= MAX_FRAME_READERS { continue; }
+                if ctx.receiving.load(Ordering::Relaxed) >= MAX_FRAME_READERS { continue; }
                 let Ok(slot) = FRAME_SLOTS.try_acquire() else { continue; };
                 ctx.receiving.fetch_add(1, Ordering::Relaxed);
                 let budget = FrameBudget { _slot: slot, receiving: ctx.receiving.clone() };

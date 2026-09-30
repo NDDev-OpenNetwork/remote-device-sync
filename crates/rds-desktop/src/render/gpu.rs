@@ -1,0 +1,273 @@
+use std::sync::Arc;
+
+use winit::{dpi::PhysicalSize, window::Window};
+
+use crate::{DesktopError, RawFrame};
+
+use super::input::Viewport;
+
+const SHADER: &str = r#"
+struct Vertex { @builtin(position) position: vec4f, @location(0) uv: vec2f }
+@vertex fn vertex(@builtin(vertex_index) index: u32) -> Vertex {
+    let p = array<vec2f, 3>(vec2f(-1., -1.), vec2f(3., -1.), vec2f(-1., 3.));
+    var v: Vertex;
+    v.position = vec4f(p[index], 0., 1.);
+    v.uv = vec2f((p[index].x + 1.) * .5, (1. - p[index].y) * .5);
+    return v;
+}
+@group(0) @binding(0) var picture: texture_2d<f32>;
+@group(0) @binding(1) var filtering: sampler;
+@fragment fn fragment(v: Vertex) -> @location(0) vec4f {
+    return vec4f(textureSample(picture, filtering, v.uv).rgb, 1.);
+}
+"#;
+
+fn error(e: impl std::fmt::Display) -> DesktopError {
+    DesktopError::Capture(format!("native renderer: {e}"))
+}
+
+pub(super) struct Gpu {
+    instance: wgpu::Instance,
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+    picture: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
+}
+
+impl Gpu {
+    pub(super) fn new(
+        window: Arc<Window>,
+        display: winit::event_loop::OwnedDisplayHandle,
+    ) -> Result<Self, DesktopError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(display),
+        ));
+        let surface = instance.create_surface(window.clone()).map_err(error)?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            ..Default::default()
+        }))
+        .map_err(error)?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .map_err(error)?;
+        let size = window.inner_size();
+        let mut config = surface
+            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .ok_or_else(|| error("no supported surface configuration"))?;
+        config.present_mode = wgpu::PresentMode::AutoNoVsync;
+        config.desired_maximum_frame_latency = 1;
+        if let Some(format) = surface
+            .get_capabilities(&adapter)
+            .formats
+            .into_iter()
+            .find(wgpu::TextureFormat::is_srgb)
+        {
+            config.format = format;
+        }
+        surface.configure(&device, &config);
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("RDS BGRA presentation"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("RDS native presentation"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fragment"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("RDS screen scaling"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        tracing::info!(backend = ?adapter.get_info().backend, "native desktop renderer ready");
+        Ok(Self {
+            instance,
+            window,
+            surface,
+            device,
+            queue,
+            config,
+            pipeline,
+            sampler,
+            picture: None,
+        })
+    }
+
+    pub(super) fn resize(&mut self, size: PhysicalSize<u32>) {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        self.config.width = size.width;
+        self.config.height = size.height;
+        self.surface.configure(&self.device, &self.config);
+    }
+
+    pub(super) fn upload(&mut self, frame: &RawFrame) -> Result<(), DesktopError> {
+        let row = frame
+            .width
+            .checked_mul(4)
+            .ok_or_else(|| error("invalid frame width"))?;
+        let required = (frame.stride as usize)
+            .checked_mul(frame.height as usize)
+            .ok_or_else(|| error("invalid frame stride"))?;
+        if crate::frame_bytes(frame.width as usize, frame.height as usize).is_none()
+            || frame.stride < row
+            || frame.data.len() < required
+        {
+            return Err(error("invalid BGRA frame"));
+        }
+        if self
+            .picture
+            .as_ref()
+            .is_none_or(|(_, _, w, h)| (*w, *h) != (frame.width, frame.height))
+        {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("RDS latest screen"),
+                size: wgpu::Extent3d {
+                    width: frame.width,
+                    height: frame.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: if self.config.format.is_srgb() {
+                    wgpu::TextureFormat::Bgra8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Bgra8Unorm
+                },
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("RDS screen"),
+                layout: &self.pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            self.picture = Some((texture, group, frame.width, frame.height));
+        }
+        if let Some((texture, _, _, _)) = &self.picture {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &frame.data[..required],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(frame.stride),
+                    rows_per_image: Some(frame.height),
+                },
+                wgpu::Extent3d {
+                    width: frame.width,
+                    height: frame.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn draw(&mut self) -> Result<bool, DesktopError> {
+        let surface = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface = self
+                    .instance
+                    .create_surface(self.window.clone())
+                    .map_err(error)?;
+                self.surface.configure(&self.device, &self.config);
+                return Ok(false);
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(false);
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(false);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(error("surface validation failed"));
+            }
+        };
+        let view = surface.texture.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("RDS screen"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if let Some((_, group, width, height)) = &self.picture {
+                let viewport =
+                    Viewport::new(self.config.width, self.config.height, *width, *height);
+                pass.set_viewport(
+                    viewport.x as f32,
+                    viewport.y as f32,
+                    viewport.width as f32,
+                    viewport.height as f32,
+                    0.,
+                    1.,
+                );
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(surface);
+        Ok(self.picture.is_some())
+    }
+}

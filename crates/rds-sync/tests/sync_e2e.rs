@@ -71,8 +71,13 @@ async fn pair() -> (
     tokio::task::JoinHandle<()>,
     PathBuf,
 ) {
-    let server_ep = bind_endpoint(EndpointConfig::default()).await.unwrap();
-    let client_ep = bind_endpoint(EndpointConfig::default()).await.unwrap();
+    let config = EndpointConfig {
+        discovery: false,
+        bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+        ..Default::default()
+    };
+    let server_ep = bind_endpoint(config.clone()).await.unwrap();
+    let client_ep = bind_endpoint(config).await.unwrap();
     let dir = scratch("server");
     let task = spawn_server(server_ep.clone(), dir.clone());
     let target = server_ep.addr();
@@ -105,6 +110,15 @@ async fn push(
     path: &Path,
 ) -> anyhow::Result<rds_sync::engine::Stats> {
     let conn = client_conn(client_ep, target).await;
+    // Each attempt owns a fresh connection, including cancellation before any
+    // application stream opens. Background readers cannot retain a killed dial.
+    struct Close(rds_net::Connection);
+    impl Drop for Close {
+        fn drop(&mut self) {
+            self.0.close(0u32.into(), b"transfer attempt ended");
+        }
+    }
+    let _close = Close(conn.clone());
     let (send, recv) = conn.open_bi().await.unwrap();
     send_file(&conn, path, send, recv).await
 }
@@ -544,7 +558,13 @@ async fn symlink_escape_refused() {
     let journal_out = scratch("journal-out");
     #[cfg(unix)]
     std::os::unix::fs::symlink(&journal_out, jail.join(".rds-sync")).unwrap();
-    let jail_ep = bind_endpoint(EndpointConfig::default()).await.unwrap();
+    let jail_ep = bind_endpoint(EndpointConfig {
+        discovery: false,
+        bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
     let jail_task = spawn_server(jail_ep.clone(), jail.clone());
     let jail_target = jail_ep.addr();
     let conn = client_conn(&c_ep, jail_target).await;

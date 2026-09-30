@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 default = []
-desktop = ["dep:rds-desktop", "rds-desktop/x11"]
+desktop = ["dep:rds-desktop", "rds-desktop/x11", "rds-desktop/viewer"]
 ## Owned transport backend for `--backend noq` selection (WS1).
 transport-noq = ["rds-net/transport-noq"]
 
@@ -17,6 +17,7 @@ rds-client.workspace = true
 rds-observe.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+rand.workspace = true
 rds-core.workspace = true
 rds-desktop = { workspace = true, optional = true }
 rds-net.workspace = true
@@ -25,7 +26,9 @@ rds-sync.workspace = true
 rds-ssh.workspace = true
 rustix = { workspace = true, features = ["fs", "termios", "event"] }
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 zeroize = "1"
 
@@ -38,6 +41,11 @@ rustix = { workspace = true, features = ["pty"] }
 [[bin]]
 name = "rds"
 path = "src/main.rs"
+
+[[bin]]
+name = "rds-viewer"
+path = "src/viewer_main.rs"
+required-features = ["desktop"]
 
 [lints]
 workspace = true

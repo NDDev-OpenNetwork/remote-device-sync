@@ -1,8 +1,8 @@
 # Desktop client receive and cancellation contract
 
-Scope: part of W6.2 and W2.5/W2.6. The graphical renderer and desktop manager
-API remain unimplemented; this contract describes the existing Rust viewing
-session, including its headless header tap.
+Scope: part of W6.2 and W2.5/W2.6. This contract describes the Rust viewing
+session, including its headless header tap. The [native viewer](native-viewer.md)
+and managed encoded channel now consume this session.
 
 `DesktopSession` claims its uni-stream inbox before opening a control stream.
 The default `connect` mints a random session ID, claims
@@ -48,7 +48,9 @@ without an extra full-payload copy.
 
 Zero/oversized dimensions and `u64::MAX` frame sequences are refused before
 body reads. Input and heartbeat counters fail on exhaustion instead of wrapping.
-Decoded dimensions must agree with the header. A sequence gap or decode failure
+Decoded dimensions must agree with the header. Completed bodies are ordered
+under a three-successor bound; a delayed keyframe remains eligible even when a
+later delta completes first. A 100 ms unresolved gap or decode failure
 invalidates the reference chain; deltas wait for a keyframe, and the decoder is
 recreated on that blocking path. All automatic IDR requests share a 500 ms
 limit, including the first request at session time zero. The header tap still

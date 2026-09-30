@@ -25,7 +25,10 @@ pub mod client;
 pub mod codec;
 pub mod input;
 pub mod mailbox;
+mod order;
 pub mod render;
+#[cfg(any(all(target_os = "linux", feature = "x11"), test))]
+mod scaling;
 mod session;
 
 #[cfg(feature = "x11")]
