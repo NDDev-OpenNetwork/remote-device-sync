@@ -38,15 +38,24 @@ change it delivers both reference and successor in order. The existing delayed
 initial-keyframe case now waits 350 ms, beyond the faulty 100 ms window. Both
 cases, bounded hostile readers, and independent key/delta deadlines pass.
 
-The gated real-UDP capture/ACK test still verifies one held keyframe, bounded
-capture, same-connection resumption and a reduced encoder target after delayed
-ACKs. Its added rate assertion also passed the prior implementation because
-that fixture exposes transport congestion; it alone does not prove clean-relay
-feedback. Controller tests separately cover clean relay counters plus delayed
-media, the recovery hold, no growth without fresh ACKs, bounded growth, and
-floor/ceiling preservation. The process-wide hostile-reader fixtures are
-serialized so independent scenarios do not consume each other's global budget;
-concurrency and budget assertions within each scenario are retained.
+The gated real-UDP test verifies one held keyframe, bounded capture and
+same-connection resumption. Its first rate assertion also passed the prior
+controller and did not isolate media feedback. The refined fixture forwards
+cadence-resume to its wrapped producer and pauses server egress before datagrams
+are emitted, rather than dropping receiver ACKs. With the production pacing
+call restored to the old path-only controller, the rate assertion fails; with
+media feedback enabled it passes. Both outcomes are retained. Controller tests
+also cover clean relay counters plus delayed media, the recovery hold, no growth
+without fresh ACKs, bounded growth, and floor/ceiling preservation. The
+process-wide hostile-reader fixtures are serialized so independent scenarios do
+not consume each other's global budget; concurrency and budget assertions within
+each scenario are retained.
+
+Mac whole all-feature workspace tests pass: **775 passed, 0 failed, 2 ignored**
+across 107 result groups. Strict all-feature/all-target workspace clippy,
+formatting and cargo-deny advisories/bans/licenses/sources pass. The two ignored
+cases remain outside this increment's acceptance. The fixture refinement changes
+only tests; the installed production code is unchanged.
 
 Current Mac/Linux workspace, lint and installed-device results are recorded
 below once complete. Private endpoint and runtime facts belong to the consumer

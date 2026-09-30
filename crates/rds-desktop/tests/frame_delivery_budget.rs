@@ -111,6 +111,9 @@ struct CountingSource {
     bitrate: Arc<std::sync::atomic::AtomicU64>,
 }
 impl rds_desktop::FrameProducer for CountingSource {
+    fn resume_after_backpressure(&mut self) {
+        self.inner.resume_after_backpressure();
+    }
     fn produce(
         &mut self,
         seq: u64,
@@ -135,8 +138,10 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
     use std::sync::atomic::{AtomicU64, Ordering};
 
     tokio::time::timeout(Duration::from_secs(10), async {
-        let (server, _) = endpoint().await;
-        let (client, gate) = endpoint().await;
+        // Pause before server datagrams are emitted. This creates delayed
+        // media without deliberately losing packets or receiver ACKs.
+        let (server, gate) = endpoint().await;
+        let (client, _) = endpoint().await;
         let (a, b) = tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
             server.accept().await.unwrap().await
         });
