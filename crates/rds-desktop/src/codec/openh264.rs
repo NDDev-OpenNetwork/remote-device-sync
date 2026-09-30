@@ -114,7 +114,6 @@ impl H264Encoder {
         }
         if self.want_idr {
             self.inner.force_intra_frame();
-            self.want_idr = false;
         }
         let (w, h) = (frame.width as usize, frame.height as usize);
         let stride = frame.stride as usize;
@@ -150,6 +149,11 @@ impl H264Encoder {
         // the wire, not a schedule assumption: OpenH264 decides when
         // forced and periodic IDRs actually land, so read the NALs.
         let keyframe = bitstream_has_idr(&stream);
+        // A rate-control skip must not consume a pending recovery request.
+        // Clear only after an independent frame actually exists on the wire.
+        if keyframe {
+            self.want_idr = false;
+        }
         Ok(EncodedFrame {
             codec: Codec::H264,
             data: Bytes::from(stream.to_vec()),
