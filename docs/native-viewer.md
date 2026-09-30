@@ -115,7 +115,7 @@ the `trace` level adds frame sizes and sender stage durations, without pixels.
 For a Linux desktop launcher after installing `rds-viewer` on PATH:
 
 ```sh
-install -Dm644 crates/rds-desktop/assets/app-icon.png \
+install -Dm644 crates/rds-desktop/assets/app-icon-512.png \
   "$HOME/.local/share/icons/hicolor/512x512/apps/org.nddev.opennetwork.rds.png"
 install -Dm644 crates/rds-desktop/assets/org.nddev.opennetwork.rds.desktop \
   "$HOME/.local/share/applications/org.nddev.opennetwork.rds.desktop"

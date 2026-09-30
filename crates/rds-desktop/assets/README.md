@@ -5,6 +5,7 @@ The master `app-icon.png` was generated with the built-in imagegen tool on
 The same artwork supplies:
 
 - `app-icon.icns`: macOS bundle/Finder/Dock, with 16–1024 px representations.
+- `app-icon-512.png`: Linux icon-theme installation.
 - `app-icon-256.rgba`: 256×256 RGBA bytes embedded in native viewer windows.
 - The embedded PNG: AppKit application icon for direct CLI viewer launches.
 - `org.nddev.opennetwork.rds.desktop`: generic Linux desktop launcher, using the
