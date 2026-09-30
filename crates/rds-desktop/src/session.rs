@@ -35,6 +35,7 @@ const RTT_STEP_UP: f64 = 1.5;
 // streams than the receiver's four readers, leaving capacity for recovery.
 const MAX_PENDING_FRAME_ACKS: usize = 3;
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+const KEYFRAME_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Monotonic clock shared by producer and writer so `FrameHeader`
 /// timestamps are comparable within one session.
@@ -1213,7 +1214,8 @@ async fn send_frame_inner(
     // outstanding frames without closing unrelated connection services.
     acknowledgements.spawn(async move {
         let started = Instant::now();
-        let acknowledged = match tokio::time::timeout(FRAME_ACK_TIMEOUT, sending.stream.stopped()).await {
+        let deadline = if keyframe {KEYFRAME_ACK_TIMEOUT} else {FRAME_ACK_TIMEOUT};
+        let acknowledged = match tokio::time::timeout(deadline, sending.stream.stopped()).await {
             Ok(Ok(None)) => {
                 sending.finished = true;
                 tracing::trace!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop frame transport acknowledged");

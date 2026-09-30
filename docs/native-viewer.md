@@ -190,14 +190,18 @@ Bitrate changes apply typed native OpenH264 target/max options after encoder
 initialization, preserving references rather than producing an adaptation IDR.
 RTT adaptation detects new increases between valid samples; an unchanged high
 RTT does not repeatedly penalize the stream against a permanent startup value.
-Incomplete media bodies release reader permits after three seconds and request
-IDR recovery; handshake/control deadlines remain separate. Receiver health logs
+Incomplete delta bodies release reader permits after three seconds; a validated
+independent keyframe has eight seconds including its header. Recovery frames
+often require more initial congestion-window rounds than a delta. Missing
+headers still expire after three seconds; handshake/control deadlines remain
+separate. Receiver health logs
 include admission, completion, rejection, timeout, gap and keyframe counters.
 Timeout records include frame sequence and partial media byte count, without
 logging the payload, so stalled headers and stalled bodies can be distinguished.
 
 The sender retains at most three frame streams awaiting transport delivery
-confirmation, with a five-second bound and reset-on-cancellation ownership. A
+confirmation, with five-second delta/ten-second keyframe bounds and
+reset-on-cancellation ownership. A
 queued FIN alone is not a delivery receipt. This leaves capacity below the
 receiver's four-reader budget; capture pauses before encoding when its two-slot
 queue is full. Sender health distinguishes queued, acknowledged and unconfirmed

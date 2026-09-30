@@ -42,6 +42,7 @@ const FRAME_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 // Even a high-resolution keyframe must finish promptly or release its budget
 // for fresh IDR recovery. Control/handshake policy remains independent.
 const FRAME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const KEYFRAME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Decode state owned by one session. Codec reference frames are chain
 /// state: a decoder shared across sessions would cross-contaminate
@@ -764,12 +765,30 @@ async fn read_one(
     next_seq: Arc<AtomicU64>,
     budget: FrameBudget,
 ) -> FrameRead {
-    let mut frame_seq = None;
     let mut body_bytes = 0usize;
     let started = std::time::Instant::now();
+    let header: FrameHeader =
+        match tokio::time::timeout(FRAME_READ_TIMEOUT, read_frame(&mut stream)).await {
+            Ok(Ok(header)) => header,
+            Ok(Err(_)) => return FrameRead::Rejected,
+            Err(_) => {
+                tracing::warn!(
+                    stage = "header",
+                    body_bytes,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "desktop frame receive deadline exceeded"
+                );
+                return FrameRead::TimedOut;
+            }
+        };
+    let frame_seq = header.seq;
+    let keyframe = header.keyframe;
+    let deadline = if keyframe {
+        KEYFRAME_READ_TIMEOUT
+    } else {
+        FRAME_READ_TIMEOUT
+    };
     let reading = async {
-        let header: FrameHeader = read_frame(&mut stream).await.ok()?;
-        frame_seq = Some(header.seq);
         if header.seq == u64::MAX
             || header.seq < next_seq.load(Ordering::Relaxed)
             || crate::frame_bytes(header.width as usize, header.height as usize).is_none()
@@ -790,11 +809,12 @@ async fn read_one(
         }
         Some((header, body, budget))
     };
-    match tokio::time::timeout(FRAME_READ_TIMEOUT, reading).await {
+    match tokio::time::timeout(deadline.saturating_sub(started.elapsed()), reading).await {
         Ok(Some((header, body, budget))) => FrameRead::Complete(header, body, budget),
         Ok(None) => {
             tracing::debug!(
                 ?frame_seq,
+                keyframe,
                 body_bytes,
                 "desktop frame rejected before completion"
             );
@@ -803,6 +823,7 @@ async fn read_one(
         Err(_) => {
             tracing::warn!(
                 ?frame_seq,
+                keyframe,
                 body_bytes,
                 elapsed_ms = started.elapsed().as_millis(),
                 "desktop frame receive deadline exceeded"

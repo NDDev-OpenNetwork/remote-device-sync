@@ -11,7 +11,9 @@ retains one newest CPU image and cannot accumulate unsubmitted staging writes.
 Native startup logs rotate in a private directory, and live snapshots separate
 UI dispatch, encoded/decoded/presented age, occlusion and network/render stage.
 Input/heartbeat and decode waits have independent bounds. Incomplete encoded
-bodies release their reader permits within three seconds and request recovery.
+delta bodies release reader permits within three seconds; validated keyframes
+receive eight seconds including their header. Missing headers remain bounded to
+three seconds. These receive failures request recovery.
 
 Managed IPC framing has one owned bounded reader independent of a caller's
 canceled wait. A regression splitting both message headers and payloads failed
@@ -47,7 +49,8 @@ Receive timeouts report frame sequence and partial body byte count, never media
 content; rejected incomplete frames also request bounded IDR recovery.
 
 Frame delivery now owns a three-stream transport-acknowledgement budget, below
-the receiver's four-reader limit. Outstanding frames reset after five seconds
+the receiver's four-reader limit. Outstanding deltas reset after five seconds
+and keyframes after ten seconds
 or writer cancellation. Capture waits for its bounded queue before encoding,
 avoiding reference loss and IDR production into a blocked transport. A real
 UDP/QUIC regression suppresses peer ACKs after the desktop handshake: the old
