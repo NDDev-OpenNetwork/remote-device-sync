@@ -305,6 +305,7 @@ impl DesktopSession {
         let (mut send, mut recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
             let (send, mut recv) = conn.open_bi().await?;
             let mut send = ControlSend(send);
+            rds_net::wire::prioritize_control(&send.0, &greeting)?;
             write_frame(&mut send.0, &greeting).await?;
             let caps = match read_frame::<_, HelloAck>(&mut recv).await? {
                 HelloAck::Desktop(caps) => caps,

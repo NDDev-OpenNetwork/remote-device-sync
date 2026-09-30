@@ -36,6 +36,7 @@ tracing.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+noq.workspace = true
 rustix = { workspace = true, features = ["process"] }
 iroh-relay = { workspace = true, features = ["server"] }
 rand = { workspace = true }

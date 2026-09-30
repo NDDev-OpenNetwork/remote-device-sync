@@ -22,12 +22,7 @@ use tokio::task::JoinSet;
 
 use crate::DesktopError;
 
-/// Highest input/control priority; video frames rank below.
-const CONTROL_PRIORITY: i32 = i32::MAX;
-/// Frame streams sit at the midpoint: strictly below control, above
-/// QUIC's default so they can't be starved by lower-priority traffic
-/// the connection might one day carry.
-const FRAME_PRIORITY: i32 = i32::MAX / 2;
+use rds_net::wire::{CONTROL_STREAM_PRIORITY, MEDIA_STREAM_PRIORITY};
 
 /// Pacing sample interval for the bitrate controller.
 const PACING_INTERVAL: Duration = Duration::from_millis(250);
@@ -245,7 +240,7 @@ pub async fn serve_desktop_with(
     config: SessionConfig,
 ) -> Result<(), DesktopError> {
     let mut send = SessionSend(send);
-    send.0.set_priority(CONTROL_PRIORITY)?;
+    send.0.set_priority(CONTROL_STREAM_PRIORITY)?;
     // Dropping the serving future aborts async siblings and queued blocking
     // work. A running capture call may finish, then sees its receiver closed.
     let mut workers = JoinSet::new();
@@ -943,7 +938,7 @@ async fn send_frame_inner(
     let stream = &mut sending.stream;
     // Frame streams rank below the control stream — a stale frame
     // must never delay an input event or a resync request.
-    if let Err(e) = stream.set_priority(FRAME_PRIORITY) {
+    if let Err(e) = stream.set_priority(MEDIA_STREAM_PRIORITY) {
         tracing::debug!("frame stream priority failed: {e}");
     }
     // Every uni stream leads with its UniHello tag — the receiver's

@@ -217,18 +217,41 @@ mod native {
             view.status("Reconnecting");
             tracing::debug!(error = ?result.as_ref().err(),"desktop reconnecting");
             let wait = Duration::from_millis((250u64 << failures.min(5)).min(8000));
-            tokio::select! {
-                _ = stop.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(wait) => {},
-                message = input.recv() => {
-                    if matches!(message,Some(ViewerInput::Close)|None) { return Ok(()); }
-                }
+            if !retry_pause(wait, &stop, input).await {
+                return Ok(());
             }
             // Never replay input captured while disconnected onto a replacement.
             while let Some(message) = input.try_recv() {
                 if matches!(message, ViewerInput::Close) {
                     return Ok(());
                 }
+            }
+        }
+    }
+
+    trait RetryInput: Send {
+        fn close_requested(&mut self) -> impl Future<Output = bool> + Send;
+    }
+    impl RetryInput for InputReceiver {
+        async fn close_requested(&mut self) -> bool {
+            matches!(self.recv().await, Some(ViewerInput::Close) | None)
+        }
+    }
+
+    async fn retry_pause(
+        wait: Duration,
+        stop: &CancellationToken,
+        input: &mut impl RetryInput,
+    ) -> bool {
+        // Discarded input must neither complete nor restart the retry timer.
+        let deadline = tokio::time::sleep(wait);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => return false,
+                _ = &mut deadline => return true,
+                close = input.close_requested() => if close { return false; },
             }
         }
     }
@@ -418,6 +441,55 @@ mod native {
             }
         }
         Ok(())
+    }
+    #[cfg(test)]
+    mod retry_tests {
+        use super::*;
+
+        impl RetryInput for tokio::sync::mpsc::Receiver<bool> {
+            async fn close_requested(&mut self) -> bool {
+                self.recv().await.unwrap_or(true)
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn input_does_not_end_or_extend_retry_delay() {
+            let stop = CancellationToken::new();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let wait = Duration::from_secs(8);
+            let started = tokio::time::Instant::now();
+            let mut retry = Box::pin(retry_pause(wait, &stop, &mut rx));
+            tx.send(false).await.unwrap();
+            tokio::select! {
+                result = &mut retry => panic!("input bypassed retry delay: {result}"),
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+            }
+            for _ in 0..6 {
+                tx.send(false).await.unwrap();
+                tokio::select! {
+                    result = &mut retry => panic!("input bypassed retry delay: {result}"),
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                }
+            }
+            assert!(retry.await);
+            assert_eq!(started.elapsed(), wait, "input must not restart the timer");
+            assert!(
+                rx.try_recv().is_err(),
+                "disconnected input was not discarded"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn close_and_cancel_interrupt_retry_immediately() {
+            let stop = CancellationToken::new();
+            let started = tokio::time::Instant::now();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            tx.send(true).await.unwrap();
+            assert!(!retry_pause(Duration::from_secs(8), &stop, &mut rx).await);
+            stop.cancel();
+            assert!(!retry_pause(Duration::from_secs(8), &stop, &mut rx).await);
+            assert_eq!(started.elapsed(), Duration::ZERO);
+        }
     }
 }
 

@@ -68,6 +68,7 @@ pub(crate) async fn exchange(
 ) -> anyhow::Result<(RequestStreams, HelloAck)> {
     let mut streams = RequestStreams::new(conn.open_bi().await?);
     let (send, recv) = streams.get_mut();
+    rds_net::wire::prioritize_control(send, hello)?;
     write_frame(send, hello).await?;
     let ack = read_frame(recv).await?;
     Ok((streams, ack))

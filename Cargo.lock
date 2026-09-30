@@ -4151,6 +4151,7 @@ dependencies = [
  "ed25519-dalek",
  "iroh-relay",
  "libc",
+ "noq",
  "rand 0.10.3",
  "rds-cli",
  "rds-client",

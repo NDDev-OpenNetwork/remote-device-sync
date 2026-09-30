@@ -662,6 +662,7 @@ async fn serve_stream(
                 anyhow::bail!("stream hello timed out");
             }
         };
+    rds_net::wire::prioritize_control(&send, &hello)?;
     if let StreamHello::Authz(grant) = hello {
         return rds_observe::observe(
             rds_observe::Operation::GrantAuthorize,
@@ -1095,3 +1096,6 @@ fn hostname() -> Option<String> {
         })
         .filter(|s| !s.is_empty())
 }
+
+#[cfg(all(test, feature = "transport-noq"))]
+mod priority_tests;

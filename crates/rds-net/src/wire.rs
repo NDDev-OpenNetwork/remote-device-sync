@@ -8,6 +8,32 @@ use rds_core::MAX_MESSAGE_LEN;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Short lifecycle requests and desktop input/heartbeats precede media.
+pub const CONTROL_STREAM_PRIORITY: i32 = i32::MAX;
+/// Media precedes default-priority bulk streams, while control stays responsive.
+pub const MEDIA_STREAM_PRIORITY: i32 = i32::MAX / 2;
+
+/// Apply the shared control class in either direction. Streaming TCP/sync
+/// bodies retain their existing priority; their greeting does not promote
+/// the lifetime of a bulk transfer into the control class.
+pub fn prioritize_control(
+    send: &crate::SendStream,
+    hello: &rds_core::StreamHello,
+) -> Result<(), crate::ClosedStream> {
+    if matches!(
+        hello,
+        rds_core::StreamHello::Ping { .. }
+            | rds_core::StreamHello::Info
+            | rds_core::StreamHello::Authz(_)
+            | rds_core::StreamHello::RenewAuthz(_)
+            | rds_core::StreamHello::Desktop(_)
+            | rds_core::StreamHello::DesktopV2 { .. }
+    ) {
+        send.set_priority(CONTROL_STREAM_PRIORITY)?;
+    }
+    Ok(())
+}
+
 /// Serialize `msg` as postcard and write it with a big-endian u32 length.
 pub async fn write_frame<W, M>(writer: &mut W, msg: &M) -> std::io::Result<()>
 where

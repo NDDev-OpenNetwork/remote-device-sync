@@ -49,6 +49,16 @@ automatic grant issuance/renewal remains GDS work. Fifteen seconds without a
 decoded frame triggers a new desktop session. Closing the window cancels and
 joins its network worker, leaving unrelated managed streams intact.
 
+Discarding input during a reconnect pause keeps the original retry deadline;
+pointer/key activity can neither shorten nor restart it. Window close and
+cancellation still interrupt the pause immediately.
+
+Both halves of desktop control streams use the shared highest QUIC priority.
+Ping, Info and authorization/renewal requests and replies use the same class,
+above media frames. TCP/sync bodies keep their existing priority. This local
+stream scheduling cannot overtake datagrams already emitted or bypass congestion
+and flow-control limits; complete mixed-load/renewal acceptance remains separate.
+
 The separate `rds-viewer` accepts `--control-dir` and `--grant-file`. When run
 without a target, it uses the selected managed session or an optional private
 `viewer.json` beside the endpoint key:
