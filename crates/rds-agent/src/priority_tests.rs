@@ -171,7 +171,9 @@ async fn compete(client_direction: bool, info: bool) {
             let info = rds_client::info(&client_conn).await.unwrap();
             assert!(!info.services.is_empty());
         } else {
-            rds_client::ping(&client_conn, 0xC011).await.unwrap();
+            rds_client::ping(&client_conn, rand::random())
+                .await
+                .unwrap();
         }
     };
     tokio::pin!(request);
