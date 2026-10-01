@@ -33,7 +33,14 @@ impl<T> Ordered<T> {
         // Retain the nearest three successors, leaving global reader permits
         // available for the missing reference or a replacement keyframe.
         self.frames.insert(header.seq, (header, payload));
-        if self.frames.len() > 3 {
+        // Three waiting successors plus their now-complete reference fit
+        // the four reader permits. Do not evict a valid successor exactly
+        // when its missing reference arrives; pop will remove it next.
+        let limit = 3 + usize::from(
+            self.next
+                .is_some_and(|next| self.frames.contains_key(&next)),
+        );
+        while self.frames.len() > limit {
             self.frames.pop_last();
         }
         if self.blocked.is_none() {
@@ -77,6 +84,21 @@ mod tests {
             height: 32,
         }
     }
+    #[test]
+    fn completing_the_missing_reference_retains_all_three_admitted_successors() {
+        let mut order = Ordered::default();
+        order.push(header(0, true), 0);
+        order.pop();
+        for seq in [2, 3, 4] {
+            order.push(header(seq, false), seq);
+        }
+        order.push(header(1, false), 1);
+        for expected in 1..=4 {
+            assert_eq!(order.pop().unwrap().0.seq, expected);
+        }
+        assert!(order.pop().is_none());
+    }
+
     #[test]
     fn a_later_delta_cannot_discard_the_initial_keyframe() {
         let mut order = Ordered::default();

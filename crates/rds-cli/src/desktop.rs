@@ -347,7 +347,10 @@ mod native {
             tokio::select! {
                 _ = stop.cancelled() => break Ok(true),
                 message = input.recv() => match message {
-                    Some(ViewerInput::Control(message)) => tokio::time::timeout(Duration::from_secs(2), control.control(message)).await.map_err(|_|anyhow::anyhow!("desktop control write stalled"))??,
+                    Some(ViewerInput::Control(message)) => {
+                        view.input_sent(&message);
+                        tokio::time::timeout(Duration::from_secs(2), control.control(message)).await.map_err(|_|anyhow::anyhow!("desktop control write stalled"))??;
+                    },
                     Some(ViewerInput::Close)|None => break Ok(true),
                 },
                 _ = tick.tick() => {
@@ -357,7 +360,7 @@ mod native {
                 message = channel.recv() => match message? {
                     None => break Ok(false),
                     Some(ManagedMessage::Event(rds_core::DesktopEvent::Heartbeat { ts_ms,.. })) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
-                    Some(ManagedMessage::Event(rds_core::DesktopEvent::InputAck { .. })) => view.input_ack(),
+                    Some(ManagedMessage::Event(rds_core::DesktopEvent::InputAck { seq,.. })) => view.input_ack(seq),
                     Some(ManagedMessage::Event(rds_core::DesktopEvent::ClipboardReady { bytes,.. })) => {view.clipboard_ready(bytes);tracing::info!(bytes,"remote clipboard ready");},
                     Some(ManagedMessage::Frame(frame)) => {
                         view.stage("decoding");
@@ -420,7 +423,10 @@ mod native {
             tokio::select! {
                 _ = stop.cancelled() => break Ok(true),
                 message = input.recv() => match message {
-                    Some(ViewerInput::Control(message)) => tokio::time::timeout(Duration::from_secs(2),ctrl.send(message)).await.map_err(|_|anyhow::anyhow!("direct desktop control stalled"))??,
+                    Some(ViewerInput::Control(message)) => {
+                        view.input_sent(&message);
+                        tokio::time::timeout(Duration::from_secs(2),ctrl.send(message)).await.map_err(|_|anyhow::anyhow!("direct desktop control stalled"))??;
+                    },
                     Some(ViewerInput::Close)|None => break Ok(true),
                 },
                 _ = tick.tick() => {
@@ -429,7 +435,7 @@ mod native {
                 },
                 event = session.events.recv() => match event {
                     Some(rds_core::DesktopEvent::Heartbeat { ts_ms,.. }) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
-                    Some(rds_core::DesktopEvent::InputAck { .. }) => view.input_ack(),
+                    Some(rds_core::DesktopEvent::InputAck { seq,.. }) => view.input_ack(seq),
                     Some(rds_core::DesktopEvent::ClipboardReady { bytes,.. }) => {view.clipboard_ready(bytes);tracing::info!(bytes,"remote clipboard ready");},
                     None => break Ok(false),
                 },

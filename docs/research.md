@@ -528,3 +528,30 @@ Primary-source checks reinforce the implemented bounded media design:
 These sources guide implementation, not acceptance. Actual installed-device
 performance, first-frame/recovery behavior and mixed-load/physical display gates
 still require their own current-build evidence.
+
+## 2026-10-01 sparse desktop loss estimation
+
+Observed low-volume desktop traffic needs a sufficient packet sample before
+an application encoder treats loss as a bandwidth estimate. The maintained
+[WebRTC send-side estimator](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/congestion_controller/goog_cc/send_side_bandwidth_estimation.cc)
+accumulates packet feedback rather than interpreting each tiny interval in
+isolation. [RFC 9002](https://www.rfc-editor.org/rfc/rfc9002.html) also separates
+individual losses and PTO events from persistent congestion. RDS does not copy
+WebRTC or replace QUIC congestion control: its own bounded media-delivery
+feedback still detects actual blockage. The native contract documents its
+packet sample, severe-burst shortcut, RTT confirmation and correlated-cut
+cooldown. Regression tests cover sparse successful delivery, transient and
+sustained RTT, severe loss and path changes. Installed-device evidence remains
+separate from those deterministic tests.
+
+## Input-to-capture wake on composited X11
+
+The [EWMH compositing contract](https://specifications.freedesktop.org/wm/latest/ar01s08.html)
+describes redirected application pixmaps and their own damage. A watched root
+DAMAGE object alone must not be assumed to cover every application repaint.
+RDS supplements damage-driven idle capture with a bounded burst after accepted
+input, retaining normal pacing, reference ordering and memory admission.
+[Moonlight's latency definitions](https://github.com/moonlight-stream/moonlight-docs/wiki/Frequently-Asked-Questions)
+separate network, decode, frame queue and presentation; a successful input ACK
+or fresh frame timestamp is not an application-response measurement. Runtime
+qualification compares actual target transitions with those stage diagnostics.

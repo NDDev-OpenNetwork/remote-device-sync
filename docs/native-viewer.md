@@ -251,3 +251,76 @@ Reassembly permits at most five seconds without progress and thirty seconds in
 total. A progressing large transfer is no longer rejected solely because its
 first chunk arrived more than five seconds earlier. Errors distinguish bounds,
 identity/offset changes, idle/total deadlines and invalid UTF-8 without content.
+
+## Sparse traffic and latency diagnostics
+
+The serving bitrate controller aggregates at least 100 sent datagrams before
+using the 2% loss threshold. A short burst losing at least five packets and
+more than 10% can react earlier. Individual transport congestion events remain
+diagnostic: QUIC still handles retransmission and packet pacing. A large RTT
+rise needs two consecutive 250 ms observations; path and media penalties for
+one burst share a one-second cooldown. Actual failed media receipts and
+sustained blocked delivery retain their bounded recovery and bitrate response.
+This prevents a single lost packet among a handful of idle-screen datagrams
+from repeatedly collapsing Full HD quality.
+
+Private normal-level server logs now retain every bitrate reduction's path
+counters, delivery state and producer misses. Five-second health records also
+include direct/relay selection and the maximum successful input-injection
+duration in that interval. No input values or content are recorded. Viewer
+reports correlate up to 128 sent input sequences using only the viewer's local
+clock, with bounded 1024-sample histories. Input ACK p50/p95 includes local
+queueing, transport, server injection and reply handling; queue p95 and the
+oldest pending ACK age distinguish an input backlog from stale video. These
+ACK measurements do not establish that the target application changed pixels.
+
+## Keyboard modifiers across platforms
+
+The Mac viewer explicitly treats both Option keys as remote Alt. Native
+modifier flags reconcile the held remote keys before the next key or pointer
+event, including when a modifier was already held as the viewer gained focus
+or the OS omitted a separate modifier-key event. Known right-side keys stay
+right-side keys; flags with no known side default to the left modifier.
+Focus loss still releases held keys and buttons. Ctrl remains Ctrl, Shift
+remains Shift, and Command maps to the remote Super/Windows modifier; physical
+keyboard layout and text interpretation stay with the remote desktop.
+
+For Ubuntu shortcuts, use Option+arrow for Alt+arrow, Control for Ctrl and
+Command for Super. This does not turn local OS-reserved shortcuts into remote
+input, or provide the still-planned IME/composition integration.
+
+Explicit viewer launches request window focus once. Redraws and reconnects
+retain normal window stacking and never reactivate the application. Surface
+occlusion, acquisition timeout, reconfiguration and absence of a picture have
+separate diagnostic stage names, so a covered window is not confused with a
+presentation failure.
+
+A contiguous blocked media receipt produces one soft bitrate reduction.
+Capture admission can already be paused while a large keyframe is in flight;
+repeatedly lowering future encoding rates cannot shrink that payload. Fresh
+acknowledgements or completion reset the episode; distinct hard failures still
+react immediately. This prevents startup/recovery keys from driving otherwise
+healthy sessions to the bitrate floor merely by taking several RTTs to arrive.
+
+Accepted input opens a bounded 250 ms capture burst without requesting a
+keyframe. The X11 producer checks this session-clock deadline while waiting
+for damage and captures at its existing cadence/admission limits during the
+burst. This avoids a one-second idle refresh wait if a redirected/composited
+application repaint is not represented by the watched root DAMAGE stream.
+Idle capture still pauses after the deadline. View-only or rejected input
+cannot open a burst; this is an interaction hint, not proof of an application's
+response or a replacement for end-to-end latency qualification.
+
+On macOS, explicit startup requests application activation after creating the
+window, in addition to window focus. The modern AppKit activation request is
+used when the runtime supports it; older supported systems use their legacy
+activation API. AppKit may decline an activation request, and covered-window
+snapshots still cannot establish physical presentation. Redraw/reconnect does
+not request activation or raise window level.
+
+The local encoded relay tap holds at most one queued compressed frame and
+backpressures its wire receiver while IPC/decoding is busy. It preserves H.264
+reference order: dropping compressed predecessors used to force unnecessary
+IDR recovery during local stalls. Newest-frame replacement remains valid only
+after decode. Closing the encoded receiver wakes its blocked sender and ends
+that receive leg; session cancellation still aborts owned readers.

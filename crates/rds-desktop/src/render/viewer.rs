@@ -16,8 +16,8 @@ use winit::{
 };
 
 use super::{
-    gpu::Gpu,
-    input::{Viewport, evdev},
+    gpu::{DrawOutcome, Gpu},
+    input::{Viewport, evdev, modifier_changes},
 };
 use crate::{DesktopError, RawFrame};
 
@@ -116,6 +116,11 @@ pub struct ViewerReport {
     pub encode_to_send_p95_ms: Option<f64>,
     pub control_rtt_ms: Option<u64>,
     pub input_acks: u64,
+    pub input_ack_p50_ms: Option<f64>,
+    pub input_ack_p95_ms: Option<f64>,
+    pub input_queue_p95_ms: Option<f64>,
+    pub pending_input_acks: usize,
+    pub oldest_input_ack_age_ms: Option<u64>,
     pub clipboard_transfers: u64,
     pub last_clipboard_bytes: u32,
     pub reconnects: u64,
@@ -145,6 +150,35 @@ struct Pending {
     raw: RawFrame,
     received: Instant,
 }
+/// Local event-to-ack measurements never compare clocks on different hosts.
+/// Coalesced pointer events are tracked only after dequeue; the event's own
+/// local creation time still includes time spent waiting in the UI queue.
+#[derive(Default)]
+struct InputLatency {
+    pending: VecDeque<(u64, u64)>,
+    queued: Vec<f64>,
+    acknowledged: Vec<f64>,
+}
+impl InputLatency {
+    fn sent(&mut self, seq: u64, created_ms: u64, now_ms: u64) {
+        if self.pending.len() == 128 {
+            self.pending.pop_front();
+        }
+        self.pending.push_back((seq, created_ms));
+        sample(&mut self.queued, now_ms.saturating_sub(created_ms) as f64);
+    }
+    fn ack(&mut self, seq: u64, now_ms: u64) {
+        if let Some(index) = self.pending.iter().position(|(pending, _)| *pending == seq)
+            && let Some((_, created_ms)) = self.pending.remove(index)
+        {
+            sample(
+                &mut self.acknowledged,
+                now_ms.saturating_sub(created_ms) as f64,
+            );
+        }
+    }
+}
+
 struct State {
     pending: Option<Pending>,
     wake_pending: bool,
@@ -154,6 +188,7 @@ struct State {
     delays: Vec<f64>,
     encoding: Vec<f64>,
     sending: Vec<f64>,
+    input_latency: InputLatency,
     close: bool,
     interrupted: Option<Instant>,
     network_stage: String,
@@ -245,6 +280,9 @@ impl ViewerHandle {
     pub fn status(&self, text: impl Into<String>) {
         let mut state = lock(&self.state);
         state.status = text.into();
+        if state.status == "Reconnecting" {
+            state.input_latency.pending.clear();
+        }
         if state.status == "Reconnecting" && state.interrupted.is_none() {
             state.interrupted = Some(Instant::now());
             state.report.reconnects += 1;
@@ -257,8 +295,21 @@ impl ViewerHandle {
     pub fn control_rtt(&self, ms: u64) {
         lock(&self.state).report.control_rtt_ms = Some(ms);
     }
-    pub fn input_ack(&self) {
-        lock(&self.state).report.input_acks += 1;
+    pub fn input_sent(&self, control: &DesktopControl) {
+        if let DesktopControl::Input(event) = control {
+            lock(&self.state).input_latency.sent(
+                event.seq,
+                event.event_ts_ms,
+                self.started.elapsed().as_millis() as u64,
+            );
+        }
+    }
+    pub fn input_ack(&self, seq: u64) {
+        let mut state = lock(&self.state);
+        state.report.input_acks += 1;
+        state
+            .input_latency
+            .ack(seq, self.started.elapsed().as_millis() as u64);
     }
     pub fn clipboard_ready(&self, bytes: u32) {
         let mut state = lock(&self.state);
@@ -295,6 +346,13 @@ impl ViewerHandle {
         ) = quantiles(&state.delays);
         (report.capture_encode_p50_ms, report.capture_encode_p95_ms) = quantiles(&state.encoding);
         (report.encode_to_send_p50_ms, report.encode_to_send_p95_ms) = quantiles(&state.sending);
+        (report.input_ack_p50_ms, report.input_ack_p95_ms) =
+            quantiles(&state.input_latency.acknowledged);
+        report.input_queue_p95_ms = quantiles(&state.input_latency.queued).1;
+        report.pending_input_acks = state.input_latency.pending.len();
+        report.oldest_input_ack_age_ms = state.input_latency.pending.front().map(|(_, created)| {
+            (self.started.elapsed().as_millis() as u64).saturating_sub(*created)
+        });
         report
     }
 }
@@ -324,6 +382,7 @@ impl Viewer {
                 delays: Vec::new(),
                 encoding: Vec::new(),
                 sending: Vec::new(),
+                input_latency: InputLatency::default(),
                 close: false,
                 interrupted: None,
                 network_stage: "starting".into(),
@@ -342,6 +401,7 @@ impl Viewer {
             input,
             display,
             seq: 0,
+            modifiers: Default::default(),
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
             pointer: false,
@@ -367,6 +427,7 @@ struct App {
     input: InputSender,
     display: u32,
     seq: u64,
+    modifiers: winit::event::Modifiers,
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
     pointer: bool,
@@ -377,6 +438,23 @@ impl App {
         self.error = Some(error);
         let _ = self.input.send(ViewerInput::Close);
         event_loop.exit();
+    }
+    fn sync_modifiers(&mut self, event_loop: &ActiveEventLoop) {
+        for (code, pressed) in modifier_changes(&self.keys, self.modifiers) {
+            if pressed {
+                self.keys.insert(code);
+            } else {
+                self.keys.remove(&code);
+            }
+            self.input(
+                event_loop,
+                if pressed {
+                    InputKind::KeyDown { code }
+                } else {
+                    InputKind::KeyUp { code }
+                },
+            );
+        }
     }
     fn input(&mut self, event_loop: &ActiveEventLoop, kind: InputKind) {
         let Some(next) = self.seq.checked_add(1) else {
@@ -427,7 +505,7 @@ impl App {
         lock(&self.handle.state).report.gpu_uploads = gpu.uploads();
         match result {
             Err(error) => self.fail(event_loop, error),
-            Ok(true) => {
+            Ok(DrawOutcome::Presented) => {
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
                     state.report.frames_submitted += 1;
@@ -444,8 +522,8 @@ impl App {
                     );
                 }
             }
-            Ok(false) => {
-                lock(&self.handle.state).render_stage = "surface unavailable".into();
+            Ok(outcome) => {
+                lock(&self.handle.state).render_stage = outcome.stage().into();
                 lock(&self.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
@@ -473,7 +551,7 @@ impl ApplicationHandler<()> for App {
             .and_then(|icon| {
                 event_loop
                     .create_window(
-                        Window::default_attributes()
+                        super::platform::window_attributes()
                             .with_title("RDS — Connecting")
                             .with_window_level(WindowLevel::Normal)
                             .with_window_icon(Some(icon))
@@ -487,6 +565,10 @@ impl ApplicationHandler<()> for App {
             });
         match result {
             Ok((window, gpu)) => {
+                // Explicit viewer launches activate once like ordinary apps.
+                // Reconnect/redraw never raises the window over other apps.
+                super::platform::activate_application();
+                window.focus_window();
                 window.request_redraw();
                 self.window = Some(window);
                 self.gpu = Some(gpu);
@@ -544,10 +626,17 @@ impl ApplicationHandler<()> for App {
                     window.request_redraw();
                 }
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+                self.sync_modifiers(event_loop);
+            }
             WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
                 if let PhysicalKey::Code(key) = event.physical_key
                     && let Some(code) = evdev(key)
                 {
+                    if !matches!(code, 29 | 42 | 54 | 56 | 97 | 100 | 125 | 126) {
+                        self.sync_modifiers(event_loop);
+                    }
                     if event.state == ElementState::Pressed {
                         if code == 47 && (self.keys.contains(&29) || self.keys.contains(&97)) {
                             match super::platform::paste_text() {
@@ -630,6 +719,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
+                self.sync_modifiers(event_loop);
                 let button = match button {
                     MouseButton::Left => 0x110,
                     MouseButton::Right => 0x111,
@@ -656,6 +746,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if self.pointer => {
+                self.sync_modifiers(event_loop);
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (f64::from(x), f64::from(y)),
                     MouseScrollDelta::PixelDelta(p) => (p.x / 40., p.y / 40.),
@@ -678,6 +769,25 @@ mod tests {
             kind,
         }))
     }
+    #[test]
+    fn input_latency_matches_sequences_and_keeps_bounded_local_clock_history() {
+        let mut latency = InputLatency::default();
+        latency.sent(7, 100, 120);
+        latency.sent(8, 110, 125);
+        latency.ack(8, 310);
+        latency.ack(8, 410); // duplicate must not produce another sample
+        latency.ack(999, 510); // unrelated ACK must not corrupt correlation
+        assert_eq!(latency.acknowledged, vec![200.]);
+        assert_eq!(latency.queued, vec![20., 15.]);
+        assert_eq!(latency.pending.front(), Some(&(7, 100)));
+        for seq in 100..1500 {
+            latency.sent(seq, seq, seq + 3);
+        }
+        assert_eq!(latency.pending.len(), 128);
+        assert_eq!(latency.queued.len(), 1024);
+        assert_eq!(latency.pending.front(), Some(&(1372, 1372)));
+    }
+
     #[tokio::test]
     async fn pointer_collapse_keeps_click_and_release_order_and_close_wakes_receiver() {
         let state = Arc::new(InputState {

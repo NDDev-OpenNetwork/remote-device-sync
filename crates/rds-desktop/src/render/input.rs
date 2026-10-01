@@ -40,6 +40,66 @@ impl Viewport {
     }
 }
 
+/// Reconcile native modifier flags when a press happened before focus, or
+/// the OS reports flags without a separate physical modifier key event.
+/// Unknown sides retain a known held side; otherwise use the left key.
+pub(super) fn modifier_changes(
+    held: &std::collections::BTreeSet<u32>,
+    modifiers: winit::event::Modifiers,
+) -> Vec<(u32, bool)> {
+    use winit::keyboard::ModifiersKeyState::Pressed;
+    let state = modifiers.state();
+    let groups = [
+        (
+            42,
+            54,
+            state.shift_key(),
+            modifiers.lshift_state(),
+            modifiers.rshift_state(),
+        ),
+        (
+            29,
+            97,
+            state.control_key(),
+            modifiers.lcontrol_state(),
+            modifiers.rcontrol_state(),
+        ),
+        (
+            56,
+            100,
+            state.alt_key(),
+            modifiers.lalt_state(),
+            modifiers.ralt_state(),
+        ),
+        (
+            125,
+            126,
+            state.super_key(),
+            modifiers.lsuper_state(),
+            modifiers.rsuper_state(),
+        ),
+    ];
+    let mut changes = Vec::with_capacity(8);
+    for (left, right, active, lstate, rstate) in groups {
+        let (mut l, mut r) = (lstate == Pressed, rstate == Pressed);
+        if !active {
+            (l, r) = (false, false);
+        } else if !l && !r {
+            (l, r) = (held.contains(&left), held.contains(&right));
+            if !l && !r {
+                l = true;
+            }
+        }
+        for (code, pressed) in [(left, l), (right, r)] {
+            if held.contains(&code) != pressed {
+                changes.push((code, pressed));
+            }
+        }
+    }
+    changes.sort_by_key(|(_, pressed)| *pressed); // release before changing sides
+    changes
+}
+
 /// Physical key mapping to the remote protocol's Linux evdev vocabulary.
 /// Layout/IME composition stays with the target desktop.
 pub(super) fn evdev(code: KeyCode) -> Option<u32> {
@@ -157,6 +217,35 @@ pub(super) fn evdev(code: KeyCode) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn option_flags_without_a_key_event_supply_alt_and_release_it() {
+        let held = std::collections::BTreeSet::new();
+        let alt = winit::event::Modifiers::from(winit::keyboard::ModifiersState::ALT);
+        assert_eq!(modifier_changes(&held, alt), vec![(56, true)]);
+        let held = std::collections::BTreeSet::from([56, 105]);
+        assert_eq!(modifier_changes(&held, alt), vec![]);
+        assert_eq!(
+            modifier_changes(&held, Default::default()),
+            vec![(56, false)]
+        );
+        assert_eq!(evdev(KeyCode::AltLeft), Some(56));
+        assert_eq!(evdev(KeyCode::AltRight), Some(100));
+        assert_eq!(evdev(KeyCode::ArrowUp), Some(103));
+    }
+
+    #[test]
+    fn unknown_modifier_sides_preserve_right_keys_and_release_both_on_focus_reset() {
+        let held = std::collections::BTreeSet::from([97, 100, 126]);
+        let flags = winit::keyboard::ModifiersState::CONTROL
+            | winit::keyboard::ModifiersState::ALT
+            | winit::keyboard::ModifiersState::SUPER;
+        assert_eq!(modifier_changes(&held, flags.into()), vec![]);
+        assert_eq!(
+            modifier_changes(&held, Default::default()),
+            vec![(97, false), (100, false), (126, false)]
+        );
+    }
+
     #[test]
     fn letterboxing_and_scaled_video_preserve_remote_coordinates() {
         let v = Viewport::new(1000, 1000, 1920, 1080);

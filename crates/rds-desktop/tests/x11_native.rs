@@ -245,3 +245,92 @@ fn native_display_scope_and_invalid_capture_fail_closed() {
             .same_screen
     );
 }
+
+#[test]
+#[ignore = "requires a dedicated Xvfb server; injects native input"]
+fn native_alt_navigation_resolves_the_actual_xkb_physical_map() {
+    use std::time::{Duration, Instant};
+    use x11rb::protocol::{
+        Event,
+        xkb::{ConnectionExt as _, ID, NameDetail},
+        xproto::{CreateWindowAux, EventMask, InputFocus, WindowClass},
+    };
+    let (observer, root) = observer();
+    observer.xkb_use_extension(1, 0).unwrap().reply().unwrap();
+    let names = observer
+        .xkb_get_names(ID::USE_CORE_KBD.into(), NameDetail::KEY_NAMES)
+        .unwrap()
+        .reply()
+        .unwrap();
+    let native_up = names
+        .value_list
+        .key_names
+        .unwrap()
+        .iter()
+        .position(|key| {
+            key.name
+                .iter()
+                .copied()
+                .filter(|byte| *byte != 0 && *byte != b' ')
+                .collect::<Vec<_>>()
+                == b"UP"
+        })
+        .map(|offset| names.first_key as usize + offset)
+        .unwrap() as u8;
+    let previous = observer.get_input_focus().unwrap().reply().unwrap().focus;
+    let window = observer.generate_id().unwrap();
+    observer
+        .create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            20,
+            20,
+            200,
+            100,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().event_mask(EventMask::KEY_PRESS | EventMask::KEY_RELEASE),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    observer.map_window(window).unwrap().check().unwrap();
+    observer
+        .set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)
+        .unwrap()
+        .check()
+        .unwrap();
+    let mut sink = XtestInput::new().unwrap();
+    sink.inject(&event(InputKind::KeyDown { code: 56 }))
+        .unwrap();
+    sink.inject(&event(InputKind::KeyDown { code: 103 }))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Some(Event::KeyPress(key)) = observer.poll_for_event().unwrap()
+            && key.detail == native_up
+        {
+            assert!(
+                key.state.contains(KeyButMask::MOD1),
+                "native Up did not carry Alt"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "wire Up never reached the native Up key"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    sink.inject(&event(InputKind::KeyUp { code: 103 })).unwrap();
+    sink.inject(&event(InputKind::KeyUp { code: 56 })).unwrap();
+    drop(sink);
+    observer
+        .set_input_focus(InputFocus::PARENT, previous, x11rb::CURRENT_TIME)
+        .unwrap()
+        .check()
+        .unwrap();
+    observer.destroy_window(window).unwrap().check().unwrap();
+}

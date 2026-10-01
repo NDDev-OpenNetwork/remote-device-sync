@@ -44,7 +44,7 @@ pub fn choose_resolution() -> Option<u32> {
         for title in ["Full HD · 1080p", "HD · 720p", "Original", "Cancel"] {
             alert.addButtonWithTitle(&NSString::from_str(title));
         }
-        app.activate();
+        activate_application();
         alert.runModal()
     };
     match response {
@@ -85,3 +85,41 @@ pub(super) fn event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError
 pub(super) fn event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
     EventLoop::with_user_event().build()
 }
+
+#[cfg(target_os = "macos")]
+pub(super) fn window_attributes() -> winit::window::WindowAttributes {
+    use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
+    winit::window::Window::default_attributes().with_option_as_alt(OptionAsAlt::Both)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn window_attributes() -> winit::window::WindowAttributes {
+    winit::window::Window::default_attributes()
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn activate_application() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+    if let Some(main) = MainThreadMarker::new() {
+        // SAFETY: explicit viewer launch on the verified AppKit main thread.
+        // Request application activation after its window exists; window focus
+        // alone does not activate a background application on current macOS.
+        let app = NSApplication::sharedApplication(main);
+        // The modern request exists on macOS 14+. Preserve the advertised
+        // older system floor without sending an unsupported Objective-C selector.
+        unsafe {
+            let modern: bool = objc2::msg_send![&*app, respondsToSelector: objc2::sel!(activate)];
+            if modern {
+                app.activate();
+            } else {
+                // Required compatibility path only when the modern selector is absent.
+                #[allow(deprecated)]
+                app.activateIgnoringOtherApps(true);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn activate_application() {}
