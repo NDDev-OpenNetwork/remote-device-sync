@@ -3,8 +3,15 @@
 Scope: part of W6.4/W6.8. The Rust backend uses `x11rb` and the server's
 standard XTEST/core protocol. No runtime helper process or dependency is added.
 
-The wire carries Linux evdev codes. XKB's evdev mapping adds eight for core X
-keycodes; zero, overflow and keys beyond the server's 8-bit range are refused.
+The wire carries Linux evdev codes. The backend reads the actual core
+keyboard's XKB physical key names and resolves those names to native X keycodes.
+This preserves remote layout/group interpretation on both evdev and legacy
+XFree86 maps; an evdev `+8` guess could turn an Up arrow into Print Screen on
+a legacy session. Zero, missing/ambiguous names, overflow and unsupported
+physical keys are refused instead of injecting an unrelated key. The existing
+x11rb dependency enables its XKB protocol feature; no new library or runtime
+helper is introduced. Core keyboard-map notifications refresh the cache;
+key-up and teardown release the exact native key recorded at key-down.
 Buttons map explicitly: left/right/middle to X buttons 1/3/2 and evdev
 side/extra/forward/back/task to 8–12. Server pointer remapping still applies;
 unsupported native buttons produce an error rather than a successful ACK.
@@ -33,7 +40,7 @@ their release and completes a server roundtrip before closing its connection.
 It does not release keys/buttons it has never pressed. This is best effort if
 the X server or connection fails; a blocking native operation can finish after
 session cancellation. An ACK means the backend accepted the request, not that
-an application displayed its effect. Layout/IME, custom non-evdev XKB maps,
+an application displayed its effect. IME, nonstandard physical names,
 extended keys, dynamic monitor geometry and input-to-visible latency remain open.
 
 ## Required disposable fixture

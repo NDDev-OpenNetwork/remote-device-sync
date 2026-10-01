@@ -294,3 +294,10 @@ retain normal window stacking and never reactivate the application. Surface
 occlusion, acquisition timeout, reconfiguration and absence of a picture have
 separate diagnostic stage names, so a covered window is not confused with a
 presentation failure.
+
+A contiguous blocked media receipt produces one soft bitrate reduction.
+Capture admission can already be paused while a large keyframe is in flight;
+repeatedly lowering future encoding rates cannot shrink that payload. Fresh
+acknowledgements or completion reset the episode; distinct hard failures still
+react immediately. This prevents startup/recovery keys from driving otherwise
+healthy sessions to the bitrate floor merely by taking several RTTs to arrive.

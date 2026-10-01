@@ -83,6 +83,7 @@ impl Drop for LateReceipt {
 #[derive(Default)]
 struct DeliveryPressure {
     stalled_ticks: u8,
+    penalized: bool,
 }
 
 impl DeliveryPressure {
@@ -90,12 +91,22 @@ impl DeliveryPressure {
         // A completed slow frame is history, not evidence of a current queue.
         // Require two consecutive pacing samples with an outstanding late
         // receipt and no new successful receipt. Hard failures still react now.
+        if delivered || late_pending == 0 {
+            self.penalized = false;
+        }
         self.stalled_ticks = if late_pending > 0 && !delivered {
             self.stalled_ticks.saturating_add(1).min(2)
         } else {
             0
         };
-        failed || self.stalled_ticks >= 2
+        // A blocked keyframe pauses capture: repeated cuts cannot shrink
+        // the already encoded payload. Penalize this blockage once, then wait
+        // for progress or a distinct hard failure before reducing again.
+        let stalled = self.stalled_ticks >= 2 && !self.penalized;
+        if stalled || failed {
+            self.penalized = true;
+        }
+        failed || stalled
     }
 }
 
@@ -1561,11 +1572,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_blocked_receipt_does_not_repeat_penalties_while_capture_is_paused() {
+        let mut pressure = DeliveryPressure::default();
+        let mut controller = BitrateController::new(4_000_000, 8_000_000);
+        controller.step_with_delivery(Some(path(1000, 0, 140, 0)), 0, false, true);
+        for tick in 0..16 {
+            let impaired = pressure.sample(1, false, false);
+            controller.step_with_delivery(Some(path(1001 + tick, 0, 140, 0)), 0, impaired, false);
+        }
+        assert_eq!(
+            controller.current(),
+            2_800_000,
+            "a single outstanding keyframe cannot repeatedly penalize future frames that admission has paused"
+        );
+        assert!(
+            pressure.sample(1, true, true),
+            "a new hard failure must still react"
+        );
+    }
+
+    #[test]
     fn delivery_pressure_requires_ongoing_blockage_and_preserves_hard_failures() {
         let mut pressure = DeliveryPressure::default();
         assert!(!pressure.sample(1, true, false));
         assert!(!pressure.sample(1, false, false));
         assert!(pressure.sample(1, false, false));
+        assert!(!pressure.sample(1, false, false));
         assert!(!pressure.sample(0, false, false));
         assert!(!pressure.sample(1, false, false));
         assert!(!pressure.sample(1, true, false));

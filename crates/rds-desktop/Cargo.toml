@@ -24,7 +24,7 @@ rds-net.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-x11rb = { version = "0.14", features = ["shm", "xtest", "xfixes", "damage"], optional = true }
+x11rb = { version = "0.14", features = ["shm", "xtest", "xfixes", "damage", "xkb"], optional = true }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "vulkan", "gles", "wgsl"], optional = true }
 # Native window/input only; client-side Adwaita decorations unnecessarily pull
 # font parsers into the desktop client. Use the window system's decorations.

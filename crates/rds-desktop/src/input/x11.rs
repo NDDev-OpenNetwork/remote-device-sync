@@ -3,7 +3,11 @@
 //! Injects into the default X11 session. Portable baseline; Wayland paths
 //! live in `input/portal` and `input/wlr`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+mod keymap;
+use keymap::KeyMap;
+use x11rb::protocol::xkb::ConnectionExt as _;
 
 use rds_core::{InputEvent, InputKind};
 use x11rb::connection::Connection as _;
@@ -20,7 +24,7 @@ const BUTTON_RELEASE: u8 = 5;
 const MOTION_NOTIFY: u8 = 6;
 const MAX_SCROLL_CLICKS: f64 = 32.0;
 
-/// XTEST input bound to one X screen, using the Linux XKB evdev keycode map.
+/// XTEST input bound to one X screen, resolving evdev through actual XKB key names.
 /// Extended evdev keys outside core X11's 8-bit keycodes are refused.
 pub struct XtestInput {
     conn: RustConnection,
@@ -28,8 +32,8 @@ pub struct XtestInput {
     screen: u32,
     width: u16,
     height: u16,
-    keycodes: std::ops::RangeInclusive<u8>,
-    keys: BTreeSet<u8>,
+    keymap: KeyMap,
+    keys: BTreeMap<u32, u8>,
     buttons: BTreeSet<u8>,
     scroll_x: f64,
     scroll_y: f64,
@@ -61,15 +65,30 @@ impl XtestInput {
             display.width_in_pixels,
             display.height_in_pixels,
         );
-        let keycodes = setup.min_keycode..=setup.max_keycode;
+        if !conn
+            .xkb_use_extension(1, 0)
+            .map_err(|e| error(&e.to_string()))?
+            .reply()
+            .map_err(|e| error(&e.to_string()))?
+            .supported
+        {
+            return Err(error(
+                "XKB physical key names are required for safe keyboard injection",
+            ));
+        }
+        let keymap = load_keymap(&conn)?;
+        tracing::info!(
+            mapped_keys = keymap.len(),
+            "X11 physical keyboard map ready"
+        );
         Ok(Self {
             conn,
             root,
             screen,
             width,
             height,
-            keycodes,
-            keys: BTreeSet::new(),
+            keymap,
+            keys: BTreeMap::new(),
             buttons: BTreeSet::new(),
             scroll_x: 0.0,
             scroll_y: 0.0,
@@ -129,22 +148,35 @@ impl XtestInput {
     }
 
     fn key(&mut self, code: u32, pressed: bool) -> Result<(), DesktopError> {
-        // Xorg's evdev map reserves the first eight X keycodes.
-        let key = code
-            .checked_add(8)
-            .and_then(|key| u8::try_from(key).ok())
-            .filter(|key| code != 0 && self.keycodes.contains(key))
-            .ok_or_else(|| error("evdev key is outside the X11 keycode range"))?;
+        // Core keyboard-map notifications invalidate the cached physical map.
+        // Layout group changes keep physical names unchanged. Releases use the
+        // exact native key pressed, even if another client replaced the map.
+        while let Some(event) = self
+            .conn
+            .poll_for_event()
+            .map_err(|e| error(&e.to_string()))?
+        {
+            if matches!(event, x11rb::protocol::Event::MappingNotify(_)) {
+                self.keymap = load_keymap(&self.conn)?;
+            }
+        }
+        let key = if let Some(key) = self.keys.get(&code) {
+            *key
+        } else {
+            let key = self.keymap.resolve(code)?;
+            if !pressed {
+                return Ok(());
+            }
+            key
+        };
         if pressed {
             self.keyboard_on_screen()?;
-        } else if !self.keys.contains(&key) {
-            return Ok(());
         }
         self.fake(if pressed { KEY_PRESS } else { KEY_RELEASE }, key, 0, 0)?;
         if pressed {
-            self.keys.insert(key);
+            self.keys.insert(code, key);
         } else {
-            self.keys.remove(&key);
+            self.keys.remove(&code);
         }
         Ok(())
     }
@@ -199,6 +231,21 @@ impl XtestInput {
         }
         Ok(())
     }
+}
+
+fn load_keymap(conn: &RustConnection) -> Result<KeyMap, DesktopError> {
+    use x11rb::protocol::xkb::{ID, NameDetail};
+    let reply = conn
+        .xkb_get_names(ID::USE_CORE_KBD.into(), NameDetail::KEY_NAMES)
+        .map_err(|e| error(&e.to_string()))?
+        .reply()
+        .map_err(|e| error(&e.to_string()))?;
+    let names = reply
+        .value_list
+        .key_names
+        .ok_or_else(|| error("XKB keyboard omitted physical key names"))?;
+    let names: Vec<_> = names.into_iter().map(|key| key.name).collect();
+    KeyMap::from_names(reply.first_key, &names)
 }
 
 fn coordinate(value: f64, extent: u16) -> Result<i16, DesktopError> {
@@ -271,7 +318,7 @@ impl Drop for XtestInput {
     fn drop(&mut self) {
         // Best-effort release of only this sink's injected holds. The worker
         // drops the sink after its last in-flight call, outside Tokio workers.
-        for key in &self.keys {
+        for key in self.keys.values() {
             let _ = self
                 .conn
                 .xtest_fake_input(KEY_RELEASE, *key, 0, self.root, 0, 0, 0);
