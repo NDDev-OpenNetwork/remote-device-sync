@@ -394,3 +394,18 @@ automation tool's clock. It records only sequence, event class and local timing;
 key/button codes, coordinates, text and clipboard contents are excluded.
 These records locate delay; neither input dispatch nor a frame read proves
 physical display response.
+
+## Native work and macOS activity
+
+Slow decode diagnostics now separate elapsed native work from that worker's
+thread CPU time. Completed work fixes its end timestamp before reporting, so
+later reporting delay cannot inflate the native stage. A failed or unavailable
+CPU clock stays absent. Elapsed time minus CPU time includes scheduling and
+other native waiting; it is not a diagnosis of a particular OS cause.
+
+The macOS viewer owns a Foundation user-initiated activity for its event-loop
+lifetime, including a covered window's active reference processing. The guard
+ends the activity when the loop returns or unwinds. Its option explicitly
+allows idle system sleep and does not keep the display awake or prevent lock.
+This is scoped application activity, not a global power/QoS setting. Installed
+measurements still decide whether it improves a particular latency episode.

@@ -418,6 +418,7 @@ impl Viewer {
         Ok((Self { event_loop, app }, handle, receiver))
     }
     pub fn run(mut self) -> Result<(), DesktopError> {
+        let _activity = super::platform::remote_activity();
         self.event_loop
             .run_app(&mut self.app)
             .map_err(|e| DesktopError::Capture(e.to_string()))?;

@@ -9,6 +9,13 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::{sync::Semaphore, task::AbortHandle};
 
+#[cfg(all(feature = "x11", any(target_os = "linux", target_os = "macos")))]
+#[path = "decode_cpu.rs"]
+mod cpu;
+#[cfg(not(all(feature = "x11", any(target_os = "linux", target_os = "macos"))))]
+#[path = "decode_cpu_unavailable.rs"]
+mod cpu;
+
 const BUDGET: u8 = 0;
 const QUEUED: u8 = 1;
 const NATIVE: u8 = 2;
@@ -20,6 +27,8 @@ pub(crate) struct Probe {
     phase: AtomicU8,
     admitted_ms: AtomicU64,
     native_ms: AtomicU64,
+    finished_ms: AtomicU64,
+    native_cpu_us: AtomicU64,
     seq: u64,
     bytes: usize,
     width: u32,
@@ -33,6 +42,8 @@ impl Probe {
             phase: AtomicU8::new(BUDGET),
             admitted_ms: AtomicU64::new(0),
             native_ms: AtomicU64::new(0),
+            finished_ms: AtomicU64::new(0),
+            native_cpu_us: AtomicU64::new(u64::MAX),
             seq: header.seq,
             bytes,
             width: header.width,
@@ -60,6 +71,16 @@ impl Probe {
         let admitted = self.admitted_ms.load(Ordering::Relaxed);
         let native = self.native_ms.load(Ordering::Relaxed);
         let elapsed = self.elapsed_ms();
+        let work_ms = (phase >= NATIVE).then(|| {
+            let end = if phase == DONE {
+                self.finished_ms.load(Ordering::Relaxed)
+            } else {
+                elapsed
+            };
+            end.saturating_sub(native)
+        });
+        let cpu_us = self.native_cpu_us.load(Ordering::Relaxed);
+        let cpu_ms = (cpu_us != u64::MAX).then_some(cpu_us / 1000);
         tracing::warn!(
             reason,
             frame_seq = self.seq,
@@ -80,7 +101,11 @@ impl Probe {
             } else {
                 native.saturating_sub(admitted)
             }),
-            native_work_ms = (phase >= NATIVE).then(|| elapsed.saturating_sub(native)),
+            native_work_ms = work_ms,
+            native_cpu_ms = cpu_ms,
+            native_non_cpu_ms = work_ms
+                .zip(cpu_ms)
+                .map(|(wall, cpu)| wall.saturating_sub(cpu)),
             "desktop decode scheduling health"
         );
     }
@@ -136,8 +161,20 @@ pub(crate) async fn run<T: Send + 'static>(
     let task_probe = probe.clone();
     let task = tokio::task::spawn_blocking(move || {
         let _slot = slot;
+        let cpu_started = cpu::now();
         task_probe.mark(NATIVE);
         let result = work();
+        let cpu_finished = cpu::now();
+        task_probe
+            .finished_ms
+            .store(task_probe.elapsed_ms(), Ordering::Relaxed);
+        if let Some(micros) = cpu_finished
+            .zip(cpu_started)
+            .and_then(|(end, start)| end.checked_sub(start))
+            .and_then(|duration| u64::try_from(duration.as_micros()).ok())
+        {
+            task_probe.native_cpu_us.store(micros, Ordering::Relaxed);
+        }
         task_probe.mark(DONE);
         task_probe.report("completed_slowly");
         result
@@ -171,6 +208,38 @@ mod tests {
             width: 64,
             height: 64,
         }
+    }
+    #[cfg(all(feature = "x11", any(target_os = "linux", target_os = "macos")))]
+    #[tokio::test]
+    async fn thread_cpu_observation_distinguishes_work_from_native_waiting() {
+        static SLOTS: Semaphore = Semaphore::const_new(1);
+        let probe = Probe::new(&header(), 12);
+        run(&SLOTS, Duration::from_secs(3), probe.clone(), || {
+            let start = cpu::now().expect("supported platform thread clock");
+            let limit = Instant::now() + Duration::from_secs(2);
+            while cpu::now().unwrap().saturating_sub(start) < Duration::from_millis(20) {
+                assert!(
+                    Instant::now() < limit,
+                    "CPU fixture was indefinitely starved"
+                );
+                std::hint::spin_loop();
+            }
+            std::thread::sleep(Duration::from_millis(80));
+        })
+        .await
+        .unwrap();
+        let cpu_us = probe.native_cpu_us.load(Ordering::Acquire);
+        let wall_ms =
+            probe.finished_ms.load(Ordering::Acquire) - probe.native_ms.load(Ordering::Acquire);
+        assert!(cpu_us >= 20_000, "actual native CPU work must be observed");
+        assert!(
+            wall_ms >= 100,
+            "native waiting remains part of elapsed time"
+        );
+        assert!(
+            cpu_us < wall_ms * 500,
+            "sleep cannot be reported as CPU work"
+        );
     }
     #[test]
     fn cancellation_before_native_start_aborts_queued_decode() {

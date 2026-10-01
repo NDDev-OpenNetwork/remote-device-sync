@@ -593,3 +593,17 @@ retry end that hold. This is application repair above QUIC, without replacing
 its loss detection or enlarging reader/decode budgets. The
 [follow-up report](reports/rds-reference-recovery-20261002.md) distinguishes the
 real-stream regression, installed diagnostics and still-open native acceptance.
+
+## 2026-10-02 native scheduling observations
+
+[Apple's activity guidance](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/PrioritizeWorkAtTheAppLevel.html)
+recommends a scoped activity for ongoing user-initiated work.
+[The allowing-idle-sleep option](https://developer.apple.com/documentation/foundation/processinfo/activityoptions/userinitiatedallowingidlesystemsleep)
+preserves idle system sleep. RDS uses that option for its native viewer; it does
+not claim App Nap was proven to cause the observed pauses and does not enable
+the stronger latency-critical option. The existing pinned Rustix dependency
+also supplies a read-only [thread CPU clock](https://docs.rs/rustix/1.1.5/rustix/time/enum.ClockId.html)
+to distinguish actual computation from elapsed native waiting on Linux/macOS.
+The fixture combines real CPU work and sleeping on one blocking worker and
+requires its CPU observation to exclude the wait. These observations do not
+replace installed latency/quality acceptance.
