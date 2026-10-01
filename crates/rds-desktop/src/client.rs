@@ -44,6 +44,17 @@ const FRAME_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 const FRAME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const KEYFRAME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
+fn reorder_wait(rtt_ms: u64) -> std::time::Duration {
+    // A missing stream tag may itself be in transit. Two observed round trips
+    // tolerate WAN reordering; the cap keeps a truly missing reference bounded.
+    let ms = if rtt_ms == u64::MAX {
+        250
+    } else {
+        rtt_ms.saturating_mul(2).clamp(100, 1000)
+    };
+    std::time::Duration::from_millis(ms)
+}
+
 /// Decode state owned by one session. Codec reference frames are chain
 /// state: a decoder shared across sessions would cross-contaminate
 /// streams, so it lives here and is dropped with the session.
@@ -406,6 +417,7 @@ impl DesktopSession {
                 ctrl: ctrl_tx.clone(),
                 clock: clock.clone(),
                 receiving: receiving.clone(),
+                control_rtt_ms: control_rtt_ms.clone(),
             },
         ));
         let task = tokio::spawn(async move {
@@ -642,6 +654,7 @@ struct ReceiveContext {
     ctrl: mpsc::Sender<DesktopControl>,
     clock: SessionClock,
     receiving: Arc<AtomicUsize>,
+    control_rtt_ms: Arc<AtomicU64>,
 }
 
 enum FrameRead {
@@ -726,11 +739,13 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
         tokio::select! {
             biased;
             _ = repair.tick() => {
-                // An admitted reference still has its own bounded reader
-                // deadline. Discarding completed successors at 100 ms while
-                // it is progressing generates avoidable large IDRs on jitter.
-                if readers.is_empty() && ordered.expire(std::time::Duration::from_millis(100)) {
+                // An admitted reference has its own bounded reader deadline.
+                // Before its tag arrives, allow a measured WAN reorder window
+                // rather than generating an IDR at the old fixed 100 ms.
+                let wait = reorder_wait(ctx.control_rtt_ms.load(Ordering::Relaxed));
+                if readers.is_empty() && ordered.expire(wait) {
                     gaps+=1;
+                    tracing::warn!(expected_seq=ctx.next_seq.load(Ordering::Relaxed),reorder_budget_ms=wait.as_millis(),"desktop reference gap expired");
                     delivery.invalidate();
                     delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());
                 }
@@ -869,6 +884,15 @@ pub async fn run_desktop_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reference_wait_uses_rtt_and_caps_untrusted_or_missing_measurements() {
+        assert_eq!(reorder_wait(0).as_millis(), 100);
+        assert_eq!(reorder_wait(200).as_millis(), 400);
+        assert_eq!(reorder_wait(50_000).as_millis(), 1000);
+        assert_eq!(reorder_wait(u64::MAX - 1).as_millis(), 1000);
+        assert_eq!(reorder_wait(u64::MAX).as_millis(), 250);
+    }
 
     #[test]
     fn exhausted_control_sequences_never_wrap() {

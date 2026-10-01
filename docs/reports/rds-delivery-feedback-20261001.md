@@ -13,8 +13,9 @@ successors after 100 ms even when an admitted reference reader was still active,
 causing avoidable reference loss and new large keyframes.
 
 Ordering now retains at most three successors until admitted readers complete
-or reach their existing bounded deadlines. A missing reference with no active
-reader still expires after 100 ms. Reader/payload/decode limits are unchanged.
+or reach their existing bounded deadlines. A missing reference with no active reader
+uses two measured control RTTs, bounded to 100–1000 ms, with a 250 ms initial
+fallback. Reader/payload/decode limits are unchanged.
 
 The sender observes each owned frame stream's delivery receipt. A soft delay
 threshold of three sampled path RTTs, bounded to 250–1000 ms, reports an impaired
@@ -80,3 +81,18 @@ Installed-device observations belong to the private estate. The prior longer
 run contained an unplanned recovery and remains failed stability evidence. A
 new installed run is being qualified; a locked local console is excluded from
 visible-pixel acceptance. No full milestone gate is marked closed here.
+
+A real Iroh/Noq test also delays the missing reference tag beyond 100 ms while
+measuring a 200 ms control RTT. The former fixed timer requested an unnecessary
+IDR before that reference arrived. The receive loop now uses a bounded RTT-based
+window and logs the expected sequence and expiration budget on actual gaps.
+No payload or identity is added to these diagnostics. The initial test harness
+mistakenly requested a legacy route while expecting V2; that failed setup was
+retained separately and excluded from the corrected failed-before evidence.
+
+A separate five-second production health record remains active when the writer
+has no new frame. It reports native production activity, intentional codec skip
+count, latest produced-frame age, admission/keyframe waits and path RTT. These
+metadata distinguish capture/encode inactivity, intentional skips and transport
+backpressure during the observed long pauses. Hard budgets and wire remain
+unchanged; no image, clipboard content, credential or endpoint identity is logged.

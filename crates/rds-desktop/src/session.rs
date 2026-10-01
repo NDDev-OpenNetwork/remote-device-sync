@@ -45,6 +45,10 @@ struct DeliveryFeedback {
     failed: AtomicU64,
     acknowledged: AtomicU64,
     last_ack_ms: AtomicU64,
+    producing: AtomicBool,
+    produced: AtomicU64,
+    codec_skips: AtomicU64,
+    last_produced_ms: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -392,6 +396,7 @@ pub async fn serve_desktop_with(
     let (tx, mut rx) = mpsc::channel::<AdmittedFrame>(2);
     let keyframe_pending = Arc::new(AtomicBool::new(false));
     let capture_admission = Arc::new(AtomicU64::new(0));
+    let delivery_feedback = Arc::new(DeliveryFeedback::default());
     {
         let clock = clock.clone();
         let bitrate = Arc::clone(&controls.bitrate);
@@ -401,6 +406,7 @@ pub async fn serve_desktop_with(
         let mut producer = config.producer;
         let keyframe_pending = keyframe_pending.clone();
         let capture_admission = capture_admission.clone();
+        let feedback = delivery_feedback.clone();
         capture.spawn_blocking(move || {
             let producer_controls = ProducerControls {
                 bitrate,
@@ -453,10 +459,20 @@ pub async fn serve_desktop_with(
                 if paused {
                     source.resume_after_backpressure();
                 }
-                match source.produce(seq, &producer_controls, &clock) {
+                feedback.producing.store(true, Ordering::Relaxed);
+                let result = source.produce(seq, &producer_controls, &clock);
+                feedback.producing.store(false, Ordering::Relaxed);
+                match result {
                     Some(p) => {
                         if p.payload.is_empty() && source.preserves_reference() {
+                            feedback.codec_skips.fetch_add(1, Ordering::Relaxed);
                             continue;
+                        }
+                        if !p.payload.is_empty() {
+                            feedback
+                                .last_produced_ms
+                                .store(clock.now_ms(), Ordering::Relaxed);
+                            feedback.produced.fetch_add(1, Ordering::Relaxed);
                         }
                         if p.header.keyframe && !p.payload.is_empty() {
                             keyframe_pending.store(true, Ordering::Release);
@@ -484,7 +500,6 @@ pub async fn serve_desktop_with(
         })
     };
 
-    let delivery_feedback = Arc::new(DeliveryFeedback::default());
     // Pacing: sample path counters + actual media delivery + deadline misses,
     // which writes the bitrate the producer reads each frame.
     {
@@ -493,11 +508,15 @@ pub async fn serve_desktop_with(
         let requested = Arc::clone(&controls.requested);
         let misses = Arc::clone(&controls.deadline_misses);
         let feedback = delivery_feedback.clone();
+        let admission = capture_admission.clone();
+        let pending_key = keyframe_pending.clone();
+        let progress_clock = clock.clone();
         let mut controller = BitrateController::new(4_000_000, ceiling);
         workers.spawn(async move {
             let mut last_delayed = 0;
             let mut last_failed = 0;
             let mut last_acknowledged = 0;
+            let mut health = Instant::now();
             let mut tick = tokio::time::interval(PACING_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -541,6 +560,26 @@ pub async fn serve_desktop_with(
                     );
                 }
                 bitrate.store(bps.min(u64::from(u32::MAX)), Ordering::Relaxed);
+                // Independent of frame sends: during a freeze, distinguish
+                // native production, codec skips and delivery backpressure.
+                if health.elapsed() >= Duration::from_secs(5) {
+                    let produced = feedback.produced.load(Ordering::Relaxed);
+                    tracing::info!(
+                        producing = feedback.producing.load(Ordering::Relaxed),
+                        produced,
+                        codec_skips = feedback.codec_skips.load(Ordering::Relaxed),
+                        last_produced_age_ms = ?(produced > 0).then(|| progress_clock.now_ms().saturating_sub(feedback.last_produced_ms.load(Ordering::Relaxed))),
+                        pending_media_frames = admission.load(Ordering::Acquire),
+                        keyframe_pending = pending_key.load(Ordering::Acquire),
+                        bitrate_bps = bps,
+                        delayed_delivery = delayed,
+                        failed_delivery = failed,
+                        last_ack_ms = feedback.last_ack_ms.load(Ordering::Relaxed),
+                        path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        "desktop production and delivery health"
+                    );
+                    health = Instant::now();
+                }
             }
         })
     };
