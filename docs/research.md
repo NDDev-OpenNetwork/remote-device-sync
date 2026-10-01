@@ -543,3 +543,15 @@ packet sample, severe-burst shortcut, RTT confirmation and correlated-cut
 cooldown. Regression tests cover sparse successful delivery, transient and
 sustained RTT, severe loss and path changes. Installed-device evidence remains
 separate from those deterministic tests.
+
+## Input-to-capture wake on composited X11
+
+The [EWMH compositing contract](https://specifications.freedesktop.org/wm/latest/ar01s08.html)
+describes redirected application pixmaps and their own damage. A watched root
+DAMAGE object alone must not be assumed to cover every application repaint.
+RDS supplements damage-driven idle capture with a bounded burst after accepted
+input, retaining normal pacing, reference ordering and memory admission.
+[Moonlight's latency definitions](https://github.com/moonlight-stream/moonlight-docs/wiki/Frequently-Asked-Questions)
+separate network, decode, frame queue and presentation; a successful input ACK
+or fresh frame timestamp is not an application-response measurement. Runtime
+qualification compares actual target transitions with those stage diagnostics.

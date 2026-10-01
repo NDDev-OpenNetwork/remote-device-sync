@@ -301,3 +301,12 @@ repeatedly lowering future encoding rates cannot shrink that payload. Fresh
 acknowledgements or completion reset the episode; distinct hard failures still
 react immediately. This prevents startup/recovery keys from driving otherwise
 healthy sessions to the bitrate floor merely by taking several RTTs to arrive.
+
+Accepted input opens a bounded 250 ms capture burst without requesting a
+keyframe. The X11 producer checks this session-clock deadline while waiting
+for damage and captures at its existing cadence/admission limits during the
+burst. This avoids a one-second idle refresh wait if a redirected/composited
+application repaint is not represented by the watched root DAMAGE stream.
+Idle capture still pauses after the deadline. View-only or rejected input
+cannot open a burst; this is an interaction hint, not proof of an application's
+response or a replacement for end-to-end latency qualification.

@@ -27,6 +27,9 @@ use rds_net::wire::{CONTROL_STREAM_PRIORITY, MEDIA_STREAM_PRIORITY};
 
 /// Pacing sample interval for the bitrate controller.
 const PACING_INTERVAL: Duration = Duration::from_millis(250);
+/// Capture briefly after accepted input even when a compositor's root DAMAGE
+/// notification does not describe the redirected application repaint.
+const INPUT_REFRESH_BURST_MS: u64 = 250;
 /// Loss ratio that drives the bitrate down (2%).
 const LOSS_STEP_DOWN: f64 = 0.02;
 // An isolated loss among 3–8 desktop datagrams is not a 12–33% path loss
@@ -189,6 +192,8 @@ pub struct ProducerControls {
     pub idr: Arc<AtomicBool>,
     pub deadline_misses: Arc<AtomicU64>,
     pub requested: Arc<AtomicU64>,
+    /// Session-clock deadline for recent-input capture; does not request IDRs.
+    pub input_refresh_until_ms: Arc<AtomicU64>,
 }
 
 impl ProducerControls {
@@ -198,6 +203,7 @@ impl ProducerControls {
             idr: Arc::new(AtomicBool::new(true)),
             deadline_misses: Arc::new(AtomicU64::new(0)),
             requested: Arc::new(AtomicU64::new(0)),
+            input_refresh_until_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -510,6 +516,7 @@ pub async fn serve_desktop_with(
         let idr = Arc::clone(&controls.idr);
         let misses = Arc::clone(&controls.deadline_misses);
         let requested = Arc::clone(&controls.requested);
+        let input_refresh_until_ms = Arc::clone(&controls.input_refresh_until_ms);
         let mut producer = config.producer;
         let keyframe_pending = keyframe_pending.clone();
         let capture_admission = capture_admission.clone();
@@ -523,6 +530,7 @@ pub async fn serve_desktop_with(
                 // `requested` must see what the control arm filed, not a
                 // private always-empty copy.
                 requested,
+                input_refresh_until_ms,
             };
             let mut source = match producer.take() {
                 Some(p) => p,
@@ -911,6 +919,10 @@ pub async fn serve_desktop_with(
                             continue;
                         }
                     }
+                    controls.input_refresh_until_ms.store(
+                        send_clock.now_ms().saturating_add(INPUT_REFRESH_BURST_MS),
+                        Ordering::Release,
+                    );
                     delivery_feedback
                         .inputs_handled
                         .fetch_add(1, Ordering::Relaxed);
@@ -1226,16 +1238,19 @@ mod x11 {
         /// (the caller's `is_closed` check) is never deferred past it.
         /// `idr` wakes the loop early: a viewer joining or recovering
         /// from loss asks for a keyframe and must not wait out the cap.
-        fn idle_wait(&mut self, idr: &AtomicBool) -> bool {
+        fn idle_wait(&mut self, controls: &ProducerControls, clock: &SessionClock) -> bool {
             const IDLE_POLL: Duration = Duration::from_millis(10);
             const IDLE_MAX: Duration = Duration::from_secs(1);
-            if self.capturer.changed() || idr.load(Ordering::Relaxed) {
+            let input_active =
+                || controls.input_refresh_until_ms.load(Ordering::Acquire) > clock.now_ms();
+            if self.capturer.changed() || controls.idr.load(Ordering::Relaxed) || input_active() {
                 return false;
             }
             let deadline = Instant::now() + IDLE_MAX;
             loop {
                 if self.capturer.wait_for_change(IDLE_POLL)
-                    || idr.load(Ordering::Relaxed)
+                    || controls.idr.load(Ordering::Relaxed)
+                    || input_active()
                     || Instant::now() >= deadline
                 {
                     break;
@@ -1266,7 +1281,7 @@ mod x11 {
             controls: &ProducerControls,
             clock: &SessionClock,
         ) -> Option<Produced> {
-            let resumed = self.idle_wait(&controls.idr);
+            let resumed = self.idle_wait(controls, clock);
             // Capture/conversion has a fixed CPU cost that lowering encoded
             // bitrate cannot remove. Honor max_fps while using the achievable
             // cadence, rather than collapsing bitrate for every slow frame.
