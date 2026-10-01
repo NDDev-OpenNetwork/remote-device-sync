@@ -30,7 +30,12 @@ pub(super) fn remote_activity() -> RemoteActivity {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn remote_activity() {}
+pub(super) struct RemoteActivity;
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn remote_activity() -> RemoteActivity {
+    RemoteActivity
+}
 
 #[cfg(target_os = "macos")]
 pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
