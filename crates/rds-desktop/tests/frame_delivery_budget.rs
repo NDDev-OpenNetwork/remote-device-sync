@@ -108,8 +108,12 @@ async fn endpoint() -> (Endpoint, Gate) {
 struct CountingSource {
     inner: rds_desktop::SyntheticProducer,
     calls: Arc<std::sync::atomic::AtomicU64>,
+    bitrate: Arc<std::sync::atomic::AtomicU64>,
 }
 impl rds_desktop::FrameProducer for CountingSource {
+    fn resume_after_backpressure(&mut self) {
+        self.inner.resume_after_backpressure();
+    }
     fn produce(
         &mut self,
         seq: u64,
@@ -117,6 +121,10 @@ impl rds_desktop::FrameProducer for CountingSource {
         clock: &rds_desktop::SessionClock,
     ) -> Option<rds_desktop::Produced> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.bitrate.store(
+            controls.bitrate.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         self.inner.produce(seq, controls, clock)
     }
 }
@@ -130,13 +138,17 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
     use std::sync::atomic::{AtomicU64, Ordering};
 
     tokio::time::timeout(Duration::from_secs(10), async {
-        let (server, _) = endpoint().await;
-        let (client, gate) = endpoint().await;
+        // Pause before server datagrams are emitted. This creates delayed
+        // media without deliberately losing packets or receiver ACKs.
+        let (server, gate) = endpoint().await;
+        let (client, _) = endpoint().await;
         let (a, b) = tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
             server.accept().await.unwrap().await
         });
         let (a, b) = (a.unwrap(), b.unwrap());
         let calls = Arc::new(AtomicU64::new(0));
+        let bitrate = Arc::new(AtomicU64::new(0));
+        let observed_bitrate = bitrate.clone();
         let produced = calls.clone();
         let (start, ready) = tokio::sync::oneshot::channel();
         let serving = tokio::spawn(async move {
@@ -165,6 +177,7 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
                     producer: Some(Box::new(CountingSource {
                         inner: SyntheticProducer::new(240, 64, 64, 1024).keyframe_every(1),
                         calls: produced,
+                        bitrate: observed_bitrate,
                     })),
                     frame_route: Some(UniHello::DesktopFrames { id: session }),
                     ..Default::default()
@@ -196,7 +209,8 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         let held = calls.load(Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let initial_bitrate = bitrate.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(800)).await;
         assert_eq!(
             held, 1,
             "a recovery keyframe must finish before encoding successors"
@@ -214,6 +228,10 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
             last = encoded.recv().await.unwrap().header.seq;
         }
         assert!(last > first, "delivery must resume on the same connection");
+        assert!(
+            bitrate.load(Ordering::SeqCst) < initial_bitrate,
+            "delayed media ACKs must reduce the encoder target even with no reported packet loss"
+        );
         drop(session);
         serving.abort();
         let _ = serving.await;

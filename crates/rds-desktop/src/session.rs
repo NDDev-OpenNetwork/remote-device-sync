@@ -37,6 +37,35 @@ const MAX_PENDING_FRAME_ACKS: usize = 3;
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const KEYFRAME_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
+// QUIC path counters may remain clean while a reliable relay queues media.
+// Observe actual frame delivery as well, without retaining frame payloads.
+#[derive(Default)]
+struct DeliveryFeedback {
+    delayed: AtomicU64,
+    failed: AtomicU64,
+    acknowledged: AtomicU64,
+    last_ack_ms: AtomicU64,
+    producing: AtomicBool,
+    produced: AtomicU64,
+    codec_skips: AtomicU64,
+    last_produced_ms: AtomicU64,
+}
+
+#[derive(Clone)]
+struct FrameDelivery {
+    keyframe_pending: Arc<AtomicBool>,
+    idr: Arc<AtomicBool>,
+    feedback: Arc<DeliveryFeedback>,
+}
+
+fn delivery_delay_budget(path: Option<PathStats>) -> Duration {
+    path.map_or(Duration::from_millis(250), |p| {
+        p.rtt
+            .saturating_mul(3)
+            .clamp(Duration::from_millis(250), Duration::from_secs(1))
+    })
+}
+
 /// Monotonic clock shared by producer and writer so `FrameHeader`
 /// timestamps are comparable within one session.
 #[derive(Clone)]
@@ -184,6 +213,8 @@ pub struct BitrateController {
     last_congestion: u64,
     primed: bool,
     last_path: Option<u64>,
+    delivery_hold_ticks: u8,
+    delivery_cut_cooldown_ticks: u8,
 }
 
 impl BitrateController {
@@ -198,6 +229,8 @@ impl BitrateController {
             last_congestion: 0,
             primed: false,
             last_path: None,
+            delivery_hold_ticks: 0,
+            delivery_cut_cooldown_ticks: 0,
         }
     }
 
@@ -264,6 +297,44 @@ impl BitrateController {
         self.current = next;
         next
     }
+
+    // The serving session supplements path samples with frame ACKs. A late
+    // frame reduces offered load before its hard reset deadline. Hold that
+    // reduction for five seconds; coalesce a burst of correlated receipts for
+    // one second, and increase only on fresh successful delivery
+    // and at 1% per sample so clean relay packet counters cannot immediately
+    // drive the encoder back into the same backlog.
+    fn step_with_delivery(
+        &mut self,
+        path: Option<PathStats>,
+        deadline_misses: u64,
+        impaired: bool,
+        delivered: bool,
+    ) -> u64 {
+        let previous = self.current;
+        let proposed = self.step(path, deadline_misses);
+        self.delivery_cut_cooldown_ticks = self.delivery_cut_cooldown_ticks.saturating_sub(1);
+        self.current = if impaired {
+            self.delivery_hold_ticks = 20;
+            if self.delivery_cut_cooldown_ticks == 0 {
+                self.delivery_cut_cooldown_ticks = 4;
+                // RTT/loss and a delayed receipt may report the same event.
+                // Apply the stronger response once, never multiply both cuts.
+                let media_cut = (previous / 10 * 7 + previous % 10 * 7 / 10).max(self.floor);
+                proposed.min(media_cut)
+            } else {
+                proposed.min(previous)
+            }
+        } else if self.delivery_hold_ticks > 0 {
+            self.delivery_hold_ticks -= 1;
+            proposed.min(previous)
+        } else if !delivered {
+            proposed.min(previous)
+        } else {
+            proposed.min(previous.saturating_add((previous / 100).max(1)))
+        };
+        self.current
+    }
 }
 
 /// Serve one desktop session on an already-accepted stream pair.
@@ -325,6 +396,7 @@ pub async fn serve_desktop_with(
     let (tx, mut rx) = mpsc::channel::<AdmittedFrame>(2);
     let keyframe_pending = Arc::new(AtomicBool::new(false));
     let capture_admission = Arc::new(AtomicU64::new(0));
+    let delivery_feedback = Arc::new(DeliveryFeedback::default());
     {
         let clock = clock.clone();
         let bitrate = Arc::clone(&controls.bitrate);
@@ -334,6 +406,7 @@ pub async fn serve_desktop_with(
         let mut producer = config.producer;
         let keyframe_pending = keyframe_pending.clone();
         let capture_admission = capture_admission.clone();
+        let feedback = delivery_feedback.clone();
         capture.spawn_blocking(move || {
             let producer_controls = ProducerControls {
                 bitrate,
@@ -386,10 +459,20 @@ pub async fn serve_desktop_with(
                 if paused {
                     source.resume_after_backpressure();
                 }
-                match source.produce(seq, &producer_controls, &clock) {
+                feedback.producing.store(true, Ordering::Relaxed);
+                let result = source.produce(seq, &producer_controls, &clock);
+                feedback.producing.store(false, Ordering::Relaxed);
+                match result {
                     Some(p) => {
                         if p.payload.is_empty() && source.preserves_reference() {
+                            feedback.codec_skips.fetch_add(1, Ordering::Relaxed);
                             continue;
+                        }
+                        if !p.payload.is_empty() {
+                            feedback
+                                .last_produced_ms
+                                .store(clock.now_ms(), Ordering::Relaxed);
+                            feedback.produced.fetch_add(1, Ordering::Relaxed);
                         }
                         if p.header.keyframe && !p.payload.is_empty() {
                             keyframe_pending.store(true, Ordering::Release);
@@ -417,15 +500,23 @@ pub async fn serve_desktop_with(
         })
     };
 
-    // Pacing: sample path counters + deadline misses into the controller,
+    // Pacing: sample path counters + actual media delivery + deadline misses,
     // which writes the bitrate the producer reads each frame.
     {
         let conn = conn.clone();
         let bitrate = Arc::clone(&controls.bitrate);
         let requested = Arc::clone(&controls.requested);
         let misses = Arc::clone(&controls.deadline_misses);
+        let feedback = delivery_feedback.clone();
+        let admission = capture_admission.clone();
+        let pending_key = keyframe_pending.clone();
+        let progress_clock = clock.clone();
         let mut controller = BitrateController::new(4_000_000, ceiling);
         workers.spawn(async move {
+            let mut last_delayed = 0;
+            let mut last_failed = 0;
+            let mut last_acknowledged = 0;
+            let mut health = Instant::now();
             let mut tick = tokio::time::interval(PACING_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -439,12 +530,26 @@ pub async fn serve_desktop_with(
                 let missed = misses.swap(0, Ordering::Relaxed);
                 let previous = controller.current();
                 let path = conn.current_path_stats();
-                let bps = controller.step(path, missed);
+                let delayed = feedback.delayed.load(Ordering::Relaxed);
+                let failed = feedback.failed.load(Ordering::Relaxed);
+                let acknowledged = feedback.acknowledged.load(Ordering::Relaxed);
+                let delayed_frames = delayed.saturating_sub(last_delayed);
+                let failed_frames = failed.saturating_sub(last_failed);
+                let bps = controller.step_with_delivery(
+                    path,
+                    missed,
+                    delayed_frames > 0 || failed_frames > 0,
+                    acknowledged > last_acknowledged,
+                );
+                (last_delayed, last_failed, last_acknowledged) = (delayed, failed, acknowledged);
                 if bps != previous {
                     tracing::debug!(
                         previous_bps = previous,
                         bitrate_bps = bps,
                         deadline_misses = missed,
+                        delayed_frames,
+                        failed_frames,
+                        last_ack_ms = feedback.last_ack_ms.load(Ordering::Relaxed),
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
                         path_id = ?path.map(|p| p.path_id),
                         path_via_relay = ?path.map(|p| p.via_relay),
@@ -455,6 +560,26 @@ pub async fn serve_desktop_with(
                     );
                 }
                 bitrate.store(bps.min(u64::from(u32::MAX)), Ordering::Relaxed);
+                // Independent of frame sends: during a freeze, distinguish
+                // native production, codec skips and delivery backpressure.
+                if health.elapsed() >= Duration::from_secs(5) {
+                    let produced = feedback.produced.load(Ordering::Relaxed);
+                    tracing::info!(
+                        producing = feedback.producing.load(Ordering::Relaxed),
+                        produced,
+                        codec_skips = feedback.codec_skips.load(Ordering::Relaxed),
+                        last_produced_age_ms = ?(produced > 0).then(|| progress_clock.now_ms().saturating_sub(feedback.last_produced_ms.load(Ordering::Relaxed))),
+                        pending_media_frames = admission.load(Ordering::Acquire),
+                        keyframe_pending = pending_key.load(Ordering::Acquire),
+                        bitrate_bps = bps,
+                        delayed_delivery = delayed,
+                        failed_delivery = failed,
+                        last_ack_ms = feedback.last_ack_ms.load(Ordering::Relaxed),
+                        path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        "desktop production and delivery health"
+                    );
+                    health = Instant::now();
+                }
             }
         })
     };
@@ -466,6 +591,7 @@ pub async fn serve_desktop_with(
     let writer_clock = clock.clone();
     let writer_bitrate = Arc::clone(&controls.bitrate);
     let writer_idr = Arc::clone(&controls.idr);
+    let writer_feedback = delivery_feedback.clone();
     let frame_route = config.frame_route.unwrap_or(rds_core::UniHello::Desktop);
     workers.spawn(async move {
         // Token bucket on the paced bitrate: offering faster than the
@@ -554,8 +680,11 @@ pub async fn serve_desktop_with(
                 produced,
                 &mut rx,
                 &mut acknowledgements,
-                keyframe_pending.clone(),
-                writer_idr.clone(),
+                FrameDelivery {
+                    keyframe_pending: keyframe_pending.clone(),
+                    idr: writer_idr.clone(),
+                    feedback: writer_feedback.clone(),
+                },
             )
             .await
             {
@@ -585,6 +714,8 @@ pub async fn serve_desktop_with(
                     pending_media_frames = capture_admission.load(Ordering::Acquire),
                     keyframe_pending = keyframe_pending.load(Ordering::Acquire),
                     bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
+                    delayed_delivery = writer_feedback.delayed.load(Ordering::Relaxed),
+                    last_ack_ms = writer_feedback.last_ack_ms.load(Ordering::Relaxed),
                     "desktop sender health"
                 );
                 health = Instant::now();
@@ -1128,20 +1259,11 @@ async fn send_frame(
     produced: AdmittedFrame,
     rx: &mut mpsc::Receiver<AdmittedFrame>,
     acknowledgements: &mut JoinSet<bool>,
-    keyframe_pending: Arc<AtomicBool>,
-    idr: Arc<AtomicBool>,
+    delivery: FrameDelivery,
 ) -> SendOutcome {
     match tokio::time::timeout(
         FRAME_SEND_TIMEOUT,
-        send_frame_inner(
-            conn,
-            route,
-            produced,
-            rx,
-            acknowledgements,
-            keyframe_pending,
-            idr,
-        ),
+        send_frame_inner(conn, route, produced, rx, acknowledgements, delivery),
     )
     .await
     {
@@ -1159,8 +1281,7 @@ async fn send_frame_inner(
     produced: AdmittedFrame,
     rx: &mut mpsc::Receiver<AdmittedFrame>,
     acknowledgements: &mut JoinSet<bool>,
-    keyframe_pending: Arc<AtomicBool>,
-    idr: Arc<AtomicBool>,
+    delivery: FrameDelivery,
 ) -> SendOutcome {
     let AdmittedFrame { produced, permit } = produced;
     let mut sending = match conn.open_uni().await {
@@ -1209,19 +1330,40 @@ async fn send_frame_inner(
     let seq = produced.header.seq;
     let keyframe = produced.header.keyframe;
     let payload_bytes = produced.payload.len();
+    let delay_budget = delivery_delay_budget(conn.current_path_stats());
+    let FrameDelivery {
+        keyframe_pending,
+        idr,
+        feedback,
+    } = delivery;
     // Retain the reset-on-drop owner until delivery is acknowledged. The
     // bounded task group is owned by this writer; cancellation resets its
     // outstanding frames without closing unrelated connection services.
     acknowledgements.spawn(async move {
         let started = Instant::now();
         let deadline = if keyframe {KEYFRAME_ACK_TIMEOUT} else {FRAME_ACK_TIMEOUT};
-        let acknowledged = match tokio::time::timeout(deadline, sending.stream.stopped()).await {
+        let result = {
+            let receipt = tokio::time::timeout(deadline, sending.stream.stopped());
+            tokio::pin!(receipt);
+            tokio::select! {
+                result = &mut receipt => result,
+                _ = tokio::time::sleep(delay_budget) => {
+                    feedback.delayed.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(frame_seq=seq,payload_bytes,delay_budget_ms=delay_budget.as_millis(),"desktop frame delivery delayed");
+                    receipt.await
+                }
+            }
+        };
+        feedback.last_ack_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        let acknowledged = match result {
             Ok(Ok(None)) => {
                 sending.finished = true;
+                feedback.acknowledged.fetch_add(1, Ordering::Relaxed);
                 tracing::trace!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop frame transport acknowledged");
                 true
             }
             result => {
+                feedback.failed.fetch_add(1, Ordering::Relaxed);
                 idr.store(true, Ordering::Relaxed);
                 tracing::warn!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),outcome=?result,"desktop frame delivery unconfirmed");
                 false
@@ -1641,6 +1783,78 @@ mod tests {
             bps = c.step(Some(path(2000 + i * 1000, 0, 20, 0)), 0);
         }
         assert_eq!(bps, 8_000_000, "clean windows must reach the ceiling");
+    }
+
+    #[test]
+    fn delayed_media_reduces_load_despite_clean_relay_counters_and_recovers_cautiously() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        let mut sample = path(1000, 0, 80, 0);
+        sample.via_relay = true;
+        c.step_with_delivery(Some(sample), 0, false, true);
+        sample.sent += 100;
+        let reduced = c.step_with_delivery(Some(sample), 0, true, false);
+        assert_eq!(reduced, 2_800_000);
+        // Fresh ACKs must not undo the cut during its five-second hold.
+        for _ in 0..20 {
+            sample.sent += 100;
+            assert_eq!(c.step_with_delivery(Some(sample), 0, false, true), reduced);
+        }
+        // Packet activity without a media receipt cannot justify growth.
+        sample.sent += 100;
+        assert_eq!(c.step_with_delivery(Some(sample), 0, false, false), reduced);
+        sample.sent += 100;
+        assert_eq!(
+            c.step_with_delivery(Some(sample), 0, false, true),
+            2_828_000
+        );
+        assert!(c.step_with_delivery(None, 0, true, false) < 2_828_000);
+    }
+
+    #[test]
+    fn repeated_media_failure_honors_the_existing_floor_and_ceiling() {
+        let mut c = BitrateController::new(200_000, 300_000);
+        for _ in 0..30 {
+            c.step_with_delivery(None, 0, true, false);
+        }
+        assert_eq!(c.current(), 100_000);
+        c.steer(1_000_000);
+        assert_eq!(c.current(), 300_000);
+    }
+
+    #[test]
+    fn one_delivery_burst_does_not_compound_frame_and_path_penalties() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step_with_delivery(Some(path(1000, 0, 80, 0)), 0, false, true);
+        // A path event and a delayed receipt describe the same congestion.
+        let reduced = c.step_with_delivery(Some(path(1100, 0, 160, 1)), 0, true, false);
+        assert_eq!(reduced, 2_800_000, "one event must not apply two 30% cuts");
+        // Up to three outstanding frames can report the same burst on
+        // successive pacing ticks. Keep their first cut rather than cubing it.
+        for i in 0..3 {
+            assert_eq!(
+                c.step_with_delivery(Some(path(1200 + i * 100, 0, 160, 1)), 0, true, false),
+                reduced,
+                "correlated receipts over-penalized image quality"
+            );
+        }
+        // Continued pressure after a full second must still reduce load.
+        assert_eq!(
+            c.step_with_delivery(Some(path(1600, 0, 160, 1)), 0, true, false),
+            1_960_000
+        );
+    }
+
+    #[test]
+    fn media_delay_budget_accounts_for_propagation_but_remains_bounded() {
+        assert_eq!(delivery_delay_budget(None), Duration::from_millis(250));
+        assert_eq!(
+            delivery_delay_budget(Some(path(0, 0, 200, 0))),
+            Duration::from_millis(600)
+        );
+        assert_eq!(
+            delivery_delay_budget(Some(path(0, 0, 9000, 0))),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]
