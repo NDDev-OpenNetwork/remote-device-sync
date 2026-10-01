@@ -31,6 +31,10 @@ const PACING_INTERVAL: Duration = Duration::from_millis(250);
 const LOSS_STEP_DOWN: f64 = 0.02;
 /// New RTT growth over the preceding sample that counts as congestion (1.5×).
 const RTT_STEP_UP: f64 = 1.5;
+// Millisecond rounding and normal low-RTT scheduling noise must not turn a
+// 1–3 ms loopback fluctuation into a repeated 30% encoder penalty. QUIC's
+// own congestion control still handles the underlying path independently.
+const RTT_MIN_INCREASE_MS: u64 = 10;
 // A queued FIN is not a delivery receipt. Keep fewer unacknowledged media
 // streams than the receiver's four readers, leaving capacity for recovery.
 const MAX_PENDING_FRAME_ACKS: usize = 3;
@@ -42,6 +46,7 @@ const KEYFRAME_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Default)]
 struct DeliveryFeedback {
     delayed: AtomicU64,
+    late_pending: AtomicU64,
     failed: AtomicU64,
     acknowledged: AtomicU64,
     last_ack_ms: AtomicU64,
@@ -49,6 +54,40 @@ struct DeliveryFeedback {
     produced: AtomicU64,
     codec_skips: AtomicU64,
     last_produced_ms: AtomicU64,
+}
+
+struct LateReceipt(Arc<DeliveryFeedback>);
+
+impl LateReceipt {
+    fn new(feedback: Arc<DeliveryFeedback>) -> Self {
+        feedback.late_pending.fetch_add(1, Ordering::Relaxed);
+        Self(feedback)
+    }
+}
+
+impl Drop for LateReceipt {
+    fn drop(&mut self) {
+        self.0.late_pending.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct DeliveryPressure {
+    stalled_ticks: u8,
+}
+
+impl DeliveryPressure {
+    fn sample(&mut self, late_pending: u64, delivered: bool, failed: bool) -> bool {
+        // A completed slow frame is history, not evidence of a current queue.
+        // Require two consecutive pacing samples with an outstanding late
+        // receipt and no new successful receipt. Hard failures still react now.
+        self.stalled_ticks = if late_pending > 0 && !delivered {
+            self.stalled_ticks.saturating_add(1).min(2)
+        } else {
+            0
+        };
+        failed || self.stalled_ticks >= 2
+    }
 }
 
 #[derive(Clone)]
@@ -268,9 +307,10 @@ impl BitrateController {
             };
             let congestion = p.congestion_events > self.last_congestion;
             let rtt_ms = p.rtt.as_millis() as u64;
-            let rtt_high = self
-                .previous_rtt_ms
-                .is_some_and(|b| rtt_ms > (b as f64 * RTT_STEP_UP) as u64);
+            let rtt_high = self.previous_rtt_ms.is_some_and(|b| {
+                rtt_ms.saturating_sub(b) >= RTT_MIN_INCREASE_MS
+                    && rtt_ms > (b as f64 * RTT_STEP_UP) as u64
+            });
             if rtt_ms > 0 {
                 // A sustained propagation/path delay is not a fresh congestion
                 // signal every 250 ms. Reusing the startup RTT permanently
@@ -516,6 +556,7 @@ pub async fn serve_desktop_with(
             let mut last_delayed = 0;
             let mut last_failed = 0;
             let mut last_acknowledged = 0;
+            let mut pressure = DeliveryPressure::default();
             let mut health = Instant::now();
             let mut tick = tokio::time::interval(PACING_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -535,11 +576,14 @@ pub async fn serve_desktop_with(
                 let acknowledged = feedback.acknowledged.load(Ordering::Relaxed);
                 let delayed_frames = delayed.saturating_sub(last_delayed);
                 let failed_frames = failed.saturating_sub(last_failed);
+                let delivered = acknowledged > last_acknowledged;
+                let late_pending = feedback.late_pending.load(Ordering::Relaxed);
+                let impaired = pressure.sample(late_pending, delivered, failed_frames > 0);
                 let bps = controller.step_with_delivery(
                     path,
                     missed,
-                    delayed_frames > 0 || failed_frames > 0,
-                    acknowledged > last_acknowledged,
+                    impaired,
+                    delivered,
                 );
                 (last_delayed, last_failed, last_acknowledged) = (delayed, failed, acknowledged);
                 if bps != previous {
@@ -549,6 +593,8 @@ pub async fn serve_desktop_with(
                         deadline_misses = missed,
                         delayed_frames,
                         failed_frames,
+                        late_pending,
+                        delivery_stalled_ticks = pressure.stalled_ticks,
                         last_ack_ms = feedback.last_ack_ms.load(Ordering::Relaxed),
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
                         path_id = ?path.map(|p| p.path_id),
@@ -573,6 +619,8 @@ pub async fn serve_desktop_with(
                         keyframe_pending = pending_key.load(Ordering::Acquire),
                         bitrate_bps = bps,
                         delayed_delivery = delayed,
+                        late_pending,
+                        delivery_stalled_ticks = pressure.stalled_ticks,
                         failed_delivery = failed,
                         last_ack_ms = feedback.last_ack_ms.load(Ordering::Relaxed),
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
@@ -1342,6 +1390,7 @@ async fn send_frame_inner(
     acknowledgements.spawn(async move {
         let started = Instant::now();
         let deadline = if keyframe {KEYFRAME_ACK_TIMEOUT} else {FRAME_ACK_TIMEOUT};
+        let mut late = None;
         let result = {
             let receipt = tokio::time::timeout(deadline, sending.stream.stopped());
             tokio::pin!(receipt);
@@ -1349,6 +1398,7 @@ async fn send_frame_inner(
                 result = &mut receipt => result,
                 _ = tokio::time::sleep(delay_budget) => {
                     feedback.delayed.fetch_add(1, Ordering::Relaxed);
+                    late = Some(LateReceipt::new(feedback.clone()));
                     tracing::warn!(frame_seq=seq,payload_bytes,delay_budget_ms=delay_budget.as_millis(),"desktop frame delivery delayed");
                     receipt.await
                 }
@@ -1369,6 +1419,7 @@ async fn send_frame_inner(
                 false
             }
         };
+        drop(late);
         // Capture the complete reset owner, including its Drop implementation,
         // rather than allowing disjoint field captures in the async closure.
         drop(sending);
@@ -1420,6 +1471,57 @@ async fn send_payload<W: AsyncWrite + Unpin, T: Borrow<Produced>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_pressure_requires_ongoing_blockage_and_preserves_hard_failures() {
+        let mut pressure = DeliveryPressure::default();
+        assert!(!pressure.sample(1, true, false));
+        assert!(!pressure.sample(1, false, false));
+        assert!(pressure.sample(1, false, false));
+        assert!(!pressure.sample(0, false, false));
+        assert!(!pressure.sample(1, false, false));
+        assert!(!pressure.sample(1, true, false));
+        assert!(
+            pressure.sample(0, true, true),
+            "hard failure must react immediately"
+        );
+    }
+
+    #[test]
+    fn recovered_jitter_does_not_collapse_a_clean_delivering_stream() {
+        let mut controller = BitrateController::new(4_000_000, 8_000_000);
+        let mut pressure = DeliveryPressure::default();
+        for tick in 0..240 {
+            // Roughly one percent of a frame-rate stream has a soft delay,
+            // while receipts continue. This cannot justify the 100 kbps floor.
+            let late = u64::from(tick % 20 == 0);
+            let impaired = pressure.sample(late, true, false);
+            controller.step_with_delivery(
+                Some(path(1000 + tick * 100, 0, 140, 0)),
+                0,
+                impaired,
+                true,
+            );
+        }
+        assert_eq!(controller.current(), 8_000_000);
+    }
+
+    #[tokio::test]
+    async fn canceling_a_late_receipt_releases_its_current_pressure() {
+        let feedback = Arc::new(DeliveryFeedback::default());
+        let task_feedback = feedback.clone();
+        let (tx, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _late = LateReceipt::new(task_feedback);
+            tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        assert_eq!(feedback.late_pending.load(Ordering::Relaxed), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(feedback.late_pending.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn idle_wakes_and_subslot_jitter_do_not_collapse_bitrate() {
@@ -1873,6 +1975,26 @@ mod tests {
         c.step(Some(path(1000, 0, 20, 0)), 0);
         let bps = c.step(Some(path(2000, 0, 60, 0)), 0); // 3× baseline RTT
         assert!(bps < 4_000_000, "RTT growth must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn low_rtt_rounding_noise_does_not_penalize_a_clean_path() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        for i in 0..40 {
+            c.step(
+                Some(path(1000 + i * 100, 0, [1, 2, 3][i as usize % 3], 0)),
+                0,
+            );
+        }
+        assert_eq!(
+            c.current(),
+            8_000_000,
+            "minor RTT noise cannot justify a codec drought"
+        );
+        assert!(
+            c.step(Some(path(5100, 0, 40, 0)), 0) < 8_000_000,
+            "material RTT growth still reacts"
+        );
     }
 
     #[test]

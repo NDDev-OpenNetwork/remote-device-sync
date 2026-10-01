@@ -9,6 +9,11 @@ use std::time::Duration;
 use noq::{AsyncUdpSocket, Runtime, UdpSender};
 use rds_net::{Endpoint, EndpointConfig};
 
+// Isolate timing scenarios so one fixture's deliberately paused transport
+// cannot introduce unrelated scheduler/path pressure in the other. Each
+// scenario retains its concurrent producer, receiver and ACK workers.
+static DELIVERY_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Clone, Debug)]
 struct Gate(Arc<Mutex<(bool, Vec<Waker>)>>);
 impl Gate {
@@ -109,6 +114,7 @@ struct CountingSource {
     inner: rds_desktop::SyntheticProducer,
     calls: Arc<std::sync::atomic::AtomicU64>,
     bitrate: Arc<std::sync::atomic::AtomicU64>,
+    misses: Arc<std::sync::atomic::AtomicU64>,
 }
 impl rds_desktop::FrameProducer for CountingSource {
     fn resume_after_backpressure(&mut self) {
@@ -125,12 +131,34 @@ impl rds_desktop::FrameProducer for CountingSource {
             controls.bitrate.load(std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::SeqCst,
         );
-        self.inner.produce(seq, controls, clock)
+        let before = controls
+            .deadline_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let frame = self.inner.produce(seq, controls, clock);
+        let after = controls
+            .deadline_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.misses.fetch_add(
+            after.saturating_sub(before),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        frame
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_connection() {
+    let _isolation = DELIVERY_TEST.lock().await;
+    delivery_pause(Duration::from_millis(800), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recovered_delay_does_not_reduce_quality_while_media_receipts_continue() {
+    let _isolation = DELIVERY_TEST.lock().await;
+    delivery_pause(Duration::from_millis(200), false).await;
+}
+
+async fn delivery_pause(extra_hold: Duration, sustained: bool) {
     use rds_core::{Codec, DesktopCaps, DesktopHello, HelloAck, StreamHello, UniHello};
     use rds_desktop::client::{DesktopSession, SessionOpts};
     use rds_desktop::{SessionConfig, SyntheticProducer, serve_desktop_with};
@@ -146,9 +174,12 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
             server.accept().await.unwrap().await
         });
         let (a, b) = (a.unwrap(), b.unwrap());
+        let observer = b.clone();
         let calls = Arc::new(AtomicU64::new(0));
         let bitrate = Arc::new(AtomicU64::new(0));
         let observed_bitrate = bitrate.clone();
+        let misses = Arc::new(AtomicU64::new(0));
+        let observed_misses = misses.clone();
         let produced = calls.clone();
         let (start, ready) = tokio::sync::oneshot::channel();
         let serving = tokio::spawn(async move {
@@ -175,9 +206,14 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
                 SessionConfig {
                     view_only: true,
                     producer: Some(Box::new(CountingSource {
-                        inner: SyntheticProducer::new(240, 64, 64, 1024).keyframe_every(1),
+                        // Measure delivery pressure without also imposing a
+                        // 4 ms synthetic CPU cadence under concurrent tests.
+                        // Encoder starvation remains an independent signal
+                        // covered by the controller/cadence regressions.
+                        inner: SyntheticProducer::new(30, 64, 64, 1024).keyframe_every(1),
                         calls: produced,
                         bitrate: observed_bitrate,
+                        misses: observed_misses,
                     })),
                     frame_route: Some(UniHello::DesktopFrames { id: session }),
                     ..Default::default()
@@ -191,7 +227,7 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
             DesktopHello {
                 display: 0,
                 codec: Codec::H264,
-                max_fps: 240,
+                max_fps: 30,
                 input_acks: false,
             },
             SessionOpts {
@@ -210,7 +246,7 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
         tokio::time::sleep(Duration::from_millis(100)).await;
         let held = calls.load(Ordering::SeqCst);
         let initial_bitrate = bitrate.load(Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        tokio::time::sleep(extra_hold).await;
         assert_eq!(
             held, 1,
             "a recovery keyframe must finish before encoding successors"
@@ -228,10 +264,22 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
             last = encoded.recv().await.unwrap().header.seq;
         }
         assert!(last > first, "delivery must resume on the same connection");
-        assert!(
-            bitrate.load(Ordering::SeqCst) < initial_bitrate,
-            "delayed media ACKs must reduce the encoder target even with no reported packet loss"
-        );
+        if sustained {
+            assert!(
+                bitrate.load(Ordering::SeqCst) < initial_bitrate,
+                "sustained delivery blockage must reduce load even without reported packet loss"
+            );
+        } else {
+            // Observe more than one pacing tick after delivery recovered.
+            // The old cumulative delay event was consumed here and cut the
+            // rate despite healthy receipts already arriving again.
+            tokio::time::sleep(Duration::from_millis(550)).await;
+            assert!(
+                bitrate.load(Ordering::SeqCst) >= initial_bitrate,
+                "a recovered delay unnecessarily reduced image quality: initial={initial_bitrate}, current={}, observed_misses={}, path={:?}",
+                bitrate.load(Ordering::SeqCst), misses.load(Ordering::Relaxed), observer.current_path_stats()
+            );
+        }
         drop(session);
         serving.abort();
         let _ = serving.await;
