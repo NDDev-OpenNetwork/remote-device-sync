@@ -37,6 +37,11 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// Upper bound for a serialized greeting, guard against abusive peers.
 pub const MAX_MESSAGE_LEN: u32 = 64 * 1024;
 
+/// Desktop frame STOP_SENDING code: this predecessor is no longer needed
+/// after a newer independent picture. It is neither fresh successful delivery
+/// nor a broken current reference. Older senders may treat it as generic failure.
+pub const DESKTOP_FRAME_OBSOLETE: u32 = 0x5244_5301;
+
 /// First frame on every uni-directional stream (v3): routes the stream
 /// to the service that owns it. The accepting side runs one
 /// `accept_uni` demux per connection and hands each stream to the

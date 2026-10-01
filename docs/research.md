@@ -607,3 +607,15 @@ to distinguish actual computation from elapsed native waiting on Linux/macOS.
 The fixture combines real CPU work and sleeping on one blocking worker and
 requires its CPU observation to exclude the wait. These observations do not
 replace installed latency/quality acceptance.
+
+## 2026-10-02 obsolete media dispositions
+
+[QUIC STOP_SENDING](https://www.rfc-editor.org/rfc/rfc9000.html#section-3.5)
+provides an application error code for terminating one receive stream. RDS uses
+a specific code for a predecessor already superseded by receiver recovery,
+distinguishing disposal from successful delivery and a broken current reference.
+The sender preserves that distinction both during writes and while awaiting the
+transport receipt. Existing peers can retain generic-stop recovery; this does
+not require a frame-layout or authorization change. The
+[real-stream receipt](reports/rds-obsolete-frame-20261002.md) records failing old
+behavior, regression scope and the still-required installed qualification.

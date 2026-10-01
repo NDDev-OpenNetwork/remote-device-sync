@@ -409,3 +409,19 @@ ends the activity when the loop returns or unwinds. Its option explicitly
 allows idle system sleep and does not keep the display awake or prevent lock.
 This is scoped application activity, not a global power/QoS setting. Installed
 measurements still decide whether it improves a particular latency episode.
+
+## Obsolete predecessors and repair
+
+A valid header older than the receiver's recovered sequence releases its stream
+with `STOP_SENDING` code `0x52445301`. The receiver counts it separately from
+malformed or timed-out readers and does not request another key. The sender
+recognizes only this exact obsolete disposition, including a stop during an
+unfinished write. It frees that frame's admission without ending the video
+writer, invalidating the recovered chain or counting fresh delivery for bitrate
+growth. Unknown stops and actual failures retain their existing failure path.
+
+No greeting, control message or frame layout changes. Older senders can still
+classify the code as generic failure and perform their previous repair behavior;
+matching receivers/senders obtain the complete improvement. Limits, malformed
+header validation, read/write deadlines and successful-delivery semantics stay
+unchanged. Sender and receiver health report obsolete dispositions separately.
