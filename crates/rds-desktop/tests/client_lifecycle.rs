@@ -248,6 +248,18 @@ async fn wan_reference_header_can_arrive_after_the_lan_reorder_window() {
         key.write_all(b"initial").await.unwrap();
         key.finish().unwrap();
         assert_eq!(client.frame_headers.recv().await.unwrap().seq, 0);
+        assert_eq!(
+            client
+                .encoded
+                .as_mut()
+                .unwrap()
+                .recv()
+                .await
+                .unwrap()
+                .header
+                .seq,
+            0
+        );
         let mut successor = tagged(&b, id).await;
         let mut h = header(2);
         h.keyframe = false;
@@ -275,6 +287,18 @@ async fn wan_reference_header_can_arrive_after_the_lan_reorder_window() {
                     .await
                     .unwrap()
                     .unwrap()
+                    .seq,
+                expected
+            );
+            assert_eq!(
+                client
+                    .encoded
+                    .as_mut()
+                    .unwrap()
+                    .recv()
+                    .await
+                    .unwrap()
+                    .header
                     .seq,
                 expected
             );

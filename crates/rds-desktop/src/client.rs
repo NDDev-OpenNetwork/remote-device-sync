@@ -4,7 +4,8 @@
 //! heartbeats) and a receiver of decoded frames. Frame streams that arrive
 //! stale are reset immediately, so a slow link degrades to lower effective
 //! fps rather than queueing latency; when the decode queue is full the
-//! *oldest* queued frame is evicted — newest wins.
+//! *oldest* queued decoded frame is evicted — newest wins. Compressed
+//! relay frames instead use bounded backpressure to preserve references.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -213,7 +214,7 @@ pub struct DesktopSession {
     /// Server→client control events (input acks, heartbeat echoes).
     pub events: mailbox::Receiver<DesktopEvent>,
     /// Encoded wire frames in relay mode; `None` on a direct session.
-    pub encoded: Option<mailbox::Receiver<EncodedDelivery>>,
+    pub encoded: Option<mpsc::Receiver<EncodedDelivery>>,
     /// Send input or encoder control to the serving side.
     ctrl_tx: mpsc::Sender<DesktopControl>,
     /// Next expected frame sequence — the lowest seq still accepted.
@@ -390,7 +391,9 @@ impl DesktopSession {
         let (events_tx, events) = mailbox::channel::<DesktopEvent>(128);
         let (encoded_tx, encoded) = match opts.relay_encoded {
             true => {
-                let (tx, rx) = mailbox::channel::<EncodedDelivery>(4);
+                // Compressed references must reach local decode in order. One
+                // queued frame bounds IPC latency without evicting its predecessor.
+                let (tx, rx) = mpsc::channel::<EncodedDelivery>(1);
                 (Some(tx), Some(rx))
             }
             false => (None, None),
@@ -680,7 +683,7 @@ struct ReceiveContext {
     frame_tx: mailbox::Sender<RawFrame>,
     header_tx: mailbox::Sender<FrameHeader>,
     /// Relay-mode tap: encoded payloads publish here instead of decoding.
-    encoded_tx: Option<mailbox::Sender<EncodedDelivery>>,
+    encoded_tx: Option<mpsc::Sender<EncodedDelivery>>,
     next_seq: Arc<AtomicU64>,
     ctrl: mpsc::Sender<DesktopControl>,
     clock: SessionClock,
@@ -726,10 +729,16 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 received_keys += 1;
             }
             if let Some(tx) = &ctx.encoded_tx {
-                tx.send(EncodedDelivery {
-                    header,
-                    payload: body.into(),
-                });
+                if tx
+                    .send(EncodedDelivery {
+                        header,
+                        payload: body.into(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
                 continue;
             }
             let Ok(slot) = DECODE_SLOTS.acquire().await else {
@@ -792,7 +801,10 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                     _=>{rejected+=1;delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
                 }
             }
-            stream = uni.recv() => {
+            // A compressed relay consumer can backpressure completed readers.
+            // Leave further streams in the bounded router inbox instead of
+            // rejecting a legitimate successor while its local queue is busy.
+            stream = uni.recv(), if ctx.encoded_tx.is_none() || ctx.receiving.load(Ordering::Relaxed) < MAX_FRAME_READERS => {
                 let Some(stream) = stream else { break; };
                 // Refuse excess work immediately; don't create parked tasks
                 // or read a large body before obtaining its memory budget.

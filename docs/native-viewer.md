@@ -317,3 +317,10 @@ used when the runtime supports it; older supported systems use their legacy
 activation API. AppKit may decline an activation request, and covered-window
 snapshots still cannot establish physical presentation. Redraw/reconnect does
 not request activation or raise window level.
+
+The local encoded relay tap holds at most one queued compressed frame and
+backpressures its wire receiver while IPC/decoding is busy. It preserves H.264
+reference order: dropping compressed predecessors used to force unnecessary
+IDR recovery during local stalls. Newest-frame replacement remains valid only
+after decode. Closing the encoded receiver wakes its blocked sender and ends
+that receive leg; session cancellation still aborts owned readers.
