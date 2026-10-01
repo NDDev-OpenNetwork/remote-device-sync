@@ -27,6 +27,14 @@ native latency/quality/stability gates remain open.
 
 Validation so far: all 63 macOS desktop units pass, including continuous
 references, live rate updates and the new actual-codec case. Strict full
-workspace/all-targets/all-features clippy and formatting pass. Integration,
-Linux and installed-binary results are recorded as they complete; they are
-not implied by this focused result. No milestone checkpoint is closed.
+workspace/all-targets/all-features clippy and formatting pass. Relevant macOS desktop/client/CLI integrations pass 136 cases (one platform
+ignore) and Linux passes 140 (ten ignores), across 24 groups per platform.
+Linux strict full workspace lint and the serving release build pass. Installed
+binary and native pixel qualification are recorded separately as they complete. No milestone checkpoint is closed.
+
+The serving binary is installed on the existing Linux endpoint with the
+original credential/policy and desktop seat. The already-running native
+Mac client recovered in 1,235 ms after the planned serving restart and
+continues decoding Full HD. Its window is outside the active unlocked
+console; this recovery is network/decode evidence, not visible-pixel
+qualification. A subsequent bounded installed continuity run is in progress.
