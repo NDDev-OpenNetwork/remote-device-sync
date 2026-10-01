@@ -39,3 +39,21 @@ Both targeted cases pass. Additional tests cover two-sample detection, immediate
 hard failures, repeated jitter with continuing receipts, and cancellation of an
 owned late-receipt task. Current whole-suite and installed-device results will
 be recorded after qualification; no stable-runtime claim is made here yet.
+
+The first whole Mac run failed the recovered-delay fixture under concurrent
+240 fps synthetic workloads. The fixture now uses30 fps, records observed
+cadence misses/path counters on failure, and isolates the timing scenarios.
+Internal producer/reader/ACK concurrency and all admission/recovery assertions
+remain. Restoring the old cumulative-event signal in the30 fps fixture still
+fails (4 Mbit/s becomes1.96 Mbit/s), while the new signal passes individually.
+The parallel-fixture failure is retained; isolated/full requalification follows.
+
+Temporary metadata instrumentation localized the remaining fixture reduction:
+with no late receipt, no failures, no misses and fresh successful delivery,
+a path RTT change from1.465 to2.239 ms cut the rate again. Integer-millisecond
+rounding and the relative-only growth threshold classified harmless low-RTT
+noise as congestion. The controller now also requires at least10 ms absolute
+growth. Existing loss/congestion-event and material RTT-growth reactions remain;
+QUIC's underlying control is unchanged. A regression alternates1/2/3 ms clean
+samples and then introduces a40 ms sample to verify both behaviors. Temporary
+instrumentation was removed and is never part of the deployed binaries.

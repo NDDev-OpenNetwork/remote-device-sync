@@ -31,6 +31,10 @@ const PACING_INTERVAL: Duration = Duration::from_millis(250);
 const LOSS_STEP_DOWN: f64 = 0.02;
 /// New RTT growth over the preceding sample that counts as congestion (1.5×).
 const RTT_STEP_UP: f64 = 1.5;
+// Millisecond rounding and normal low-RTT scheduling noise must not turn a
+// 1–3 ms loopback fluctuation into a repeated 30% encoder penalty. QUIC's
+// own congestion control still handles the underlying path independently.
+const RTT_MIN_INCREASE_MS: u64 = 10;
 // A queued FIN is not a delivery receipt. Keep fewer unacknowledged media
 // streams than the receiver's four readers, leaving capacity for recovery.
 const MAX_PENDING_FRAME_ACKS: usize = 3;
@@ -303,9 +307,10 @@ impl BitrateController {
             };
             let congestion = p.congestion_events > self.last_congestion;
             let rtt_ms = p.rtt.as_millis() as u64;
-            let rtt_high = self
-                .previous_rtt_ms
-                .is_some_and(|b| rtt_ms > (b as f64 * RTT_STEP_UP) as u64);
+            let rtt_high = self.previous_rtt_ms.is_some_and(|b| {
+                rtt_ms.saturating_sub(b) >= RTT_MIN_INCREASE_MS
+                    && rtt_ms > (b as f64 * RTT_STEP_UP) as u64
+            });
             if rtt_ms > 0 {
                 // A sustained propagation/path delay is not a fresh congestion
                 // signal every 250 ms. Reusing the startup RTT permanently
@@ -1970,6 +1975,26 @@ mod tests {
         c.step(Some(path(1000, 0, 20, 0)), 0);
         let bps = c.step(Some(path(2000, 0, 60, 0)), 0); // 3× baseline RTT
         assert!(bps < 4_000_000, "RTT growth must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn low_rtt_rounding_noise_does_not_penalize_a_clean_path() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        for i in 0..40 {
+            c.step(
+                Some(path(1000 + i * 100, 0, [1, 2, 3][i as usize % 3], 0)),
+                0,
+            );
+        }
+        assert_eq!(
+            c.current(),
+            8_000_000,
+            "minor RTT noise cannot justify a codec drought"
+        );
+        assert!(
+            c.step(Some(path(5100, 0, 40, 0)), 0) < 8_000_000,
+            "material RTT growth still reacts"
+        );
     }
 
     #[test]

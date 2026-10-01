@@ -212,7 +212,8 @@ skipped codec frame preserves the reference sequence and does not force an IDR.
 Capture/encode errors and dropped encoded references still require recovery.
 Bitrate changes apply typed native OpenH264 target/max options after encoder
 initialization, preserving references rather than producing an adaptation IDR.
-RTT adaptation detects new increases between valid samples; an unchanged high
+RTT adaptation detects new increases between valid samples with at least
+10 ms absolute growth, avoiding relative-only penalties from 1–3 ms noise; an unchanged high
 RTT does not repeatedly penalize the stream against a permanent startup value.
 Incomplete delta bodies release reader permits after three seconds; a validated
 independent keyframe has eight seconds including its header. Recovery frames
