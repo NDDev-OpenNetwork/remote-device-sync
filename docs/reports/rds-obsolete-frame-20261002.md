@@ -31,3 +31,11 @@ multi-second pauses despite no slow worker CPU record. Native dispatch-to-window
 capture was also confounded by surface occlusion; it cannot establish a network
 latency SLO. These negative results are retained and are not closed by regression
 success. This defect explains a possible redundant repair path, not every freeze.
+
+A related writer race also repeated repair: a receipt worker scheduled an IDR,
+then its joined failure reset a chain that had already admitted the replacement
+and scheduled another IDR. An equivalent-old-semantics regression fails on the
+repeated request; corrected sequence-aware handling preserves the next delta
+after independent recovery while still invalidating a failed current reference.
+The latest produced-key marker coalesces repair for older frames; transport
+success counters remain the sole successful-delivery growth signal.

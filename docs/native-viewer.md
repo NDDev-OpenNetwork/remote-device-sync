@@ -425,3 +425,11 @@ classify the code as generic failure and perform their previous repair behavior;
 matching receivers/senders obtain the complete improvement. Limits, malformed
 header validation, read/write deadlines and successful-delivery semantics stay
 unchanged. Sender and receiver health report obsolete dispositions separately.
+
+Delivery results also retain their frame sequence. A failed receipt older than
+an already admitted independent picture cannot invalidate the recovered chain.
+The receipt worker owns its repair request; joining the result does not request
+repair a second time. A newer produced key suppresses another request for an
+older frame, including reference-admission rejection while that key is queued.
+Current failures and unknown worker termination still require repair. This
+correlation does not treat a produced picture as successful delivery.
