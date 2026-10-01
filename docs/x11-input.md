@@ -55,6 +55,11 @@ xvfb-run -a -s '-noreset -screen 0 1280x720x24 -screen 1 640x480x24' \
   cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1
 ```
 
+Linux CI also runs the navigation case on a second disposable Xvfb instance
+with `setxkbmap -keycodes xfree86 -layout us,ru`. It asserts that the native Up
+key receives Alt, covering the legacy map where an evdev offset becomes Print
+Screen. This fixture never changes an operator's desktop keymap.
+
 The fixture checks real capture/DAMAGE, evdev keys/buttons, motion, lone scroll,
 screen mismatch/nonexistent screens, invalid numeric input and release on drop.
 `-noreset` keeps the disposable server alive between client lifetimes. Capture

@@ -41,7 +41,9 @@ jobs:
         && { [ "$(uname -s)" != "Linux" ] || {
         cargo test --locked --workspace --features rds-desktop/x11 --no-fail-fast
         && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24"
-        cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1;
+        cargo test --locked -p rds-desktop --features x11 -- --ignored --test-threads=1
+        && xvfb-run -a -s "-noreset -screen 0 1280x720x24 -screen 1 640x480x24"
+        sh -c 'setxkbmap -keycodes xfree86 -layout us,ru && cargo test --locked -p rds-desktop --features x11 --test x11_native native_alt_navigation_resolves_the_actual_xkb_physical_map -- --ignored --exact --test-threads=1';
         }; }
       fmt_command: "cargo fmt --all -- --check"
       # Clippy runs once on Linux: default features, then every
