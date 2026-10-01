@@ -60,6 +60,7 @@ struct DeliveryFeedback {
     late_pending: AtomicU64,
     failed: AtomicU64,
     acknowledged: AtomicU64,
+    obsolete: AtomicU64,
     last_ack_ms: AtomicU64,
     producing: AtomicBool,
     produced: AtomicU64,
@@ -119,6 +120,21 @@ struct FrameDelivery {
     keyframe_pending: Arc<AtomicBool>,
     idr: Arc<AtomicBool>,
     feedback: Arc<DeliveryFeedback>,
+    latest_key_seq: Arc<AtomicU64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FrameReceipt {
+    Delivered,
+    Obsolete,
+    Failed,
+}
+
+fn request_frame_repair(latest_key_seq: &AtomicU64, idr: &AtomicBool, failed_seq: u64) {
+    let key = latest_key_seq.load(Ordering::Acquire);
+    if key == u64::MAX || key <= failed_seq {
+        idr.store(true, Ordering::Release);
+    }
 }
 
 fn delivery_delay_budget(path: Option<PathStats>) -> Duration {
@@ -541,6 +557,7 @@ pub async fn serve_desktop_with(
     // Capture+encode runs on a blocking thread; frames flow to the writer.
     let (tx, mut rx) = mpsc::channel::<AdmittedFrame>(2);
     let keyframe_pending = Arc::new(AtomicBool::new(false));
+    let latest_key_seq = Arc::new(AtomicU64::new(u64::MAX));
     let capture_admission = Arc::new(AtomicU64::new(0));
     let delivery_feedback = Arc::new(DeliveryFeedback::default());
     {
@@ -553,6 +570,7 @@ pub async fn serve_desktop_with(
         let input_refresh_pending = Arc::clone(&controls.input_refresh_pending);
         let mut producer = config.producer;
         let keyframe_pending = keyframe_pending.clone();
+        let latest_key_seq = latest_key_seq.clone();
         let capture_admission = capture_admission.clone();
         let feedback = delivery_feedback.clone();
         capture.spawn_blocking(move || {
@@ -625,6 +643,7 @@ pub async fn serve_desktop_with(
                             feedback.produced.fetch_add(1, Ordering::Relaxed);
                         }
                         if p.header.keyframe && !p.payload.is_empty() {
+                            latest_key_seq.store(p.header.seq, Ordering::Release);
                             keyframe_pending.store(true, Ordering::Release);
                         }
                         // Losing any encoded reference breaks its successors,
@@ -750,6 +769,7 @@ pub async fn serve_desktop_with(
                         late_pending,
                         delivery_stalled_ticks = pressure.stalled_ticks,
                         failed_delivery = failed,
+                        obsolete_delivery = feedback.obsolete.load(Ordering::Relaxed),
                         last_ack_ms = feedback.last_ack_ms.load(Ordering::Relaxed),
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
                         path_via_relay = ?path.map(|p| p.via_relay),
@@ -788,25 +808,38 @@ pub async fn serve_desktop_with(
         let mut superseded = 0u64;
         let mut acknowledgements = JoinSet::new();
         let mut acknowledged = 0u64;
+        let mut obsolete = 0u64;
         let mut failed_delivery = 0u64;
         let mut health = Instant::now();
         'writer: loop {
             while let Some(result) = acknowledgements.try_join_next() {
-                if matches!(result, Ok(true)) {
-                    acknowledged += 1;
-                } else {
-                    failed_delivery += 1;
-                    chain.next = None;
-                    writer_idr.store(true, Ordering::Relaxed);
+                match result {
+                    Ok((_, FrameReceipt::Delivered)) => acknowledged += 1,
+                    Ok((_, FrameReceipt::Obsolete)) => obsolete += 1,
+                    Ok((seq, FrameReceipt::Failed)) => {
+                        failed_delivery += 1;
+                        chain.failed_receipt(seq);
+                    }
+                    _ => {
+                        failed_delivery += 1;
+                        chain.next = None;
+                        writer_idr.store(true, Ordering::Relaxed);
+                    }
                 }
             }
             if acknowledgements.len() >= MAX_PENDING_FRAME_ACKS {
-                if matches!(acknowledgements.join_next().await, Some(Ok(true))) {
-                    acknowledged += 1;
-                } else {
-                    failed_delivery += 1;
-                    chain.next = None;
-                    writer_idr.store(true, Ordering::Relaxed);
+                match acknowledgements.join_next().await {
+                    Some(Ok((_, FrameReceipt::Delivered))) => acknowledged += 1,
+                    Some(Ok((_, FrameReceipt::Obsolete))) => obsolete += 1,
+                    Some(Ok((seq, FrameReceipt::Failed))) => {
+                        failed_delivery += 1;
+                        chain.failed_receipt(seq);
+                    }
+                    _ => {
+                        failed_delivery += 1;
+                        chain.next = None;
+                        writer_idr.store(true, Ordering::Relaxed);
+                    }
                 }
                 continue;
             }
@@ -819,7 +852,7 @@ pub async fn serve_desktop_with(
             };
             if produced.payload.is_empty() {
                 chain.next = None;
-                writer_idr.store(true, Ordering::Relaxed);
+                request_frame_repair(&latest_key_seq, &writer_idr, produced.header.seq);
                 continue;
             }
             let bps = writer_bitrate.load(Ordering::Relaxed).max(50_000) as f64 / 8.0;
@@ -837,7 +870,7 @@ pub async fn serve_desktop_with(
             // Admission follows the final selection: advancing this before
             // the pacing wait would lose track of frames collapsed afterward.
             if !chain.admit(&produced) {
-                writer_idr.store(true, Ordering::Relaxed);
+                request_frame_repair(&latest_key_seq, &writer_idr, produced.header.seq);
                 continue;
             }
             produced.header.send_ts_ms = writer_clock.now_ms();
@@ -866,12 +899,16 @@ pub async fn serve_desktop_with(
                     keyframe_pending: keyframe_pending.clone(),
                     idr: writer_idr.clone(),
                     feedback: writer_feedback.clone(),
+                    latest_key_seq: latest_key_seq.clone(),
                 },
             )
             .await
             {
                 SendOutcome::Sent => {
                     sent += 1;
+                }
+                SendOutcome::Obsolete => {
+                    obsolete += 1;
                 }
                 SendOutcome::Superseded(newer) => {
                     superseded += 1;
@@ -891,6 +928,7 @@ pub async fn serve_desktop_with(
                     sent,
                     superseded,
                     acknowledged,
+                    obsolete,
                     failed_delivery,
                     pending_acknowledgements = acknowledgements.len(),
                     pending_media_frames = capture_admission.load(Ordering::Acquire),
@@ -1399,9 +1437,17 @@ mod x11 {
 #[derive(Default)]
 struct FrameChain {
     next: Option<u64>,
+    last_key_seq: Option<u64>,
 }
 
 impl FrameChain {
+    fn failed_receipt(&mut self, seq: u64) {
+        // The receipt worker already owns the one repair request. An older
+        // result joining after independent recovery cannot break that chain.
+        if self.last_key_seq.is_none_or(|key| key <= seq) {
+            self.next = None;
+        }
+    }
     fn admit(&mut self, produced: &Produced) -> bool {
         let header = &produced.header;
         if produced.payload.is_empty()
@@ -1412,6 +1458,9 @@ impl FrameChain {
             return false;
         }
         self.next = header.seq.checked_add(1);
+        if header.keyframe {
+            self.last_key_seq = Some(header.seq);
+        }
         true
     }
 }
@@ -1441,12 +1490,37 @@ impl Drop for FrameSend {
 enum SendOutcome {
     /// Frame fully sent.
     Sent,
+    /// Receiver already recovered past this predecessor; continue the writer.
+    Obsolete,
     /// A fresher decodable frame supersedes — send it next.
     Superseded(AdmittedFrame),
     /// Producer closed mid-send; the final frame was finished.
     Done,
     /// Transport failure — the writer ends.
     Failed,
+}
+
+fn obsolete_write(error: &std::io::Error) -> bool {
+    matches!(error.get_ref().and_then(|cause| cause.downcast_ref::<rds_net::WriteError>()),
+        Some(rds_net::WriteError::Stopped(code)) if *code == rds_core::DESKTOP_FRAME_OBSOLETE.into())
+}
+
+fn obsolete_send(
+    sending: &mut FrameSend,
+    produced: &Produced,
+    delivery: &FrameDelivery,
+) -> SendOutcome {
+    sending.finished = true;
+    delivery.feedback.obsolete.fetch_add(1, Ordering::Relaxed);
+    if produced.header.keyframe {
+        delivery.keyframe_pending.store(false, Ordering::Release);
+    }
+    tracing::info!(
+        frame_seq = produced.header.seq,
+        payload_bytes = produced.payload.len(),
+        "desktop obsolete frame stopped during write"
+    );
+    SendOutcome::Obsolete
 }
 
 /// Send one frame on its own tagged uni stream, aborting mid-write if
@@ -1457,7 +1531,7 @@ async fn send_frame(
     route: rds_core::UniHello,
     produced: AdmittedFrame,
     rx: &mut mpsc::Receiver<AdmittedFrame>,
-    acknowledgements: &mut JoinSet<bool>,
+    acknowledgements: &mut JoinSet<(u64, FrameReceipt)>,
     delivery: FrameDelivery,
 ) -> SendOutcome {
     match tokio::time::timeout(
@@ -1479,7 +1553,7 @@ async fn send_frame_inner(
     route: rds_core::UniHello,
     produced: AdmittedFrame,
     rx: &mut mpsc::Receiver<AdmittedFrame>,
-    acknowledgements: &mut JoinSet<bool>,
+    acknowledgements: &mut JoinSet<(u64, FrameReceipt)>,
     delivery: FrameDelivery,
 ) -> SendOutcome {
     let AdmittedFrame { produced, permit } = produced;
@@ -1503,10 +1577,16 @@ async fn send_frame_inner(
     // per-connection demux routes on it. Per-session routes keep a stale
     // stream out of any replacement session's inbox.
     if let Err(e) = write_frame(&mut *stream, &route).await {
+        if obsolete_write(&e) {
+            return obsolete_send(&mut sending, &produced, &delivery);
+        }
         tracing::debug!("frame tag write failed: {e}");
         return SendOutcome::Failed;
     }
     if let Err(e) = write_frame(&mut *stream, &produced.header).await {
+        if obsolete_write(&e) {
+            return obsolete_send(&mut sending, &produced, &delivery);
+        }
         tracing::debug!("frame header write failed: {e}");
         return SendOutcome::Failed;
     }
@@ -1518,11 +1598,21 @@ async fn send_frame_inner(
         Ok(PayloadOutcome::Superseded(next)) => SendOutcome::Superseded(next),
         Ok(PayloadOutcome::ProducerEnded) => SendOutcome::Done,
         Err(e) => {
+            if obsolete_write(&e) {
+                return obsolete_send(&mut sending, &produced, &delivery);
+            }
             tracing::debug!("frame send failed: {e}");
             return SendOutcome::Failed;
         }
     };
     if let Err(e) = stream.finish() {
+        // finish() reports an erased ClosedStream. Only a ready, exact peer
+        // disposition can classify it as obsolete; never wait on other errors.
+        if matches!(tokio::time::timeout(Duration::ZERO, stream.stopped()).await,
+            Ok(Ok(Some(code))) if code == rds_core::DESKTOP_FRAME_OBSOLETE.into())
+        {
+            return obsolete_send(&mut sending, &produced, &delivery);
+        }
         tracing::debug!("frame finish failed: {e}");
         return SendOutcome::Failed;
     }
@@ -1534,6 +1624,7 @@ async fn send_frame_inner(
         keyframe_pending,
         idr,
         feedback,
+        latest_key_seq,
     } = delivery;
     // Retain the reset-on-drop owner until delivery is acknowledged. The
     // bounded task group is owned by this writer; cancellation resets its
@@ -1561,13 +1652,19 @@ async fn send_frame_inner(
                 sending.finished = true;
                 feedback.acknowledged.fetch_add(1, Ordering::Relaxed);
                 tracing::trace!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop frame transport acknowledged");
-                true
+                FrameReceipt::Delivered
+            }
+            Ok(Ok(Some(code))) if code == rds_core::DESKTOP_FRAME_OBSOLETE.into() => {
+                sending.finished = true;
+                feedback.obsolete.fetch_add(1, Ordering::Relaxed);
+                tracing::info!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop obsolete frame receipt");
+                FrameReceipt::Obsolete
             }
             result => {
                 feedback.failed.fetch_add(1, Ordering::Relaxed);
-                idr.store(true, Ordering::Relaxed);
+                request_frame_repair(&latest_key_seq, &idr, seq);
                 tracing::warn!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),outcome=?result,"desktop frame delivery unconfirmed");
-                false
+                FrameReceipt::Failed
             }
         };
         drop(late);
@@ -1578,7 +1675,7 @@ async fn send_frame_inner(
         if keyframe {
             keyframe_pending.store(false, Ordering::Release);
         }
-        acknowledged
+        (seq, acknowledged)
     });
     outcome
 }
@@ -2047,6 +2144,151 @@ mod tests {
             .await
             .expect("frame cancellation did not release transport resources");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn obsolete_stop_during_payload_does_not_end_writer_or_count_fresh_delivery() {
+        for (backend, stop_code) in [rds_net::Backend::Iroh, rds_net::Backend::Noq]
+            .into_iter()
+            .flat_map(|backend| {
+                [rds_core::DESKTOP_FRAME_OBSOLETE, 42].map(move |code| (backend, code))
+            })
+        {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let config = rds_net::EndpointConfig {
+                    backend,
+                    discovery: false,
+                    bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                    ..Default::default()
+                };
+                let client = rds_net::bind_endpoint(config.clone()).await.unwrap();
+                let server = rds_net::bind_endpoint(config).await.unwrap();
+                let (a, b) = tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
+                    server.accept().await.unwrap().await
+                });
+                let (a, b) = (a.unwrap(), b.unwrap());
+                let admission = Arc::new(AtomicU64::new(1));
+                let feedback = Arc::new(DeliveryFeedback::default());
+                let idr = Arc::new(AtomicBool::new(false));
+                let produce = AdmittedFrame {
+                    produced: Produced {
+                        header: FrameHeader {
+                            seq: 1,
+                            keyframe: false,
+                            capture_ts_ms: 0,
+                            encode_done_ts_ms: 0,
+                            send_ts_ms: 0,
+                            codec: rds_core::Codec::H264,
+                            width: 32,
+                            height: 32,
+                        },
+                        payload: Bytes::from(vec![1; 32 * 1024 * 1024]),
+                    },
+                    permit: CapturePermit(admission.clone()),
+                };
+                let (_tx, mut rx) = mpsc::channel(2);
+                let mut receipts = JoinSet::new();
+                let delivery = FrameDelivery {
+                    keyframe_pending: Arc::new(AtomicBool::new(false)),
+                    idr: idr.clone(),
+                    feedback: feedback.clone(),
+                    latest_key_seq: Arc::new(AtomicU64::new(u64::MAX)),
+                };
+                let (outcome, ()) = tokio::join!(
+                    send_frame(
+                        &a,
+                        rds_core::UniHello::Desktop,
+                        produce,
+                        &mut rx,
+                        &mut receipts,
+                        delivery
+                    ),
+                    async {
+                        let mut stream = b.accept_uni().await.unwrap();
+                        let _: rds_core::UniHello = read_frame(&mut stream).await.unwrap();
+                        let h: FrameHeader = read_frame(&mut stream).await.unwrap();
+                        assert_eq!(h.seq, 1);
+                        stream.stop(stop_code.into()).unwrap();
+                    }
+                );
+                let obsolete = stop_code == rds_core::DESKTOP_FRAME_OBSOLETE;
+                assert_eq!(
+                    matches!(outcome, SendOutcome::Failed),
+                    !obsolete,
+                    "only the exact obsolete disposition may continue the writer"
+                );
+                while let Some(result) = receipts.join_next().await {
+                    assert_eq!(result.unwrap(), (1, FrameReceipt::Obsolete));
+                }
+                assert_eq!(admission.load(Ordering::Acquire), 0);
+                assert_eq!(
+                    feedback.acknowledged.load(Ordering::Acquire),
+                    0,
+                    "obsolete disposal cannot justify bitrate growth"
+                );
+                assert_eq!(feedback.failed.load(Ordering::Acquire), 0);
+                assert_eq!(
+                    feedback.obsolete.load(Ordering::Acquire),
+                    u64::from(obsolete)
+                );
+                assert!(!idr.load(Ordering::Acquire));
+                let mut next = a.open_uni().await.unwrap();
+                next.write_all(b"still usable").await.unwrap();
+                next.finish().unwrap();
+                let mut stream = b.accept_uni().await.unwrap();
+                assert_eq!(stream.read_to_end(32).await.unwrap(), b"still usable");
+                a.close(0u32.into(), b"done");
+                tokio::join!(client.close(), server.close());
+            })
+            .await
+            .expect("obsolete stop did not release resources");
+        }
+    }
+
+    #[test]
+    fn older_failed_receipt_cannot_invalidate_an_admitted_recovery_or_repeat_repair() {
+        let mut chain = FrameChain::default();
+        let mut frame = Produced {
+            header: FrameHeader {
+                seq: 20,
+                keyframe: true,
+                capture_ts_ms: 0,
+                encode_done_ts_ms: 0,
+                send_ts_ms: 0,
+                codec: rds_core::Codec::H264,
+                width: 32,
+                height: 32,
+            },
+            payload: Bytes::from_static(b"independent picture"),
+        };
+        assert!(chain.admit(&frame));
+        // The receipt worker requested repair; the producer consumed that flag
+        // and the writer already admitted its replacement. The older failed
+        // receipt may join afterward while that newer key is travelling.
+        let idr = AtomicBool::new(false);
+        request_frame_repair(&AtomicU64::new(20), &idr, 10);
+        chain.failed_receipt(10);
+        assert!(
+            !idr.load(Ordering::Relaxed),
+            "one failed receipt requested a second expensive recovery"
+        );
+        frame.header.seq = 21;
+        frame.header.keyframe = false;
+        assert!(
+            chain.admit(&frame),
+            "an old failure broke the independently recovered reference chain"
+        );
+        request_frame_repair(&AtomicU64::new(20), &idr, 21);
+        assert!(
+            idr.load(Ordering::Relaxed),
+            "a current failure still requests repair"
+        );
+        chain.failed_receipt(21);
+        frame.header.seq = 22;
+        assert!(
+            !chain.admit(&frame),
+            "a failed current reference must still invalidate its successors"
+        );
     }
 
     fn path(sent: u64, lost: u64, rtt_ms: u64, congestion: u64) -> PathStats {
