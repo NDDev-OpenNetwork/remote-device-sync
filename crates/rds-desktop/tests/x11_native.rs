@@ -309,14 +309,14 @@ fn native_alt_navigation_resolves_the_actual_xkb_physical_map() {
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        if let Some(Event::KeyPress(key)) = observer.poll_for_event().unwrap() {
-            if key.detail == native_up {
-                assert!(
-                    key.state.contains(KeyButMask::MOD1),
-                    "native Up did not carry Alt"
-                );
-                break;
-            }
+        if let Some(Event::KeyPress(key)) = observer.poll_for_event().unwrap()
+            && key.detail == native_up
+        {
+            assert!(
+                key.state.contains(KeyButMask::MOD1),
+                "native Up did not carry Alt"
+            );
+            break;
         }
         assert!(
             Instant::now() < deadline,
