@@ -30,8 +30,9 @@ const PACING_INTERVAL: Duration = Duration::from_millis(250);
 /// Capture briefly after accepted input even when a compositor's root DAMAGE
 /// notification does not describe the redirected application repaint.
 const INPUT_REFRESH_BURST_MS: u64 = 250;
-/// Loss ratio that drives the bitrate down (2%).
-const LOSS_STEP_DOWN: f64 = 0.02;
+/// Moderate random loss holds the offered rate; severe loss reduces it.
+const LOSS_HOLD: f64 = 0.02;
+const LOSS_STEP_DOWN: f64 = 0.10;
 // An isolated loss among 3–8 desktop datagrams is not a 12–33% path loss
 // estimate. Aggregate enough packets; QUIC handles isolated retransmissions.
 const LOSS_SAMPLE_MIN_SENT: u64 = 100;
@@ -280,8 +281,9 @@ pub struct SessionConfig {
 /// to *measured* path quality, not a static guess).
 ///
 /// Each `step` consumes one sample window: path counters plus the count
-/// of producer deadline misses. A sufficiently populated loss sample or
-/// sustained RTT growth pushes bitrate down multiplicatively; isolated transport congestion events
+/// of producer deadline misses. A sufficiently populated severe-loss sample
+/// or sustained RTT growth pushes bitrate down multiplicatively; moderate
+/// loss holds the path estimate. Isolated transport congestion events
 /// remain diagnostic and do not bypass the sample requirement. Clean
 /// windows probe upward toward the ceiling; deadline misses push down
 /// even when the path looks clean (encoder starvation is congestion too).
@@ -294,6 +296,7 @@ pub struct BitrateController {
     last_lost: u64,
     loss_sample_sent: u64,
     loss_sample_lost: u64,
+    loss_hold: bool,
     rtt_rise_baseline: Option<u64>,
     path_cut_cooldown_ticks: u8,
     reduction_reason: Option<&'static str>,
@@ -314,6 +317,7 @@ impl BitrateController {
             last_lost: 0,
             loss_sample_sent: 0,
             loss_sample_lost: 0,
+            loss_hold: false,
             rtt_rise_baseline: None,
             path_cut_cooldown_ticks: 0,
             reduction_reason: None,
@@ -349,6 +353,7 @@ impl BitrateController {
                 self.last_lost = 0;
                 self.loss_sample_sent = 0;
                 self.loss_sample_lost = 0;
+                self.loss_hold = false;
                 self.rtt_rise_baseline = None;
                 self.path_cut_cooldown_ticks = 0;
                 self.primed = false;
@@ -368,6 +373,7 @@ impl BitrateController {
                 || (self.loss_sample_lost >= LOSS_FAST_MIN_LOST && loss > LOSS_FAST_RATIO);
             let loss_high = sample_ready && loss > LOSS_STEP_DOWN;
             if sample_ready {
+                self.loss_hold = loss > LOSS_HOLD && !loss_high;
                 self.loss_sample_sent = 0;
                 self.loss_sample_lost = 0;
             }
@@ -411,7 +417,7 @@ impl BitrateController {
             } else if self.primed && deadline_misses > 0 {
                 self.reduction_reason = Some("producer_deadline");
                 next = (next / 100 * 85 + next % 100 * 85 / 100).max(self.floor);
-            } else if self.primed {
+            } else if self.primed && !self.loss_hold {
                 next = next.saturating_add(next / 10).min(self.ceiling);
             }
             self.primed = true;
@@ -460,6 +466,17 @@ impl BitrateController {
         } else if !delivered {
             proposed.min(previous)
         } else {
+            // Reliable QUIC already retransmits isolated packet loss. Fresh
+            // media receipts permit a bounded probe through a moderate-loss
+            // hold; otherwise a rate cut would become an absorbing low-quality
+            // state even after delivery recovers. Severe loss/RTT cuts remain.
+            let proposed = if self.loss_hold && proposed == previous {
+                previous
+                    .saturating_add((previous / 100).max(1))
+                    .min(self.ceiling)
+            } else {
+                proposed
+            };
             proposed.min(previous.saturating_add((previous / 100).max(1)))
         };
         self.current
@@ -2052,8 +2069,77 @@ mod tests {
     fn controller_drops_bitrate_on_loss() {
         let mut c = BitrateController::new(4_000_000, 8_000_000);
         c.step(Some(path(1000, 0, 20, 0)), 0); // prime baseline
-        let bps = c.step(Some(path(2000, 80, 20, 0)), 0); // 4% loss
+        let bps = c.step(Some(path(2000, 160, 20, 0)), 0); // 16% of the sample
         assert!(bps < 4_000_000, "loss must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn moderate_loss_with_timely_receipts_holds_quality_without_starvation() {
+        for lost_per_sample in [3, 8] {
+            let mut controller = BitrateController::new(4_000_000, 8_000_000);
+            let mut sample = path(1000, 0, 120, 0);
+            controller.step_with_delivery(Some(sample), 0, false, true);
+            for _ in 0..240 {
+                sample.sent += 100;
+                sample.lost += lost_per_sample;
+                sample.congestion_events += 1;
+                controller.step_with_delivery(Some(sample), 0, false, true);
+            }
+            assert!(
+                controller.current() >= 4_000_000,
+                "successful media at {lost_per_sample}% random loss must not force the codec floor"
+            );
+            let previous = controller.current();
+            let reduced = controller.step_with_delivery(Some(sample), 0, true, false);
+            assert!(
+                reduced < previous,
+                "real media blockage must still reduce load"
+            );
+        }
+    }
+
+    #[test]
+    fn moderate_loss_hold_clears_after_clean_feedback_or_path_change() {
+        let mut controller = BitrateController::new(4_000_000, 8_000_000);
+        controller.step(Some(path(1000, 0, 120, 0)), 0);
+        assert_eq!(controller.step(Some(path(1100, 3, 120, 1)), 0), 4_000_000);
+        assert_eq!(controller.step(Some(path(1105, 3, 120, 1)), 0), 4_000_000);
+        assert!(controller.step(Some(path(1200, 3, 120, 1)), 0) > 4_000_000);
+        controller.step(Some(path(1300, 6, 120, 2)), 0);
+        let held = controller.current();
+        let mut replacement = path(100, 0, 120, 0);
+        replacement.path_id = 99;
+        controller.step(Some(replacement), 0);
+        replacement.sent += 100;
+        assert!(controller.step(Some(replacement), 0) > held);
+    }
+
+    #[test]
+    fn moderate_loss_recovery_requires_receipts_and_bounds_each_probe() {
+        let mut controller = BitrateController::new(100_000, 8_000_000);
+        let mut sample = path(1000, 0, 120, 0);
+        controller.step_with_delivery(Some(sample), 0, false, true);
+        sample.sent += 100;
+        sample.lost += 3;
+        assert_eq!(
+            controller.step_with_delivery(Some(sample), 0, false, false),
+            100_000,
+            "moderate-loss recovery cannot grow without fresh receipts"
+        );
+        for _ in 0..240 {
+            sample.sent += 100;
+            sample.lost += 3;
+            let previous = controller.current();
+            let next = controller.step_with_delivery(Some(sample), 0, false, true);
+            assert_eq!(next, (previous + previous / 100).min(8_000_000));
+        }
+        assert!(controller.current() > 1_000_000);
+        controller.steer(8_000_000);
+        assert_eq!(
+            controller.step_with_delivery(Some(sample), 0, false, true),
+            8_000_000,
+            "successful probes cannot exceed the negotiated ceiling"
+        );
     }
 
     #[test]

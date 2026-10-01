@@ -24,6 +24,7 @@ pub mod capture;
 pub mod client;
 pub mod clipboard;
 pub mod codec;
+mod decode_work;
 pub mod input;
 pub mod mailbox;
 mod order;
