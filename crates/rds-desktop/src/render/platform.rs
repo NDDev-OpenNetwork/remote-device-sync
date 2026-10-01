@@ -3,6 +3,41 @@
 use winit::event_loop::EventLoop;
 
 #[cfg(target_os = "macos")]
+pub(super) struct RemoteActivity(objc2::rc::Retained<objc2_foundation::NSObject>);
+
+#[cfg(target_os = "macos")]
+impl Drop for RemoteActivity {
+    fn drop(&mut self) {
+        // SAFETY: the owned token came from this process's activity API and
+        // ends once, when the native viewer event loop returns or unwinds.
+        unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&self.0) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn remote_activity() -> RemoteActivity {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    // SAFETY: Foundation owns the retained activity token; the RAII guard
+    // pairs its begin/end. This user-requested stream must remain responsive
+    // while covered, without preventing idle system/display sleep or locking.
+    let token = unsafe {
+        NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::NSActivityUserInitiatedAllowingIdleSystemSleep,
+            &NSString::from_str("Remote desktop session"),
+        )
+    };
+    RemoteActivity(token)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) struct RemoteActivity;
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn remote_activity() -> RemoteActivity {
+    RemoteActivity
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
     let main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
