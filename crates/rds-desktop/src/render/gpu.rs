@@ -26,6 +26,26 @@ fn error(e: impl std::fmt::Display) -> DesktopError {
     DesktopError::Capture(format!("native renderer: {e}"))
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum DrawOutcome {
+    Presented,
+    Empty,
+    Occluded,
+    TimedOut,
+    Reconfigured,
+}
+impl DrawOutcome {
+    pub(super) fn stage(self) -> &'static str {
+        match self {
+            Self::Presented => "presented",
+            Self::Empty => "waiting for picture",
+            Self::Occluded => "surface occluded",
+            Self::TimedOut => "surface timeout",
+            Self::Reconfigured => "surface reconfigured",
+        }
+    }
+}
+
 pub(super) struct Gpu {
     instance: wgpu::Instance,
     window: Arc<Window>,
@@ -215,7 +235,7 @@ impl Gpu {
         self.uploads
     }
 
-    pub(super) fn draw(&mut self, frame: Option<&RawFrame>) -> Result<bool, DesktopError> {
+    pub(super) fn draw(&mut self, frame: Option<&RawFrame>) -> Result<DrawOutcome, DesktopError> {
         let surface = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -225,16 +245,14 @@ impl Gpu {
                     .create_surface(self.window.clone())
                     .map_err(error)?;
                 self.surface.configure(&self.device, &self.config);
-                return Ok(false);
+                return Ok(DrawOutcome::Reconfigured);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
-                return Ok(false);
+                return Ok(DrawOutcome::Reconfigured);
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                tracing::debug!("native surface unavailable for presentation");
-                return Ok(false);
-            }
+            wgpu::CurrentSurfaceTexture::Timeout => return Ok(DrawOutcome::TimedOut),
+            wgpu::CurrentSurfaceTexture::Occluded => return Ok(DrawOutcome::Occluded),
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err(error("surface validation failed"));
             }
@@ -282,6 +300,10 @@ impl Gpu {
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(surface);
-        Ok(self.picture.is_some())
+        Ok(if self.picture.is_some() {
+            DrawOutcome::Presented
+        } else {
+            DrawOutcome::Empty
+        })
     }
 }

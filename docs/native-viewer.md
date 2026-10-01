@@ -273,3 +273,24 @@ clock, with bounded 1024-sample histories. Input ACK p50/p95 includes local
 queueing, transport, server injection and reply handling; queue p95 and the
 oldest pending ACK age distinguish an input backlog from stale video. These
 ACK measurements do not establish that the target application changed pixels.
+
+## Keyboard modifiers across platforms
+
+The Mac viewer explicitly treats both Option keys as remote Alt. Native
+modifier flags reconcile the held remote keys before the next key or pointer
+event, including when a modifier was already held as the viewer gained focus
+or the OS omitted a separate modifier-key event. Known right-side keys stay
+right-side keys; flags with no known side default to the left modifier.
+Focus loss still releases held keys and buttons. Ctrl remains Ctrl, Shift
+remains Shift, and Command maps to the remote Super/Windows modifier; physical
+keyboard layout and text interpretation stay with the remote desktop.
+
+For Ubuntu shortcuts, use Option+arrow for Alt+arrow, Control for Ctrl and
+Command for Super. This does not turn local OS-reserved shortcuts into remote
+input, or provide the still-planned IME/composition integration.
+
+Explicit viewer launches request window focus once. Redraws and reconnects
+retain normal window stacking and never reactivate the application. Surface
+occlusion, acquisition timeout, reconfiguration and absence of a picture have
+separate diagnostic stage names, so a covered window is not confused with a
+presentation failure.

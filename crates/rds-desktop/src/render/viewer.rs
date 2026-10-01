@@ -16,8 +16,8 @@ use winit::{
 };
 
 use super::{
-    gpu::Gpu,
-    input::{Viewport, evdev},
+    gpu::{DrawOutcome, Gpu},
+    input::{Viewport, evdev, modifier_changes},
 };
 use crate::{DesktopError, RawFrame};
 
@@ -401,6 +401,7 @@ impl Viewer {
             input,
             display,
             seq: 0,
+            modifiers: Default::default(),
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
             pointer: false,
@@ -426,6 +427,7 @@ struct App {
     input: InputSender,
     display: u32,
     seq: u64,
+    modifiers: winit::event::Modifiers,
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
     pointer: bool,
@@ -436,6 +438,23 @@ impl App {
         self.error = Some(error);
         let _ = self.input.send(ViewerInput::Close);
         event_loop.exit();
+    }
+    fn sync_modifiers(&mut self, event_loop: &ActiveEventLoop) {
+        for (code, pressed) in modifier_changes(&self.keys, self.modifiers) {
+            if pressed {
+                self.keys.insert(code);
+            } else {
+                self.keys.remove(&code);
+            }
+            self.input(
+                event_loop,
+                if pressed {
+                    InputKind::KeyDown { code }
+                } else {
+                    InputKind::KeyUp { code }
+                },
+            );
+        }
     }
     fn input(&mut self, event_loop: &ActiveEventLoop, kind: InputKind) {
         let Some(next) = self.seq.checked_add(1) else {
@@ -486,7 +505,7 @@ impl App {
         lock(&self.handle.state).report.gpu_uploads = gpu.uploads();
         match result {
             Err(error) => self.fail(event_loop, error),
-            Ok(true) => {
+            Ok(DrawOutcome::Presented) => {
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
                     state.report.frames_submitted += 1;
@@ -503,8 +522,8 @@ impl App {
                     );
                 }
             }
-            Ok(false) => {
-                lock(&self.handle.state).render_stage = "surface unavailable".into();
+            Ok(outcome) => {
+                lock(&self.handle.state).render_stage = outcome.stage().into();
                 lock(&self.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
@@ -532,7 +551,7 @@ impl ApplicationHandler<()> for App {
             .and_then(|icon| {
                 event_loop
                     .create_window(
-                        Window::default_attributes()
+                        super::platform::window_attributes()
                             .with_title("RDS — Connecting")
                             .with_window_level(WindowLevel::Normal)
                             .with_window_icon(Some(icon))
@@ -546,6 +565,9 @@ impl ApplicationHandler<()> for App {
             });
         match result {
             Ok((window, gpu)) => {
+                // Explicit viewer launches activate once like ordinary apps.
+                // Reconnect/redraw never raises the window over other apps.
+                window.focus_window();
                 window.request_redraw();
                 self.window = Some(window);
                 self.gpu = Some(gpu);
@@ -603,10 +625,17 @@ impl ApplicationHandler<()> for App {
                     window.request_redraw();
                 }
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+                self.sync_modifiers(event_loop);
+            }
             WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
                 if let PhysicalKey::Code(key) = event.physical_key
                     && let Some(code) = evdev(key)
                 {
+                    if !matches!(code, 29 | 42 | 54 | 56 | 97 | 100 | 125 | 126) {
+                        self.sync_modifiers(event_loop);
+                    }
                     if event.state == ElementState::Pressed {
                         if code == 47 && (self.keys.contains(&29) || self.keys.contains(&97)) {
                             match super::platform::paste_text() {
@@ -689,6 +718,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
+                self.sync_modifiers(event_loop);
                 let button = match button {
                     MouseButton::Left => 0x110,
                     MouseButton::Right => 0x111,
@@ -715,6 +745,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if self.pointer => {
+                self.sync_modifiers(event_loop);
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (f64::from(x), f64::from(y)),
                     MouseScrollDelta::PixelDelta(p) => (p.x / 40., p.y / 40.),

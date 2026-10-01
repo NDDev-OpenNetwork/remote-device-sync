@@ -85,3 +85,14 @@ pub(super) fn event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError
 pub(super) fn event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
     EventLoop::with_user_event().build()
 }
+
+#[cfg(target_os = "macos")]
+pub(super) fn window_attributes() -> winit::window::WindowAttributes {
+    use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
+    winit::window::Window::default_attributes().with_option_as_alt(OptionAsAlt::Both)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn window_attributes() -> winit::window::WindowAttributes {
+    winit::window::Window::default_attributes()
+}
