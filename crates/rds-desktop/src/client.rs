@@ -646,22 +646,14 @@ impl RelayDecoder {
         header: FrameHeader,
         payload: Vec<u8>,
     ) -> Result<(Self, RelayOutcome), DesktopError> {
-        let slot = DECODE_SLOTS
-            .acquire()
-            .await
-            .map_err(|_| DesktopError::Decode("decoder budget closed".into()))?;
-        tokio::time::timeout(
-            FRAME_STREAM_TIMEOUT,
-            tokio::task::spawn_blocking(move || {
-                let _slot = slot;
-                let mut decoder = self;
-                let outcome = decoder.push(&header, payload);
-                (decoder, outcome)
-            }),
-        )
+        let probe = crate::decode_work::Probe::new(&header, payload.len());
+        crate::decode_work::run(&DECODE_SLOTS, FRAME_STREAM_TIMEOUT, probe, move || {
+            let mut decoder = self;
+            let outcome = decoder.push(&header, payload);
+            (decoder, outcome)
+        })
         .await
-        .map_err(|_| DesktopError::Decode("decoder timed out".into()))?
-        .map_err(|e| DesktopError::Decode(e.to_string()))
+        .map_err(DesktopError::from)
     }
 }
 
@@ -741,26 +733,22 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 }
                 continue;
             }
-            let Ok(slot) = DECODE_SLOTS.acquire().await else {
-                break;
-            };
-            let decoded = tokio::time::timeout(
-                FRAME_STREAM_TIMEOUT,
-                tokio::task::spawn_blocking(move || {
-                    let (_slot, _budget) = (slot, budget);
+            let probe = crate::decode_work::Probe::new(&header, body.len());
+            let decoded =
+                crate::decode_work::run(&DECODE_SLOTS, FRAME_STREAM_TIMEOUT, probe, move || {
+                    let _budget = budget;
                     let result = delivery.decode(&header, body);
                     (delivery, result)
-                }),
-            )
-            .await;
+                })
+                .await;
             let (state, outcome) = match decoded {
-                Ok(Ok(pair)) => pair,
-                Err(_) => {
+                Ok(pair) => pair,
+                Err(crate::decode_work::Error::Timeout) => {
                     delivery = Delivery::new();
                     delivery.request_idr(&ctx.ctrl, ctx.clock.now_ms());
                     continue;
                 }
-                Ok(Err(_)) => break,
+                Err(_) => break,
             };
             delivery = state;
             match outcome {

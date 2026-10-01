@@ -352,3 +352,20 @@ replaying input, growing a queue or bypassing frame admission. View-only and
 failed input do not set that wake. The real-UDP idle-capture regression includes
 a 600 ms unavailable-producer interval and retains its existing 300 ms wake
 bound after that deliberate pause.
+
+## Decode scheduling diagnostics and cancellation
+
+Slow decode records separate global-budget admission, blocking-pool queue
+wait and native codec work, using only the local monotonic clock. Completed
+work or a caller that stops waiting after 250 ms emits metadata only: frame
+sequence, dimensions, payload byte count, phase and elapsed stage durations.
+It contains no image, input, clipboard or peer contents. This distinguishes
+resource/scheduling delays from actual native decode cost without extending
+existing caller, frame or codec deadlines.
+
+Caller cancellation requests abort of a blocking task that has not started.
+If native work is already running, the existing global permit stays inside
+that work until it returns; cancellation does not permit an unbounded series
+of replacement decoders. Controlled blocking-pool tests cover both cases.
+Managed and direct decode use the same work boundary. These diagnostics do
+not themselves prove native visible latency or stability under contention.
