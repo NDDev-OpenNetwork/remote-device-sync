@@ -302,17 +302,25 @@ async fn canceled_transfer_releases_its_slot_without_closing_tcp_or_the_session(
             .await
             .unwrap()
             .unwrap();
-        let stats = if upload {
-            client
-                .send_file(session, &destination.join("file"))
-                .await
-                .unwrap()
-        } else {
-            client
-                .recv_file(session, "file", &destination)
-                .await
-                .unwrap()
-        };
+        // Remote RESET observation is not a fence for the local manager's
+        // canceled worker/permit destructor. Require bounded local admission
+        // after cleanup; only TransferBusy is a non-admitted probe. Never
+        // replay an accepted transfer or hide a transport/filesystem failure.
+        let stats = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let result = if upload {
+                    client.send_file(session, &destination.join("file")).await
+                } else {
+                    client.recv_file(session, "file", &destination).await
+                };
+                match result {
+                    Err(Error::Rejected(ErrorCode::TransferBusy)) => tokio::task::yield_now().await,
+                    result => break result.unwrap(),
+                }
+            }
+        })
+        .await
+        .expect("canceled local transfer did not release admission within its bound");
         assert_eq!(stats.bytes, 18);
         assert_eq!(
             std::fs::read(if upload {
