@@ -113,3 +113,11 @@ pairs with local monotonic instants. Echoes preserve the caller's wire values;
 unmatched or duplicate echoes cannot invent an RTT. A real managed-style
 heartbeat test with a different timestamp origin failed before and passes with
 the fix. Bounded-correlation tests cover eviction, exact matching and duplicates.
+
+After the heartbeat clock-origin repair, both whole all-feature suites pass:
+Mac **779 passed, 0 failed, 2 ignored**; Linux **781 passed, 0 failed, 11 ignored**,
+107 result groups each. Strict all-feature/all-target clippy and formatting pass.
+The scoped real-device qualification remains separate: prior failed motion runs
+are retained and the corrected build has a fresh visible native/mixed-workload
+run underway. No broad milestone or physical-latency closure is inferred from
+these checks.
