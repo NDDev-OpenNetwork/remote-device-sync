@@ -131,6 +131,15 @@ impl rds_desktop::FrameProducer for CountingSource {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_connection() {
+    delivery_pause(Duration::from_millis(800), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recovered_delay_does_not_reduce_quality_while_media_receipts_continue() {
+    delivery_pause(Duration::from_millis(200), false).await;
+}
+
+async fn delivery_pause(extra_hold: Duration, sustained: bool) {
     use rds_core::{Codec, DesktopCaps, DesktopHello, HelloAck, StreamHello, UniHello};
     use rds_desktop::client::{DesktopSession, SessionOpts};
     use rds_desktop::{SessionConfig, SyntheticProducer, serve_desktop_with};
@@ -210,7 +219,7 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
         tokio::time::sleep(Duration::from_millis(100)).await;
         let held = calls.load(Ordering::SeqCst);
         let initial_bitrate = bitrate.load(Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        tokio::time::sleep(extra_hold).await;
         assert_eq!(
             held, 1,
             "a recovery keyframe must finish before encoding successors"
@@ -228,10 +237,21 @@ async fn blocked_acknowledgements_bound_capture_and_resume_without_closing_conne
             last = encoded.recv().await.unwrap().header.seq;
         }
         assert!(last > first, "delivery must resume on the same connection");
-        assert!(
-            bitrate.load(Ordering::SeqCst) < initial_bitrate,
-            "delayed media ACKs must reduce the encoder target even with no reported packet loss"
-        );
+        if sustained {
+            assert!(
+                bitrate.load(Ordering::SeqCst) < initial_bitrate,
+                "sustained delivery blockage must reduce load even without reported packet loss"
+            );
+        } else {
+            // Observe more than one pacing tick after delivery recovered.
+            // The old cumulative delay event was consumed here and cut the
+            // rate despite healthy receipts already arriving again.
+            tokio::time::sleep(Duration::from_millis(550)).await;
+            assert!(
+                bitrate.load(Ordering::SeqCst) >= initial_bitrate,
+                "a recovered delay unnecessarily reduced image quality"
+            );
+        }
         drop(session);
         serving.abort();
         let _ = serving.await;

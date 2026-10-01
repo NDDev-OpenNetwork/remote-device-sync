@@ -46,13 +46,15 @@ being received. The existing global encoded/decode limits still apply.
 
 The sender also measures frame delivery receipts independently of QUIC packet
 loss counters, which may look clean while a reliable relay queues traffic.
-A receipt delayed beyond three sampled path RTTs (bounded to 250–1000 ms), or
-a failed delivery, reduces the encoder target. A five-second recovery hold and
-growth of at most 1% per 250 ms sample with fresh media receipts prevent an
-immediate return to the same backlog. Media reductions coalesce correlated
-receipts over one second. When path and media observations describe the same
-sample, the stronger reduction applies once, preserving quality while continued
-pressure still reduces load. Existing bitrate bounds, frame deadlines,
+A receipt delayed beyond three sampled path RTTs (bounded to 250–1000 ms) is
+tracked until it completes or its owned task is canceled. A completed delayed
+receipt remains a diagnostic count and is no longer treated as a current queue.
+Soft congestion requires two consecutive 250 ms samples with outstanding late
+receipts and no new successful receipt. A hard delivery failure still reduces
+load immediately. A five-second recovery hold and growth of at most 1% per
+sample with fresh receipts prevent immediate return to a sustained backlog.
+Media reductions coalesce over one second; simultaneous path/media observations
+apply the stronger response once. Existing bitrate bounds, frame deadlines,
 three-frame admission and reference-preserving live encoder updates still apply.
 Sender health includes delayed-delivery counts and latest receipt duration.
 Independent production health continues during a stopped video writer and
