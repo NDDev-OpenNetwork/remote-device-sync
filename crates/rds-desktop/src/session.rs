@@ -194,6 +194,8 @@ pub struct ProducerControls {
     pub requested: Arc<AtomicU64>,
     /// Session-clock deadline for recent-input capture; does not request IDRs.
     pub input_refresh_until_ms: Arc<AtomicU64>,
+    /// Accepted input not yet observed by the admitted capture producer.
+    pub input_refresh_pending: Arc<AtomicBool>,
 }
 
 impl ProducerControls {
@@ -204,7 +206,21 @@ impl ProducerControls {
             deadline_misses: Arc::new(AtomicU64::new(0)),
             requested: Arc::new(AtomicU64::new(0)),
             input_refresh_until_ms: Arc::new(AtomicU64::new(0)),
+            input_refresh_pending: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Check input-driven capture after acquiring normal frame admission.
+    /// A pending wake survives a blocked producer; consuming it starts one
+    /// bounded burst on the producer's current session clock, without an IDR.
+    pub fn input_refresh_active(&self, now_ms: u64) -> bool {
+        if self.input_refresh_pending.swap(false, Ordering::AcqRel) {
+            self.input_refresh_until_ms.fetch_max(
+                now_ms.saturating_add(INPUT_REFRESH_BURST_MS),
+                Ordering::AcqRel,
+            );
+        }
+        self.input_refresh_until_ms.load(Ordering::Acquire) > now_ms
     }
 }
 
@@ -517,6 +533,7 @@ pub async fn serve_desktop_with(
         let misses = Arc::clone(&controls.deadline_misses);
         let requested = Arc::clone(&controls.requested);
         let input_refresh_until_ms = Arc::clone(&controls.input_refresh_until_ms);
+        let input_refresh_pending = Arc::clone(&controls.input_refresh_pending);
         let mut producer = config.producer;
         let keyframe_pending = keyframe_pending.clone();
         let capture_admission = capture_admission.clone();
@@ -531,6 +548,7 @@ pub async fn serve_desktop_with(
                 // private always-empty copy.
                 requested,
                 input_refresh_until_ms,
+                input_refresh_pending,
             };
             let mut source = match producer.take() {
                 Some(p) => p,
@@ -923,6 +941,9 @@ pub async fn serve_desktop_with(
                         send_clock.now_ms().saturating_add(INPUT_REFRESH_BURST_MS),
                         Ordering::Release,
                     );
+                    controls
+                        .input_refresh_pending
+                        .store(true, Ordering::Release);
                     delivery_feedback
                         .inputs_handled
                         .fetch_add(1, Ordering::Relaxed);
@@ -1241,9 +1262,8 @@ mod x11 {
         fn idle_wait(&mut self, controls: &ProducerControls, clock: &SessionClock) -> bool {
             const IDLE_POLL: Duration = Duration::from_millis(10);
             const IDLE_MAX: Duration = Duration::from_secs(1);
-            let input_active =
-                || controls.input_refresh_until_ms.load(Ordering::Acquire) > clock.now_ms();
-            if self.capturer.changed() || controls.idr.load(Ordering::Relaxed) || input_active() {
+            let input_active = || controls.input_refresh_active(clock.now_ms());
+            if input_active() || self.capturer.changed() || controls.idr.load(Ordering::Relaxed) {
                 return false;
             }
             let deadline = Instant::now() + IDLE_MAX;
@@ -1585,6 +1605,31 @@ async fn send_payload<W: AsyncWrite + Unpin, T: Borrow<Produced>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepted_input_wake_survives_capture_backpressure_then_expires() {
+        let controls = ProducerControls::new(4_000_000);
+        assert!(!controls.input_refresh_active(100));
+        controls
+            .input_refresh_until_ms
+            .store(350, Ordering::Release);
+        controls
+            .input_refresh_pending
+            .store(true, Ordering::Release);
+        // Admission remains blocked beyond the original 250 ms hint.
+        assert!(controls.input_refresh_active(2_000));
+        assert!(!controls.input_refresh_pending.load(Ordering::Acquire));
+        assert!(controls.input_refresh_active(2_249));
+        assert!(!controls.input_refresh_active(2_250));
+        assert!(!controls.input_refresh_active(3_000));
+        assert!(controls.idr.swap(false, Ordering::Relaxed));
+        controls
+            .input_refresh_pending
+            .store(true, Ordering::Release);
+        assert!(controls.input_refresh_active(3_000));
+        assert!(!controls.idr.load(Ordering::Relaxed));
+        assert!(!controls.input_refresh_active(3_250));
+    }
 
     #[test]
     fn one_blocked_receipt_does_not_repeat_penalties_while_capture_is_paused() {
