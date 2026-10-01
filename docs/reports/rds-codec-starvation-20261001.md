@@ -38,3 +38,30 @@ Mac client recovered in 1,235 ms after the planned serving restart and
 continues decoding Full HD. Its window is outside the active unlocked
 console; this recovery is network/decode evidence, not visible-pixel
 qualification. A subsequent bounded installed continuity run is in progress.
+
+A subsequent 600-second installed decoder observation received 2,624 Full HD
+frames with zero reconnects and about 69 MiB peak resident memory. Freshness
+p95/max remained 920/5,214 ms, so this continuity check failed. All native
+presentation observations were OS-covered. No physical-pixel result is
+claimed, and this shorter different workload is not a comparable before/after
+performance benchmark.
+
+A separate managed-channel fixture, concurrent with the existing native
+session, verified 12 attributed target transitions on each run. It traverses
+real local IPC, RDS control/QUIC, native input/capture/encode and the Mac software
+decoder; it excludes native key handling, Metal and physical display. Normal
+input-to-decoded-color p50/p95/max was 695/1,040/1,684 ms. A forced 100 kbps
+run measured 669/1,732/2,551 ms; all transition pictures were deltas of roughly
+2 KiB. These are functional transitions with unacceptable latency tails.
+Normal local input-ACK median was 348 ms; same-server-clock handled-to-capture
+and capture-to-encode medians were 32 and 66 ms. Some low-rate captures still
+started over a second after handling input while media admission was blocked.
+Codec-skip progress alone therefore does not close interaction or quality gates.
+
+The macOS full CI lane exposed a separate owned-transport telemetry fixture
+timeout after path churn. Only its intentionally delayed observer should lag;
+the ordinary facade must observe each established path before the fixture
+closes it and advances. An explicit observer barrier retains both the sticky
+loss and single-live-path assertions and the existing timeouts. All 85 local
+network units pass with that barrier; the failed CI artifact is retained and
+fresh full CI remains separate evidence.

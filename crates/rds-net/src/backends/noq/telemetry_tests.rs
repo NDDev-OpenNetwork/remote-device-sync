@@ -77,6 +77,30 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
             })
             .await
             .unwrap();
+            // Keep the ordinary observer current while only `delayed` is
+            // intentionally unpolled. Otherwise a busy executor can overflow
+            // both event buffers, making the facade correctly fail closed
+            // when this fixture later asks for a known selected path.
+            let opened_id = crate::path_id_u64(path.id());
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let snapshot = facade.path_stats_snapshot();
+                    assert_eq!(
+                        snapshot.coverage,
+                        PathStatsCoverage::PolicyObserved {
+                            lost_events: 0,
+                            driver_running: true,
+                        },
+                        "only the deliberately delayed observer may lag"
+                    );
+                    if snapshot.paths.iter().any(|p| p.path_id == opened_id) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
             if iteration == 69 {
                 last = Some(path);
                 break;
