@@ -123,14 +123,16 @@ impl Delivery {
         self.waiting_keyframe = true;
     }
 
-    fn request_idr(&mut self, ctrl: &mpsc::Sender<DesktopControl>, now_ms: u64) {
+    fn request_idr(&mut self, ctrl: &mpsc::Sender<DesktopControl>, now_ms: u64) -> bool {
         if self
             .last_idr_req_ms
             .is_none_or(|last| now_ms.saturating_sub(last) >= IDR_MIN_INTERVAL_MS)
             && ctrl.try_send(DesktopControl::RequestIdr).is_ok()
         {
             self.last_idr_req_ms = Some(now_ms);
+            return true;
         }
+        false
     }
 
     fn decode(&mut self, header: &FrameHeader, body: Vec<u8>) -> DecodeOutcome {
@@ -683,6 +685,38 @@ struct ReceiveContext {
     control_rtt_ms: Arc<AtomicU64>,
 }
 
+/// Successors of one missing reference must not queue repeated large IDRs
+/// while a reliable recovery request/key is still in transit. Actual reader
+/// failure or a received key ends that episode; absent either, retry within
+/// the existing key-reader deadline. Failed control admission never arms it.
+#[derive(Default)]
+struct GapRepair {
+    requested_at_ms: Option<u64>,
+}
+impl GapRepair {
+    fn request(
+        &mut self,
+        delivery: &mut Delivery,
+        ctrl: &mpsc::Sender<DesktopControl>,
+        now_ms: u64,
+    ) -> bool {
+        if self
+            .requested_at_ms
+            .is_some_and(|at| now_ms.saturating_sub(at) < KEYFRAME_READ_TIMEOUT.as_millis() as u64)
+        {
+            return false;
+        }
+        if delivery.request_idr(ctrl, now_ms) {
+            self.requested_at_ms = Some(now_ms);
+            return true;
+        }
+        false
+    }
+    fn clear(&mut self) {
+        self.requested_at_ms = None;
+    }
+}
+
 enum FrameRead {
     Complete(FrameHeader, Vec<u8>, FrameBudget),
     Rejected,
@@ -698,6 +732,7 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
     // Keep the decoded queue open for the session even in a headless build.
     let _frames = &ctx.frame_tx;
     let mut delivery = Delivery::new();
+    let mut gap_repair = GapRepair::default();
     let mut admitted = 0u64;
     let mut completed = 0u64;
     let mut rejected = 0u64;
@@ -718,6 +753,7 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
             ctx.header_tx.send(header.clone());
             completed += 1;
             if header.keyframe {
+                gap_repair.clear();
                 received_keys += 1;
             }
             if let Some(tx) = &ctx.encoded_tx {
@@ -773,9 +809,10 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 let wait = reorder_wait(ctx.control_rtt_ms.load(Ordering::Relaxed));
                 if readers.is_empty() && ordered.expire(wait) {
                     gaps+=1;
-                    tracing::warn!(expected_seq=ctx.next_seq.load(Ordering::Relaxed),reorder_budget_ms=wait.as_millis(),"desktop reference gap expired");
                     delivery.invalidate();
-                    delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());
+                    let now_ms = ctx.clock.now_ms();
+                    let request_sent = gap_repair.request(&mut delivery, &ctx.ctrl, now_ms);
+                    tracing::warn!(expected_seq=ctx.next_seq.load(Ordering::Relaxed),reorder_budget_ms=wait.as_millis(),request_sent,pending_recovery_age_ms=gap_repair.requested_at_ms.map(|at| now_ms.saturating_sub(at)),"desktop reference gap expired");
                 }
                 if health.elapsed()>=std::time::Duration::from_secs(5) {
                     tracing::info!(admitted,completed,rejected,timed_out,gaps,received_keys,in_flight=ctx.receiving.load(Ordering::Relaxed),"desktop receiver health");
@@ -785,8 +822,8 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
             frame = readers.join_next(), if !readers.is_empty() => {
                 match frame {
                     Some(Ok(FrameRead::Complete(header,body,budget)))=>ordered.push(header,(body,budget)),
-                    Some(Ok(FrameRead::TimedOut))=>{timed_out+=1;delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
-                    _=>{rejected+=1;delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
+                    Some(Ok(FrameRead::TimedOut))=>{timed_out+=1;gap_repair.clear();delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
+                    _=>{rejected+=1;gap_repair.clear();delivery.request_idr(&ctx.ctrl,ctx.clock.now_ms());},
                 }
             }
             // A compressed relay consumer can backpressure completed readers.
@@ -832,6 +869,7 @@ async fn read_one(
         };
     let frame_seq = header.seq;
     let keyframe = header.keyframe;
+    let header_ms = started.elapsed().as_millis();
     let deadline = if keyframe {
         KEYFRAME_READ_TIMEOUT
     } else {
@@ -859,7 +897,19 @@ async fn read_one(
         Some((header, body, budget))
     };
     match tokio::time::timeout(deadline.saturating_sub(started.elapsed()), reading).await {
-        Ok(Some((header, body, budget))) => FrameRead::Complete(header, body, budget),
+        Ok(Some((header, body, budget))) => {
+            if started.elapsed() >= std::time::Duration::from_millis(250) {
+                tracing::warn!(
+                    frame_seq,
+                    keyframe,
+                    body_bytes,
+                    header_ms,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "desktop frame receive completed slowly"
+                );
+            }
+            FrameRead::Complete(header, body, budget)
+        }
         Ok(None) => {
             tracing::debug!(
                 ?frame_seq,
@@ -969,6 +1019,37 @@ mod tests {
         }
         assert!(rx.try_recv().is_err());
         delivery.request_idr(&tx, 500);
+        assert!(matches!(rx.try_recv(), Ok(DesktopControl::RequestIdr)));
+    }
+
+    #[test]
+    fn gap_repair_coalesces_until_a_key_failure_or_bounded_retry() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut delivery = Delivery::new();
+        let mut repair = GapRepair::default();
+        assert!(repair.request(&mut delivery, &tx, 0));
+        assert!(matches!(rx.try_recv(), Ok(DesktopControl::RequestIdr)));
+        for now in [500, 1000, 7999] {
+            assert!(!repair.request(&mut delivery, &tx, now));
+        }
+        assert!(rx.try_recv().is_err());
+        assert!(repair.request(&mut delivery, &tx, 8000));
+        assert!(matches!(rx.try_recv(), Ok(DesktopControl::RequestIdr)));
+        repair.clear();
+        assert!(repair.request(&mut delivery, &tx, 8500));
+        assert!(matches!(rx.try_recv(), Ok(DesktopControl::RequestIdr)));
+    }
+
+    #[test]
+    fn a_full_control_queue_does_not_arm_gap_repair() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(DesktopControl::RequestIdr).unwrap();
+        let mut delivery = Delivery::new();
+        let mut repair = GapRepair::default();
+        assert!(!repair.request(&mut delivery, &tx, 0));
+        assert!(repair.requested_at_ms.is_none());
+        rx.try_recv().unwrap();
+        assert!(repair.request(&mut delivery, &tx, 0));
         assert!(matches!(rx.try_recv(), Ok(DesktopControl::RequestIdr)));
     }
 

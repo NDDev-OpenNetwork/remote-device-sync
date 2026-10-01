@@ -374,3 +374,23 @@ that work until it returns; cancellation does not permit an unbounded series
 of replacement decoders. Controlled blocking-pool tests cover both cases.
 Managed and direct decode use the same work boundary. These diagnostics do
 not themselves prove native visible latency or stability under contention.
+
+## Coalesced reference-gap recovery
+
+Repeated successors of the same missing reference may expire while a requested
+keyframe is still travelling over reliable QUIC. The receiver now sends one
+recovery request for that episode. A received key clears it; an actual rejected
+or timed-out reader also permits repair again. Without either outcome, another
+request becomes eligible at the existing eight-second key-reader bound. A full
+control queue does not arm the hold, and the existing 500 ms request rate limit
+still applies. Reader count, memory budgets and read deadlines are unchanged.
+
+Gap records distinguish a sent request from a coalesced observation and include
+pending recovery age. Successful frame reads taking at least 250 ms now report
+header time, total time, sequence, keyframe flag and byte count. A short scoped
+`RUST_LOG=rds_desktop::input_timing=trace` capture can correlate local native
+input dispatch with a read-only local image observer, without relying on the
+automation tool's clock. It records only sequence, event class and local timing;
+key/button codes, coordinates, text and clipboard contents are excluded.
+These records locate delay; neither input dispatch nor a frame read proves
+physical display response.
