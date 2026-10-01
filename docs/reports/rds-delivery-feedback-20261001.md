@@ -96,3 +96,20 @@ count, latest produced-frame age, admission/keyframe waits and path RTT. These
 metadata distinguish capture/encode inactivity, intentional skips and transport
 backpressure during the observed long pauses. Hard budgets and wire remain
 unchanged; no image, clipboard content, credential or endpoint identity is logged.
+
+At the WAN/progress-diagnostics revision, Mac whole all-feature workspace tests
+pass **778/0/2 ignored**,107 result groups; Linux whole recheck passes
+**780/0/11 ignored**,107 groups. Strict all-feature/all-target workspace clippy
+and formatting pass both. One first-run Linux owned-relay closure assertion
+failed under host load; the unchanged focused case and full recheck pass, and
+both raw outcomes remain recorded. Current both-OS CI also passes. Ignored
+platform/account cases remain outside these totals and acceptance claims.
+
+The independent logs exposed a clock-origin bug in managed heartbeats: verbatim
+viewer timestamps survived reconnect, while the desktop receiver subtracted
+its own new session clock. RTT saturated to zero and therefore used the100 ms
+reorder floor. Heartbeat timing now correlates up to64 sent sequence/timestamp
+pairs with local monotonic instants. Echoes preserve the caller's wire values;
+unmatched or duplicate echoes cannot invent an RTT. A real managed-style
+heartbeat test with a different timestamp origin failed before and passes with
+the fix. Bounded-correlation tests cover eviction, exact matching and duplicates.

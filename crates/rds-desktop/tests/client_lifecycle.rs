@@ -219,7 +219,15 @@ async fn wan_reference_header_can_arrive_after_the_lan_reorder_window() {
         );
         let mut client = client.unwrap();
         let (mut control_send, mut control_recv, id) = streams;
-        client.heartbeat().await.unwrap();
+        // The managed viewer's clock predates this desktop session after
+        // reconnect. Echo timestamps remain caller-owned on the wire.
+        client
+            .send_control(DesktopControl::Heartbeat {
+                seq: 734,
+                ts_ms: 1_000_000,
+            })
+            .await
+            .unwrap();
         let DesktopControl::Heartbeat { seq, ts_ms } = read_frame(&mut control_recv).await.unwrap()
         else {
             panic!("heartbeat expected")

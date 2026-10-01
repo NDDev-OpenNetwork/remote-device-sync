@@ -39,7 +39,9 @@ visible. Completed encoded frames are briefly ordered before decode so a delta
 that finishes first cannot discard its in-flight reference keyframe. Ordering
 retains at most three successor bodies. The missing-reference timer uses two measured control RTTs, bounded to
 100–1000 ms (250 ms before measurement). It requests IDR recovery only after
-admitted readers finish or reach their own bounded deadlines. Jitter does not discard successors of a reference still
+admitted readers finish or reach their own bounded deadlines. Heartbeat RTT
+uses bounded local send/echo correlations; caller timestamps stay opaque, so
+reconnecting a managed desktop does not compare two different clock origins. Jitter does not discard successors of a reference still
 being received. The existing global encoded/decode limits still apply.
 
 The sender also measures frame delivery receipts independently of QUIC packet
