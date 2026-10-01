@@ -342,3 +342,13 @@ A real Full HD low-rate regression decodes the initial recovery picture and
 all subsequent emitted deltas, retains normal skips, and rejects extended
 codec silence. Current installed input-to-pixel and mixed-load qualification
 remain separate acceptance evidence.
+
+Input-triggered capture retains one pending wake while normal media admission
+blocks the producer. Once the admitted producer observes that wake, its 250 ms
+burst begins on the current session clock. The pending flag is consumed once;
+idle polling resumes after the burst. Accepted input can therefore survive
+backpressure that outlasts the original deadline without forcing an IDR,
+replaying input, growing a queue or bypassing frame admission. View-only and
+failed input do not set that wake. The real-UDP idle-capture regression includes
+a 600 ms unavailable-producer interval and retains its existing 300 ms wake
+bound after that deliberate pause.

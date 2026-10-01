@@ -65,3 +65,19 @@ closes it and advances. An explicit observer barrier retains both the sticky
 loss and single-live-path assertions and the existing timeouts. All 85 local
 network units pass with that barrier; the failed CI artifact is retained and
 fresh full CI remains separate evidence.
+
+## Accepted input pending across capture backpressure
+
+Same-clock target-transition instrumentation also found accepted-input to
+capture gaps over one second. The earlier input hint expired 250 ms after
+handling, including time when media admission prevented capture. A bounded
+pending flag now survives that interval and rebases the short capture burst
+when the admitted producer first observes it. No command is replayed and no
+additional frame may bypass admission.
+
+The real-UDP idle-capture fixture adds a 600 ms producer pause. With only the
+old absolute-deadline check, accepted input never produces the requested delta
+within the original 300 ms wake allowance after that pause. This failed before
+the fix; the pending-wake implementation retains the view-only denial and
+continuous-delta/no-IDR checks. Its final software/installed results are being
+recorded separately; this change does not claim native visible latency success.

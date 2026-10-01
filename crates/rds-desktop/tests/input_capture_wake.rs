@@ -15,6 +15,7 @@ use std::time::Duration;
 struct IdleSource {
     idle: Option<tokio::sync::oneshot::Sender<()>>,
     stop: std::sync::mpsc::Receiver<()>,
+    pause: Duration,
 }
 impl FrameProducer for IdleSource {
     fn produce(
@@ -31,11 +32,12 @@ impl FrameProducer for IdleSource {
             if let Some(idle) = self.idle.take() {
                 let _ = idle.send(());
             }
+            std::thread::sleep(self.pause);
             loop {
                 if self.stop.try_recv().is_ok() {
                     return None;
                 }
-                if controls.input_refresh_until_ms.load(Ordering::Acquire) > clock.now_ms() {
+                if controls.input_refresh_active(clock.now_ms()) {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(1));
@@ -64,7 +66,11 @@ impl InputSink for Input {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_input_wakes_idle_capture_without_requesting_a_keyframe() {
-    for view_only in [false, true] {
+    for (view_only, pause) in [
+        (false, Duration::ZERO),
+        (true, Duration::ZERO),
+        (false, Duration::from_millis(600)),
+    ] {
         let config = EndpointConfig {
             discovery: false,
             bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
@@ -104,6 +110,7 @@ async fn accepted_input_wakes_idle_capture_without_requesting_a_keyframe() {
                         producer: Some(Box::new(IdleSource {
                             idle: Some(idle),
                             stop: stopped,
+                            pause,
                         })),
                         frame_route: Some(rds_core::UniHello::DesktopFrames { id: session }),
                         ..Default::default()
@@ -153,7 +160,9 @@ async fn accepted_input_wakes_idle_capture_without_requesting_a_keyframe() {
             .await
             .unwrap();
         let response = tokio::time::timeout(
-            Duration::from_millis(300),
+            // Preserve the original 300 ms wake bound after the deliberately
+            // paused producer resumes, rather than treating its pause as RTT.
+            pause + Duration::from_millis(300),
             desktop.encoded.as_mut().unwrap().recv(),
         )
         .await;
