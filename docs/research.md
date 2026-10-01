@@ -555,3 +555,16 @@ input, retaining normal pacing, reference ordering and memory admission.
 separate network, decode, frame queue and presentation; a successful input ACK
 or fresh frame timestamp is not an application-response measurement. Runtime
 qualification compares actual target transitions with those stage diagnostics.
+
+## 2026-10-01 low-rate codec starvation
+
+Installed diagnostics separated a nearly ten-second picture pause from
+ordinary network RTT: the encoder counted continuing rate-control skips
+after a recovery picture at 100 kbps. Cisco's
+[rate controller](https://github.com/cisco/openh264/blob/master/codec/encoder/core/src/ratectl.cpp)
+accounts picture debt against timestamp-based buffer fullness. Its
+[native live option](https://github.com/cisco/openh264/blob/master/codec/encoder/plus/src/welsEncoderExt.cpp)
+changes `ENCODER_OPTION_RC_FRAME_SKIP` as a bool on the initialized context.
+RDS uses that documented option for a bounded freshness encode, retaining
+normal skips, reference continuity and transport byte pacing. The codec
+regression and current installed delivery/presentation gates remain distinct.

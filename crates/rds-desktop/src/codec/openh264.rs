@@ -15,6 +15,11 @@ use rds_core::Codec;
 
 use crate::{Decoder, DesktopError, EncodedFrame, Encoder, RawFrame};
 
+// A large recovery picture can leave timestamp rate control in debt for
+// seconds at its low-rate floor. Preserve occasional delta progress while
+// the serving writer still enforces its byte pacing and admission bounds.
+const MAX_CODEC_SILENCE_MS: u64 = 250;
+
 /// Real-time OpenH264 encoder feeding `EncodedFrame`s.
 pub struct H264Encoder {
     inner: OhEncoder,
@@ -29,6 +34,7 @@ pub struct H264Encoder {
     want_idr: bool,
     started: std::time::Instant,
     last_timestamp: Option<u64>,
+    last_output_timestamp: Option<u64>,
     /// Recycled I420 input buffer — a 1080p frame is ~3 MiB, so a fresh
     /// allocation per frame at 60 fps is ~190 MB/s of pure alloc churn.
     /// Rebuilt only when frame dimensions change.
@@ -48,6 +54,7 @@ impl H264Encoder {
             want_idr: true,
             started: std::time::Instant::now(),
             last_timestamp: None,
+            last_output_timestamp: None,
             yuv_buf: None,
         })
     }
@@ -145,30 +152,65 @@ impl H264Encoder {
             )
             .min(i64::MAX as u64);
         self.last_timestamp = Some(stamp);
-        let stream = self
+        let refresh = self.dimensions == Some(dimensions)
+            && self
+                .last_output_timestamp
+                .is_some_and(|last| stamp.saturating_sub(last) >= MAX_CODEC_SILENCE_MS);
+        if refresh {
+            self.frame_skip(false)?;
+        }
+        let result = self
             .inner
             .encode_at(&yuv, openh264::Timestamp::from_millis(stamp))
-            .map_err(|e| DesktopError::Encode(e.to_string()))?;
+            .map(|stream| (bitstream_has_idr(&stream), Bytes::from(stream.to_vec())))
+            .map_err(|e| DesktopError::Encode(e.to_string()));
+        // Restore normal rate control even when this encode failed. This
+        // option updates a bool on the initialized encoder, not references.
+        if refresh {
+            self.frame_skip(true)?;
+        }
         self.yuv_buf = Some(yuv);
+        let (keyframe, data) = result?;
         self.dimensions = Some(dimensions);
         // The flag the writer's collapse trusts must be the truth on
         // the wire, not a schedule assumption: OpenH264 decides when
         // forced and periodic IDRs actually land, so read the NALs.
-        let keyframe = bitstream_has_idr(&stream);
         // A rate-control skip must not consume a pending recovery request.
         // Clear only after an independent frame actually exists on the wire.
         if keyframe {
             self.want_idr = false;
         }
+        if !data.is_empty() {
+            self.last_output_timestamp = Some(stamp);
+        }
         Ok(EncodedFrame {
             codec: Codec::H264,
-            data: Bytes::from(stream.to_vec()),
+            data,
             keyframe,
         })
     }
 }
 
 impl H264Encoder {
+    #[allow(unsafe_code)]
+    fn frame_skip(&mut self, mut enabled: bool) -> Result<(), DesktopError> {
+        // SAFETY: called only after encode initialized unchanged geometry,
+        // under exclusive access. The documented RC_FRAME_SKIP option reads
+        // exactly one C++ bool synchronously; Rust bool has the same ABI.
+        let code = unsafe {
+            self.inner.raw_api().set_option(
+                openh264_sys2::ENCODER_OPTION_RC_FRAME_SKIP,
+                std::ptr::from_mut(&mut enabled).cast(),
+            )
+        };
+        if code != 0 {
+            return Err(DesktopError::Encode(format!(
+                "live frame-skip option failed: {code}"
+            )));
+        }
+        Ok(())
+    }
+
     #[allow(unsafe_code)]
     fn update_bitrate(&mut self, bps: u32) -> Result<(), DesktopError> {
         use openh264_sys2::{
@@ -500,6 +542,66 @@ mod tests {
             encoder.last_timestamp,
             Some(6_000),
             "rate adaptation must not reset its media clock"
+        );
+    }
+
+    #[test]
+    fn low_rate_fullhd_recovery_does_not_starve_the_reference_chain() {
+        let (width, height) = (1920u32, 1080u32);
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        for (i, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let x = i as u32 % width / 8;
+            let y = i as u32 / width / 8;
+            let color = x.wrapping_mul(73) ^ y.wrapping_mul(151);
+            pixel.copy_from_slice(&[color as u8, (color >> 2) as u8, (color * 3) as u8, 255]);
+        }
+        let mut raw = RawFrame {
+            width,
+            height,
+            stride: width * 4,
+            data: Bytes::from(pixels),
+        };
+        let mut encoder = H264Encoder::new(100_000, 60.0).unwrap();
+        let mut decoder = H264Decoder::new().unwrap();
+        let first = encoder.encode_timed(&raw, 1).unwrap();
+        assert!(first.keyframe && !first.data.is_empty());
+        assert!(decoder.decode(&first).unwrap().is_some());
+        let mut last_output = 1;
+        let mut skipped = 0;
+        let mut outputs = 0;
+        let mut skipped_after_refresh = 0;
+        for sequence in 1..=60 {
+            let stamp = 1 + sequence * 17;
+            let mut changed = raw.data.to_vec();
+            changed[0..4].copy_from_slice(&[sequence as u8, 80, 200, 255]);
+            raw.data = Bytes::from(changed);
+            let encoded = encoder.encode_timed(&raw, stamp).unwrap();
+            if encoded.data.is_empty() {
+                skipped += 1;
+                skipped_after_refresh += usize::from(outputs > 0);
+            } else {
+                assert!(
+                    !encoded.keyframe,
+                    "freshness must preserve delta references"
+                );
+                assert!(decoder.decode(&encoded).unwrap().is_some());
+                last_output = stamp;
+                outputs += 1;
+            }
+            assert!(
+                stamp - last_output <= 250,
+                "codec starved for {} ms at 100 kbps",
+                stamp - last_output
+            );
+        }
+        assert!(skipped > 0, "normal rate-control skips must remain enabled");
+        assert!(
+            outputs >= 3,
+            "fresh deltas must continue through low-rate debt"
+        );
+        assert!(
+            skipped_after_refresh > 0,
+            "the temporary freshness encode must restore frame skipping"
         );
     }
 

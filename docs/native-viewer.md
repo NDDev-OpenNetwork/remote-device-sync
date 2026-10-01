@@ -324,3 +324,21 @@ reference order: dropping compressed predecessors used to force unnecessary
 IDR recovery during local stalls. Newest-frame replacement remains valid only
 after decode. Closing the encoded receiver wakes its blocked sender and ends
 that receive leg; session cancellation still aborts owned readers.
+
+## Bounded software-codec silence
+
+OpenH264 timestamp rate control may accumulate substantial debt after a
+recovery picture at the 100 kbps floor. Normal frame skips remain enabled;
+if an initialized encoder has emitted no picture for 250 ms of its media
+clock, one encode temporarily disables `ENCODER_OPTION_RC_FRAME_SKIP`, then
+restores it even after an encode error. This does not force an IDR, rebuild
+references, alter geometry, raise a grant ceiling or bypass the serving
+writer's existing byte pacing and bounded admission. Under an inadequate
+path, transport delivery and quality can still miss their budgets. The
+250 ms bound applies to codec skipping when encode calls continue, not
+network delivery, UI presentation or physical pixels.
+
+A real Full HD low-rate regression decodes the initial recovery picture and
+all subsequent emitted deltas, retains normal skips, and rejects extended
+codec silence. Current installed input-to-pixel and mixed-load qualification
+remain separate acceptance evidence.
