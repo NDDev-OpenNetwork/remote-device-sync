@@ -280,6 +280,9 @@ impl ViewerHandle {
     pub fn status(&self, text: impl Into<String>) {
         let mut state = lock(&self.state);
         state.status = text.into();
+        if state.status == "Reconnecting" {
+            state.input_latency.pending.clear();
+        }
         if state.status == "Reconnecting" && state.interrupted.is_none() {
             state.interrupted = Some(Instant::now());
             state.report.reconnects += 1;

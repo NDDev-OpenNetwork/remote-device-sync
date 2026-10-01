@@ -263,6 +263,7 @@ pub struct BitrateController {
     loss_sample_lost: u64,
     rtt_rise_baseline: Option<u64>,
     path_cut_cooldown_ticks: u8,
+    reduction_reason: Option<&'static str>,
     primed: bool,
     last_path: Option<u64>,
     delivery_hold_ticks: u8,
@@ -282,6 +283,7 @@ impl BitrateController {
             loss_sample_lost: 0,
             rtt_rise_baseline: None,
             path_cut_cooldown_ticks: 0,
+            reduction_reason: None,
             primed: false,
             last_path: None,
             delivery_hold_ticks: 0,
@@ -305,6 +307,7 @@ impl BitrateController {
     /// produce calls that missed their cadence slot since the last step.
     pub fn step(&mut self, path: Option<PathStats>, deadline_misses: u64) -> u64 {
         let mut next = self.current;
+        self.reduction_reason = None;
         if let Some(p) = path {
             if self.last_path != Some(p.path_id) {
                 self.last_path = Some(p.path_id);
@@ -366,14 +369,21 @@ impl BitrateController {
                 if self.path_cut_cooldown_ticks == 0 {
                     next = (next / 10 * 7 + next % 10 * 7 / 10).max(self.floor);
                     self.path_cut_cooldown_ticks = PATH_CUT_COOLDOWN_TICKS;
+                    self.reduction_reason = Some(if loss_high {
+                        "sampled_packet_loss"
+                    } else {
+                        "sustained_rtt"
+                    });
                 }
             } else if self.primed && deadline_misses > 0 {
+                self.reduction_reason = Some("producer_deadline");
                 next = (next / 100 * 85 + next % 100 * 85 / 100).max(self.floor);
             } else if self.primed {
                 next = next.saturating_add(next / 10).min(self.ceiling);
             }
             self.primed = true;
         } else if deadline_misses > 0 {
+            self.reduction_reason = Some("producer_deadline");
             next = (next / 100 * 85 + next % 100 * 85 / 100).max(self.floor);
         }
         self.current = next;
@@ -404,6 +414,9 @@ impl BitrateController {
                 // RTT/loss and a delayed receipt may report the same event.
                 // Apply the stronger response once, never multiply both cuts.
                 let media_cut = (previous / 10 * 7 + previous % 10 * 7 / 10).max(self.floor);
+                if media_cut <= proposed {
+                    self.reduction_reason = Some("media_delivery");
+                }
                 proposed.min(media_cut)
             } else {
                 proposed.min(previous)
@@ -650,6 +663,7 @@ pub async fn serve_desktop_with(
                 }
                 if bps < previous {
                     tracing::info!(
+                        reduction_reason = controller.reduction_reason.unwrap_or("unknown"),
                         previous_bps = previous,
                         bitrate_bps = bps,
                         deadline_misses = missed,
