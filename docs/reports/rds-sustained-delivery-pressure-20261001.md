@@ -57,3 +57,15 @@ growth. Existing loss/congestion-event and material RTT-growth reactions remain;
 QUIC's underlying control is unchanged. A regression alternates1/2/3 ms clean
 samples and then introduces a40 ms sample to verify both behaviors. Temporary
 instrumentation was removed and is never part of the deployed binaries.
+
+Current production revision passes whole all-feature workspace suites:
+Mac784 passed,0 failed,2 ignored; Linux786 passed,0 failed,11 ignored;
+107 result groups each. Strict all-feature/all-target workspace clippy and
+formatting pass both. Full desktop regressions include the real recovered-delay
+and sustained-blockage cases, alongside resource/lifecycle/impairment checks.
+The RTT-noise regression fails with the relative-only guard (461888 bps instead
+of8 Mbit/s) and passes with the absolute margin, including a material-growth cut.
+All failed fixture observations and temporary diagnostic receipts are retained.
+The current code is installed on both devices with backed-up atomic replacements;
+a fresh native mixed-workload qualification is running. Prior failed longer-run
+observations are not relabeled as successes.
