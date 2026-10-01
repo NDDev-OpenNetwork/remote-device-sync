@@ -251,3 +251,25 @@ Reassembly permits at most five seconds without progress and thirty seconds in
 total. A progressing large transfer is no longer rejected solely because its
 first chunk arrived more than five seconds earlier. Errors distinguish bounds,
 identity/offset changes, idle/total deadlines and invalid UTF-8 without content.
+
+## Sparse traffic and latency diagnostics
+
+The serving bitrate controller aggregates at least 100 sent datagrams before
+using the 2% loss threshold. A short burst losing at least five packets and
+more than 10% can react earlier. Individual transport congestion events remain
+diagnostic: QUIC still handles retransmission and packet pacing. A large RTT
+rise needs two consecutive 250 ms observations; path and media penalties for
+one burst share a one-second cooldown. Actual failed media receipts and
+sustained blocked delivery retain their bounded recovery and bitrate response.
+This prevents a single lost packet among a handful of idle-screen datagrams
+from repeatedly collapsing Full HD quality.
+
+Private normal-level server logs now retain every bitrate reduction's path
+counters, delivery state and producer misses. Five-second health records also
+include direct/relay selection and the maximum successful input-injection
+duration in that interval. No input values or content are recorded. Viewer
+reports correlate up to 128 sent input sequences using only the viewer's local
+clock, with bounded 1024-sample histories. Input ACK p50/p95 includes local
+queueing, transport, server injection and reply handling; queue p95 and the
+oldest pending ACK age distinguish an input backlog from stale video. These
+ACK measurements do not establish that the target application changed pixels.

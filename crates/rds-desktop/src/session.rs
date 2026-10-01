@@ -29,7 +29,14 @@ use rds_net::wire::{CONTROL_STREAM_PRIORITY, MEDIA_STREAM_PRIORITY};
 const PACING_INTERVAL: Duration = Duration::from_millis(250);
 /// Loss ratio that drives the bitrate down (2%).
 const LOSS_STEP_DOWN: f64 = 0.02;
-/// New RTT growth over the preceding sample that counts as congestion (1.5×).
+// An isolated loss among 3–8 desktop datagrams is not a 12–33% path loss
+// estimate. Aggregate enough packets; QUIC handles isolated retransmissions.
+const LOSS_SAMPLE_MIN_SENT: u64 = 100;
+// A genuinely lossy short burst can react before the full sample fills.
+const LOSS_FAST_MIN_LOST: u64 = 5;
+const LOSS_FAST_RATIO: f64 = 0.10;
+const PATH_CUT_COOLDOWN_TICKS: u8 = 4;
+/// Sustained RTT growth over the preceding baseline counts as congestion (1.5×).
 const RTT_STEP_UP: f64 = 1.5;
 // Millisecond rounding and normal low-RTT scheduling noise must not turn a
 // 1–3 ms loopback fluctuation into a repeated 30% encoder penalty. QUIC's
@@ -54,6 +61,8 @@ struct DeliveryFeedback {
     produced: AtomicU64,
     codec_skips: AtomicU64,
     last_produced_ms: AtomicU64,
+    inputs_handled: AtomicU64,
+    max_input_inject_ms: AtomicU64,
 }
 
 struct LateReceipt(Arc<DeliveryFeedback>);
@@ -238,8 +247,9 @@ pub struct SessionConfig {
 /// to *measured* path quality, not a static guess).
 ///
 /// Each `step` consumes one sample window: path counters plus the count
-/// of producer deadline misses. Loss, congestion events or RTT growth
-/// over the previous observed sample push bitrate down multiplicatively; clean
+/// of producer deadline misses. A sufficiently populated loss sample or
+/// sustained RTT growth pushes bitrate down multiplicatively; isolated transport congestion events
+/// remain diagnostic and do not bypass the sample requirement. Clean
 /// windows probe upward toward the ceiling; deadline misses push down
 /// even when the path looks clean (encoder starvation is congestion too).
 pub struct BitrateController {
@@ -249,7 +259,10 @@ pub struct BitrateController {
     previous_rtt_ms: Option<u64>,
     last_sent: u64,
     last_lost: u64,
-    last_congestion: u64,
+    loss_sample_sent: u64,
+    loss_sample_lost: u64,
+    rtt_rise_baseline: Option<u64>,
+    path_cut_cooldown_ticks: u8,
     primed: bool,
     last_path: Option<u64>,
     delivery_hold_ticks: u8,
@@ -265,7 +278,10 @@ impl BitrateController {
             previous_rtt_ms: None,
             last_sent: 0,
             last_lost: 0,
-            last_congestion: 0,
+            loss_sample_sent: 0,
+            loss_sample_lost: 0,
+            rtt_rise_baseline: None,
+            path_cut_cooldown_ticks: 0,
             primed: false,
             last_path: None,
             delivery_hold_ticks: 0,
@@ -295,36 +311,62 @@ impl BitrateController {
                 self.previous_rtt_ms = None;
                 self.last_sent = 0;
                 self.last_lost = 0;
-                self.last_congestion = 0;
+                self.loss_sample_sent = 0;
+                self.loss_sample_lost = 0;
+                self.rtt_rise_baseline = None;
+                self.path_cut_cooldown_ticks = 0;
                 self.primed = false;
             }
             let d_sent = p.sent.saturating_sub(self.last_sent);
             let d_lost = p.lost.saturating_sub(self.last_lost);
-            let loss = if d_sent > 0 {
-                d_lost as f64 / d_sent as f64
+            if self.primed {
+                self.loss_sample_sent = self.loss_sample_sent.saturating_add(d_sent);
+                self.loss_sample_lost = self.loss_sample_lost.saturating_add(d_lost);
+            }
+            let loss = if self.loss_sample_sent > 0 {
+                self.loss_sample_lost as f64 / self.loss_sample_sent as f64
             } else {
                 0.0
             };
-            let congestion = p.congestion_events > self.last_congestion;
+            let sample_ready = self.loss_sample_sent >= LOSS_SAMPLE_MIN_SENT
+                || (self.loss_sample_lost >= LOSS_FAST_MIN_LOST && loss > LOSS_FAST_RATIO);
+            let loss_high = sample_ready && loss > LOSS_STEP_DOWN;
+            if sample_ready {
+                self.loss_sample_sent = 0;
+                self.loss_sample_lost = 0;
+            }
+            // A congestion-event counter also advances on isolated packet
+            // loss. Do not let it bypass the minimum loss sample. Transport
+            // congestion control continues to pace every packet independently.
             let rtt_ms = p.rtt.as_millis() as u64;
-            let rtt_high = self.previous_rtt_ms.is_some_and(|b| {
-                rtt_ms.saturating_sub(b) >= RTT_MIN_INCREASE_MS
-                    && rtt_ms > (b as f64 * RTT_STEP_UP) as u64
-            });
+            let mut rtt_high = false;
             if rtt_ms > 0 {
-                // A sustained propagation/path delay is not a fresh congestion
-                // signal every 250 ms. Reusing the startup RTT permanently
-                // drove otherwise clean Full HD streams to the 100 kbps floor.
+                let rises_from = |baseline: u64| {
+                    rtt_ms.saturating_sub(baseline) >= RTT_MIN_INCREASE_MS
+                        && rtt_ms > (baseline as f64 * RTT_STEP_UP) as u64
+                };
+                if let Some(baseline) = self.rtt_rise_baseline.take() {
+                    // Confirm on a second pacing observation. A delayed ACK
+                    // or scheduling spike must not compound encoder penalties.
+                    rtt_high = rises_from(baseline);
+                } else if let Some(baseline) = self.previous_rtt_ms
+                    && rises_from(baseline)
+                {
+                    self.rtt_rise_baseline = Some(baseline);
+                }
                 self.previous_rtt_ms = Some(rtt_ms);
             }
             self.last_sent = p.sent;
             self.last_lost = p.lost;
-            self.last_congestion = p.congestion_events;
+            self.path_cut_cooldown_ticks = self.path_cut_cooldown_ticks.saturating_sub(1);
 
-            // First sample only establishes the baseline — never react
-            // to counters we didn't watch accumulate.
-            if self.primed && (loss > LOSS_STEP_DOWN || congestion || rtt_high) {
-                next = (next / 10 * 7 + next % 10 * 7 / 10).max(self.floor);
+            // First sample only establishes the baseline. Coalesce one path
+            // burst for a second, as with correlated media-receipt pressure.
+            if self.primed && (loss_high || rtt_high) {
+                if self.path_cut_cooldown_ticks == 0 {
+                    next = (next / 10 * 7 + next % 10 * 7 / 10).max(self.floor);
+                    self.path_cut_cooldown_ticks = PATH_CUT_COOLDOWN_TICKS;
+                }
             } else if self.primed && deadline_misses > 0 {
                 next = (next / 100 * 85 + next % 100 * 85 / 100).max(self.floor);
             } else if self.primed {
@@ -358,6 +400,7 @@ impl BitrateController {
             self.delivery_hold_ticks = 20;
             if self.delivery_cut_cooldown_ticks == 0 {
                 self.delivery_cut_cooldown_ticks = 4;
+                self.path_cut_cooldown_ticks = PATH_CUT_COOLDOWN_TICKS;
                 // RTT/loss and a delayed receipt may report the same event.
                 // Apply the stronger response once, never multiply both cuts.
                 let media_cut = (previous / 10 * 7 + previous % 10 * 7 / 10).max(self.floor);
@@ -605,6 +648,23 @@ pub async fn serve_desktop_with(
                         "desktop bitrate adapted"
                     );
                 }
+                if bps < previous {
+                    tracing::info!(
+                        previous_bps = previous,
+                        bitrate_bps = bps,
+                        deadline_misses = missed,
+                        delivery_impaired = impaired,
+                        delivered,
+                        late_pending,
+                        failed_frames,
+                        path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        path_via_relay = ?path.map(|p| p.via_relay),
+                        path_sent = ?path.map(|p| p.sent),
+                        path_lost = ?path.map(|p| p.lost),
+                        path_congestion_events = ?path.map(|p| p.congestion_events),
+                        "desktop bitrate reduced"
+                    );
+                }
                 bitrate.store(bps.min(u64::from(u32::MAX)), Ordering::Relaxed);
                 // Independent of frame sends: during a freeze, distinguish
                 // native production, codec skips and delivery backpressure.
@@ -624,6 +684,12 @@ pub async fn serve_desktop_with(
                         failed_delivery = failed,
                         last_ack_ms = feedback.last_ack_ms.load(Ordering::Relaxed),
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        path_via_relay = ?path.map(|p| p.via_relay),
+                        path_sent = ?path.map(|p| p.sent),
+                        path_lost = ?path.map(|p| p.lost),
+                        path_congestion_events = ?path.map(|p| p.congestion_events),
+                        inputs_handled = feedback.inputs_handled.load(Ordering::Relaxed),
+                        max_input_inject_ms = feedback.max_input_inject_ms.swap(0, Ordering::Relaxed),
                         "desktop production and delivery health"
                     );
                     health = Instant::now();
@@ -801,6 +867,7 @@ pub async fn serve_desktop_with(
                         super::input::worker::InputWorker::new(input_sink.take())
                     });
                     let seq = ev.seq;
+                    let input_started = Instant::now();
                     match tokio::time::timeout(FRAME_SEND_TIMEOUT, worker.inject(ev)).await {
                         Ok(Ok(())) => input = Some(worker),
                         Ok(Err(e)) => {
@@ -819,6 +886,13 @@ pub async fn serve_desktop_with(
                             continue;
                         }
                     }
+                    delivery_feedback
+                        .inputs_handled
+                        .fetch_add(1, Ordering::Relaxed);
+                    delivery_feedback.max_input_inject_ms.fetch_max(
+                        input_started.elapsed().as_millis() as u64,
+                        Ordering::Relaxed,
+                    );
                     if acks {
                         let ack = DesktopEvent::InputAck {
                             seq,
@@ -1973,8 +2047,65 @@ mod tests {
     fn controller_reacts_to_rtt_growth() {
         let mut c = BitrateController::new(4_000_000, 8_000_000);
         c.step(Some(path(1000, 0, 20, 0)), 0);
-        let bps = c.step(Some(path(2000, 0, 60, 0)), 0); // 3× baseline RTT
+        c.step(Some(path(2000, 0, 60, 0)), 0); // first elevated sample
+        let bps = c.step(Some(path(2100, 0, 60, 0)), 0); // confirmed 3× baseline RTT
         assert!(bps < 4_000_000, "RTT growth must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn sparse_successful_delivery_does_not_treat_one_packet_as_mass_loss() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        // Captured WAN pattern: 3–8 datagrams per 250 ms, approximately
+        // one lost packet per 100. Every frame is still acknowledged.
+        let mut p = path(1000, 0, 140, 0);
+        c.step_with_delivery(Some(p), 0, false, true);
+        for i in 1..=320 {
+            p.sent += 5;
+            if i % 20 == 0 {
+                p.lost += 1;
+                p.congestion_events += 1;
+            }
+            c.step_with_delivery(Some(p), 0, false, true);
+        }
+        assert_eq!(
+            c.current(),
+            8_000_000,
+            "sparse random loss must not starve an acknowledged desktop"
+        );
+    }
+
+    #[test]
+    fn a_severely_lossy_short_burst_reacts_before_a_full_sample() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step(Some(path(1000, 0, 140, 0)), 0);
+        assert_eq!(c.step(Some(path(1010, 5, 140, 1)), 0), 2_800_000);
+    }
+
+    #[test]
+    fn switching_paths_discards_the_previous_partial_loss_sample() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step(Some(path(1000, 0, 140, 0)), 0);
+        c.step(Some(path(1040, 4, 140, 1)), 0);
+        let mut replacement = path(10, 0, 120, 0);
+        replacement.path_id = 2;
+        c.step(Some(replacement), 0);
+        let before = c.current();
+        replacement.sent += 60;
+        assert!(c.step(Some(replacement), 0) > before);
+    }
+
+    #[test]
+    fn isolated_rtt_spikes_do_not_collapse_successful_delivery() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        for i in 0..320 {
+            let rtt = if i % 20 == 10 { 260 } else { 140 };
+            c.step_with_delivery(Some(path(1000 + i * 5, 0, rtt, 0)), 0, false, true);
+        }
+        assert_eq!(
+            c.current(),
+            8_000_000,
+            "one delayed RTT sample must not repeatedly punish fresh receipts"
+        );
     }
 
     #[test]
@@ -1992,7 +2123,10 @@ mod tests {
             "minor RTT noise cannot justify a codec drought"
         );
         assert!(
-            c.step(Some(path(5100, 0, 40, 0)), 0) < 8_000_000,
+            {
+                c.step(Some(path(5100, 0, 40, 0)), 0);
+                c.step(Some(path(5200, 0, 40, 0)), 0) < 8_000_000
+            },
             "material RTT growth still reacts"
         );
     }
@@ -2001,13 +2135,15 @@ mod tests {
     fn sustained_rtt_change_without_loss_does_not_collapse_bitrate() {
         let mut c = BitrateController::new(4_000_000, 8_000_000);
         c.step(Some(path(1000, 0, 90, 0)), 0);
-        let reduced = c.step(Some(path(2000, 0, 240, 0)), 0);
+        c.step(Some(path(2000, 0, 240, 0)), 0);
+        let reduced = c.step(Some(path(2100, 0, 240, 0)), 0);
         assert!(reduced < 4_000_000, "a new delay increase must react");
         for i in 0..40 {
             c.step(Some(path(3000 + i * 1000, 0, 240, 0)), 0);
         }
         assert_eq!(c.current(), 8_000_000, "stable delay is not new congestion");
-        assert!(c.step(Some(path(44000, 0, 500, 0)), 0) < 8_000_000);
+        c.step(Some(path(44000, 0, 500, 0)), 0);
+        assert!(c.step(Some(path(44100, 0, 500, 0)), 0) < 8_000_000);
     }
 
     #[test]
