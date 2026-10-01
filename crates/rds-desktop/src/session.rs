@@ -210,6 +210,7 @@ pub struct BitrateController {
     primed: bool,
     last_path: Option<u64>,
     delivery_hold_ticks: u8,
+    delivery_cut_cooldown_ticks: u8,
 }
 
 impl BitrateController {
@@ -225,6 +226,7 @@ impl BitrateController {
             primed: false,
             last_path: None,
             delivery_hold_ticks: 0,
+            delivery_cut_cooldown_ticks: 0,
         }
     }
 
@@ -294,7 +296,8 @@ impl BitrateController {
 
     // The serving session supplements path samples with frame ACKs. A late
     // frame reduces offered load before its hard reset deadline. Hold that
-    // reduction for five seconds; increase only on fresh successful delivery
+    // reduction for five seconds; coalesce a burst of correlated receipts for
+    // one second, and increase only on fresh successful delivery
     // and at 1% per sample so clean relay packet counters cannot immediately
     // drive the encoder back into the same backlog.
     fn step_with_delivery(
@@ -306,10 +309,18 @@ impl BitrateController {
     ) -> u64 {
         let previous = self.current;
         let proposed = self.step(path, deadline_misses);
+        self.delivery_cut_cooldown_ticks = self.delivery_cut_cooldown_ticks.saturating_sub(1);
         self.current = if impaired {
             self.delivery_hold_ticks = 20;
-            let base = previous.min(proposed);
-            (base / 10 * 7 + base % 10 * 7 / 10).max(self.floor)
+            if self.delivery_cut_cooldown_ticks == 0 {
+                self.delivery_cut_cooldown_ticks = 4;
+                // RTT/loss and a delayed receipt may report the same event.
+                // Apply the stronger response once, never multiply both cuts.
+                let media_cut = (previous / 10 * 7 + previous % 10 * 7 / 10).max(self.floor);
+                proposed.min(media_cut)
+            } else {
+                proposed.min(previous)
+            }
         } else if self.delivery_hold_ticks > 0 {
             self.delivery_hold_ticks -= 1;
             proposed.min(previous)
@@ -1769,6 +1780,29 @@ mod tests {
         assert_eq!(c.current(), 100_000);
         c.steer(1_000_000);
         assert_eq!(c.current(), 300_000);
+    }
+
+    #[test]
+    fn one_delivery_burst_does_not_compound_frame_and_path_penalties() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step_with_delivery(Some(path(1000, 0, 80, 0)), 0, false, true);
+        // A path event and a delayed receipt describe the same congestion.
+        let reduced = c.step_with_delivery(Some(path(1100, 0, 160, 1)), 0, true, false);
+        assert_eq!(reduced, 2_800_000, "one event must not apply two 30% cuts");
+        // Up to three outstanding frames can report the same burst on
+        // successive pacing ticks. Keep their first cut rather than cubing it.
+        for i in 0..3 {
+            assert_eq!(
+                c.step_with_delivery(Some(path(1200 + i * 100, 0, 160, 1)), 0, true, false),
+                reduced,
+                "correlated receipts over-penalized image quality"
+            );
+        }
+        // Continued pressure after a full second must still reduce load.
+        assert_eq!(
+            c.step_with_delivery(Some(path(1600, 0, 160, 1)), 0, true, false),
+            1_960_000
+        );
     }
 
     #[test]

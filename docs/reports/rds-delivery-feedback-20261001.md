@@ -20,7 +20,10 @@ The sender observes each owned frame stream's delivery receipt. A soft delay
 threshold of three sampled path RTTs, bounded to 250–1000 ms, reports an impaired
 media sample without resetting that frame. Hard ACK/read deadlines are unchanged.
 An impaired sample reduces target bitrate by 30%; a five-second hold prevents
-immediate reversal. Recovery requires a new successful frame receipt and grows
+immediate reversal. Correlated media receipts coalesce over one second; a
+simultaneous path penalty is combined by taking the stronger response once.
+Continued pressure after that second can reduce load again. Recovery requires
+a new successful frame receipt and grows
 by at most 1% per 250 ms sample. Existing floor, grant ceiling, three-frame
 capture admission and live reference-preserving encoder updates remain in force.
 No protocol, identity, permission, or dependency change is introduced.
@@ -51,17 +54,27 @@ process-wide hostile-reader fixtures are serialized so independent scenarios do
 not consume each other's global budget; concurrency and budget assertions within
 each scenario are retained.
 
-Mac whole all-feature workspace tests pass: **775 passed, 0 failed, 2 ignored**
+At the initial production commit, Mac whole all-feature workspace tests passed:
+**775 passed, 0 failed, 2 ignored**
 across 107 result groups. Strict all-feature/all-target workspace clippy,
 formatting and cargo-deny advisories/bans/licenses/sources pass. The two ignored
-cases remain outside this increment's acceptance. The fixture refinement changes
-only tests; the installed production code is unchanged.
+cases remain outside this increment's acceptance. The fixture refinement changed
+only tests. Subsequent media-burst adaptation is qualified separately below.
 
-Linux whole all-feature workspace tests pass: **777 passed, 0 failed,
+At that initial production commit, Linux whole all-feature workspace tests passed:
+**777 passed, 0 failed,
 11 ignored**, across 107 result groups, together with strict all-feature
 workspace/all-target clippy and formatting. Ignored native/display/account cases
 are not counted as passes. These checks ran on the production commit; the
 subsequent test-fixture refinement has its separate targeted receipt.
+
+The longer run exposed excessive rate reductions from correlated receipts and
+overlapping path/media signals. A regression reproduced two 30% cuts for one
+sample (4 Mbit/s became 1.96 instead of 2.8 Mbit/s). The controller now combines
+the responses once and coalesces media cuts for one second. The regression also
+verifies that sustained pressure after that second still lowers offered load.
+The full desktop test suite passes the new code; updated whole-workspace and
+installed-device observations will be recorded after qualification.
 
 Installed-device observations belong to the private estate. The prior longer
 run contained an unplanned recovery and remains failed stability evidence. A

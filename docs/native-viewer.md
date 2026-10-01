@@ -47,7 +47,10 @@ loss counters, which may look clean while a reliable relay queues traffic.
 A receipt delayed beyond three sampled path RTTs (bounded to 250–1000 ms), or
 a failed delivery, reduces the encoder target. A five-second recovery hold and
 growth of at most 1% per 250 ms sample with fresh media receipts prevent an
-immediate return to the same backlog. Existing bitrate bounds, frame deadlines,
+immediate return to the same backlog. Media reductions coalesce correlated
+receipts over one second. When path and media observations describe the same
+sample, the stronger reduction applies once, preserving quality while continued
+pressure still reduces load. Existing bitrate bounds, frame deadlines,
 three-frame admission and reference-preserving live encoder updates still apply.
 Sender health includes delayed-delivery counts and latest receipt duration;
 diagnostics contain frame metadata, never pixels or clipboard contents.
