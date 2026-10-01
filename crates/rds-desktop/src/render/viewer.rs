@@ -567,6 +567,7 @@ impl ApplicationHandler<()> for App {
             Ok((window, gpu)) => {
                 // Explicit viewer launches activate once like ordinary apps.
                 // Reconnect/redraw never raises the window over other apps.
+                super::platform::activate_application();
                 window.focus_window();
                 window.request_redraw();
                 self.window = Some(window);

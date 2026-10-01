@@ -310,3 +310,10 @@ application repaint is not represented by the watched root DAMAGE stream.
 Idle capture still pauses after the deadline. View-only or rejected input
 cannot open a burst; this is an interaction hint, not proof of an application's
 response or a replacement for end-to-end latency qualification.
+
+On macOS, explicit startup requests application activation after creating the
+window, in addition to window focus. The modern AppKit activation request is
+used when the runtime supports it; older supported systems use their legacy
+activation API. AppKit may decline an activation request, and covered-window
+snapshots still cannot establish physical presentation. Redraw/reconnect does
+not request activation or raise window level.
