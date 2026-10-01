@@ -93,10 +93,15 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
         let path = last.unwrap();
         let id = crate::path_id_u64(path.id());
         assert!(id >= 64, "fixture must cross the old scan limit");
-        a.inner().path(noq::PathId::ZERO).unwrap().close().unwrap();
+        let initial_path = a.inner().path(noq::PathId::ZERO).unwrap();
+        initial_path.close().unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if facade.current_path_stats().is_some_and(|p| p.path_id == id) {
+                // Selecting the successor does not mean the engine has
+                // processed the asynchronous close of the initial path.
+                if initial_path.status().is_err()
+                    && facade.current_path_stats().is_some_and(|p| p.path_id == id)
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
