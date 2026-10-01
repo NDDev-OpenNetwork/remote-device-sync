@@ -224,7 +224,10 @@ manager session remain usable. Blocking filesystem calls already in progress
 cannot be revoked: cancellation, timeout or a lost reply can leave a completed
 commit. Inspect the destination before retrying; no automatic replay or rollback
 is promised. An immediate retry may encounter the remote service's transient
-busy refusal while cancellation cleanup finishes.
+busy refusal while cancellation cleanup finishes. A remote stream RESET is
+not an acknowledgement that the independent local manager has finished
+dropping its admission permit; cancellation fixtures bound that local release
+without replaying an accepted transfer.
 
 `sync_send` / `sync_recv` operation telemetry records duration and
 `ok` / `error` / `cancelled` outcomes through the existing safe JSON and Vector
