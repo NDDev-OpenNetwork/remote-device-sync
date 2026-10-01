@@ -81,3 +81,21 @@ within the original 300 ms wake allowance after that pause. This failed before
 the fix; the pending-wake implementation retains the view-only denial and
 continuous-delta/no-IDR checks. Its final software/installed results are being
 recorded separately; this change does not claim native visible latency success.
+
+The pending-wake runtime `1131e0e` passes the relevant desktop/client/CLI
+lanes: 137 macOS cases (one platform ignore) and 141 Linux cases (ten ignores),
+across 24 groups each. Strict whole-workspace lint and the serving release
+build pass. Full two-OS CI and native builds pass for that runtime revision.
+The existing serving agent is updated; the same native client resumed decode
+in 1,793 ms after the planned restart.
+
+Installed follow-up preserves negative observations: one low-rate run hit the
+65-second overall observer limit, another failed its initial-target deadline,
+and a normal run completed all 12 transitions but had p50/p95/max of
+1,038/1,391/1,596 ms. Improved probe logs retain partial samples and explicit
+connect/open/initial-target/input/finish stages on failure. A subsequent
+low-rate run completed 12 attributed transitions and clean channel shutdown,
+with p50/p95/max of 496/698/2,404 ms. Network/workload conditions differ between
+runs, so these are separate observations rather than a controlled performance
+improvement claim. Current native visible latency, quality and sustained
+interaction remain unqualified; the Mac console was still locked.
