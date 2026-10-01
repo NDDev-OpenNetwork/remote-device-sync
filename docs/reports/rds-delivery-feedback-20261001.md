@@ -57,6 +57,13 @@ formatting and cargo-deny advisories/bans/licenses/sources pass. The two ignored
 cases remain outside this increment's acceptance. The fixture refinement changes
 only tests; the installed production code is unchanged.
 
-Current Mac/Linux workspace, lint and installed-device results are recorded
-below once complete. Private endpoint and runtime facts belong to the consumer
-estate, not this public report.
+Linux whole all-feature workspace tests pass: **777 passed, 0 failed,
+11 ignored**, across 107 result groups, together with strict all-feature
+workspace/all-target clippy and formatting. Ignored native/display/account cases
+are not counted as passes. These checks ran on the production commit; the
+subsequent test-fixture refinement has its separate targeted receipt.
+
+Installed-device observations belong to the private estate. The prior longer
+run contained an unplanned recovery and remains failed stability evidence. A
+new installed run is being qualified; a locked local console is excluded from
+visible-pixel acceptance. No full milestone gate is marked closed here.
