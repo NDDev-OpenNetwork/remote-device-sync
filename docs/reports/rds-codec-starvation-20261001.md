@@ -99,3 +99,29 @@ with p50/p95/max of 496/698/2,404 ms. Network/workload conditions differ between
 runs, so these are separate observations rather than a controlled performance
 improvement claim. Current native visible latency, quality and sustained
 interaction remain unqualified; the Mac console was still locked.
+
+## Probe provenance correction
+
+The early managed-color probes above used an unoptimized Rust decoder. They
+remain debug-workload observations and must not be used as installed native
+latency estimates. Initial replacement with RelayDecoder failed compilation;
+a shell without fail-fast handling could still launch an older binary.
+Measurements claiming that decoder without a successful matching build
+receipt are invalid for the claimed configuration.
+
+The repaired private measurement runner checks source and executable SHA256
+against a successful release build receipt before starting a fixture, verifies
+a runtime decoder marker, and uses the application's actual
+`RelayDecoder::push_bounded` with NeedIdr recovery. It preserves partial output
+and connect/open/target/input/finish stages on failure. Forty-sample p95 uses
+nearest rank ceil(0.95*n). Earlier twelve-sample figures used a lower order
+statistic and cannot establish sustained tail behavior.
+
+One verified release run completed forty attributed controlled transitions:
+input-to-decoded-color p50/p95/max354/530/914ms. This starts an additional
+managed channel concurrently with the native viewer and excludes native input
+capture, Metal and physical presentation. A quiescence check and per-sample
+native input counter guard stop testing when concurrent user input is detected;
+other clients remain outside that guard's exclusivity proof. Earlier missing
+fixture events under concurrent input do not isolate a delivery defect. No
+current native stability, visible latency or quality gate is closed.
