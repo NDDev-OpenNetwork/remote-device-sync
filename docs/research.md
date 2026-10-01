@@ -544,6 +544,19 @@ cooldown. Regression tests cover sparse successful delivery, transient and
 sustained RTT, severe loss and path changes. Installed-device evidence remains
 separate from those deterministic tests.
 
+## 2026-10-02 moderate-loss quality recovery
+
+The maintained [WebRTC send-side estimator](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/congestion_controller/goog_cc/send_side_bandwidth_estimation.cc)
+contains a fallback that separates low loss, an intermediate hold and high-loss
+reduction, alongside its newer loss-based estimator. This supports avoiding an
+unconditional application-rate cut for every moderate loss sample; it does not
+make RDS a WebRTC/GoogCC implementation. RDS retains QUIC congestion control,
+actual media-receipt pressure, RTT confirmation and its negotiated limits.
+Its application controller now holds the path estimate at 2–10% sampled loss
+and permits only receipt-backed, bounded recovery probes. Severe loss and real
+blocked delivery still reduce offered load. Installed native qualification is
+recorded in [the follow-up report](reports/rds-moderate-loss-20261002.md).
+
 ## Input-to-capture wake on composited X11
 
 The [EWMH compositing contract](https://specifications.freedesktop.org/wm/latest/ar01s08.html)

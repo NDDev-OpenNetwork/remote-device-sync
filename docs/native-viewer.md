@@ -255,14 +255,19 @@ identity/offset changes, idle/total deadlines and invalid UTF-8 without content.
 ## Sparse traffic and latency diagnostics
 
 The serving bitrate controller aggregates at least 100 sent datagrams before
-using the 2% loss threshold. A short burst losing at least five packets and
-more than 10% can react earlier. Individual transport congestion events remain
+classifying packet loss. Loss above 2% and up to 10% holds the path estimate;
+it does not repeatedly cut successfully delivered media. Fresh media receipts
+permit recovery probes capped at 1% per pacing step, within the negotiated
+ceiling and after the existing delivery hold. No receipt means no growth.
+Loss above 10% reduces the estimate; a short burst losing at least five packets
+and more than 10% can react earlier. Individual transport congestion events remain
 diagnostic: QUIC still handles retransmission and packet pacing. A large RTT
 rise needs two consecutive 250 ms observations; path and media penalties for
 one burst share a one-second cooldown. Actual failed media receipts and
 sustained blocked delivery retain their bounded recovery and bitrate response.
-This prevents a single lost packet among a handful of idle-screen datagrams
-from repeatedly collapsing Full HD quality.
+This prevents sparse losses and continuing moderate loss with timely receipts
+from repeatedly collapsing Full HD quality. It does not establish a quality or
+latency guarantee on a particular network.
 
 Private normal-level server logs now retain every bitrate reduction's path
 counters, delivery state and producer misses. Five-second health records also
