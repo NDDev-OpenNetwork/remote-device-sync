@@ -581,3 +581,15 @@ changes `ENCODER_OPTION_RC_FRAME_SKIP` as a bool on the initialized context.
 RDS uses that documented option for a bounded freshness encode, retaining
 normal skips, reference continuity and transport byte pacing. The codec
 regression and current installed delivery/presentation gates remain distinct.
+
+## 2026-10-02 recovery requests during reliable frame delivery
+
+[QUIC loss recovery](https://www.rfc-editor.org/rfc/rfc9002.html#section-6.2)
+uses RTT variation, acknowledgement delay and probe backoff; a transient reorder
+observation is not itself a transport declaration of permanent loss. RDS retains
+its bounded first-gap detection but coalesces further observations while a
+recovery is pending. Successful key receipt, actual reader failure and a bounded
+retry end that hold. This is application repair above QUIC, without replacing
+its loss detection or enlarging reader/decode budgets. The
+[follow-up report](reports/rds-reference-recovery-20261002.md) distinguishes the
+real-stream regression, installed diagnostics and still-open native acceptance.

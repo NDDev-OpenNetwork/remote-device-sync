@@ -297,11 +297,19 @@ impl ViewerHandle {
     }
     pub fn input_sent(&self, control: &DesktopControl) {
         if let DesktopControl::Input(event) = control {
-            lock(&self.state).input_latency.sent(
-                event.seq,
-                event.event_ts_ms,
-                self.started.elapsed().as_millis() as u64,
-            );
+            let sent_ms = self.started.elapsed().as_millis() as u64;
+            lock(&self.state)
+                .input_latency
+                .sent(event.seq, event.event_ts_ms, sent_ms);
+            let event_class = match event.kind {
+                InputKind::KeyDown { .. } => "key_down",
+                InputKind::KeyUp { .. } => "key_up",
+                InputKind::PointerMove { .. } | InputKind::PointerMotion { .. } => "pointer_move",
+                InputKind::PointerButton { pressed: true, .. } => "button_down",
+                InputKind::PointerButton { pressed: false, .. } => "button_up",
+                InputKind::Scroll { .. } => "scroll",
+            };
+            tracing::trace!(target: "rds_desktop::input_timing", input_seq=event.seq,event_class,event_created_ms=event.event_ts_ms,input_sent_ms=sent_ms,queue_ms=sent_ms.saturating_sub(event.event_ts_ms),"native input dispatched");
         }
     }
     pub fn input_ack(&self, seq: u64) {
