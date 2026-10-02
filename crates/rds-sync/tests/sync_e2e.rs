@@ -98,7 +98,16 @@ fn count_parts(state_dir: &Path) -> usize {
         .map(|e| e.path().join("parts"))
         .map(|p| {
             std::fs::read_dir(&p)
-                .map(|d| d.flatten().filter(|f| f.path().is_file()).count())
+                .map(|d| {
+                    d.flatten()
+                        .filter(|f| {
+                            f.path().is_file()
+                                && f.file_name().to_str().is_some_and(|name| {
+                                    name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit())
+                                })
+                        })
+                        .count()
+                })
                 .unwrap_or(0)
         })
         .sum()
@@ -121,6 +130,35 @@ async fn push(
     let _close = Close(conn.clone());
     let (send, recv) = conn.open_bi().await.unwrap();
     send_file(&conn, path, send, recv).await
+}
+
+/// Client-task cancellation does not join a receiver's running filesystem
+/// operation. Wait for its actual exclusive journal admission before the one
+/// resumed transfer; only a typed lock-contention error is transient here.
+async fn wait_receive_journal(
+    dir: &Path,
+    rel: &str,
+    manifest: &Manifest,
+) -> rds_sync::journal::Journal {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (dir, rel, manifest) = (dir.to_owned(), rel.to_owned(), manifest.clone());
+            let opened = tokio::task::spawn_blocking(move || {
+                rds_sync::journal::Journal::open(&dir, &rel, &manifest)
+            })
+            .await
+            .unwrap();
+            match opened {
+                Ok(journal) => break journal,
+                Err(rds_sync::SyncError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("unexpected receive admission error: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("canceled receive retained its journal lock beyond the cleanup bound")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -354,8 +392,16 @@ async fn kill_mid_transfer_resumes_identical() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     attempt.abort();
-    // Let the server observe the drop before reconnecting.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    let _ = attempt.await;
+    assert!(landed >= 3, "the kill must follow verified part progress");
+    // A fixed sleep is not a receiver cleanup fence. Observe the exact root's
+    // lock and retain its verified progress before making one resumed push.
+    let journal = wait_receive_journal(&server_dir, "killme.bin", &manifest_of(&data)).await;
+    assert!(
+        journal.have_set().len() >= 3,
+        "canceled parts did not survive"
+    );
+    drop(journal);
 
     let stats = push(&c_ep, target.clone(), &src).await.unwrap();
     assert_eq!(std::fs::read(server_dir.join("killme.bin")).unwrap(), data);
@@ -365,6 +411,35 @@ async fn kill_mid_transfer_resumes_identical() {
         stats.fetched < stats.total,
         "resume re-sent everything: {stats:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receive_admission_waits_for_the_actual_lock_release() {
+    use rds_sync::journal::Journal;
+    let dir = scratch("release-fence");
+    let manifest = manifest_of(b"retained receiver work");
+    let held = Journal::open(&dir, "data.bin", &manifest).unwrap();
+    // Reproduce the old assumption: 150ms elapsed, but an executing receiver
+    // still owns the real lock. This must remain a refusal, not a forced release.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(matches!(Journal::open(&dir, "data.bin", &manifest),
+        Err(rds_sync::SyncError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock));
+    let path = dir.clone();
+    let waiting =
+        tokio::spawn(async move { wait_receive_journal(&path, "data.bin", &manifest).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !waiting.is_finished(),
+        "admission bypassed the receiver lock"
+    );
+    drop(held);
+    let journal = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(journal.need(), [0]);
+    drop(journal);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 /// G6: kill at randomized progress points until done — byte-identical
