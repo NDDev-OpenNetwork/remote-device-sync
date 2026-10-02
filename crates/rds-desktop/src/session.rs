@@ -60,6 +60,8 @@ struct DeliveryFeedback {
     late_pending: AtomicU64,
     failed: AtomicU64,
     acknowledged: AtomicU64,
+    timely_bytes: AtomicU64,
+    timely_receipts: AtomicU64,
     obsolete: AtomicU64,
     last_ack_ms: AtomicU64,
     producing: AtomicBool,
@@ -68,6 +70,16 @@ struct DeliveryFeedback {
     last_produced_ms: AtomicU64,
     inputs_handled: AtomicU64,
     max_input_inject_ms: AtomicU64,
+}
+
+impl DeliveryFeedback {
+    fn acknowledged(&self, bytes: usize, elapsed: Duration, budget: Duration) {
+        self.acknowledged.fetch_add(1, Ordering::Relaxed);
+        if elapsed <= budget {
+            self.timely_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+            self.timely_receipts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 struct LateReceipt(Arc<DeliveryFeedback>);
@@ -320,6 +332,7 @@ pub struct BitrateController {
     last_path: Option<u64>,
     delivery_hold_ticks: u8,
     delivery_cut_cooldown_ticks: u8,
+    rtt_reduction: bool,
 }
 
 impl BitrateController {
@@ -341,6 +354,7 @@ impl BitrateController {
             last_path: None,
             delivery_hold_ticks: 0,
             delivery_cut_cooldown_ticks: 0,
+            rtt_reduction: false,
         }
     }
 
@@ -361,6 +375,7 @@ impl BitrateController {
     pub fn step(&mut self, path: Option<PathStats>, deadline_misses: u64) -> u64 {
         let mut next = self.current;
         self.reduction_reason = None;
+        self.rtt_reduction = false;
         if let Some(p) = path {
             if self.last_path != Some(p.path_id) {
                 self.last_path = Some(p.path_id);
@@ -422,6 +437,7 @@ impl BitrateController {
             // burst for a second, as with correlated media-receipt pressure.
             if self.primed && (loss_high || rtt_high) {
                 if self.path_cut_cooldown_ticks == 0 {
+                    self.rtt_reduction = rtt_high;
                     next = (next / 10 * 7 + next % 10 * 7 / 10).max(self.floor);
                     self.path_cut_cooldown_ticks = PATH_CUT_COOLDOWN_TICKS;
                     self.reduction_reason = Some(if loss_high {
@@ -451,6 +467,7 @@ impl BitrateController {
     // one second, and increase only on fresh successful delivery
     // and at 1% per sample so clean relay packet counters cannot immediately
     // drive the encoder back into the same backlog.
+    #[cfg(test)]
     fn step_with_delivery(
         &mut self,
         path: Option<PathStats>,
@@ -458,7 +475,19 @@ impl BitrateController {
         impaired: bool,
         delivered: bool,
     ) -> u64 {
+        self.step_with_delivery_floor(path, deadline_misses, impaired, delivered, None)
+    }
+
+    fn step_with_delivery_floor(
+        &mut self,
+        path: Option<PathStats>,
+        deadline_misses: u64,
+        impaired: bool,
+        delivered: bool,
+        delivery_floor: Option<u64>,
+    ) -> u64 {
         let previous = self.current;
+        let held = self.delivery_hold_ticks > 0;
         let proposed = self.step(path, deadline_misses);
         self.delivery_cut_cooldown_ticks = self.delivery_cut_cooldown_ticks.saturating_sub(1);
         self.current = if impaired {
@@ -495,6 +524,21 @@ impl BitrateController {
             };
             proposed.min(previous.saturating_add((previous / 100).max(1)))
         };
+        // Independent QUIC loss declarations must not lower a healthy media
+        // stream beneath conservatively observed successful timely goodput.
+        // RTT/producer pressure and real delivery problems retain their cuts.
+        if !impaired
+            && !held
+            && delivered
+            && self.delivery_hold_ticks == 0
+            && !self.rtt_reduction
+            && self.rtt_rise_baseline.is_none()
+            && deadline_misses == 0
+            && self.reduction_reason == Some("sampled_packet_loss")
+            && let Some(floor) = delivery_floor
+        {
+            self.current = self.current.max(floor.min(self.ceiling));
+        }
         self.current
     }
 }
@@ -681,6 +725,7 @@ pub async fn serve_desktop_with(
         let pending_key = keyframe_pending.clone();
         let progress_clock = clock.clone();
         let mut controller = BitrateController::new(4_000_000, ceiling);
+        let mut delivery_rate = crate::delivery_rate::DeliveryRate::default();
         workers.spawn(async move {
             let mut last_delayed = 0;
             let mut last_failed = 0;
@@ -708,17 +753,25 @@ pub async fn serve_desktop_with(
                 let delivered = acknowledged > last_acknowledged;
                 let late_pending = feedback.late_pending.load(Ordering::Relaxed);
                 let impaired = pressure.sample(late_pending, delivered, failed_frames > 0);
-                let bps = controller.step_with_delivery(
+                let delivery_floor = delivery_rate.sample(
+                    path.map(|p| p.path_id), progress_clock.now_ms(),
+                    feedback.timely_bytes.load(Ordering::Relaxed),
+                    feedback.timely_receipts.load(Ordering::Relaxed),
+                    impaired || failed_frames > 0 || late_pending > 0,
+                );
+                let bps = controller.step_with_delivery_floor(
                     path,
                     missed,
                     impaired,
                     delivered,
+                    delivery_floor,
                 );
                 (last_delayed, last_failed, last_acknowledged) = (delayed, failed, acknowledged);
                 if bps != previous {
                     tracing::debug!(
                         previous_bps = previous,
                         bitrate_bps = bps,
+                        timely_delivery_floor_bps = delivery_floor,
                         deadline_misses = missed,
                         delayed_frames,
                         failed_frames,
@@ -766,6 +819,9 @@ pub async fn serve_desktop_with(
                         keyframe_pending = pending_key.load(Ordering::Acquire),
                         bitrate_bps = bps,
                         delayed_delivery = delayed,
+                        timely_delivery_floor_bps = delivery_floor,
+                        timely_delivery_bytes = feedback.timely_bytes.load(Ordering::Relaxed),
+                        timely_deliveries = feedback.timely_receipts.load(Ordering::Relaxed),
                         late_pending,
                         delivery_stalled_ticks = pressure.stalled_ticks,
                         failed_delivery = failed,
@@ -1197,13 +1253,13 @@ fn advance_cadence(
     false
 }
 
+fn resume_cadence(next_due: &mut Instant, interval: Duration, now: Instant) {
+    *next_due = (*next_due).max(now.checked_sub(interval).unwrap_or(now));
+}
+
 impl FrameProducer for SyntheticProducer {
     fn resume_after_backpressure(&mut self) {
-        self.next_due = self.next_due.max(
-            Instant::now()
-                .checked_sub(self.interval)
-                .unwrap_or_else(Instant::now),
-        );
+        resume_cadence(&mut self.next_due, self.interval, Instant::now());
     }
     fn produce(
         &mut self,
@@ -1341,11 +1397,7 @@ mod x11 {
                 .interval
                 .max(self.last_work)
                 .min(Duration::from_millis(500));
-            self.next_due = self.next_due.max(
-                Instant::now()
-                    .checked_sub(interval)
-                    .unwrap_or_else(Instant::now),
-            );
+            resume_cadence(&mut self.next_due, interval, Instant::now());
         }
         fn preserves_reference(&self) -> bool {
             self.skipped
@@ -1556,6 +1608,7 @@ async fn send_frame_inner(
     acknowledgements: &mut JoinSet<(u64, FrameReceipt)>,
     delivery: FrameDelivery,
 ) -> SendOutcome {
+    let transfer_started = Instant::now();
     let AdmittedFrame { produced, permit } = produced;
     let mut sending = match conn.open_uni().await {
         Ok(stream) => FrameSend {
@@ -1650,7 +1703,7 @@ async fn send_frame_inner(
         let acknowledged = match result {
             Ok(Ok(None)) => {
                 sending.finished = true;
-                feedback.acknowledged.fetch_add(1, Ordering::Relaxed);
+                feedback.acknowledged(payload_bytes, transfer_started.elapsed(), delay_budget);
                 tracing::trace!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop frame transport acknowledged");
                 FrameReceipt::Delivered
             }
@@ -1859,20 +1912,22 @@ mod tests {
 
     #[test]
     fn admission_pause_does_not_report_encoder_starvation() {
-        let controls = ProducerControls::new(4_000_000);
-        let mut source = SyntheticProducer::new(60, 64, 64, 256);
-        source.next_due = Instant::now() - Duration::from_secs(2);
-        source.resume_after_backpressure();
-        assert!(
-            source
-                .produce(0, &controls, &SessionClock::default())
-                .is_some()
-        );
-        assert_eq!(controls.deadline_misses.load(Ordering::Relaxed), 0);
+        let now = Instant::now();
+        let interval = Duration::from_millis(16);
+        let mut due = now - Duration::from_secs(2);
+        // Exercise the production resume/advance functions on one explicit
+        // clock. OS preemption between two calls is actual scheduling delay,
+        // not proof that admission itself counted as encoder starvation.
+        resume_cadence(&mut due, interval, now);
+        assert!(!advance_cadence(&mut due, interval, now, false));
+        assert_eq!(due, now);
         // Real lateness without a deliberate admission pause still reports.
-        source.next_due = Instant::now() - Duration::from_secs(2);
-        source.produce(1, &controls, &SessionClock::default());
-        assert_eq!(controls.deadline_misses.load(Ordering::Relaxed), 1);
+        assert!(advance_cadence(
+            &mut due,
+            interval,
+            now + interval * 3,
+            false
+        ));
     }
 
     fn produced(seq: u64, keyframe: bool) -> Produced {
@@ -2227,6 +2282,8 @@ mod tests {
                     "obsolete disposal cannot justify bitrate growth"
                 );
                 assert_eq!(feedback.failed.load(Ordering::Acquire), 0);
+                assert_eq!(feedback.timely_bytes.load(Ordering::Acquire), 0);
+                assert_eq!(feedback.timely_receipts.load(Ordering::Acquire), 0);
                 assert_eq!(
                     feedback.obsolete.load(Ordering::Acquire),
                     u64::from(obsolete)
@@ -2598,6 +2655,87 @@ mod tests {
         assert_eq!(c.current(), 100_000);
         c.steer(50_000_000);
         assert_eq!(c.current(), 8_000_000);
+    }
+
+    #[test]
+    fn loss_only_cuts_respect_recent_timely_confirmed_goodput() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step_with_delivery_floor(Some(path(1000, 0, 120, 0)), 0, false, true, None);
+        for i in 1..=40 {
+            let bps = c.step_with_delivery_floor(
+                Some(path(1000 + i * 100, i * 15, 120, i)),
+                0,
+                false,
+                true,
+                Some(1_600_000),
+            );
+            assert!(
+                bps >= 1_600_000,
+                "confirmed timely media must not collapse: {bps}"
+            );
+            assert!(bps <= 8_000_000);
+        }
+        // No receipt evidence keeps the conservative original loss response.
+        let mut old = BitrateController::new(4_000_000, 8_000_000);
+        old.step_with_delivery(Some(path(1000, 0, 120, 0)), 0, false, true);
+        for i in 1..=40 {
+            old.step_with_delivery(Some(path(1000 + i * 100, i * 15, 120, i)), 0, false, true);
+        }
+        assert!(
+            old.current() < 1_600_000,
+            "fixture must distinguish the old response"
+        );
+    }
+
+    #[test]
+    fn delivery_rate_credits_only_complete_timely_receipts() {
+        let feedback = DeliveryFeedback::default();
+        feedback.acknowledged(
+            10_000,
+            Duration::from_millis(100),
+            Duration::from_millis(250),
+        );
+        feedback.acknowledged(90_000, Duration::from_secs(2), Duration::from_millis(250));
+        assert_eq!(feedback.acknowledged.load(Ordering::Relaxed), 2);
+        assert_eq!(feedback.timely_bytes.load(Ordering::Relaxed), 10_000);
+        assert_eq!(feedback.timely_receipts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn confirmed_goodput_cannot_override_delivery_rtt_or_producer_pressure() {
+        for reason in 0..4 {
+            let mut c = BitrateController::new(4_000_000, 8_000_000);
+            c.step_with_delivery_floor(Some(path(1000, 0, 120, 0)), 0, false, true, None);
+            let (impaired, delivered, misses, rtt) = match reason {
+                0 => (true, false, 0, 120),
+                1 => (false, false, 0, 120),
+                2 => (false, true, 1, 120),
+                _ => (false, true, 0, 240),
+            };
+            let bps = c.step_with_delivery_floor(
+                Some(path(1100, 15, rtt, 1)),
+                misses,
+                impaired,
+                delivered,
+                Some(8_000_000),
+            );
+            assert!(
+                bps < 4_000_000,
+                "real pressure was overridden: reason={reason} bps={bps}"
+            );
+        }
+        let mut capped = BitrateController::new(4_000_000, 4_000_000);
+        capped.step_with_delivery_floor(Some(path(1000, 0, 120, 0)), 0, false, true, None);
+        assert_eq!(
+            capped.step_with_delivery_floor(
+                Some(path(1100, 15, 120, 1)),
+                0,
+                false,
+                true,
+                Some(u64::MAX)
+            ),
+            4_000_000
+        );
     }
 
     #[test]

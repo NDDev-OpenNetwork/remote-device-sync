@@ -8,6 +8,20 @@ decisions and a build order.
 
 ## 0. Executive summary — what changed vs v0.1
 
+The October 2 [confirmed-goodput increment](reports/rds-confirmed-goodput-20261002.md)
+uses timely frame-receipt bytes to constrain loss-only bitrate reductions.
+The maintained [WebRTC LossBasedBweV2](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/congestion_controller/goog_cc/loss_based_bwe_v2.cc)
+separates inherent loss, acknowledged rate and delay estimates; its
+`CalculateInstantLowerBound` can retain a rate backed by acknowledged traffic.
+RDS uses its own smaller conservative observation rule, not a port of GCC:
+two populated recent windows, 20% headroom, selected-path scope and immediate
+revocation under actual media/RTT pressure. Static application-limited traffic
+is not capacity proof. [QUIC loss recovery](https://www.rfc-editor.org/rfc/rfc9002.html)
+still controls the underlying transport independently. Increasing encoder
+bitrate without delivery evidence can increase queues; [FQ-CoDel](https://www.rfc-editor.org/rfc/rfc8290.html)
+documents why short per-flow queues matter to interactive traffic. Physical
+route bandwidth, NAT/migration and native long-session acceptance remain open.
+
 The [managed native dispatch regression](reports/rds-managed-control-20261002.md)
 separates the whole control future from receive/decode. Awaiting a codec inside
 a selected receive handler stops polling the other branches until that handler

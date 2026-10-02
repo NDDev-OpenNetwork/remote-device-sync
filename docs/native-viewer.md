@@ -67,6 +67,16 @@ sample with fresh receipts prevent immediate return to a sustained backlog.
 Media reductions coalesce over one second; simultaneous path/media observations
 apply the stronger response once. Existing bitrate bounds, frame deadlines,
 three-frame admission and reference-preserving live encoder updates still apply.
+
+Loss-only reductions now also respect recent timely transport goodput. Two
+adjacent one-second windows must each contain at least three complete timely
+frame receipts and 4096 payload bytes; the lower window's rate supplies a
+conservative floor with 20% headroom. Late, obsolete and failed frames supply
+no such credit. Unknown/changed paths, outstanding late receipts, actual failure
+or stale/idle evidence clear the observation. RTT/producer pressure, delivery
+holds and negotiated ceilings retain their existing limits. This estimates
+confirmed transport delivery, not decoded/displayed quality or total capacity.
+See [the qualification boundary](reports/rds-confirmed-goodput-20261002.md).
 Sender health includes delayed-delivery counts and latest receipt duration.
 Independent production health continues during a stopped video writer and
 records production activity, intentional codec skips, latest produced-frame
