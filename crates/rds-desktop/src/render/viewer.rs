@@ -937,7 +937,7 @@ mod tests {
             max_depth: AtomicU64::new(0),
         });
         let sender = InputSender(state.clone());
-        let mut receiver = InputReceiver(state.clone());
+        let receiver = InputReceiver(state.clone());
         for seq in 0..400 {
             sender
                 .send(event(
