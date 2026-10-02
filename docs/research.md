@@ -8,6 +8,16 @@ decisions and a build order.
 
 ## 0. Executive summary — what changed vs v0.1
 
+The [managed native dispatch regression](reports/rds-managed-control-20261002.md)
+separates the whole control future from receive/decode. Awaiting a codec inside
+a selected receive handler stops polling the other branches until that handler
+finishes, even when the codec uses `spawn_blocking`. Tokio documents
+[retaining and concurrently polling futures](https://docs.rs/tokio/latest/tokio/macro.select.html)
+and [blocking-work cancellation limits](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).
+The correction retains serialized control writes, bounded codec permits and
+encoded references. It does not establish native physical-pixel latency or
+remove network outages, and incoming ACK observation still shares media IPC.
+
 | Area | v0.1 assumption | Deep-research correction |
 | --- | --- | --- |
 | QUIC impl | "quinn via iroh" | iroh 1.2 runs on **noq** — a real fork with **QUIC Multipath + QNT + QAD merged**. Relay and direct are *simultaneous first-class paths* with per-path RTT/congestion, not magic-socket trickery. |

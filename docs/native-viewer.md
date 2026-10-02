@@ -6,6 +6,17 @@ decoding stays on bounded blocking workers. The serving device needs a real
 capture/input backend; the current Linux implementation uses X11/XTEST.
 macOS capture, VideoToolbox and Wayland serving remain separate work.
 
+Managed native control dispatch has its own retained async future, polled
+concurrently with the receive/decode future. Input writes, heartbeat and the
+15-second decoded-progress watchdog continue while a blocking codec worker is
+pending. Each control write remains bounded to two seconds; codec calls retain
+the existing five-second caller bound and global worker limits. Decoder state
+and encoded ordering are unchanged. Either leg's completion or cancellation
+ends the desktop IPC by EOF; it never appends a control frame after canceling a
+potentially partial write. Incoming acknowledgement observation can still wait
+behind decode in the bounded IPC receive path. See the
+[dispatch regression evidence](reports/rds-managed-control-20261002.md).
+
 The viewer uses ordinary OS window stacking and can move behind other
 applications. An occluded Metal surface may pause presentation. Returning focus
 or uncovering the window requests an immediate redraw of its latest image.
@@ -72,6 +83,11 @@ replayed by this recovery. A grant is reused only while the agent accepts it;
 automatic grant issuance/renewal remains GDS work. Fifteen seconds without a
 decoded frame triggers a new desktop session. Closing the window cancels and
 joins its network worker, leaving unrelated managed streams intact.
+
+Each reconnect warning records the last network/render stage, decoded and
+submitted frame ages, UI dispatch age, outstanding input age/count, control RTT
+and occlusion. These metadata explain the interrupted state without logging
+keys, typed text, pointer coordinates, clipboard contents or screen pixels.
 
 Discarding input during a reconnect pause keeps the original retry deadline;
 pointer/key activity can neither shorten nor restart it. Window close and
