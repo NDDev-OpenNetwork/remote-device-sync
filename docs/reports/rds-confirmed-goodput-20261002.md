@@ -23,6 +23,13 @@ network capacity, codec correctness or physical display timing.
 INFO health adds timely byte/receipt counts and the eligible delivery floor.
 These are metadata only. No protocol/identity/authorization format changes.
 
+An independent key up to 64 KiB can start without an extra application pacing
+wait when no media receipt is unconfirmed. QUIC still paces packets and the
+key-receipt barrier bounds following capture. Half-second debt bounds remain;
+larger keys, dependent frames and nonempty media keep ordinary pacing. This
+removes an artificial initial wait (up to 500 ms at the bitrate floor), not
+transmission time. Waits of at least 100 ms gain frame-metadata diagnostics.
+
 ## Regression evidence
 
 - A seeded 15% packet-loss replay with timely confirmed goodput keeps at least

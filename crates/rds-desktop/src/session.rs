@@ -915,13 +915,28 @@ pub async fn serve_desktop_with(
             let now = Instant::now();
             budget = (budget + now.duration_since(last).as_secs_f64() * bps).min(bps * 0.25);
             last = now;
-            let cost = produced.payload.len() as f64 + 64.0;
-            if cost > budget {
-                let wait = ((cost - budget) / bps).min(0.5);
-                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-                budget = (budget - cost).max(-bps * 0.5);
-            } else {
-                budget -= cost;
+            // With no unconfirmed media, a bounded independent key can start
+            // immediately. QUIC still paces its packets and the existing key
+            // receipt barrier prevents dependent capture from accumulating.
+            let wait = frame_pacing_wait(
+                &mut budget,
+                bps,
+                produced.header.keyframe,
+                produced.payload.len(),
+                acknowledgements.len(),
+            );
+            if wait >= Duration::from_millis(100) {
+                tracing::info!(
+                    frame_seq = produced.header.seq,
+                    keyframe = produced.header.keyframe,
+                    payload_bytes = produced.payload.len(),
+                    wait_ms = wait.as_millis(),
+                    bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
+                    "desktop frame pacing delayed"
+                );
+            }
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
             }
             // Admission follows the final selection: advancing this before
             // the pacing wait would lose track of frames collapsed afterward.
@@ -1255,6 +1270,28 @@ fn advance_cadence(
 
 fn resume_cadence(next_due: &mut Instant, interval: Duration, now: Instant) {
     *next_due = (*next_due).max(now.checked_sub(interval).unwrap_or(now));
+}
+
+fn frame_pacing_wait(
+    budget: &mut f64,
+    bytes_per_second: f64,
+    keyframe: bool,
+    payload_bytes: usize,
+    pending_receipts: usize,
+) -> Duration {
+    let cost = payload_bytes as f64 + 64.0;
+    let cold_key = keyframe && payload_bytes <= 64 * 1024 && pending_receipts == 0;
+    if cost <= *budget {
+        *budget -= cost;
+        return Duration::ZERO;
+    }
+    let wait = if cold_key {
+        Duration::ZERO
+    } else {
+        Duration::from_secs_f64(((cost - *budget) / bytes_per_second).min(0.5))
+    };
+    *budget = (*budget - cost).max(-bytes_per_second * 0.5);
+    wait
 }
 
 impl FrameProducer for SyntheticProducer {
@@ -2699,6 +2736,43 @@ mod tests {
         assert_eq!(feedback.acknowledged.load(Ordering::Relaxed), 2);
         assert_eq!(feedback.timely_bytes.load(Ordering::Relaxed), 10_000);
         assert_eq!(feedback.timely_receipts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn empty_media_key_starts_without_artificial_wait_but_retains_bounded_debt() {
+        let mut budget = 0.0;
+        let rate = 100_000.0 / 8.0;
+        let old_wait = Duration::from_secs_f64((50_000.0f64 / rate).min(0.5));
+        assert_eq!(
+            old_wait,
+            Duration::from_millis(500),
+            "fixture must distinguish prior delay"
+        );
+        assert_eq!(
+            frame_pacing_wait(&mut budget, rate, true, 50_000, 0),
+            Duration::ZERO
+        );
+        assert_eq!(budget, -rate * 0.5);
+        assert_eq!(
+            frame_pacing_wait(&mut budget, rate, false, 1000, 0),
+            Duration::from_millis(500)
+        );
+        assert_eq!(budget, -rate * 0.5, "a later frame cannot grow debt");
+        let mut full = 50_000.0;
+        assert_eq!(
+            frame_pacing_wait(&mut full, rate, false, 1000, 0),
+            Duration::ZERO
+        );
+        assert_eq!(full, 48_936.0);
+        for (keyframe, bytes, pending) in [(false, 50_000, 0), (true, 50_000, 1), (true, 65_537, 0)]
+        {
+            let mut budget = 0.0;
+            assert_eq!(
+                frame_pacing_wait(&mut budget, rate, keyframe, bytes, pending),
+                Duration::from_millis(500),
+                "nonempty/large/dependent frames retain pacing"
+            );
+        }
     }
 
     #[test]

@@ -77,6 +77,12 @@ or stale/idle evidence clear the observation. RTT/producer pressure, delivery
 holds and negotiated ceilings retain their existing limits. This estimates
 confirmed transport delivery, not decoded/displayed quality or total capacity.
 See [the qualification boundary](reports/rds-confirmed-goodput-20261002.md).
+
+With no unconfirmed media, an independent key of at most 64 KiB starts under
+QUIC pacing without an extra application wait. Larger keys, dependent frames
+and nonempty media retain pacing and the same half-second debt bound. The
+existing key-receipt capture barrier remains; waits of at least 100 ms are
+logged with frame metadata, never pixels.
 Sender health includes delayed-delivery counts and latest receipt duration.
 Independent production health continues during a stopped video writer and
 records production activity, intentional codec skips, latest produced-frame
