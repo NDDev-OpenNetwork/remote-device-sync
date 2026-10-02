@@ -1,7 +1,9 @@
 //! A silent first address must not delay a healthy authenticated candidate.
 #![cfg(feature = "transport-noq")]
+use ::noq::Runtime;
 use rds_net::backends::noq::{self as owned};
 use rds_net::{Backend, EndpointConfig, SecretKey, TransportAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn config(bind: std::net::SocketAddr, key: SecretKey) -> EndpointConfig {
@@ -14,6 +16,17 @@ fn config(bind: std::net::SocketAddr, key: SecretKey) -> EndpointConfig {
     }
 }
 
+// Keep the port reserved through ownership handoff. Dropping a reservation
+// before rebinding lets a concurrent fixture/process acquire that address.
+async fn bind_reserved(socket: std::net::UdpSocket, key: SecretKey) -> owned::Endpoint {
+    let addr = socket.local_addr().unwrap();
+    let runtime = Arc::new(::noq::TokioRuntime);
+    let socket = runtime.wrap_udp_socket(socket).unwrap();
+    owned::bind_with_socket(config(addr, key), socket, vec![addr], runtime, vec![])
+        .await
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blackholed_first_candidate_does_not_block_a_healthy_second() {
     let one = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -24,11 +37,7 @@ async fn blackholed_first_candidate_does_not_block_a_healthy_second() {
         (two, one)
     };
     let dead = blackhole.local_addr().unwrap();
-    let live = working.local_addr().unwrap();
-    drop(working);
-    let server = owned::bind_endpoint(config(live, SecretKey::from_bytes(&[91; 32])))
-        .await
-        .unwrap();
+    let server = bind_reserved(working, SecretKey::from_bytes(&[91; 32])).await;
     let client = owned::bind_endpoint(config(
         "127.0.0.1:0".parse().unwrap(),
         SecretKey::from_bytes(&[92; 32]),
@@ -64,15 +73,8 @@ async fn fast_wrong_identity_cannot_win_or_cancel_the_valid_candidate() {
         (two, one)
     };
     let wrong_addr = wrong.local_addr().unwrap();
-    let valid_addr = valid.local_addr().unwrap();
-    drop(wrong);
-    drop(valid);
-    let wrong = owned::bind_endpoint(config(wrong_addr, SecretKey::from_bytes(&[93; 32])))
-        .await
-        .unwrap();
-    let server = owned::bind_endpoint(config(valid_addr, SecretKey::from_bytes(&[94; 32])))
-        .await
-        .unwrap();
+    let wrong = bind_reserved(wrong, SecretKey::from_bytes(&[93; 32])).await;
+    let server = bind_reserved(valid, SecretKey::from_bytes(&[94; 32])).await;
     let client = owned::bind_endpoint(config(
         "127.0.0.1:0".parse().unwrap(),
         SecretKey::from_bytes(&[95; 32]),
