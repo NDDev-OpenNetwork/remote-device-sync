@@ -33,6 +33,85 @@ async fn write_payload<W: AsyncWrite + Unpin>(writer: &mut W, payload: &[u8]) ->
     writer.write_all(payload).await
 }
 
+/// A slow video writer cannot hold remote input acknowledgements or heartbeat
+/// echoes. All retained legs end with the desktop owner or event subscriber.
+pub(super) async fn serve_separated(
+    stream: &mut UnixStream,
+    session: rds_desktop::client::DesktopSession,
+    registration: super::desktop_events::Registration,
+) -> io::Result<()> {
+    let (reader, writer) = stream.split();
+    serve_separated_io(reader, writer, session, registration).await
+}
+
+async fn serve_separated_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    mut reader: R,
+    mut writer: W,
+    mut session: rds_desktop::client::DesktopSession,
+    mut registration: super::desktop_events::Registration,
+) -> io::Result<()> {
+    let ctrl = session.control_sender();
+    let encoded = session.encoded.as_mut().ok_or_else(invalid)?;
+    let up = async {
+        loop {
+            match read_frame::<_, DesktopUp>(&mut reader).await {
+                Ok(DesktopUp::Control(control)) => ctrl
+                    .send(control)
+                    .await
+                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "control closed"))?,
+                Ok(DesktopUp::Finished) => return Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+    };
+    tokio::pin!(up);
+    // Keep this read alive across the attachment fence: canceling a pending
+    // framed read and continuing it later would lose its partial parse state.
+    let event_stop = registration.stop.clone();
+    tokio::select! {
+        result = &mut up => return result,
+        result = registration.attached() => result?,
+        _ = event_stop.cancelled() => return Ok(()),
+    }
+    let media = async {
+        while let Some(frame) = encoded.recv().await {
+            if frame.payload.len() > MAX_DESKTOP_PAYLOAD {
+                return Err(invalid());
+            }
+            write_frame(
+                &mut writer,
+                &DesktopDown::Frame {
+                    header: frame.header,
+                },
+            )
+            .await?;
+            write_payload(&mut writer, &frame.payload).await?;
+        }
+        Ok(())
+    };
+    let events = async {
+        while let Some(event) = session.events.recv().await {
+            registration.sender.try_send(event).map_err(|_| {
+                // Metadata only; never discard an ACK and keep a healthy status.
+                tracing::warn!("desktop event subscriber unavailable or full");
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "desktop event subscriber unavailable or full",
+                )
+            })?;
+        }
+        Ok(())
+    };
+    tokio::select! {
+        biased;
+        _ = registration.stop.cancelled() => Ok(()),
+        result = up => result,
+        result = events => result,
+        result = media => result,
+    }
+}
+
 /// Read one u32-length-prefixed encoded payload, bounded like the remote
 /// frame reader.
 async fn read_payload<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Vec<u8>> {
@@ -127,6 +206,9 @@ pub enum ManagedMessage {
     Event(rds_core::DesktopEvent),
 }
 
+/// Dedicated event receive queue; drop the owning desktop to abort its reader.
+pub type ManagedEvents = tokio::sync::mpsc::Receiver<io::Result<rds_core::DesktopEvent>>;
+
 /// Shared control-plane state behind `ManagedDesktop`/`ManagedControl`:
 /// the socket's write half and the viewer-side sequence counters.
 /// Serializing writes through the mutex keeps postcard frames atomic.
@@ -212,6 +294,7 @@ impl ManagedControl {
 pub struct ManagedDesktop {
     messages: tokio::sync::mpsc::Receiver<io::Result<Option<ManagedMessage>>>,
     reading: tokio::task::JoinHandle<()>,
+    event_reading: Option<tokio::task::JoinHandle<()>>,
     state: Arc<ControlState>,
     /// The manager session this channel is pinned to.
     pub session: SessionId,
@@ -222,6 +305,9 @@ pub struct ManagedDesktop {
 impl Drop for ManagedDesktop {
     fn drop(&mut self) {
         self.reading.abort();
+        if let Some(reading) = &self.event_reading {
+            reading.abort();
+        }
     }
 }
 
@@ -274,6 +360,7 @@ impl ManagedDesktop {
         Self {
             messages,
             reading,
+            event_reading: None,
             state: Arc::new(ControlState {
                 writer: Mutex::new(writer),
                 display,
@@ -284,6 +371,35 @@ impl ManagedDesktop {
             session,
             caps,
         }
+    }
+
+    pub(super) fn separated(
+        stream: UnixStream,
+        mut events: UnixStream,
+        session: SessionId,
+        caps: DesktopCaps,
+        display: u32,
+    ) -> (Self, ManagedEvents) {
+        let mut desktop = Self::new(stream, session, caps, display);
+        let (sender, receiver) = tokio::sync::mpsc::channel(super::desktop_events::EVENT_CAPACITY);
+        desktop.event_reading = Some(tokio::spawn(async move {
+            // Own the whole event socket: dropping its write half would look
+            // like caller departure to the same-UID event service.
+            loop {
+                let event = match read_frame::<_, DesktopDown>(&mut events).await {
+                    Ok(DesktopDown::Event(event)) => Ok(event),
+                    Ok(DesktopDown::Finished) => break,
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Ok(DesktopDown::Frame { .. }) => Err(invalid()),
+                    Err(e) => Err(e),
+                };
+                let failed = event.is_err();
+                if sender.send(event).await.is_err() || failed {
+                    break;
+                }
+            }
+        }));
+        (desktop, receiver)
     }
 
     /// A cloneable control half for tasks that send while `recv` runs —
@@ -539,6 +655,10 @@ mod tests {
     }
 
     async fn loopback_relay() -> Relay {
+        loopback_relay_with_payload(1024).await
+    }
+
+    async fn loopback_relay_with_payload(payload_bytes: usize) -> Relay {
         use rds_core::{HelloAck, StreamHello, UniHello};
         use rds_desktop::{SessionConfig, SyntheticProducer, serve_desktop_with};
 
@@ -578,7 +698,7 @@ mod tests {
                 SessionConfig {
                     input_sink: Some(Box::new(NoopInput)),
                     producer: Some(Box::new(
-                        SyntheticProducer::new(30, 640, 480, 1024).keyframe_every(5),
+                        SyntheticProducer::new(30, 640, 480, payload_bytes).keyframe_every(5),
                     )),
                     frame_route: route,
                     ..Default::default()
@@ -722,5 +842,281 @@ mod tests {
             .unwrap()
             .unwrap();
         relay.server_task.abort();
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn separate_events_progress_while_video_body_is_not_read() {
+        use super::super::desktop_events;
+        use std::time::Duration;
+        let relay = loopback_relay_with_payload(1024 * 1024).await;
+        let registry = Arc::new(desktop_events::Registry::default());
+        let registration = registry.register().unwrap();
+        let route = registration.route;
+        let subscription = registry.take(route).unwrap();
+        let stop = registration.stop.clone();
+        let (video_server, mut video_client) = tokio::io::duplex(64);
+        let (mut event_server, mut event_client) = UnixStream::pair().unwrap();
+        let events =
+            tokio::spawn(
+                async move { desktop_events::serve(&mut event_server, subscription).await },
+            );
+        let media = tokio::spawn(async move {
+            {
+                let (read, write) = tokio::io::split(video_server);
+                serve_separated_io(read, write, relay.session, registration).await
+            }
+        });
+        let first = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_frame::<_, DesktopDown>(&mut video_client),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(first, DesktopDown::Frame { .. }));
+        let bytes = video_client.read_u32().await.unwrap();
+        assert!(
+            bytes > 64 && bytes <= 1024 * 1024,
+            "body must exceed the deterministic video capacity"
+        );
+        // Retain the whole large body unread. On the old single socket, an
+        // event cannot be parsed before draining exactly these payload bytes.
+        for seq in 1..=8 {
+            write_frame(
+                &mut video_client,
+                &DesktopUp::Control(DesktopControl::Heartbeat {
+                    seq,
+                    ts_ms: seq + 100,
+                }),
+            )
+            .await
+            .unwrap();
+            let event = tokio::time::timeout(
+                Duration::from_secs(2),
+                read_frame::<_, DesktopDown>(&mut event_client),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                matches!(event, DesktopDown::Event(rds_core::DesktopEvent::Heartbeat { seq: echoed, ts_ms }) if echoed == seq && ts_ms == seq + 100)
+            );
+            assert!(!media.is_finished(), "video owner unexpectedly ended");
+        }
+        // Event subscriber departure ends its own blocked video writer.
+        drop(event_client);
+        tokio::time::timeout(Duration::from_secs(2), events)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), media)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(stop.is_cancelled());
+        relay.server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn separated_readers_keep_events_independent_of_full_media_queue() {
+        let (video, mut peer) = UnixStream::pair().unwrap();
+        let (events, mut event_peer) = UnixStream::pair().unwrap();
+        let caps = DesktopCaps {
+            displays: vec![],
+            codecs: vec![rds_core::Codec::H264],
+        };
+        let (mut channel, mut events) =
+            ManagedDesktop::separated(video, events, SessionId([7; 16]), caps, 0);
+        // Force the FIFO reader's existing one-message channel to fill and
+        // block. Independent event parsing must remain available.
+        for seq in 0..3 {
+            write_frame(
+                &mut peer,
+                &DesktopDown::Frame {
+                    header: header(seq),
+                },
+            )
+            .await
+            .unwrap();
+            write_payload(&mut peer, &[0xff; 16]).await.unwrap();
+        }
+        write_frame(
+            &mut event_peer,
+            &DesktopDown::Event(rds_core::DesktopEvent::InputAck {
+                seq: 77,
+                handled_ts_ms: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            rds_core::DesktopEvent::InputAck { seq: 77, .. }
+        ));
+        for seq in 0..3 {
+            assert!(
+                matches!(channel.recv().await.unwrap(), Some(ManagedMessage::Frame(frame)) if frame.header.seq == seq)
+            );
+        }
+        drop(channel);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn separated_client_uses_authenticated_manager_and_retains_shared_peer() {
+        use super::super::{Client, Prepared, Server};
+        use rds_core::{
+            HelloAck, StreamHello, UniHello,
+            local::{Command, Reply},
+        };
+        use std::{os::unix::fs::DirBuilderExt, time::Duration};
+        let backends = {
+            #[cfg(feature = "transport-noq")]
+            {
+                vec![rds_net::Backend::Iroh, rds_net::Backend::Noq]
+            }
+            #[cfg(not(feature = "transport-noq"))]
+            {
+                vec![rds_net::Backend::Iroh]
+            }
+        };
+        for backend in backends {
+            let config = || rds_net::EndpointConfig {
+                backend,
+                bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                discovery: false,
+                ..Default::default()
+            };
+            let remote = rds_net::bind_endpoint(config()).await.unwrap();
+            let local = rds_net::bind_endpoint(config()).await.unwrap();
+            let remote_task = tokio::spawn({
+                let remote = remote.clone();
+                async move {
+                    let conn = remote.accept().await.unwrap().await.unwrap();
+                    let mut workers = tokio::task::JoinSet::new();
+                    loop {
+                        tokio::select! {
+                            Some(result) = workers.join_next(), if !workers.is_empty() => { result.unwrap(); },
+                            streams = conn.accept_bi() => {
+                                let (mut send, mut recv) = match streams { Ok(pair) => pair, Err(_) => break };
+                                let conn = conn.clone();
+                                workers.spawn(async move {
+                                    match read_frame::<_, StreamHello>(&mut recv).await.unwrap() {
+                                        StreamHello::Ping { nonce } => {
+                                            write_frame(&mut send, &HelloAck::Ok).await.unwrap();
+                                            send.write_all(&nonce.to_be_bytes()).await.unwrap();
+                                            send.finish().unwrap();
+                                        }
+                                        StreamHello::DesktopV3 { session, hello, output_height } => {
+                                            assert_eq!(output_height, 1080);
+                                            write_frame(&mut send, &HelloAck::Desktop(DesktopCaps {
+                                                displays: vec![], codecs: vec![rds_core::Codec::H264],
+                                            })).await.unwrap();
+                                            rds_desktop::serve_desktop_with(conn, send, recv, hello, rds_desktop::SessionConfig {
+                                                frame_route: Some(UniHello::DesktopFrames { id: session }),
+                                                input_sink: Some(Box::new(NoopInput)),
+                                                producer: Some(Box::new(rds_desktop::SyntheticProducer::new(30, 640, 480, 1024))),
+                                                ..Default::default()
+                                            }).await.unwrap();
+                                        }
+                                        other => panic!("unexpected service {other:?}"),
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    workers.shutdown().await;
+                }
+            });
+            let root = std::path::Path::new("/tmp")
+                .canonicalize()
+                .unwrap()
+                .join(format!(
+                    "rds-event-route-{}-{}",
+                    std::process::id(),
+                    rand::random::<u64>()
+                ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let mut manager = Server::start(
+                Some(Prepared::bind(&root).await.unwrap()),
+                local.clone(),
+                None,
+            );
+            let client = Client::new(&root);
+            let Reply::Connected(id) = client
+                .request(Command::Connect {
+                    target: rds_net::Ticket::of(&remote).to_string(),
+                    grant: None,
+                })
+                .await
+                .unwrap()
+            else {
+                panic!("missing session")
+            };
+            let (desktop, mut events) = client
+                .desktop_profile_separated(
+                    Some(id),
+                    rds_core::DesktopHello {
+                        display: 0,
+                        max_fps: 30,
+                        codec: rds_core::Codec::H264,
+                        input_acks: true,
+                    },
+                    1080,
+                )
+                .await
+                .unwrap();
+            let controls = desktop.control_handle();
+            let seq = controls
+                .send_input(InputKind::KeyDown { code: 30 })
+                .await
+                .unwrap();
+            let ack = tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(ack, rds_core::DesktopEvent::InputAck { seq: ack, .. } if ack == seq));
+            controls.heartbeat().await.unwrap();
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+                rds_core::DesktopEvent::Heartbeat { .. }
+            ));
+            drop(desktop);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), events.recv())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                matches!(client.request(Command::Ping { session: Some(id), nonce: 91 }).await.unwrap(), Reply::Pong { session, .. } if session == id)
+            );
+            manager.close().await.unwrap();
+            local.close().await;
+            remote.close().await;
+            tokio::time::timeout(Duration::from_secs(2), remote_task)
+                .await
+                .unwrap()
+                .unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

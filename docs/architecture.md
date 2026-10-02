@@ -81,11 +81,13 @@ a wgpu surface and one pending BGRA image. The CLI owns the cancelable network
 worker and reopens a desktop session on the same authenticated peer after loss.
 Per-session wire routing and broader native media acceptance remain separate.
 
-Managed native input/heartbeat dispatch and its decoded-progress watchdog are
-retained async legs independent of receive/decode waits. They share the existing
-serialized control writer, with bounded writes and EOF teardown after either
-leg ends. Incoming event observation still shares the bounded media IPC route;
-see [the native contract](native-viewer.md) for the tested boundary.
+Managed native input/heartbeat dispatch, incoming control-event observation and
+ordered media/decode have independent retained futures. The additive local
+separated-desktop API attaches one same-UID event socket using a bounded,
+single-claim, process-lifetime route. Video FIFO backpressure cannot block its
+input ACK/heartbeat observation. Both sockets share desktop termination, without
+closing the manager's unrelated peer streams. Existing combined APIs and remote
+wire formats remain; see [the native contract](native-viewer.md).
 
 Owned path policy now uses [validated eligibility](path-selection.md): only the
 handshake path is seeded; application-opened candidates stay Backup until an

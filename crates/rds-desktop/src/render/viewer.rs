@@ -116,6 +116,7 @@ pub struct ViewerReport {
     pub encode_to_send_p95_ms: Option<f64>,
     pub control_rtt_ms: Option<u64>,
     pub input_acks: u64,
+    pub managed_events_separated: bool,
     pub input_ack_p50_ms: Option<f64>,
     pub input_ack_p95_ms: Option<f64>,
     pub input_queue_p95_ms: Option<f64>,
@@ -311,6 +312,9 @@ impl ViewerHandle {
             };
             tracing::trace!(target: "rds_desktop::input_timing", input_seq=event.seq,event_class,event_created_ms=event.event_ts_ms,input_sent_ms=sent_ms,queue_ms=sent_ms.saturating_sub(event.event_ts_ms),"native input dispatched");
         }
+    }
+    pub fn managed_events_separated(&self) {
+        lock(&self.state).report.managed_events_separated = true;
     }
     pub fn input_ack(&self, seq: u64) {
         let mut state = lock(&self.state);
@@ -515,6 +519,7 @@ impl App {
         match result {
             Err(error) => self.fail(event_loop, error),
             Ok(DrawOutcome::Presented) => {
+                lock(&self.handle.state).render_stage = "presented".into();
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
                     state.report.frames_submitted += 1;

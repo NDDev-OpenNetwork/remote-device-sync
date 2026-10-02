@@ -179,6 +179,7 @@ async fn run(
     let mut workers = JoinSet::new();
     let streams = Arc::new(Semaphore::new(MAX_STREAMS));
     let transfers = Arc::new(Semaphore::new(sync::MAX_TRANSFERS));
+    let events = Arc::new(desktop_events::Registry::default());
     let mut sample = tokio::time::interval(Duration::from_secs(1));
     sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
@@ -204,10 +205,11 @@ async fn run(
                 let directory = directory.clone();
                 let streams = streams.clone();
                 let transfers = transfers.clone();
+                let events = events.clone();
                 workers.spawn(async move {
                     // Responses carry typed reasons; never log the request or
                     // an upstream error containing a ticket/grant/private path.
-                    let _ = serve(stream, shared, endpoint, directory, streams, transfers).await;
+                    let _ = serve(stream, shared, endpoint, directory, streams, transfers, events).await;
                 });
             }
         }
@@ -219,14 +221,20 @@ async fn run(
 }
 
 mod desktop;
+mod desktop_events;
 
-pub use desktop::{ManagedControl, ManagedDesktop, ManagedMessage, RelayedFrame};
+pub use desktop::{ManagedControl, ManagedDesktop, ManagedEvents, ManagedMessage, RelayedFrame};
 
 struct Output {
     reply: Reply,
     reservation: Option<state::Reservation>,
     tcp: Option<(RequestStreams, OwnedSemaphorePermit)>,
-    desktop: Option<(rds_desktop::client::DesktopSession, OwnedSemaphorePermit)>,
+    desktop: Option<(
+        rds_desktop::client::DesktopSession,
+        OwnedSemaphorePermit,
+        Option<desktop_events::Registration>,
+    )>,
+    events: Option<(desktop_events::Subscription, OwnedSemaphorePermit)>,
 }
 
 impl Output {
@@ -236,6 +244,7 @@ impl Output {
             reservation: None,
             tcp: None,
             desktop: None,
+            events: None,
         }
     }
 }
@@ -247,6 +256,7 @@ async fn serve(
     directory: Option<rds_discovery::client::Client>,
     streams: Arc<Semaphore>,
     transfers: Arc<Semaphore>,
+    events: Arc<desktop_events::Registry>,
 ) -> Result<(), Error> {
     let request: Request = tokio::time::timeout(PRELUDE_TIMEOUT, read_frame(&mut stream))
         .await
@@ -265,7 +275,7 @@ async fn serve(
         tokio::select! {
             biased;
             _ = stream.read(&mut probe) => return Ok(()),
-            result = tokio::time::timeout(timeout, execute(request.command, &shared, &endpoint, directory, streams, transfers)) => result.unwrap_or(Err(ErrorCode::Timeout)),
+            result = tokio::time::timeout(timeout, execute(request.command, &shared, &endpoint, directory, streams, transfers, &events)) => result.unwrap_or(Err(ErrorCode::Timeout)),
         }
     };
     let response = Response {
@@ -286,8 +296,16 @@ async fn serve(
             // data/FIN instead of resetting a successfully completed upload.
             drop(tcp.release());
         }
-        if let Some((session, _permit)) = output.desktop {
-            desktop::serve(&mut stream, session).await?;
+        if let Some((session, _permit, registration)) = output.desktop {
+            match registration {
+                Some(registration) => {
+                    desktop::serve_separated(&mut stream, session, registration).await?
+                }
+                None => desktop::serve(&mut stream, session).await?,
+            }
+        }
+        if let Some((subscription, _permit)) = output.events {
+            desktop_events::serve(&mut stream, subscription).await?;
         }
     }
     Ok(())
@@ -309,6 +327,7 @@ async fn execute(
     directory: Option<rds_discovery::client::Client>,
     streams: Arc<Semaphore>,
     transfers: Arc<Semaphore>,
+    events: &Arc<desktop_events::Registry>,
 ) -> Result<Output, ErrorCode> {
     match command {
         Command::Sync { session, operation } => {
@@ -398,6 +417,7 @@ async fn execute(
                 reservation: Some(reservation),
                 tcp: None,
                 desktop: None,
+                events: None,
             })
         }
         Command::Renew { session, grant } => {
@@ -421,6 +441,7 @@ async fn execute(
                 reservation: Some(reservation),
                 tcp: None,
                 desktop: None,
+                events: None,
             })
         }
         Command::Select { session } => {
@@ -467,14 +488,32 @@ async fn execute(
                 reservation: None,
                 tcp: Some((RequestStreams::new(pair), permit)),
                 desktop: None,
+                events: None,
+            })
+        }
+        Command::DesktopEvents { route } => {
+            let permit = streams
+                .try_acquire_owned()
+                .map_err(|_| ErrorCode::Capacity)?;
+            let subscription = events.take(route)?;
+            Ok(Output {
+                reply: Reply::DesktopEventsOpened { route },
+                reservation: None,
+                tcp: None,
+                desktop: None,
+                events: Some((subscription, permit)),
             })
         }
         Command::Desktop { session, ref hello }
+        | Command::DesktopSeparated {
+            session, ref hello, ..
+        }
         | Command::DesktopProfile {
             session, ref hello, ..
         } => {
             let output_height = match &command {
-                Command::DesktopProfile { output_height, .. } => Some(*output_height),
+                Command::DesktopProfile { output_height, .. }
+                | Command::DesktopSeparated { output_height, .. } => Some(*output_height),
                 _ => None,
             };
             let permit = streams
@@ -497,14 +536,28 @@ async fn execute(
             )
             .await
             .map_err(|_| ErrorCode::Remote)?;
-            Ok(Output {
-                reply: Reply::DesktopOpened {
+            let registration = if matches!(command, Command::DesktopSeparated { .. }) {
+                Some(events.register()?)
+            } else {
+                None
+            };
+            let reply = match &registration {
+                Some(registration) => Reply::DesktopSeparatedOpened {
+                    session,
+                    caps: remote.caps().clone(),
+                    route: registration.route,
+                },
+                None => Reply::DesktopOpened {
                     session,
                     caps: remote.caps().clone(),
                 },
+            };
+            Ok(Output {
+                reply,
                 reservation: None,
                 tcp: None,
-                desktop: Some((remote, permit)),
+                desktop: Some((remote, permit, registration)),
+                events: None,
             })
         }
     }
@@ -526,7 +579,11 @@ impl Client {
     async fn exchange(&self, command: Command) -> Result<(Reply, UnixStream), Error> {
         let body = matches!(
             command,
-            Command::OpenTcp { .. } | Command::Desktop { .. } | Command::DesktopProfile { .. }
+            Command::OpenTcp { .. }
+                | Command::Desktop { .. }
+                | Command::DesktopProfile { .. }
+                | Command::DesktopSeparated { .. }
+                | Command::DesktopEvents { .. }
         );
         let timeout = if matches!(command, Command::Sync { .. }) {
             SYNC_TIMEOUT + Duration::from_secs(10)
@@ -565,7 +622,11 @@ impl Client {
     pub async fn request(&self, command: Command) -> Result<Reply, Error> {
         if matches!(
             command,
-            Command::OpenTcp { .. } | Command::Desktop { .. } | Command::DesktopProfile { .. }
+            Command::OpenTcp { .. }
+                | Command::Desktop { .. }
+                | Command::DesktopProfile { .. }
+                | Command::DesktopSeparated { .. }
+                | Command::DesktopEvents { .. }
         ) {
             return Err(Error::Protocol);
         }
@@ -609,6 +670,39 @@ impl Client {
             }
             _ => Err(Error::Protocol),
         }
+    }
+
+    /// Independently received events and bounded FIFO video on same-UID sockets.
+    /// Requires the additive separated-channel extension; no legacy fallback.
+    pub async fn desktop_profile_separated(
+        &self,
+        session: Option<SessionId>,
+        hello: rds_core::DesktopHello,
+        output_height: u32,
+    ) -> Result<(ManagedDesktop, ManagedEvents), Error> {
+        let display = hello.display;
+        let (reply, stream) = self
+            .exchange(Command::DesktopSeparated {
+                session,
+                hello: Box::new(hello),
+                output_height,
+            })
+            .await?;
+        let Reply::DesktopSeparatedOpened {
+            session,
+            caps,
+            route,
+        } = reply
+        else {
+            return Err(Error::Protocol);
+        };
+        let (reply, events) = self.exchange(Command::DesktopEvents { route }).await?;
+        if !matches!(reply, Reply::DesktopEventsOpened { route: opened } if opened == route) {
+            return Err(Error::Protocol);
+        }
+        Ok(ManagedDesktop::separated(
+            stream, events, session, caps, display,
+        ))
     }
 
     pub async fn snapshot(&self) -> Result<rds_core::local::Snapshot, Error> {

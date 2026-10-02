@@ -6,16 +6,27 @@ decoding stays on bounded blocking workers. The serving device needs a real
 capture/input backend; the current Linux implementation uses X11/XTEST.
 macOS capture, VideoToolbox and Wayland serving remain separate work.
 
-Managed native control dispatch has its own retained async future, polled
-concurrently with the receive/decode future. Input writes, heartbeat and the
-15-second decoded-progress watchdog continue while a blocking codec worker is
-pending. Each control write remains bounded to two seconds; codec calls retain
-the existing five-second caller bound and global worker limits. Decoder state
-and encoded ordering are unchanged. Either leg's completion or cancellation
-ends the desktop IPC by EOF; it never appends a control frame after canceling a
-potentially partial write. Incoming acknowledgement observation can still wait
-behind decode in the bounded IPC receive path. See the
-[dispatch regression evidence](reports/rds-managed-control-20261002.md).
+Managed native dispatch and acknowledgement observation use separate retained
+async legs from ordered receive/decode. The agent's separated local extension
+keeps video and upward controls on the first same-UID Unix socket and transfers
+input ACKs, heartbeat echoes and clipboard-ready metadata over a second socket.
+A blocked video-body write or a busy decoder cannot hold event observation.
+`managed_events_separated` in the viewer report identifies this installed mode.
+
+Each control write remains bounded to two seconds; codec calls retain their
+five-second caller bound and global worker limits. The 15-second decoded-progress
+watchdog still requires actual decoded frames. This change does not keep a
+nonfunctional video session healthy simply because heartbeats continue.
+Decoder state, FIFO encoded ordering and the one-message media queue remain.
+Either socket's departure ends this desktop by EOF, with both owned reader tasks
+aborted; no frame is appended after canceling a potentially partial write.
+Shared TCP/sync connections and other desktops are not closed.
+
+Legacy managed/headless APIs retain their original combined socket. The native
+viewer requires the additive v5 separated-channel commands; an older agent
+refuses them without silently reverting to the coupled route. Update the local
+agent and viewer together. Remote desktop framing and grants are unchanged.
+See [the independent-event qualification](reports/rds-event-isolation-20261002.md).
 
 The viewer uses ordinary OS window stacking and can move behind other
 applications. An occluded Metal surface may pause presentation. Returning focus

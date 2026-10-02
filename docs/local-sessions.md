@@ -296,3 +296,30 @@ for native/direct desktop use, unchanged.
 Each step needs code, failure tests, platform evidence and an updated receipt.
 All remediation waves remain open. This sequence preserves every other task in
 the [full remediation plan](remediation-plan.md).
+
+
+## Separated desktop events (additive local v5 extension)
+
+`DesktopSeparated` replies with `DesktopSeparatedOpened` and an opaque random
+route; `DesktopEvents` claims that route exactly once and returns
+`DesktopEventsOpened`. Both requests pass the existing same-UID socket identity
+and directory checks. All existing command/reply discriminants stay unchanged;
+older managers reject the new commands. No remote ALPN, grant or frame format
+changes. The native viewer and local agent need a coordinated update; the
+legacy combined/headless APIs remain available explicitly.
+
+The first socket carries ordered encoded video and upward controls. The second
+carries only `DesktopDown::Event` messages and clean EOF; a frame there is a
+protocol error. The attachment-ready fence follows the successful subscription
+reply. An unattached owner waits at most five seconds. The bounded route registry
+holds no peer connection and its guard removes/cancels a route on every exit.
+Routes cannot be claimed twice or reused after cancellation/manager restart.
+
+Each desktop/event socket uses a stream permit (64 total), and the existing
+96-worker limit also applies. Queues hold 128 small events, one queued encoded
+message and one being read. Encoded FIFO and 32 MiB payload bounds are unchanged.
+The event writer has a two-second per-message limit; queue overflow fails the
+desktop explicitly, rather than dropping an ACK and claiming healthy progress.
+Both owned client readers abort on desktop drop. Subscriber EOF, unexpected
+caller bytes, video/control EOF or remote end cancels only this desktop. The
+manager's unrelated TCP/sync sessions stay live.
