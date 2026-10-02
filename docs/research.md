@@ -8,6 +8,30 @@ decisions and a build order.
 
 ## 0. Executive summary — what changed vs v0.1
 
+The October 2 [confirmed-goodput increment](reports/rds-confirmed-goodput-20261002.md)
+uses timely frame-receipt bytes to constrain loss-only bitrate reductions.
+The maintained [WebRTC LossBasedBweV2](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/congestion_controller/goog_cc/loss_based_bwe_v2.cc)
+separates inherent loss, acknowledged rate and delay estimates; its
+`CalculateInstantLowerBound` can retain a rate backed by acknowledged traffic.
+RDS uses its own smaller conservative observation rule, not a port of GCC:
+two populated recent windows, 20% headroom, selected-path scope and immediate
+revocation under actual media/RTT pressure. Static application-limited traffic
+is not capacity proof. [QUIC loss recovery](https://www.rfc-editor.org/rfc/rfc9002.html)
+still controls the underlying transport independently. Increasing encoder
+bitrate without delivery evidence can increase queues; [FQ-CoDel](https://www.rfc-editor.org/rfc/rfc8290.html)
+documents why short per-flow queues matter to interactive traffic. Physical
+route bandwidth, NAT/migration and native long-session acceptance remain open.
+
+The [managed native dispatch regression](reports/rds-managed-control-20261002.md)
+separates the whole control future from receive/decode. Awaiting a codec inside
+a selected receive handler stops polling the other branches until that handler
+finishes, even when the codec uses `spawn_blocking`. Tokio documents
+[retaining and concurrently polling futures](https://docs.rs/tokio/latest/tokio/macro.select.html)
+and [blocking-work cancellation limits](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).
+The correction retains serialized control writes, bounded codec permits and
+encoded references. It does not establish native physical-pixel latency or
+remove network outages, and incoming ACK observation still shares media IPC.
+
 | Area | v0.1 assumption | Deep-research correction |
 | --- | --- | --- |
 | QUIC impl | "quinn via iroh" | iroh 1.2 runs on **noq** — a real fork with **QUIC Multipath + QNT + QAD merged**. Relay and direct are *simultaneous first-class paths* with per-path RTT/congestion, not magic-socket trickery. |

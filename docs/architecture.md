@@ -81,6 +81,12 @@ a wgpu surface and one pending BGRA image. The CLI owns the cancelable network
 worker and reopens a desktop session on the same authenticated peer after loss.
 Per-session wire routing and broader native media acceptance remain separate.
 
+Managed native input/heartbeat dispatch and its decoded-progress watchdog are
+retained async legs independent of receive/decode waits. They share the existing
+serialized control writer, with bounded writes and EOF teardown after either
+leg ends. Incoming event observation still shares the bounded media IPC route;
+see [the native contract](native-viewer.md) for the tested boundary.
+
 Owned path policy now uses [validated eligibility](path-selection.md): only the
 handshake path is seeded; application-opened candidates stay Backup until an
 Established event. An owned bounded queue retries temporary path-credit

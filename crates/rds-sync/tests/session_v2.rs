@@ -100,8 +100,13 @@ async fn pair() -> (
         .with_max_level(tracing::level_filters::LevelFilter::DEBUG)
         .with_test_writer()
         .try_init();
-    let server_ep = bind_endpoint(EndpointConfig::default()).await.unwrap();
-    let client_ep = bind_endpoint(EndpointConfig::default()).await.unwrap();
+    let config = EndpointConfig {
+        discovery: false,
+        bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+        ..Default::default()
+    };
+    let server_ep = bind_endpoint(config.clone()).await.unwrap();
+    let client_ep = bind_endpoint(config).await.unwrap();
     let dir = scratch("server");
     let (outcomes, rx) = mpsc::channel();
     let target = server_ep.addr();
@@ -251,10 +256,16 @@ async fn v1_route_still_serves_unchanged_for_compat() {
         .unwrap();
     let ack: HelloAck = read_frame(&mut recv).await.unwrap();
     assert!(matches!(ack, HelloAck::Ok));
-    let stats = Transfer::new(id)
+    let stats = match Transfer::new(id)
         .send_file(&conn, &src, (send, recv), Duration::from_secs(60))
         .await
-        .unwrap();
+    {
+        Ok(stats) => stats,
+        Err(error) => {
+            let server = rx.recv_timeout(Duration::from_secs(10));
+            panic!("v1 client failed: {error:#}; server outcome: {server:?}");
+        }
+    };
     assert_eq!(stats.bytes, data.len() as u64);
     assert_eq!(std::fs::read(server_dir.join("v1.bin")).unwrap(), data);
     assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), "ok");
