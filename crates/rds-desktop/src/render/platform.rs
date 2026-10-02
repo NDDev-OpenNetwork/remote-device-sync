@@ -19,12 +19,16 @@ pub(super) fn remote_activity() -> RemoteActivity {
     use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
     // SAFETY: Foundation owns the retained activity token; the RAII guard
     // pairs its begin/end. This user-requested stream must remain responsive
-    // while covered, without preventing idle system/display sleep or locking.
+    // while covered and inactive: latency-critical precision prevents App Nap
+    // from stretching heartbeat/reconnect timers, while allowing idle system
+    // and display sleep keeps the viewer from changing power policy.
     let token = unsafe {
-        NSProcessInfo::processInfo().beginActivityWithOptions_reason(
-            NSActivityOptions::NSActivityUserInitiatedAllowingIdleSystemSleep,
-            &NSString::from_str("Remote desktop session"),
-        )
+        let options = NSActivityOptions::NSActivityUserInitiatedAllowingIdleSystemSleep
+            | NSActivityOptions::NSActivityLatencyCritical
+            | NSActivityOptions::NSActivityAutomaticTerminationDisabled
+            | NSActivityOptions::NSActivitySuddenTerminationDisabled;
+        NSProcessInfo::processInfo()
+            .beginActivityWithOptions_reason(options, &NSString::from_str("Remote desktop session"))
     };
     RemoteActivity(token)
 }
