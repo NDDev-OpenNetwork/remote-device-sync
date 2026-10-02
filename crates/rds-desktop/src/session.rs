@@ -868,21 +868,14 @@ pub async fn serve_desktop_with(
         let mut failed_delivery = 0u64;
         let mut health = Instant::now();
         'writer: loop {
-            while let Some(result) = acknowledgements.try_join_next() {
-                match result {
-                    Ok((_, FrameReceipt::Delivered)) => acknowledged += 1,
-                    Ok((_, FrameReceipt::Obsolete)) => obsolete += 1,
-                    Ok((seq, FrameReceipt::Failed)) => {
-                        failed_delivery += 1;
-                        chain.failed_receipt(seq);
-                    }
-                    _ => {
-                        failed_delivery += 1;
-                        chain.next = None;
-                        writer_idr.store(true, Ordering::Relaxed);
-                    }
-                }
-            }
+            drain_frame_receipts(
+                &mut acknowledgements,
+                &mut chain,
+                &writer_idr,
+                &mut acknowledged,
+                &mut obsolete,
+                &mut failed_delivery,
+            );
             if acknowledgements.len() >= MAX_PENDING_FRAME_ACKS {
                 match acknowledgements.join_next().await {
                     Some(Ok((_, FrameReceipt::Delivered))) => acknowledged += 1,
@@ -911,6 +904,17 @@ pub async fn serve_desktop_with(
                 request_frame_repair(&latest_key_seq, &writer_idr, produced.header.seq);
                 continue;
             }
+            // Receipts can finish while the writer waits for the next frame.
+            // Retire them before testing whether a recovered key has an empty
+            // media queue; completed tasks are not outstanding delivery.
+            drain_frame_receipts(
+                &mut acknowledgements,
+                &mut chain,
+                &writer_idr,
+                &mut acknowledged,
+                &mut obsolete,
+                &mut failed_delivery,
+            );
             let bps = writer_bitrate.load(Ordering::Relaxed).max(50_000) as f64 / 8.0;
             let now = Instant::now();
             budget = (budget + now.duration_since(last).as_secs_f64() * bps).min(bps * 0.25);
@@ -1633,6 +1637,31 @@ async fn send_frame(
         Err(_) => {
             tracing::debug!("frame send deadline exceeded");
             SendOutcome::Failed
+        }
+    }
+}
+
+fn drain_frame_receipts(
+    receipts: &mut JoinSet<(u64, FrameReceipt)>,
+    chain: &mut FrameChain,
+    idr: &AtomicBool,
+    acknowledged: &mut u64,
+    obsolete: &mut u64,
+    failed: &mut u64,
+) {
+    while let Some(result) = receipts.try_join_next() {
+        match result {
+            Ok((_, FrameReceipt::Delivered)) => *acknowledged += 1,
+            Ok((_, FrameReceipt::Obsolete)) => *obsolete += 1,
+            Ok((seq, FrameReceipt::Failed)) => {
+                *failed += 1;
+                chain.failed_receipt(seq);
+            }
+            _ => {
+                *failed += 1;
+                chain.next = None;
+                idr.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -2773,6 +2802,42 @@ mod tests {
                 "nonempty/large/dependent frames retain pacing"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn receipt_completed_during_idle_wait_does_not_delay_the_next_independent_key() {
+        let mut receipts = JoinSet::new();
+        let done = receipts.spawn(async { (1, FrameReceipt::Delivered) });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !done.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            receipts.len(),
+            1,
+            "completed task still needs to be retired"
+        );
+        let (mut acknowledged, mut obsolete, mut failed) = (0, 0, 0);
+        let mut chain = FrameChain::default();
+        let idr = AtomicBool::new(false);
+        drain_frame_receipts(
+            &mut receipts,
+            &mut chain,
+            &idr,
+            &mut acknowledged,
+            &mut obsolete,
+            &mut failed,
+        );
+        assert_eq!((acknowledged, obsolete, failed), (1, 0, 0));
+        assert!(!idr.load(Ordering::Relaxed));
+        let mut budget = 0.0;
+        assert_eq!(
+            frame_pacing_wait(&mut budget, 12_500.0, true, 50_000, receipts.len()),
+            Duration::ZERO
+        );
     }
 
     #[test]
