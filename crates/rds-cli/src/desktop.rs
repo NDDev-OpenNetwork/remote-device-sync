@@ -346,13 +346,10 @@ mod native {
         started: Instant,
     ) -> anyhow::Result<bool> {
         view.stage("opening desktop");
-        let mut channel = client
-            .desktop_profile(
-                Some(session),
-                hello(options),
-                Some(options.resolution.height()),
-            )
+        let (mut channel, mut events) = client
+            .desktop_profile_separated(Some(session), hello(options), options.resolution.height())
             .await?;
+        view.managed_events_separated();
         extent(view, &channel.caps, options.display)?;
         view.status("Waiting for screen");
         let control = channel.control_handle();
@@ -365,20 +362,8 @@ mod native {
             loop {
                 match channel.recv().await? {
                     None => break Ok(false),
-                    Some(ManagedMessage::Event(rds_core::DesktopEvent::Heartbeat {
-                        ts_ms,
-                        ..
-                    })) => view
-                        .control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
-                    Some(ManagedMessage::Event(rds_core::DesktopEvent::InputAck {
-                        seq, ..
-                    })) => view.input_ack(seq),
-                    Some(ManagedMessage::Event(rds_core::DesktopEvent::ClipboardReady {
-                        bytes,
-                        ..
-                    })) => {
-                        view.clipboard_ready(bytes);
-                        tracing::info!(bytes, "remote clipboard ready");
+                    Some(ManagedMessage::Event(_)) => {
+                        anyhow::bail!("unexpected event on separated video channel")
                     }
                     Some(ManagedMessage::Frame(frame)) => {
                         view.stage("decoding");
@@ -410,10 +395,33 @@ mod native {
                 }
             }
         };
+        let event_observation = async {
+            loop {
+                match events.recv().await.transpose()? {
+                    Some(rds_core::DesktopEvent::Heartbeat { ts_ms, .. }) => view
+                        .control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
+                    Some(rds_core::DesktopEvent::InputAck { seq, .. }) => view.input_ack(seq),
+                    Some(rds_core::DesktopEvent::ClipboardReady { bytes, .. }) => {
+                        view.clipboard_ready(bytes);
+                        tracing::info!(bytes, "remote clipboard ready");
+                    }
+                    None => {
+                        tracing::warn!("managed desktop event channel ended");
+                        return Ok(false);
+                    }
+                }
+            }
+        };
+        let incoming = async {
+            tokio::select! {
+                result = event_observation => result,
+                result = media => result,
+            }
+        };
         let controls = control::pump(input, &control, &last_frame, started, |message| {
             view.input_sent(message);
         });
-        let result = control::run(controls, media, stop).await;
+        let result = control::run(controls, incoming, stop).await;
         // A winning leg may cancel a partially written control on the other
         // leg. EOF closes the manager's desktop; never append Finished to a
         // potentially incomplete frame. Unrelated manager sessions survive.

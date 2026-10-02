@@ -1139,6 +1139,22 @@ async fn managed_desktop_reports_remote_refusal_without_leaking() {
             matches!(result, Err(Error::Rejected(ErrorCode::Remote))),
             "expected clean remote refusal, got {result:?}"
         );
+        let separated = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.desktop_profile_separated(
+                Some(session),
+                rds_core::DesktopHello {
+                    display: 0,
+                    max_fps: 30,
+                    codec: rds_core::Codec::H264,
+                    input_acks: true,
+                },
+                1080,
+            ),
+        )
+        .await
+        .expect("separated desktop refusal hung");
+        assert!(matches!(separated, Err(Error::Rejected(ErrorCode::Remote))));
         // The refused open must not park a stream permit: open_tcp still
         // has its full data budget — every slot but the lane reserved
         // for control traffic.

@@ -153,6 +153,17 @@ pub enum Command {
         hello: Box<crate::DesktopHello>,
         output_height: u32,
     },
+    /// Additive v5 extension: video/control on this socket, events on a
+    /// separately attached same-UID socket. Older managers refuse it.
+    DesktopSeparated {
+        session: Option<SessionId>,
+        hello: Box<crate::DesktopHello>,
+        output_height: u32,
+    },
+    /// Claim one process-lifetime event route exactly once.
+    DesktopEvents {
+        route: SessionId,
+    },
 }
 
 /// Never Debug: paths may contain private information.
@@ -221,6 +232,14 @@ pub enum Reply {
     Synced {
         session: SessionId,
         stats: SyncStats,
+    },
+    DesktopSeparatedOpened {
+        session: SessionId,
+        caps: crate::DesktopCaps,
+        route: SessionId,
+    },
+    DesktopEventsOpened {
+        route: SessionId,
     },
 }
 
@@ -380,6 +399,76 @@ mod tests {
         ] {
             let bytes = postcard::to_stdvec(&up).unwrap();
             postcard::from_bytes::<DesktopUp>(&bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn separated_desktop_extension_preserves_existing_discriminants() {
+        let id = SessionId([3; 16]);
+        let hello = || {
+            Box::new(crate::DesktopHello {
+                display: 0,
+                max_fps: 60,
+                codec: crate::Codec::H264,
+                input_acks: true,
+            })
+        };
+        for (command, tag) in [
+            (Command::Ticket, 7),
+            (
+                Command::Desktop {
+                    session: Some(id),
+                    hello: hello(),
+                },
+                10,
+            ),
+            (
+                Command::DesktopProfile {
+                    session: Some(id),
+                    hello: hello(),
+                    output_height: 1080,
+                },
+                11,
+            ),
+            (
+                Command::DesktopSeparated {
+                    session: Some(id),
+                    hello: hello(),
+                    output_height: 1080,
+                },
+                12,
+            ),
+            (Command::DesktopEvents { route: id }, 13),
+        ] {
+            let bytes = postcard::to_stdvec(&command).unwrap();
+            assert_eq!(bytes[0], tag);
+            postcard::from_bytes::<Command>(&bytes).unwrap();
+        }
+        let caps = || crate::DesktopCaps {
+            displays: vec![],
+            codecs: vec![crate::Codec::H264],
+        };
+        for (reply, tag) in [
+            (
+                Reply::DesktopOpened {
+                    session: id,
+                    caps: caps(),
+                },
+                6,
+            ),
+            (
+                Reply::DesktopSeparatedOpened {
+                    session: id,
+                    caps: caps(),
+                    route: id,
+                },
+                9,
+            ),
+            (Reply::DesktopEventsOpened { route: id }, 10),
+        ] {
+            let bytes = postcard::to_stdvec(&reply).unwrap();
+            assert_eq!(bytes[0], tag);
+            postcard::from_bytes::<Reply>(&bytes).unwrap();
         }
     }
 

@@ -643,3 +643,23 @@ transport receipt. Existing peers can retain generic-stop recovery; this does
 not require a frame-layout or authorization change. The
 [real-stream receipt](reports/rds-obsolete-frame-20261002.md) records failing old
 behavior, regression scope and the still-required installed qualification.
+
+
+## 2026-10-02 independent managed control-event observation
+
+The maintained [WebRTC pacer design](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/pacing/g3doc/index.md)
+separates queues for different traffic classes instead of allowing a buffered
+media track to hold another class. [QUIC stream prioritization](https://www.rfc-editor.org/rfc/rfc9000.html#section-2.3)
+is an application responsibility; independent remote streams do not preserve
+that independence if the application serializes them again onto one local pipe.
+
+RDS's managed bridge did that serialization: video-body writes and native decode
+waits could delay input ACK/heartbeat observation despite the remote control
+stream's higher priority. The separated local event extension removes those
+two application waits while preserving existing admission, decode and ordering
+bounds. It does not bypass QUIC congestion/flow control or guarantee physical
+network failover. The [measurement boundary](reports/rds-event-isolation-20261002.md)
+records blocked-body, FIFO and lifecycle regressions separately from installed
+native quality and latency acceptance. The old Iroh 0.96 network-change regression
+reported in upstream's January release note is not assumed to exist in pinned
+1.2; dependency changes require current source evidence and same-harness parity.
