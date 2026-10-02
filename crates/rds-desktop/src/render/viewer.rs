@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -30,10 +33,18 @@ pub enum ViewerInput {
 struct InputState {
     queue: Mutex<VecDeque<ViewerInput>>,
     ready: Notify,
+    pointer_coalesced: AtomicU64,
+    input_dropped: AtomicU64,
+    max_depth: AtomicU64,
 }
 struct InputSender(Arc<InputState>);
+const INPUT_QUEUE_CAPACITY: usize = 1024;
+
 /// One bounded input consumer. Consecutive pointer positions collapse, while
 /// keys/buttons retain their order relative to the final pointer before them.
+/// The queue is deliberately much larger than a normal OS event burst: a
+/// slow WAN write must never turn a fast click sequence into an application
+/// close merely because the old 128-entry queue filled.
 pub struct InputReceiver(Arc<InputState>);
 impl InputReceiver {
     pub async fn recv(&mut self) -> Option<ViewerInput> {
@@ -74,11 +85,57 @@ impl InputSender {
             })))
         ) {
             queue.pop_back();
+            self.0.pointer_coalesced.fetch_add(1, Ordering::Relaxed);
         }
-        if queue.len() >= 128 {
-            return Err(());
+        if queue.len() >= INPUT_QUEUE_CAPACITY {
+            let pointer_move = matches!(
+                &message,
+                ViewerInput::Control(DesktopControl::Input(InputEvent {
+                    kind: InputKind::PointerMove { .. },
+                    ..
+                }))
+            );
+            if pointer_move {
+                // Motion is the only lossy class. Preserve every semantic
+                // event and retain the newest motion when a burst outruns
+                // the control writer.
+                if let Some(index) = queue.iter().rposition(|queued| {
+                    matches!(
+                        queued,
+                        ViewerInput::Control(DesktopControl::Input(InputEvent {
+                            kind: InputKind::PointerMove { .. },
+                            ..
+                        }))
+                    )
+                }) {
+                    queue.remove(index);
+                    self.0.pointer_coalesced.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.0.pointer_coalesced.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+            } else if let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    ViewerInput::Control(DesktopControl::Input(InputEvent {
+                        kind: InputKind::PointerMove { .. },
+                        ..
+                    }))
+                )
+            }) {
+                // Make room for a semantic event by removing only stale
+                // motion. Button/key ordering is never coalesced.
+                queue.remove(index);
+                self.0.pointer_coalesced.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.0.input_dropped.fetch_add(1, Ordering::Relaxed);
+                return Err(());
+            }
         }
         queue.push_back(message);
+        self.0
+            .max_depth
+            .fetch_max(queue.len() as u64, Ordering::Relaxed);
         drop(queue);
         self.0.ready.notify_one();
         Ok(())
@@ -120,6 +177,9 @@ pub struct ViewerReport {
     pub input_ack_p50_ms: Option<f64>,
     pub input_ack_p95_ms: Option<f64>,
     pub input_queue_p95_ms: Option<f64>,
+    pub input_pointer_coalesced: u64,
+    pub input_events_dropped: u64,
+    pub input_queue_max_depth: u64,
     pub pending_input_acks: usize,
     pub oldest_input_ack_age_ms: Option<u64>,
     pub clipboard_transfers: u64,
@@ -225,6 +285,7 @@ fn quantiles(samples: &[f64]) -> (Option<f64>, Option<f64>) {
 #[derive(Clone)]
 pub struct ViewerHandle {
     state: Arc<Mutex<State>>,
+    input_state: Arc<InputState>,
     proxy: EventLoopProxy<()>,
     started: Instant,
 }
@@ -365,6 +426,9 @@ impl ViewerHandle {
         report.oldest_input_ack_age_ms = state.input_latency.pending.front().map(|(_, created)| {
             (self.started.elapsed().as_millis() as u64).saturating_sub(*created)
         });
+        report.input_pointer_coalesced = self.input_state.pointer_coalesced.load(Ordering::Relaxed);
+        report.input_events_dropped = self.input_state.input_dropped.load(Ordering::Relaxed);
+        report.input_queue_max_depth = self.input_state.max_depth.load(Ordering::Relaxed);
         report
     }
 }
@@ -379,11 +443,17 @@ impl Viewer {
     pub fn new(display: u32) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
         let event_loop =
             super::platform::event_loop().map_err(|e| DesktopError::Capture(e.to_string()))?;
-        let queue = Arc::new(InputState {
+        let input_state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
+            pointer_coalesced: AtomicU64::new(0),
+            input_dropped: AtomicU64::new(0),
+            max_depth: AtomicU64::new(0),
         });
-        let (input, receiver) = (InputSender(queue.clone()), InputReceiver(queue));
+        let (input, receiver) = (
+            InputSender(input_state.clone()),
+            InputReceiver(input_state.clone()),
+        );
         let handle = ViewerHandle {
             state: Arc::new(Mutex::new(State {
                 pending: None,
@@ -403,6 +473,7 @@ impl Viewer {
                 last_encoded_ms: None,
                 occluded: false,
             })),
+            input_state,
             proxy: event_loop.create_proxy(),
             started: Instant::now(),
         };
@@ -807,6 +878,9 @@ mod tests {
         let state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
+            pointer_coalesced: AtomicU64::new(0),
+            input_dropped: AtomicU64::new(0),
+            max_depth: AtomicU64::new(0),
         });
         let sender = InputSender(state.clone());
         let mut receiver = InputReceiver(state);
@@ -851,5 +925,47 @@ mod tests {
                 .unwrap(),
             Some(ViewerInput::Close)
         ));
+    }
+
+    #[tokio::test]
+    async fn rapid_semantic_burst_preserves_every_button_event() {
+        let state = Arc::new(InputState {
+            queue: Mutex::new(VecDeque::new()),
+            ready: Notify::new(),
+            pointer_coalesced: AtomicU64::new(0),
+            input_dropped: AtomicU64::new(0),
+            max_depth: AtomicU64::new(0),
+        });
+        let sender = InputSender(state.clone());
+        let mut receiver = InputReceiver(state.clone());
+        for seq in 0..400 {
+            sender
+                .send(event(
+                    seq * 2,
+                    InputKind::PointerButton {
+                        button: 0x110,
+                        pressed: true,
+                    },
+                ))
+                .unwrap();
+            sender
+                .send(event(
+                    seq * 2 + 1,
+                    InputKind::PointerButton {
+                        button: 0x110,
+                        pressed: false,
+                    },
+                ))
+                .unwrap();
+        }
+        let mut seen = Vec::with_capacity(800);
+        while let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.try_recv() {
+            seen.push(input.seq);
+        }
+        assert_eq!(seen.len(), 800);
+        assert_eq!(seen, (0..800).collect::<Vec<_>>());
+        assert_eq!(state.input_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(state.pointer_coalesced.load(Ordering::Relaxed), 0);
+        assert_eq!(state.max_depth.load(Ordering::Relaxed), 800);
     }
 }
