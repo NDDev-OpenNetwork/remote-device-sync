@@ -125,6 +125,7 @@ pub struct ViewerReport {
     pub encode_to_send_p50_ms: Option<f64>,
     pub encode_to_send_p95_ms: Option<f64>,
     pub control_rtt_ms: Option<u64>,
+    pub last_control_echo_ms: Option<u64>,
     pub input_acks: u64,
     pub inputs_dispatched: u64,
     pub input_acks_matched: u64,
@@ -159,6 +160,7 @@ pub struct ViewerSnapshot {
     pub ui_event_age_ms: u64,
     pub decoded_frame_age_ms: Option<u64>,
     pub encoded_frame_age_ms: Option<u64>,
+    pub control_echo_age_ms: Option<u64>,
     pub submission_age_ms: Option<u64>,
     pub pending_frame_bytes: usize,
     pub occluded: bool,
@@ -272,6 +274,9 @@ impl ViewerHandle {
             ui_event_age_ms: elapsed.saturating_sub(state.last_ui_ms),
             decoded_frame_age_ms: report.last_frame_ms.map(|v| elapsed.saturating_sub(v)),
             encoded_frame_age_ms: state.last_encoded_ms.map(|v| elapsed.saturating_sub(v)),
+            control_echo_age_ms: report
+                .last_control_echo_ms
+                .map(|v| elapsed.saturating_sub(v)),
             submission_age_ms: report.last_submission_ms.map(|v| elapsed.saturating_sub(v)),
             pending_frame_bytes: state.pending.as_ref().map_or(0, |p| p.raw.data.len()),
             occluded: state.occluded,
@@ -315,7 +320,9 @@ impl ViewerHandle {
         lock(&self.state).extent = (width, height);
     }
     pub fn control_rtt(&self, ms: u64) {
-        lock(&self.state).report.control_rtt_ms = Some(ms);
+        let mut state = lock(&self.state);
+        state.report.control_rtt_ms = Some(ms);
+        state.report.last_control_echo_ms = Some(self.started.elapsed().as_millis() as u64);
     }
     pub fn input_sent(&self, control: &DesktopControl) {
         if matches!(control, DesktopControl::RequestIdr) {

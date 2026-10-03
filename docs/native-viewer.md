@@ -252,6 +252,12 @@ terminated UI. CLI desktop commands may opt in with `--diagnostics-dir` pointing
 to an existing private directory. Independent UI probes share the bounded wake
 flag; a stalled UI cannot create an unbounded event queue.
 
+`control_echo_age_ms` measures time since an actually observed heartbeat echo,
+using the viewer's clock. The last RTT is a historic sample; it does not prove
+that control traffic still flows. Reconnect warnings include echo age, and
+managed stages distinguish session lookup, peer connection, identity verification
+and desktop opening so a failed peer dial is not mistaken for a video-only stall.
+
 Surface acquisition now precedes any GPU upload. An occluded surface retains
 only the newest CPU image, rather than queuing staging buffers without submission.
 Managed IPC framing is read by one owned bounded worker; canceling `recv()` in a

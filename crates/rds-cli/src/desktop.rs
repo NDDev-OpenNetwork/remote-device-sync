@@ -244,10 +244,13 @@ mod native {
                 result = async {
                     match &mut source {
                         Source::Managed { client,session,peer,grant } => {
+                            view.stage("checking managed session");
                             if session.is_none() || client.selected(*session).await.is_err() {
+                                view.stage("connecting peer");
                                 let Reply::Connected(id) = client.request(Command::Connect { target:peer.clone(),grant:grant.clone() }).await? else { anyhow::bail!("unexpected local connection response"); };
                                 // After the first authenticated connect retain the exact peer
                                 // identity, even when the initial target was a registry name.
+                                view.stage("verifying peer");
                                 let snapshot = client.snapshot().await?;
                                 let authenticated = snapshot.sessions.into_iter().find(|s| s.id == id).ok_or_else(|| anyhow::anyhow!("connected session disappeared"))?.peer;
                                 *peer = reconnect_target(peer,authenticated)?;
@@ -277,6 +280,7 @@ mod native {
                 pending_input_acks = snapshot.report.pending_input_acks,
                 oldest_input_ack_age_ms = snapshot.report.oldest_input_ack_age_ms,
                 control_rtt_ms = snapshot.report.control_rtt_ms,
+                control_echo_age_ms = snapshot.control_echo_age_ms,
                 occluded = snapshot.occluded,
                 "desktop reconnecting"
             );

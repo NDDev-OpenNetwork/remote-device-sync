@@ -81,3 +81,20 @@ first-click-to-visible-frame delay after a long pause, overnight soak and physic
 sleep/network-change recovery remain separate acceptance evidence. A responsive
 heartbeat, a submitted GPU frame and an input ACK each describe different stages;
 none alone proves physical display response or permanent WAN availability.
+
+## Heartbeat freshness follow-up
+
+The installed follow-up still encountered a prolonged recovery episode. A
+previously recorded RTT remained in snapshots throughout the outage. That value
+could not establish that heartbeat echoes continued; describing such a snapshot
+as a healthy control channel was not justified without its observation age.
+
+Snapshots and reconnect warnings now include `control_echo_age_ms`, based on
+the last locally observed echo, and the report retains its observation timestamp.
+Managed stages distinguish session lookup, peer connection, identity verification
+and desktop opening. This is additive private diagnostic metadata, without a
+remote or local IPC wire change. Desktop-feature workspace strict clippy and the
+six control/eleven render tests passed after this follow-up. The earlier full
+workspace totals apply to the preceding functional increment; fresh CI checks
+the final head independently. Neither this metadata correction nor green source
+checks closes the unresolved installed idle/network-recovery gate.
