@@ -75,17 +75,26 @@ being received. The existing global encoded/decode limits still apply.
 The sender also measures frame delivery receipts independently of QUIC packet
 loss counters, which may look clean while a reliable relay queues traffic.
 A receipt delayed beyond three sampled path RTTs (bounded to 250–1000 ms) is
-tracked until it completes or its owned task is canceled. A completed delayed
-receipt is counted separately from the currently outstanding queue. Two adjacent
-250 ms observations with new delayed completions or outstanding late receipts
-can reduce bitrate even while successful receipts continue; one isolated delayed
-completion cannot. These timing signals indicate delivery pressure, without
-proving where the delay occurred. A hard delivery failure still reduces
+tracked until it completes or its owned task is canceled. The cumulative delayed
+count increases when a receipt first crosses that deadline, not when it completes;
+currently outstanding late receipts are tracked separately. Timing-only bitrate
+pressure requires two adjacent 250 ms observations, each with at least 16 KiB of
+newly delayed payload. Sparse small updates can be late from retransmission or
+jitter without the encoder exhausting link capacity; repeatedly cutting their
+encoder target can instead degrade quality and increase codec skips. An isolated
+substantial delay cannot trigger this soft path. Outstanding blocked delivery
+without successful receipts and hard failures retain their independent response.
+These signals estimate delivery pressure without proving its physical cause.
+A hard delivery failure still reduces
 load immediately. A five-second recovery hold and growth of at most 1% per
 sample with fresh receipts prevent immediate return to a sustained backlog.
 Media reductions coalesce over one second; simultaneous path/media observations
 apply the stronger response once. Existing bitrate bounds, frame deadlines,
 three-frame admission and reference-preserving live encoder updates still apply.
+Health and reduction logs expose newly delayed payload bytes alongside frame
+counts. The 16 KiB qualification is a bounded application heuristic, not a
+measurement of path capacity or a minimum image-quality guarantee. See
+[the regression receipt](reports/rds-payload-pressure-20261003.md).
 
 Loss-only reductions now also respect recent timely transport goodput. Two
 adjacent one-second windows must each contain at least three complete timely

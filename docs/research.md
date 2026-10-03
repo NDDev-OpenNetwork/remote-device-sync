@@ -689,3 +689,20 @@ control regression covers a sixty-second idle interval, successful repair on
 the original channel, ongoing input/heartbeats and the unrecovered deadline.
 The [qualification report](reports/rds-idle-repair-20261003.md) keeps this fixture
 separate from native visibility and overnight acceptance.
+
+## 2026-10-03 payload-qualified delivery pressure
+
+[WebRTC's application-limited detector](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/congestion_controller/goog_cc/alr_detector.h)
+uses elapsed time and bytes sent to distinguish limited application traffic from
+network capacity. This supports considering load alongside timing; it does not
+validate a particular RDS threshold. RDS previously penalized two adjacent
+observations of newly delayed receipts without considering payload size. A
+one-packet desktop update can be delayed by loss/jitter while reducing encoder
+load cannot materially improve its transit time.
+
+The RDS soft-delay path now requires at least 16 KiB of newly delayed payload in
+each of two consecutive pacing intervals. This is an application heuristic to
+exclude sparse tiny updates, not the WebRTC ALR algorithm or a capacity estimate.
+Actual stalled outstanding delivery, hard failure, path feedback and existing
+bounded growth/deadlines remain. The [regression report](reports/rds-payload-pressure-20261003.md)
+separates the reproduced quality collapse from installed network acceptance.

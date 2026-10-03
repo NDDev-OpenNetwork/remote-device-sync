@@ -51,12 +51,18 @@ const RTT_MIN_INCREASE_MS: u64 = 10;
 const MAX_PENDING_FRAME_ACKS: usize = 3;
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const KEYFRAME_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+// A delayed few-packet desktop update is not evidence that encoder load
+// exceeds link capacity. Require at least 16 KiB crossing the soft deadline
+// in each pacing observation before timing-only feedback cuts image quality.
+// Outstanding stalled delivery and hard failures keep their independent path.
+const MIN_SOFT_DELIVERY_LOAD_BYTES: u64 = 16 * 1024;
 
 // QUIC path counters may remain clean while a reliable relay queues media.
 // Observe actual frame delivery as well, without retaining frame payloads.
 #[derive(Default)]
 struct DeliveryFeedback {
     delayed: AtomicU64,
+    delayed_bytes: AtomicU64,
     late_pending: AtomicU64,
     failed: AtomicU64,
     acknowledged: AtomicU64,
@@ -73,6 +79,11 @@ struct DeliveryFeedback {
 }
 
 impl DeliveryFeedback {
+    fn mark_delayed(&self, bytes: usize) {
+        self.delayed_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.delayed.fetch_add(1, Ordering::Relaxed);
+    }
     fn acknowledged(&self, bytes: usize, elapsed: Duration, budget: Duration) {
         self.acknowledged.fetch_add(1, Ordering::Relaxed);
         if elapsed <= budget {
@@ -109,18 +120,18 @@ impl DeliveryPressure {
         &mut self,
         late_pending: u64,
         delayed_frames: u64,
+        delayed_bytes: u64,
         delivered: bool,
         failed: bool,
     ) -> bool {
-        // A completed slow frame is history, not evidence of a current queue.
-        // Require two consecutive pacing samples with an outstanding late
-        // receipt and no new successful receipt. Hard failures still react now.
-        if delayed_frames == 0 {
+        // Counts include receipts crossing their soft deadline, not only
+        // completions. Packet jitter on sparse tiny updates is independent
+        // of the encoder target; cutting it would merely starve Full HD.
+        if delayed_frames == 0 || delayed_bytes < MIN_SOFT_DELIVERY_LOAD_BYTES {
             self.delayed_ticks = 0;
         } else {
-            // One isolated delayed frame is a WAN spike; two adjacent
-            // samples indicate a queue that is adding visible interaction
-            // latency even when every frame eventually gets acknowledged.
+            // Sustained substantial delayed payload may indicate excess
+            // offered media load even while receipts continue to progress.
             self.delayed_ticks = self.delayed_ticks.saturating_add(1).min(2);
         }
         if delivered || late_pending == 0 {
@@ -749,6 +760,7 @@ pub async fn serve_desktop_with(
         let mut delivery_rate = crate::delivery_rate::DeliveryRate::default();
         workers.spawn(async move {
             let mut last_delayed = 0;
+            let mut last_delayed_bytes = 0;
             let mut last_failed = 0;
             let mut last_acknowledged = 0;
             let mut pressure = DeliveryPressure::default();
@@ -767,15 +779,18 @@ pub async fn serve_desktop_with(
                 let previous = controller.current();
                 let path = conn.current_path_stats();
                 let delayed = feedback.delayed.load(Ordering::Relaxed);
+                let delayed_bytes_total = feedback.delayed_bytes.load(Ordering::Relaxed);
                 let failed = feedback.failed.load(Ordering::Relaxed);
                 let acknowledged = feedback.acknowledged.load(Ordering::Relaxed);
                 let delayed_frames = delayed.saturating_sub(last_delayed);
+                let delayed_bytes = delayed_bytes_total.saturating_sub(last_delayed_bytes);
                 let failed_frames = failed.saturating_sub(last_failed);
                 let delivered = acknowledged > last_acknowledged;
                 let late_pending = feedback.late_pending.load(Ordering::Relaxed);
                 let impaired = pressure.sample(
                     late_pending,
                     delayed_frames,
+                    delayed_bytes,
                     delivered,
                     failed_frames > 0,
                 );
@@ -793,6 +808,7 @@ pub async fn serve_desktop_with(
                     delivery_floor,
                 );
                 (last_delayed, last_failed, last_acknowledged) = (delayed, failed, acknowledged);
+                last_delayed_bytes = delayed_bytes_total;
                 if bps != previous {
                     tracing::debug!(
                         previous_bps = previous,
@@ -800,6 +816,7 @@ pub async fn serve_desktop_with(
                         timely_delivery_floor_bps = delivery_floor,
                         deadline_misses = missed,
                         delayed_frames,
+                        delayed_bytes,
                         failed_frames,
                         late_pending,
                         delivery_stalled_ticks = pressure.stalled_ticks,
@@ -822,6 +839,8 @@ pub async fn serve_desktop_with(
                         delivery_impaired = impaired,
                         delivered,
                         late_pending,
+                        delayed_frames,
+                        delayed_bytes,
                         failed_frames,
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
                         path_via_relay = ?path.map(|p| p.via_relay),
@@ -850,6 +869,8 @@ pub async fn serve_desktop_with(
                         timely_deliveries = feedback.timely_receipts.load(Ordering::Relaxed),
                         delayed_frames,
                         delayed_frames_total = delayed,
+                        delayed_bytes,
+                        delayed_bytes_total,
                         impaired,
                         late_pending,
                         delivery_stalled_ticks = pressure.stalled_ticks,
@@ -1787,7 +1808,7 @@ async fn send_frame_inner(
             tokio::select! {
                 result = &mut receipt => result,
                 _ = tokio::time::sleep(delay_budget) => {
-                    feedback.delayed.fetch_add(1, Ordering::Relaxed);
+                    feedback.mark_delayed(payload_bytes);
                     late = Some(LateReceipt::new(feedback.clone()));
                     tracing::warn!(frame_seq=seq,payload_bytes,delay_budget_ms=delay_budget.as_millis(),"desktop frame delivery delayed");
                     receipt.await
@@ -1899,7 +1920,7 @@ mod tests {
         let mut controller = BitrateController::new(4_000_000, 8_000_000);
         controller.step_with_delivery(Some(path(1000, 0, 140, 0)), 0, false, true);
         for tick in 0..16 {
-            let impaired = pressure.sample(1, 0, false, false);
+            let impaired = pressure.sample(1, 0, 0, false, false);
             controller.step_with_delivery(Some(path(1001 + tick, 0, 140, 0)), 0, impaired, false);
         }
         assert_eq!(
@@ -1908,7 +1929,7 @@ mod tests {
             "a single outstanding keyframe cannot repeatedly penalize future frames that admission has paused"
         );
         assert!(
-            pressure.sample(1, 0, true, true),
+            pressure.sample(1, 0, 0, true, true),
             "a new hard failure must still react"
         );
     }
@@ -1916,25 +1937,57 @@ mod tests {
     #[test]
     fn delivery_pressure_requires_ongoing_blockage_and_preserves_hard_failures() {
         let mut pressure = DeliveryPressure::default();
-        assert!(!pressure.sample(1, 0, true, false));
-        assert!(!pressure.sample(1, 0, false, false));
-        assert!(pressure.sample(1, 0, false, false));
-        assert!(!pressure.sample(1, 0, false, false));
-        assert!(!pressure.sample(0, 0, false, false));
-        assert!(!pressure.sample(1, 0, false, false));
-        assert!(!pressure.sample(1, 0, true, false));
+        assert!(!pressure.sample(1, 0, 0, true, false));
+        assert!(!pressure.sample(1, 0, 0, false, false));
+        assert!(pressure.sample(1, 0, 0, false, false));
+        assert!(!pressure.sample(1, 0, 0, false, false));
+        assert!(!pressure.sample(0, 0, 0, false, false));
+        assert!(!pressure.sample(1, 0, 0, false, false));
+        assert!(!pressure.sample(1, 0, 0, true, false));
         assert!(
-            pressure.sample(0, 0, true, true),
+            pressure.sample(0, 0, 0, true, true),
             "hard failure must react immediately"
         );
     }
 
     #[test]
-    fn sustained_completed_delay_reduces_load_even_with_fresh_receipts() {
+    fn sustained_substantial_delayed_payload_reduces_load_with_fresh_receipts() {
         let mut pressure = DeliveryPressure::default();
-        assert!(!pressure.sample(0, 1, true, false));
-        assert!(pressure.sample(0, 1, true, false));
-        assert!(!pressure.sample(0, 0, true, false));
+        assert!(!pressure.sample(0, 1, MIN_SOFT_DELIVERY_LOAD_BYTES, true, false));
+        assert!(pressure.sample(0, 1, MIN_SOFT_DELIVERY_LOAD_BYTES, true, false));
+        assert!(!pressure.sample(0, 0, 0, true, false));
+        // A tiny-payload observation ends the sustained-load sequence.
+        assert!(!pressure.sample(0, 1, MIN_SOFT_DELIVERY_LOAD_BYTES, true, false));
+        assert!(!pressure.sample(0, 1, 1024, true, false));
+        assert!(!pressure.sample(0, 1, MIN_SOFT_DELIVERY_LOAD_BYTES, true, false));
+    }
+
+    #[test]
+    fn repeated_small_delayed_receipts_do_not_destroy_encoder_quality() {
+        let mut pressure = DeliveryPressure::default();
+        let mut controller = BitrateController::new(4_000_000, 8_000_000);
+        let feedback = DeliveryFeedback::default();
+        let (mut last_count, mut last_bytes) = (0, 0);
+        for tick in 0..240 {
+            // One small desktop update per pacing observation. Delivery
+            // progresses despite jitter; reducing the encoder cannot fix
+            // the transit time of an approximately one-packet update.
+            feedback.mark_delayed(1024);
+            let count = feedback.delayed.load(Ordering::Relaxed);
+            let bytes = feedback.delayed_bytes.load(Ordering::Relaxed);
+            let impaired = pressure.sample(0, count - last_count, bytes - last_bytes, true, false);
+            (last_count, last_bytes) = (count, bytes);
+            controller.step_with_delivery(
+                Some(path(1000 + tick * 10, 0, 140, 0)),
+                0,
+                impaired,
+                true,
+            );
+        }
+        assert!(
+            controller.current() >= 4_000_000,
+            "timing-only pressure on tiny updates must not drive Full HD to the 100 kbps floor"
+        );
     }
 
     #[test]
@@ -1945,7 +1998,7 @@ mod tests {
             // Roughly one percent of a frame-rate stream has a soft delay,
             // while receipts continue. This cannot justify the 100 kbps floor.
             let late = u64::from(tick % 20 == 0);
-            let impaired = pressure.sample(late, 0, true, false);
+            let impaired = pressure.sample(late, 0, 0, true, false);
             controller.step_with_delivery(
                 Some(path(1000 + tick * 100, 0, 140, 0)),
                 0,
