@@ -14,9 +14,12 @@ A blocked video-body write or a busy decoder cannot hold event observation.
 `managed_events_separated` in the viewer report identifies this installed mode.
 
 Each control write remains bounded to two seconds; codec calls retain their
-five-second caller bound and global worker limits. The 15-second decoded-progress
-watchdog still requires actual decoded frames. This change does not keep a
-nonfunctional video session healthy simply because heartbeats continue.
+five-second caller bound and global worker limits. After three and eight seconds
+without decoded progress, the watchdog requests an independent recovery image on
+the existing control channel. Only a decoded frame rearms these two attempts;
+heartbeat echoes do not. Fifteen seconds without progress still ends the desktop
+and triggers bounded reconnect, so a responding control channel cannot mask a
+nonfunctional video session.
 Decoder state, FIFO encoded ordering and the one-message media queue remain.
 Either socket's departure ends this desktop by EOF, with both owned reader tasks
 aborted; no frame is appended after canceling a potentially partial write.
@@ -52,7 +55,10 @@ is downscaled. Physical keys use the wire's evdev vocabulary; the target's
 keyboard layout interprets them. IME/text composition, rich clipboard/audio and
 monitor-switching UI are not implemented. Focus loss releases held keys and
 buttons. Input queue overflow closes the session instead of silently losing
-a release. Consecutive pointer moves collapse without crossing key/click order.
+a release. The queue holds at most 1024 controls. Only adjacent absolute pointer
+moves on the same display collapse; motion before a button, key or scroll remains
+a position barrier. Full-queue rejection leaves the accepted prefix intact and
+records overflow before closing. It never evicts an earlier click's position.
 
 Only one pending decoded frame is retained for presentation. The GPU surface
 requests `AutoNoVsync` and one frame of latency, with the backend's supported
@@ -70,9 +76,11 @@ The sender also measures frame delivery receipts independently of QUIC packet
 loss counters, which may look clean while a reliable relay queues traffic.
 A receipt delayed beyond three sampled path RTTs (bounded to 250–1000 ms) is
 tracked until it completes or its owned task is canceled. A completed delayed
-receipt remains a diagnostic count and is no longer treated as a current queue.
-Soft congestion requires two consecutive 250 ms samples with outstanding late
-receipts and no new successful receipt. A hard delivery failure still reduces
+receipt is counted separately from the currently outstanding queue. Two adjacent
+250 ms observations with new delayed completions or outstanding late receipts
+can reduce bitrate even while successful receipts continue; one isolated delayed
+completion cannot. These timing signals indicate delivery pressure, without
+proving where the delay occurred. A hard delivery failure still reduces
 load immediately. A five-second recovery hold and growth of at most 1% per
 sample with fresh receipts prevent immediate return to a sustained backlog.
 Media reductions coalesce over one second; simultaneous path/media observations
@@ -108,7 +116,8 @@ cannot silently switch identities. Reconnect backoff is bounded to eight seconds
 queued while disconnected are discarded. No TCP/SSH exec or file operation is
 replayed by this recovery. A grant is reused only while the agent accepts it;
 automatic grant issuance/renewal remains GDS work. Fifteen seconds without a
-decoded frame triggers a new desktop session. Closing the window cancels and
+decoded frame triggers a new desktop session after the two bounded repair
+attempts. Closing the window cancels and
 joins its network worker, leaving unrelated managed streams intact.
 
 Each reconnect warning records the last network/render stage, decoded and
@@ -235,13 +244,19 @@ telemetry output adapter performs logging away from UI/network threads.
 Every two seconds a small `state-<pid>.json` snapshot is atomically replaced.
 It contains UI dispatch age, encoded/decoded/presented-frame ages, network/render
 stage, occlusion, pending CPU bytes, received/submitted/replaced frames, actual
-GPU upload count, reconnects and stage latency. Snapshots contain no image,
+GPU upload count, reconnects, watchdog repair requests and stage latency. Snapshots contain no image,
 clipboard, peer or credentials. Stalled input/heartbeat writes and decode waits
 are bounded separately; reconnect causes and panics are recorded. `--report`
 still emits an end-of-run receipt, while the live snapshot survives a hung or
 terminated UI. CLI desktop commands may opt in with `--diagnostics-dir` pointing
 to an existing private directory. Independent UI probes share the bounded wake
 flag; a stalled UI cannot create an unbounded event queue.
+
+`control_echo_age_ms` measures time since an actually observed heartbeat echo,
+using the viewer's clock. The last RTT is a historic sample; it does not prove
+that control traffic still flows. Reconnect warnings include echo age, and
+managed stages distinguish session lookup, peer connection, identity verification
+and desktop opening so a failed peer dial is not mistaken for a video-only stall.
 
 Surface acquisition now precedes any GPU upload. An occluded surface retains
 only the newest CPU image, rather than queuing staging buffers without submission.
@@ -316,8 +331,11 @@ Private normal-level server logs now retain every bitrate reduction's path
 counters, delivery state and producer misses. Five-second health records also
 include direct/relay selection and the maximum successful input-injection
 duration in that interval. No input values or content are recorded. Viewer
-reports correlate up to 128 sent input sequences using only the viewer's local
-clock, with bounded 1024-sample histories. Input ACK p50/p95 includes local
+reports correlate up to 1024 dispatched input sequences using only the viewer's
+local clock, with bounded 1024-sample histories. They separately count dispatch
+attempts, received/matched/unmatched ACKs and evicted tracking records. Dispatch
+is observed before the bounded write and does not prove remote injection; an
+unmatched ACK supplies no latency sample. Input ACK p50/p95 includes local
 queueing, transport, server injection and reply handling; queue p95 and the
 oldest pending ACK age distinguish an input backlog from stale video. These
 ACK measurements do not establish that the target application changed pixels.
@@ -447,11 +465,15 @@ CPU clock stays absent. Elapsed time minus CPU time includes scheduling and
 other native waiting; it is not a diagnosis of a particular OS cause.
 
 The macOS viewer owns a Foundation user-initiated activity for its event-loop
-lifetime, including a covered window's active reference processing. The guard
-ends the activity when the loop returns or unwinds. Its option explicitly
-allows idle system sleep and does not keep the display awake or prevent lock.
-This is scoped application activity, not a global power/QoS setting. Installed
-measurements still decide whether it improves a particular latency episode.
+lifetime, including a covered window's active reference processing. It requests
+latency-critical timer/I/O precision and prevents automatic idle system sleep;
+network I/O cannot continue while the computer is suspended. It does not hold the
+display awake or prevent screen locking. The RAII guard ends the activity when
+the loop returns or unwinds. Explicit sleep and lid-close behavior remain OS
+policy, and reconnection may be necessary afterward. This is scoped application
+activity, not a persistent power setting. `pmset -g assertions` can verify the
+installed process's assertion. Installed measurements still decide whether it
+improves a particular latency episode.
 
 ## Obsolete predecessors and repair
 

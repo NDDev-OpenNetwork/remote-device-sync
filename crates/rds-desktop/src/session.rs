@@ -100,14 +100,29 @@ impl Drop for LateReceipt {
 #[derive(Default)]
 struct DeliveryPressure {
     stalled_ticks: u8,
+    delayed_ticks: u8,
     penalized: bool,
 }
 
 impl DeliveryPressure {
-    fn sample(&mut self, late_pending: u64, delivered: bool, failed: bool) -> bool {
+    fn sample(
+        &mut self,
+        late_pending: u64,
+        delayed_frames: u64,
+        delivered: bool,
+        failed: bool,
+    ) -> bool {
         // A completed slow frame is history, not evidence of a current queue.
         // Require two consecutive pacing samples with an outstanding late
         // receipt and no new successful receipt. Hard failures still react now.
+        if delayed_frames == 0 {
+            self.delayed_ticks = 0;
+        } else {
+            // One isolated delayed frame is a WAN spike; two adjacent
+            // samples indicate a queue that is adding visible interaction
+            // latency even when every frame eventually gets acknowledged.
+            self.delayed_ticks = self.delayed_ticks.saturating_add(1).min(2);
+        }
         if delivered || late_pending == 0 {
             self.penalized = false;
         }
@@ -116,14 +131,20 @@ impl DeliveryPressure {
         } else {
             0
         };
-        // A blocked keyframe pauses capture: repeated cuts cannot shrink
-        // the already encoded payload. Penalize this blockage once, then wait
-        // for progress or a distinct hard failure before reducing again.
-        let stalled = self.stalled_ticks >= 2 && !self.penalized;
-        if stalled || failed {
+        // A blocked keyframe pauses capture: repeated cuts cannot shrink the
+        // already encoded payload. Penalize this blockage once, then wait for
+        // progress or a distinct hard failure before reducing again.
+        let stalled = self.stalled_ticks >= 2;
+        let sustained_delay = self.delayed_ticks >= 2;
+        let impaired = stalled || sustained_delay || failed;
+        if impaired && !self.penalized {
             self.penalized = true;
+            return true;
         }
-        failed || stalled
+        if !impaired {
+            self.penalized = false;
+        }
+        false
     }
 }
 
@@ -752,7 +773,12 @@ pub async fn serve_desktop_with(
                 let failed_frames = failed.saturating_sub(last_failed);
                 let delivered = acknowledged > last_acknowledged;
                 let late_pending = feedback.late_pending.load(Ordering::Relaxed);
-                let impaired = pressure.sample(late_pending, delivered, failed_frames > 0);
+                let impaired = pressure.sample(
+                    late_pending,
+                    delayed_frames,
+                    delivered,
+                    failed_frames > 0,
+                );
                 let delivery_floor = delivery_rate.sample(
                     path.map(|p| p.path_id), progress_clock.now_ms(),
                     feedback.timely_bytes.load(Ordering::Relaxed),
@@ -822,6 +848,9 @@ pub async fn serve_desktop_with(
                         timely_delivery_floor_bps = delivery_floor,
                         timely_delivery_bytes = feedback.timely_bytes.load(Ordering::Relaxed),
                         timely_deliveries = feedback.timely_receipts.load(Ordering::Relaxed),
+                        delayed_frames,
+                        delayed_frames_total = delayed,
+                        impaired,
                         late_pending,
                         delivery_stalled_ticks = pressure.stalled_ticks,
                         failed_delivery = failed,
@@ -1870,7 +1899,7 @@ mod tests {
         let mut controller = BitrateController::new(4_000_000, 8_000_000);
         controller.step_with_delivery(Some(path(1000, 0, 140, 0)), 0, false, true);
         for tick in 0..16 {
-            let impaired = pressure.sample(1, false, false);
+            let impaired = pressure.sample(1, 0, false, false);
             controller.step_with_delivery(Some(path(1001 + tick, 0, 140, 0)), 0, impaired, false);
         }
         assert_eq!(
@@ -1879,7 +1908,7 @@ mod tests {
             "a single outstanding keyframe cannot repeatedly penalize future frames that admission has paused"
         );
         assert!(
-            pressure.sample(1, true, true),
+            pressure.sample(1, 0, true, true),
             "a new hard failure must still react"
         );
     }
@@ -1887,17 +1916,25 @@ mod tests {
     #[test]
     fn delivery_pressure_requires_ongoing_blockage_and_preserves_hard_failures() {
         let mut pressure = DeliveryPressure::default();
-        assert!(!pressure.sample(1, true, false));
-        assert!(!pressure.sample(1, false, false));
-        assert!(pressure.sample(1, false, false));
-        assert!(!pressure.sample(1, false, false));
-        assert!(!pressure.sample(0, false, false));
-        assert!(!pressure.sample(1, false, false));
-        assert!(!pressure.sample(1, true, false));
+        assert!(!pressure.sample(1, 0, true, false));
+        assert!(!pressure.sample(1, 0, false, false));
+        assert!(pressure.sample(1, 0, false, false));
+        assert!(!pressure.sample(1, 0, false, false));
+        assert!(!pressure.sample(0, 0, false, false));
+        assert!(!pressure.sample(1, 0, false, false));
+        assert!(!pressure.sample(1, 0, true, false));
         assert!(
-            pressure.sample(0, true, true),
+            pressure.sample(0, 0, true, true),
             "hard failure must react immediately"
         );
+    }
+
+    #[test]
+    fn sustained_completed_delay_reduces_load_even_with_fresh_receipts() {
+        let mut pressure = DeliveryPressure::default();
+        assert!(!pressure.sample(0, 1, true, false));
+        assert!(pressure.sample(0, 1, true, false));
+        assert!(!pressure.sample(0, 0, true, false));
     }
 
     #[test]
@@ -1908,7 +1945,7 @@ mod tests {
             // Roughly one percent of a frame-rate stream has a soft delay,
             // while receipts continue. This cannot justify the 100 kbps floor.
             let late = u64::from(tick % 20 == 0);
-            let impaired = pressure.sample(late, true, false);
+            let impaired = pressure.sample(late, 0, true, false);
             controller.step_with_delivery(
                 Some(path(1000 + tick * 100, 0, 140, 0)),
                 0,

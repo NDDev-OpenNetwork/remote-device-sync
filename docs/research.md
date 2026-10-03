@@ -623,9 +623,9 @@ real-stream regression, installed diagnostics and still-open native acceptance.
 [Apple's activity guidance](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/PrioritizeWorkAtTheAppLevel.html)
 recommends a scoped activity for ongoing user-initiated work.
 [The allowing-idle-sleep option](https://developer.apple.com/documentation/foundation/processinfo/activityoptions/userinitiatedallowingidlesystemsleep)
-preserves idle system sleep. RDS uses that option for its native viewer; it does
-not claim App Nap was proven to cause the observed pauses and does not enable
-the stronger latency-critical option. The existing pinned Rustix dependency
+preserves idle system sleep. That was the initial native viewer policy. The
+2026-10-03 follow-up below replaces it for ongoing remote sessions; neither
+policy proves App Nap caused a particular observed pause. The existing pinned Rustix dependency
 also supplies a read-only [thread CPU clock](https://docs.rs/rustix/1.1.5/rustix/time/enum.ClockId.html)
 to distinguish actual computation from elapsed native waiting on Linux/macOS.
 The fixture combines real CPU work and sleeping on one blocking worker and
@@ -663,3 +663,29 @@ records blocked-body, FIFO and lifecycle regressions separately from installed
 native quality and latency acceptance. The old Iroh 0.96 network-change regression
 reported in upstream's January release note is not assumed to exist in pinned
 1.2; dependency changes require current source evidence and same-harness parity.
+
+## 2026-10-03 idle connection and bounded video repair
+
+[QUIC idle timeout guidance](https://www.rfc-editor.org/rfc/rfc9000.html#section-10.1.2)
+allows periodic ack-eliciting traffic to preserve an intentionally open
+connection. RDS already sends desktop heartbeats once per second and transport
+keepalive; adding faster pings cannot make a suspended OS transmit packets or
+prove that a live control channel still delivers decoded video.
+
+[Apple's scoped activity API](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/PrioritizeWorkAtTheAppLevel.html)
+supports preventing App Nap and idle system sleep during user-initiated work,
+with the owning assertion visible through `pmset -g assertions`. The native
+viewer now combines `NSActivityUserInitiated` with latency-critical activity
+until the event loop ends. It leaves display sleep and screen lock available;
+explicit sleep and lid-close behavior still belong to the OS. The pinned
+Foundation binding and a macOS unit test check that the idle-system bit is set
+and the idle-display bit is absent. This does not establish a power-use or
+real-network latency guarantee.
+
+Application recovery now requests at most two independent pictures, after three
+and eight seconds without decoded progress, before the existing fifteen-second
+session watchdog. Fresh decoded progress alone rearms the attempts. The framed
+control regression covers a sixty-second idle interval, successful repair on
+the original channel, ongoing input/heartbeats and the unrecovered deadline.
+The [qualification report](reports/rds-idle-repair-20261003.md) keeps this fixture
+separate from native visibility and overnight acceptance.

@@ -25,6 +25,60 @@ impl Sender for rds_client::local::ManagedControl {
     }
 }
 
+const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+const REPAIR_AGES: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(8)];
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum VideoAction {
+    Healthy,
+    Repair,
+    Reconnect,
+}
+
+/// Idle video is expected to refresh about once a second. Request at most
+/// two independent images before reopening the desktop; heartbeats alone
+/// never reset actual decoded progress. A new frame rearms this policy.
+#[derive(Default)]
+pub(super) struct VideoWatchdog {
+    progress: Option<tokio::time::Instant>,
+    repairs: usize,
+}
+
+impl VideoWatchdog {
+    pub(super) fn observe(&mut self, progress: tokio::time::Instant) -> VideoAction {
+        if self.progress != Some(progress) {
+            self.progress = Some(progress);
+            self.repairs = 0;
+        }
+        let age = progress.elapsed();
+        if age >= VIDEO_STALL_TIMEOUT {
+            return VideoAction::Reconnect;
+        }
+        if REPAIR_AGES
+            .get(self.repairs)
+            .is_some_and(|threshold| age >= *threshold)
+        {
+            self.repairs += 1;
+            return VideoAction::Repair;
+        }
+        VideoAction::Healthy
+    }
+}
+
+async fn send_control(
+    sender: &impl Sender,
+    message: DesktopControl,
+    sent: &impl Fn(&DesktopControl),
+) -> anyhow::Result<()> {
+    sent(&message);
+    // A partially written control is never reused after timeout: the
+    // owner ends both legs and drops the channel before reconnecting.
+    tokio::time::timeout(Duration::from_secs(2), sender.send(message))
+        .await
+        .map_err(|_| anyhow::anyhow!("desktop control write stalled"))??;
+    Ok(())
+}
+
 pub(super) async fn pump(
     input: &mut impl Input,
     sender: &impl Sender,
@@ -34,30 +88,35 @@ pub(super) async fn pump(
 ) -> anyhow::Result<bool> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut watchdog = VideoWatchdog::default();
     loop {
         let message = tokio::select! {
-            message = input.recv() => match message {
-                Some(ViewerInput::Control(message)) => message,
-                Some(ViewerInput::Close) | None => return Ok(true),
-            },
+            biased;
             _ = tick.tick() => {
-                let age = progress.borrow().elapsed();
-                if age >= Duration::from_secs(15) {
-                    tracing::warn!(last_decoded_age_ms = age.as_millis() as u64,
-                        "desktop progress watchdog expired");
-                    anyhow::bail!("remote video stopped making progress");
+                let progress = *progress.borrow();
+                match watchdog.observe(progress) {
+                    VideoAction::Reconnect => {
+                        tracing::warn!(last_decoded_age_ms = progress.elapsed().as_millis() as u64,
+                            "desktop progress watchdog expired");
+                        anyhow::bail!("remote video stopped making progress");
+                    },
+                    VideoAction::Repair => {
+                        tracing::warn!(last_decoded_age_ms = progress.elapsed().as_millis() as u64,
+                            "desktop progress repair requested");
+                        send_control(sender, DesktopControl::RequestIdr, &sent).await?;
+                    },
+                    VideoAction::Healthy => {},
                 }
                 DesktopControl::Heartbeat {
                     seq: 0, ts_ms: started.elapsed().as_millis() as u64,
                 }
             },
+            message = input.recv() => match message {
+                Some(ViewerInput::Control(message)) => message,
+                Some(ViewerInput::Close) | None => return Ok(true),
+            },
         };
-        sent(&message);
-        // A partially written control is never reused after timeout: the
-        // owner ends both legs and drops the channel before reconnecting.
-        tokio::time::timeout(Duration::from_secs(2), sender.send(message))
-            .await
-            .map_err(|_| anyhow::anyhow!("desktop control write stalled"))??;
+        send_control(sender, message, &sent).await?;
     }
 }
 
@@ -108,6 +167,94 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn video_watchdog_repairs_before_reconnect_and_rearms_only_on_frames() {
+        let first = tokio::time::Instant::now();
+        let mut watchdog = VideoWatchdog::default();
+        assert_eq!(watchdog.observe(first), VideoAction::Healthy);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(watchdog.observe(first), VideoAction::Repair);
+        assert_eq!(watchdog.observe(first), VideoAction::Healthy);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(watchdog.observe(first), VideoAction::Repair);
+        assert_eq!(watchdog.observe(first), VideoAction::Healthy);
+        tokio::time::advance(Duration::from_secs(7)).await;
+        assert_eq!(watchdog.observe(first), VideoAction::Reconnect);
+        let decoded = tokio::time::Instant::now();
+        assert_eq!(watchdog.observe(decoded), VideoAction::Healthy);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(watchdog.observe(decoded), VideoAction::Repair);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_video_repair_keeps_input_and_heartbeats_on_the_existing_channel() {
+        let (wire, mut remote) = tokio::io::duplex(256);
+        let (tx, mut input) = mpsc::channel(8);
+        let (progress, last_frame) = watch::channel(tokio::time::Instant::now());
+        let task = tokio::spawn(async move {
+            pump(
+                &mut input,
+                &Wire(Mutex::new(wire)),
+                &last_frame,
+                Instant::now(),
+                |_| {},
+            )
+            .await
+        });
+        let mut repaired = false;
+        let mut input_observed = false;
+        let started = tokio::time::Instant::now();
+        // Consume actual framed controls. A repair causes the simulated
+        // decoder to publish new progress on the original channel.
+        loop {
+            let DesktopUp::Control(message) = rds_net::read_frame(&mut remote).await.unwrap()
+            else {
+                panic!("unexpected control framing");
+            };
+            match message {
+                DesktopControl::RequestIdr => {
+                    assert!(!repaired, "one repair must not become an IDR storm");
+                    assert_eq!(started.elapsed(), Duration::from_secs(3));
+                    repaired = true;
+                    progress.send_replace(tokio::time::Instant::now());
+                    tx.send(ViewerInput::Control(DesktopControl::Input(InputEvent {
+                        seq: 37,
+                        event_ts_ms: 0,
+                        display_id: 0,
+                        kind: InputKind::PointerButton {
+                            button: 0x110,
+                            pressed: true,
+                        },
+                    })))
+                    .await
+                    .unwrap();
+                }
+                DesktopControl::Heartbeat { .. } if repaired => {
+                    progress.send_replace(tokio::time::Instant::now());
+                    if started.elapsed() >= Duration::from_secs(60) {
+                        break;
+                    }
+                }
+                DesktopControl::Input(event) => {
+                    assert_eq!(event.seq, 37);
+                    input_observed = true;
+                }
+                DesktopControl::Heartbeat { .. } => {}
+                _ => panic!("unexpected control"),
+            }
+        }
+        assert!(
+            !task.is_finished(),
+            "media recovery must retain the existing session"
+        );
+        assert!(
+            input_observed,
+            "repair must not consume or delay user input"
+        );
+        tx.send(ViewerInput::Close).await.unwrap();
+        assert!(task.await.unwrap().unwrap());
     }
 
     // Read the actual framed controls, rather than only observing that an
@@ -304,7 +451,18 @@ mod tests {
         });
         let started = tokio::time::Instant::now();
         for second in 0..31 {
-            let _: DesktopUp = rds_net::read_frame(&mut remote).await.unwrap();
+            // Count real heartbeat ticks, not all framed controls: soft
+            // repair is additional traffic, not a faster timer.
+            loop {
+                match rds_net::read_frame::<_, DesktopUp>(&mut remote)
+                    .await
+                    .unwrap()
+                {
+                    DesktopUp::Control(DesktopControl::Heartbeat { .. }) => break,
+                    DesktopUp::Control(DesktopControl::RequestIdr) => {}
+                    other => panic!("unexpected control: {other:?}"),
+                }
+            }
             if second == 10 || second == 20 {
                 progress.send_replace(tokio::time::Instant::now());
             }

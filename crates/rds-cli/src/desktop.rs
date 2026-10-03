@@ -244,10 +244,13 @@ mod native {
                 result = async {
                     match &mut source {
                         Source::Managed { client,session,peer,grant } => {
+                            view.stage("checking managed session");
                             if session.is_none() || client.selected(*session).await.is_err() {
+                                view.stage("connecting peer");
                                 let Reply::Connected(id) = client.request(Command::Connect { target:peer.clone(),grant:grant.clone() }).await? else { anyhow::bail!("unexpected local connection response"); };
                                 // After the first authenticated connect retain the exact peer
                                 // identity, even when the initial target was a registry name.
+                                view.stage("verifying peer");
                                 let snapshot = client.snapshot().await?;
                                 let authenticated = snapshot.sessions.into_iter().find(|s| s.id == id).ok_or_else(|| anyhow::anyhow!("connected session disappeared"))?.peer;
                                 *peer = reconnect_target(peer,authenticated)?;
@@ -277,6 +280,7 @@ mod native {
                 pending_input_acks = snapshot.report.pending_input_acks,
                 oldest_input_ack_age_ms = snapshot.report.oldest_input_ack_age_ms,
                 control_rtt_ms = snapshot.report.control_rtt_ms,
+                control_echo_age_ms = snapshot.control_echo_age_ms,
                 occluded = snapshot.occluded,
                 "desktop reconnecting"
             );
@@ -463,7 +467,8 @@ mod native {
         extent(view, session.caps(), options.display)?;
         view.status("Waiting for screen");
         let ctrl = session.control_sender();
-        let mut last_frame = Instant::now();
+        let mut last_frame = tokio::time::Instant::now();
+        let mut watchdog = control::VideoWatchdog::default();
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = loop {
@@ -477,7 +482,14 @@ mod native {
                     Some(ViewerInput::Close)|None => break Ok(true),
                 },
                 _ = tick.tick() => {
-                    anyhow::ensure!(last_frame.elapsed() < Duration::from_secs(15),"remote video stopped making progress");
+                    match watchdog.observe(last_frame) {
+                        control::VideoAction::Reconnect => anyhow::bail!("remote video stopped making progress"),
+                        control::VideoAction::Repair => {
+                            view.video_repair_requested();
+                            tokio::time::timeout(Duration::from_secs(2), ctrl.send(rds_core::DesktopControl::RequestIdr)).await.map_err(|_|anyhow::anyhow!("direct desktop repair stalled"))??;
+                        },
+                        control::VideoAction::Healthy => {},
+                    }
                     tokio::time::timeout(Duration::from_secs(2),ctrl.send(rds_core::DesktopControl::Heartbeat { seq: 0,ts_ms: started.elapsed().as_millis() as u64 })).await.map_err(|_|anyhow::anyhow!("direct desktop heartbeat stalled"))??;
                 },
                 event = session.events.recv() => match event {
@@ -487,7 +499,7 @@ mod native {
                     None => break Ok(false),
                 },
                 frame = session.frames.recv() => match frame {
-                    Some(raw) => { last_frame = Instant::now(); view.frame(raw,Instant::now()); },
+                    Some(raw) => { last_frame = tokio::time::Instant::now(); view.frame(raw,Instant::now()); },
                     None => break Ok(false),
                 },
             }

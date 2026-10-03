@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -30,10 +33,17 @@ pub enum ViewerInput {
 struct InputState {
     queue: Mutex<VecDeque<ViewerInput>>,
     ready: Notify,
+    pointer_coalesced: AtomicU64,
+    input_dropped: AtomicU64,
+    max_depth: AtomicU64,
 }
 struct InputSender(Arc<InputState>);
+const INPUT_QUEUE_CAPACITY: usize = 1024;
+
 /// One bounded input consumer. Consecutive pointer positions collapse, while
 /// keys/buttons retain their order relative to the final pointer before them.
+/// A full queue fails closed. Motion before a button/key/scroll is a
+/// position barrier, not stale data: removing it could redirect the action.
 pub struct InputReceiver(Arc<InputState>);
 impl InputReceiver {
     pub async fn recv(&mut self) -> Option<ViewerInput> {
@@ -60,25 +70,25 @@ impl InputSender {
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(
-            &message,
-            ViewerInput::Control(DesktopControl::Input(InputEvent {
-                kind: InputKind::PointerMove { .. },
-                ..
-            }))
-        ) && matches!(
-            queue.back(),
-            Some(ViewerInput::Control(DesktopControl::Input(InputEvent {
-                kind: InputKind::PointerMove { .. },
-                ..
-            })))
-        ) {
+        if let (
+            ViewerInput::Control(DesktopControl::Input(next)),
+            Some(ViewerInput::Control(DesktopControl::Input(previous))),
+        ) = (&message, queue.back())
+            && next.display_id == previous.display_id
+            && matches!(next.kind, InputKind::PointerMove { .. })
+            && matches!(previous.kind, InputKind::PointerMove { .. })
+        {
             queue.pop_back();
+            self.0.pointer_coalesced.fetch_add(1, Ordering::Relaxed);
         }
-        if queue.len() >= 128 {
+        if queue.len() >= INPUT_QUEUE_CAPACITY {
+            self.0.input_dropped.fetch_add(1, Ordering::Relaxed);
             return Err(());
         }
         queue.push_back(message);
+        self.0
+            .max_depth
+            .fetch_max(queue.len() as u64, Ordering::Relaxed);
         drop(queue);
         self.0.ready.notify_one();
         Ok(())
@@ -115,16 +125,25 @@ pub struct ViewerReport {
     pub encode_to_send_p50_ms: Option<f64>,
     pub encode_to_send_p95_ms: Option<f64>,
     pub control_rtt_ms: Option<u64>,
+    pub last_control_echo_ms: Option<u64>,
     pub input_acks: u64,
+    pub inputs_dispatched: u64,
+    pub input_acks_matched: u64,
+    pub input_acks_unmatched: u64,
+    pub input_ack_tracking_evicted: u64,
     pub managed_events_separated: bool,
     pub input_ack_p50_ms: Option<f64>,
     pub input_ack_p95_ms: Option<f64>,
     pub input_queue_p95_ms: Option<f64>,
+    pub input_pointer_coalesced: u64,
+    pub input_events_dropped: u64,
+    pub input_queue_max_depth: u64,
     pub pending_input_acks: usize,
     pub oldest_input_ack_age_ms: Option<u64>,
     pub clipboard_transfers: u64,
     pub last_clipboard_bytes: u32,
     pub reconnects: u64,
+    pub video_repair_requests: u64,
     pub last_recovery_ms: Option<u64>,
     pub last_frame_ms: Option<u64>,
     pub video_width: u32,
@@ -141,6 +160,7 @@ pub struct ViewerSnapshot {
     pub ui_event_age_ms: u64,
     pub decoded_frame_age_ms: Option<u64>,
     pub encoded_frame_age_ms: Option<u64>,
+    pub control_echo_age_ms: Option<u64>,
     pub submission_age_ms: Option<u64>,
     pub pending_frame_bytes: usize,
     pub occluded: bool,
@@ -159,24 +179,26 @@ struct InputLatency {
     pending: VecDeque<(u64, u64)>,
     queued: Vec<f64>,
     acknowledged: Vec<f64>,
+    evicted: u64,
 }
 impl InputLatency {
     fn sent(&mut self, seq: u64, created_ms: u64, now_ms: u64) {
-        if self.pending.len() == 128 {
+        if self.pending.len() == INPUT_QUEUE_CAPACITY {
             self.pending.pop_front();
+            self.evicted += 1;
         }
         self.pending.push_back((seq, created_ms));
         sample(&mut self.queued, now_ms.saturating_sub(created_ms) as f64);
     }
-    fn ack(&mut self, seq: u64, now_ms: u64) {
+    fn ack(&mut self, seq: u64, now_ms: u64) -> Option<f64> {
         if let Some(index) = self.pending.iter().position(|(pending, _)| *pending == seq)
             && let Some((_, created_ms)) = self.pending.remove(index)
         {
-            sample(
-                &mut self.acknowledged,
-                now_ms.saturating_sub(created_ms) as f64,
-            );
+            let latency = now_ms.saturating_sub(created_ms) as f64;
+            sample(&mut self.acknowledged, latency);
+            return Some(latency);
         }
+        None
     }
 }
 
@@ -225,6 +247,7 @@ fn quantiles(samples: &[f64]) -> (Option<f64>, Option<f64>) {
 #[derive(Clone)]
 pub struct ViewerHandle {
     state: Arc<Mutex<State>>,
+    input_state: Arc<InputState>,
     proxy: EventLoopProxy<()>,
     started: Instant,
 }
@@ -251,6 +274,9 @@ impl ViewerHandle {
             ui_event_age_ms: elapsed.saturating_sub(state.last_ui_ms),
             decoded_frame_age_ms: report.last_frame_ms.map(|v| elapsed.saturating_sub(v)),
             encoded_frame_age_ms: state.last_encoded_ms.map(|v| elapsed.saturating_sub(v)),
+            control_echo_age_ms: report
+                .last_control_echo_ms
+                .map(|v| elapsed.saturating_sub(v)),
             submission_age_ms: report.last_submission_ms.map(|v| elapsed.saturating_sub(v)),
             pending_frame_bytes: state.pending.as_ref().map_or(0, |p| p.raw.data.len()),
             occluded: state.occluded,
@@ -294,14 +320,23 @@ impl ViewerHandle {
         lock(&self.state).extent = (width, height);
     }
     pub fn control_rtt(&self, ms: u64) {
-        lock(&self.state).report.control_rtt_ms = Some(ms);
+        let mut state = lock(&self.state);
+        state.report.control_rtt_ms = Some(ms);
+        state.report.last_control_echo_ms = Some(self.started.elapsed().as_millis() as u64);
     }
     pub fn input_sent(&self, control: &DesktopControl) {
+        if matches!(control, DesktopControl::RequestIdr) {
+            self.video_repair_requested();
+        }
         if let DesktopControl::Input(event) = control {
             let sent_ms = self.started.elapsed().as_millis() as u64;
-            lock(&self.state)
-                .input_latency
-                .sent(event.seq, event.event_ts_ms, sent_ms);
+            {
+                let mut state = lock(&self.state);
+                state.report.inputs_dispatched += 1;
+                state
+                    .input_latency
+                    .sent(event.seq, event.event_ts_ms, sent_ms);
+            }
             let event_class = match event.kind {
                 InputKind::KeyDown { .. } => "key_down",
                 InputKind::KeyUp { .. } => "key_up",
@@ -313,15 +348,25 @@ impl ViewerHandle {
             tracing::trace!(target: "rds_desktop::input_timing", input_seq=event.seq,event_class,event_created_ms=event.event_ts_ms,input_sent_ms=sent_ms,queue_ms=sent_ms.saturating_sub(event.event_ts_ms),"native input dispatched");
         }
     }
+    pub fn video_repair_requested(&self) {
+        lock(&self.state).report.video_repair_requests += 1;
+    }
     pub fn managed_events_separated(&self) {
         lock(&self.state).report.managed_events_separated = true;
     }
     pub fn input_ack(&self, seq: u64) {
         let mut state = lock(&self.state);
         state.report.input_acks += 1;
-        state
-            .input_latency
-            .ack(seq, self.started.elapsed().as_millis() as u64);
+        let ack_ms = self.started.elapsed().as_millis() as u64;
+        let latency = state.input_latency.ack(seq, ack_ms);
+        if latency.is_some() {
+            state.report.input_acks_matched += 1;
+        } else {
+            state.report.input_acks_unmatched += 1;
+        }
+        drop(state);
+        tracing::trace!(target: "rds_desktop::input_timing", input_seq=seq, input_ack_ms=ack_ms,
+            event_to_ack_ms=?latency, "native input acknowledgement observed");
     }
     pub fn clipboard_ready(&self, bytes: u32) {
         let mut state = lock(&self.state);
@@ -361,10 +406,14 @@ impl ViewerHandle {
         (report.input_ack_p50_ms, report.input_ack_p95_ms) =
             quantiles(&state.input_latency.acknowledged);
         report.input_queue_p95_ms = quantiles(&state.input_latency.queued).1;
+        report.input_ack_tracking_evicted = state.input_latency.evicted;
         report.pending_input_acks = state.input_latency.pending.len();
         report.oldest_input_ack_age_ms = state.input_latency.pending.front().map(|(_, created)| {
             (self.started.elapsed().as_millis() as u64).saturating_sub(*created)
         });
+        report.input_pointer_coalesced = self.input_state.pointer_coalesced.load(Ordering::Relaxed);
+        report.input_events_dropped = self.input_state.input_dropped.load(Ordering::Relaxed);
+        report.input_queue_max_depth = self.input_state.max_depth.load(Ordering::Relaxed);
         report
     }
 }
@@ -379,11 +428,17 @@ impl Viewer {
     pub fn new(display: u32) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
         let event_loop =
             super::platform::event_loop().map_err(|e| DesktopError::Capture(e.to_string()))?;
-        let queue = Arc::new(InputState {
+        let input_state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
+            pointer_coalesced: AtomicU64::new(0),
+            input_dropped: AtomicU64::new(0),
+            max_depth: AtomicU64::new(0),
         });
-        let (input, receiver) = (InputSender(queue.clone()), InputReceiver(queue));
+        let (input, receiver) = (
+            InputSender(input_state.clone()),
+            InputReceiver(input_state.clone()),
+        );
         let handle = ViewerHandle {
             state: Arc::new(Mutex::new(State {
                 pending: None,
@@ -403,6 +458,7 @@ impl Viewer {
                 last_encoded_ms: None,
                 occluded: false,
             })),
+            input_state,
             proxy: event_loop.create_proxy(),
             started: Instant::now(),
         };
@@ -788,18 +844,19 @@ mod tests {
         let mut latency = InputLatency::default();
         latency.sent(7, 100, 120);
         latency.sent(8, 110, 125);
-        latency.ack(8, 310);
-        latency.ack(8, 410); // duplicate must not produce another sample
-        latency.ack(999, 510); // unrelated ACK must not corrupt correlation
+        assert_eq!(latency.ack(8, 310), Some(200.));
+        assert_eq!(latency.ack(8, 410), None); // duplicate is not another sample
+        assert_eq!(latency.ack(999, 510), None); // unrelated ACK cannot correlate
         assert_eq!(latency.acknowledged, vec![200.]);
         assert_eq!(latency.queued, vec![20., 15.]);
         assert_eq!(latency.pending.front(), Some(&(7, 100)));
         for seq in 100..1500 {
             latency.sent(seq, seq, seq + 3);
         }
-        assert_eq!(latency.pending.len(), 128);
+        assert_eq!(latency.pending.len(), INPUT_QUEUE_CAPACITY);
         assert_eq!(latency.queued.len(), 1024);
-        assert_eq!(latency.pending.front(), Some(&(1372, 1372)));
+        assert_eq!(latency.pending.front(), Some(&(476, 476)));
+        assert_eq!(latency.evicted, 377);
     }
 
     #[tokio::test]
@@ -807,6 +864,9 @@ mod tests {
         let state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
+            pointer_coalesced: AtomicU64::new(0),
+            input_dropped: AtomicU64::new(0),
+            max_depth: AtomicU64::new(0),
         });
         let sender = InputSender(state.clone());
         let mut receiver = InputReceiver(state);
@@ -851,5 +911,175 @@ mod tests {
                 .unwrap(),
             Some(ViewerInput::Close)
         ));
+    }
+
+    #[tokio::test]
+    async fn rapid_semantic_burst_preserves_every_button_event() {
+        let state = Arc::new(InputState {
+            queue: Mutex::new(VecDeque::new()),
+            ready: Notify::new(),
+            pointer_coalesced: AtomicU64::new(0),
+            input_dropped: AtomicU64::new(0),
+            max_depth: AtomicU64::new(0),
+        });
+        let sender = InputSender(state.clone());
+        let receiver = InputReceiver(state.clone());
+        for seq in 0..400 {
+            sender
+                .send(event(
+                    seq * 2,
+                    InputKind::PointerButton {
+                        button: 0x110,
+                        pressed: true,
+                    },
+                ))
+                .unwrap();
+            sender
+                .send(event(
+                    seq * 2 + 1,
+                    InputKind::PointerButton {
+                        button: 0x110,
+                        pressed: false,
+                    },
+                ))
+                .unwrap();
+        }
+        let mut seen = Vec::with_capacity(800);
+        while let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.try_recv() {
+            seen.push(input.seq);
+        }
+        assert_eq!(seen.len(), 800);
+        assert_eq!(seen, (0..800).collect::<Vec<_>>());
+        assert_eq!(state.input_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(state.pointer_coalesced.load(Ordering::Relaxed), 0);
+        assert_eq!(state.max_depth.load(Ordering::Relaxed), 800);
+    }
+
+    fn test_input_state() -> Arc<InputState> {
+        Arc::new(InputState {
+            queue: Mutex::new(VecDeque::new()),
+            ready: Notify::new(),
+            pointer_coalesced: AtomicU64::new(0),
+            input_dropped: AtomicU64::new(0),
+            max_depth: AtomicU64::new(0),
+        })
+    }
+
+    #[test]
+    fn semantic_burst_acknowledgements_remain_correlated_when_replies_wait() {
+        let mut latency = InputLatency::default();
+        for seq in 0..800 {
+            latency.sent(seq, seq, 800);
+        }
+        assert_eq!(latency.pending.len(), 800);
+        assert_eq!(latency.evicted, 0);
+        // Replies can be observed after dispatch has already sent the burst.
+        for seq in (0..800).rev() {
+            assert_eq!(latency.ack(seq, 1000), Some((1000 - seq) as f64));
+        }
+        assert!(latency.pending.is_empty());
+        assert_eq!(latency.acknowledged.len(), 800);
+        assert_eq!(latency.ack(799, 1001), None);
+    }
+
+    #[test]
+    fn full_queue_never_removes_a_position_before_a_click() {
+        for incoming in [
+            InputKind::PointerMove { x: 999., y: 999. },
+            InputKind::KeyDown { code: 30 },
+            InputKind::PointerButton {
+                button: 0x110,
+                pressed: false,
+            },
+        ] {
+            let state = test_input_state();
+            let sender = InputSender(state.clone());
+            let receiver = InputReceiver(state.clone());
+            for seq in 0..INPUT_QUEUE_CAPACITY as u64 {
+                let kind = if seq == INPUT_QUEUE_CAPACITY as u64 - 1 {
+                    InputKind::KeyUp { code: 30 }
+                } else {
+                    match seq % 3 {
+                        0 => InputKind::PointerMove {
+                            x: seq as f64,
+                            y: 1.,
+                        },
+                        1 => InputKind::PointerButton {
+                            button: 0x110,
+                            pressed: true,
+                        },
+                        _ => InputKind::PointerButton {
+                            button: 0x110,
+                            pressed: false,
+                        },
+                    }
+                };
+                sender.send(event(seq, kind)).unwrap();
+            }
+            // End on a semantic barrier; incoming motion must not remove
+            // an earlier click's position to make room.
+            assert!(
+                sender
+                    .send(event(INPUT_QUEUE_CAPACITY as u64, incoming))
+                    .is_err()
+            );
+            for seq in 0..INPUT_QUEUE_CAPACITY as u64 {
+                let Some(ViewerInput::Control(DesktopControl::Input(input))) = receiver.try_recv()
+                else {
+                    panic!("accepted action lost");
+                };
+                assert_eq!(input.seq, seq);
+                if seq % 3 == 0 && seq < INPUT_QUEUE_CAPACITY as u64 - 1 {
+                    assert!(
+                        matches!(input.kind, InputKind::PointerMove { x, .. } if x == seq as f64)
+                    );
+                }
+            }
+            assert!(receiver.try_recv().is_none());
+            assert_eq!(state.pointer_coalesced.load(Ordering::Relaxed), 0);
+            assert_eq!(state.input_dropped.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn full_queue_can_still_replace_same_display_tail_motion() {
+        let state = test_input_state();
+        let sender = InputSender(state.clone());
+        for seq in 0..INPUT_QUEUE_CAPACITY as u64 - 1 {
+            sender
+                .send(event(seq, InputKind::KeyDown { code: 30 }))
+                .unwrap();
+        }
+        sender
+            .send(event(1023, InputKind::PointerMove { x: 1., y: 1. }))
+            .unwrap();
+        sender
+            .send(event(1024, InputKind::PointerMove { x: 2., y: 2. }))
+            .unwrap();
+        assert_eq!(state.queue.lock().unwrap().len(), INPUT_QUEUE_CAPACITY);
+        assert_eq!(state.pointer_coalesced.load(Ordering::Relaxed), 1);
+        assert_eq!(state.input_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn pointer_coalescing_does_not_cross_displays() {
+        let state = test_input_state();
+        let sender = InputSender(state.clone());
+        let receiver = InputReceiver(state.clone());
+        sender
+            .send(event(0, InputKind::PointerMove { x: 1., y: 1. }))
+            .unwrap();
+        let ViewerInput::Control(DesktopControl::Input(mut other)) =
+            event(1, InputKind::PointerMove { x: 2., y: 2. })
+        else {
+            unreachable!()
+        };
+        other.display_id = 1;
+        sender
+            .send(ViewerInput::Control(DesktopControl::Input(other)))
+            .unwrap();
+        assert!(receiver.try_recv().is_some());
+        assert!(receiver.try_recv().is_some());
+        assert_eq!(state.pointer_coalesced.load(Ordering::Relaxed), 0);
     }
 }
