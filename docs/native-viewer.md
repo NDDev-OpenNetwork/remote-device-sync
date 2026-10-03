@@ -507,3 +507,14 @@ repair a second time. A newer produced key suppresses another request for an
 older frame, including reference-admission rejection while that key is queued.
 Current failures and unknown worker termination still require repair. This
 correlation does not treat a produced picture as successful delivery.
+
+Serving-side delivery health and bitrate-reduction records include selected
+`path_id`, instantaneous `path_cwnd_bytes` and cumulative sent/received UDP bytes.
+Compare byte deltas only within the same path id; these counters include other
+services on that connection and do not measure media throughput alone. A soft
+delayed-frame warning now has a matching ordinary-level completion record with
+sequence, keyframe flag, payload length, `enqueue_ms`, `ack_ms` and `transfer_ms`.
+Enqueue spans stream opening/writes and scheduling of the receipt worker; ACK
+spans that worker's transport receipt wait. Neither is an application input ACK
+or a physical presentation measurement. Timely frame completions remain trace
+level. The diagnostic addition changes no pacing, admission or deadlines.
