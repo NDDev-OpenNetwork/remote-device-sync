@@ -843,6 +843,10 @@ pub async fn serve_desktop_with(
                         delayed_bytes,
                         failed_frames,
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        path_id = ?path.map(|p| p.path_id),
+                        path_cwnd_bytes = ?path.map(|p| p.cwnd),
+                        path_sent_bytes = ?path.map(|p| p.sent_bytes),
+                        path_received_bytes = ?path.map(|p| p.recv_bytes),
                         path_via_relay = ?path.map(|p| p.via_relay),
                         path_sent = ?path.map(|p| p.sent),
                         path_lost = ?path.map(|p| p.lost),
@@ -878,6 +882,10 @@ pub async fn serve_desktop_with(
                         obsolete_delivery = feedback.obsolete.load(Ordering::Relaxed),
                         last_ack_ms = feedback.last_ack_ms.load(Ordering::Relaxed),
                         path_rtt_ms = ?path.map(|p| p.rtt.as_millis()),
+                        path_id = ?path.map(|p| p.path_id),
+                        path_cwnd_bytes = ?path.map(|p| p.cwnd),
+                        path_sent_bytes = ?path.map(|p| p.sent_bytes),
+                        path_received_bytes = ?path.map(|p| p.recv_bytes),
                         path_via_relay = ?path.map(|p| p.via_relay),
                         path_sent = ?path.map(|p| p.sent),
                         path_lost = ?path.map(|p| p.lost),
@@ -1810,7 +1818,7 @@ async fn send_frame_inner(
                 _ = tokio::time::sleep(delay_budget) => {
                     feedback.mark_delayed(payload_bytes);
                     late = Some(LateReceipt::new(feedback.clone()));
-                    tracing::warn!(frame_seq=seq,payload_bytes,delay_budget_ms=delay_budget.as_millis(),"desktop frame delivery delayed");
+                    tracing::warn!(frame_seq=seq,keyframe,payload_bytes,delay_budget_ms=delay_budget.as_millis(),"desktop frame delivery delayed");
                     receipt.await
                 }
             }
@@ -1820,6 +1828,19 @@ async fn send_frame_inner(
             Ok(Ok(None)) => {
                 sending.finished = true;
                 feedback.acknowledged(payload_bytes, transfer_started.elapsed(), delay_budget);
+                if late.is_some() {
+                    // Complete the soft-delay record at ordinary diagnostic
+                    // verbosity; the initial crossing alone hid its duration.
+                    tracing::info!(
+                        frame_seq = seq,
+                        keyframe,
+                        payload_bytes,
+                        enqueue_ms = started.duration_since(transfer_started).as_millis(),
+                        ack_ms = started.elapsed().as_millis(),
+                        transfer_ms = transfer_started.elapsed().as_millis(),
+                        "desktop delayed frame transport acknowledged"
+                    );
+                }
                 tracing::trace!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop frame transport acknowledged");
                 FrameReceipt::Delivered
             }
@@ -1832,7 +1853,7 @@ async fn send_frame_inner(
             result => {
                 feedback.failed.fetch_add(1, Ordering::Relaxed);
                 request_frame_repair(&latest_key_seq, &idr, seq);
-                tracing::warn!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),outcome=?result,"desktop frame delivery unconfirmed");
+                tracing::warn!(frame_seq=seq,keyframe,payload_bytes,ack_ms=started.elapsed().as_millis(),outcome=?result,"desktop frame delivery unconfirmed");
                 FrameReceipt::Failed
             }
         };
