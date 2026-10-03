@@ -15,20 +15,28 @@ impl Drop for RemoteActivity {
 }
 
 #[cfg(target_os = "macos")]
+fn activity_options() -> objc2_foundation::NSActivityOptions {
+    use objc2_foundation::NSActivityOptions;
+    NSActivityOptions::NSActivityUserInitiated
+        | NSActivityOptions::NSActivityLatencyCritical
+        | NSActivityOptions::NSActivityAutomaticTerminationDisabled
+        | NSActivityOptions::NSActivitySuddenTerminationDisabled
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn remote_activity() -> RemoteActivity {
-    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    use objc2_foundation::{NSProcessInfo, NSString};
     // SAFETY: Foundation owns the retained activity token; the RAII guard
     // pairs its begin/end. This user-requested stream must remain responsive
-    // while covered and inactive: latency-critical precision prevents App Nap
-    // from stretching heartbeat/reconnect timers, while allowing idle system
-    // and display sleep keeps the viewer from changing power policy.
+    // while covered and inactive. A session-scoped activity prevents idle
+    // system sleep (network I/O cannot progress in suspend) and requests
+    // latency-critical timer/I/O precision. Display sleep, screen locking,
+    // explicit user sleep and lid-close policy remain under OS control.
     let token = unsafe {
-        let options = NSActivityOptions::NSActivityUserInitiatedAllowingIdleSystemSleep
-            | NSActivityOptions::NSActivityLatencyCritical
-            | NSActivityOptions::NSActivityAutomaticTerminationDisabled
-            | NSActivityOptions::NSActivitySuddenTerminationDisabled;
-        NSProcessInfo::processInfo()
-            .beginActivityWithOptions_reason(options, &NSString::from_str("Remote desktop session"))
+        NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            activity_options(),
+            &NSString::from_str("Remote desktop session"),
+        )
     };
     RemoteActivity(token)
 }
@@ -162,3 +170,15 @@ pub(super) fn activate_application() {
 
 #[cfg(not(target_os = "macos"))]
 pub(super) fn activate_application() {}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    #[test]
+    fn session_prevents_idle_system_sleep_without_holding_the_display() {
+        use objc2_foundation::NSActivityOptions;
+        let options = super::activity_options();
+        assert!(options.contains(NSActivityOptions::NSActivityIdleSystemSleepDisabled));
+        assert!(!options.contains(NSActivityOptions::NSActivityIdleDisplaySleepDisabled));
+        assert!(options.contains(NSActivityOptions::NSActivityLatencyCritical));
+    }
+}

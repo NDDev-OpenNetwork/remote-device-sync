@@ -463,7 +463,8 @@ mod native {
         extent(view, session.caps(), options.display)?;
         view.status("Waiting for screen");
         let ctrl = session.control_sender();
-        let mut last_frame = Instant::now();
+        let mut last_frame = tokio::time::Instant::now();
+        let mut watchdog = control::VideoWatchdog::default();
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = loop {
@@ -477,7 +478,14 @@ mod native {
                     Some(ViewerInput::Close)|None => break Ok(true),
                 },
                 _ = tick.tick() => {
-                    anyhow::ensure!(last_frame.elapsed() < Duration::from_secs(15),"remote video stopped making progress");
+                    match watchdog.observe(last_frame) {
+                        control::VideoAction::Reconnect => anyhow::bail!("remote video stopped making progress"),
+                        control::VideoAction::Repair => {
+                            view.video_repair_requested();
+                            tokio::time::timeout(Duration::from_secs(2), ctrl.send(rds_core::DesktopControl::RequestIdr)).await.map_err(|_|anyhow::anyhow!("direct desktop repair stalled"))??;
+                        },
+                        control::VideoAction::Healthy => {},
+                    }
                     tokio::time::timeout(Duration::from_secs(2),ctrl.send(rds_core::DesktopControl::Heartbeat { seq: 0,ts_ms: started.elapsed().as_millis() as u64 })).await.map_err(|_|anyhow::anyhow!("direct desktop heartbeat stalled"))??;
                 },
                 event = session.events.recv() => match event {
@@ -487,7 +495,7 @@ mod native {
                     None => break Ok(false),
                 },
                 frame = session.frames.recv() => match frame {
-                    Some(raw) => { last_frame = Instant::now(); view.frame(raw,Instant::now()); },
+                    Some(raw) => { last_frame = tokio::time::Instant::now(); view.frame(raw,Instant::now()); },
                     None => break Ok(false),
                 },
             }
