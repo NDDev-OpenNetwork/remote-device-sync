@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn explicit_congestion_selection_preserves_legacy_defaults_and_lowers_exactly() {
+    let legacy = EndpointSettings::from_json(br#"{"schema_version":1}"#).unwrap();
+    assert_eq!(legacy.congestion_control, crate::CongestionControl::Bbr3);
+    assert!(
+        !serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("congestion_control")
+    );
+    let cubic = EndpointSettings::from_json(
+        br#"{"schema_version":1,"congestion_control":"cubic","relay":{"mode":"disabled"}}"#,
+    )
+    .unwrap();
+    let roundtrip = EndpointSettings::from_json(&serde_json::to_vec(&cubic).unwrap()).unwrap();
+    assert_eq!(cubic, roundtrip);
+    let lowered = cubic
+        .apply(EndpointOverrides::default())
+        .unwrap()
+        .into_endpoint()
+        .unwrap();
+    assert_eq!(lowered.congestion_control, crate::CongestionControl::Cubic);
+    assert!(
+        lowered
+            .congestion_control
+            .factory()
+            .build(std::time::Instant::now(), 1200)
+            .into_any()
+            .is::<noq_proto::congestion::Cubic>()
+    );
+    assert!(
+        legacy
+            .into_endpoint()
+            .unwrap()
+            .congestion_control
+            .factory()
+            .build(std::time::Instant::now(), 1200)
+            .into_any()
+            .is::<noq_proto::congestion::Bbr3>()
+    );
+    for invalid in [
+        br#"{"schema_version":1,"congestion_control":"bbr"}"#.as_slice(),
+        br#"{"schema_version":1,"congestion_control":"unknown"}"#.as_slice(),
+        br#"{"schema_version":1,"congestion_control":"cubic","congestion_control":"bbr3"}"#
+            .as_slice(),
+    ] {
+        assert!(EndpointSettings::from_json(invalid).is_err());
+    }
+}
+
+#[test]
 fn strict_schema_bounds_versions_and_roundtrip() {
     for invalid in [
         r#"{}"#,

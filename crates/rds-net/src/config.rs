@@ -130,6 +130,8 @@ pub struct EndpointSettings {
     pub transports: crate::Transports,
     #[serde(default, skip_serializing_if = "is_adaptive_packetization")]
     pub packetization: crate::Packetization,
+    #[serde(default, skip_serializing_if = "is_bbr3")]
+    pub congestion_control: crate::CongestionControl,
 }
 
 fn is_all_transports(value: &crate::Transports) -> bool {
@@ -137,6 +139,9 @@ fn is_all_transports(value: &crate::Transports) -> bool {
 }
 fn is_adaptive_packetization(value: &crate::Packetization) -> bool {
     *value == crate::Packetization::Adaptive
+}
+fn is_bbr3(value: &crate::CongestionControl) -> bool {
+    *value == crate::CongestionControl::Bbr3
 }
 
 impl Default for EndpointSettings {
@@ -149,6 +154,7 @@ impl Default for EndpointSettings {
             max_multipath_paths: None,
             transports: crate::Transports::default(),
             packetization: crate::Packetization::default(),
+            congestion_control: crate::CongestionControl::default(),
         }
     }
 }
@@ -250,6 +256,7 @@ impl EndpointSettings {
             max_multipath_paths: self.max_multipath_paths,
             transports: self.transports,
             packetization: self.packetization,
+            congestion_control: self.congestion_control,
             discovery: self.backend == Backend::Iroh,
             ..Default::default()
         };
