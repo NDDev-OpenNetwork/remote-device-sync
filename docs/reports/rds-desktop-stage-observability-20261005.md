@@ -7,7 +7,9 @@ The flight recorder previously classified this as a visible renderer stall.
 Native snapshots now expose the local age of decoded work awaiting submission.
 Newer pending images cannot reset that age and hide a blocked renderer. A
 successful submission clears it, retaining the queued time of an image that
-arrived concurrently with the draw. Occlusion remains a separate condition.
+arrived concurrently with the draw. Occlusion clears visible waiting; resuming
+with a retained image starts a fresh interval. The surface's own occluded
+outcome suppresses diagnosis even before a matching window event arrives.
 
 Input diagnostics now observe managed IPC receipt, bounded network-queue
 admission, and control-write start/completion. Existing dispatch/ACK, server
@@ -35,5 +37,7 @@ Deterministic regressions cover a long idle interval, a fresh update after idle,
 successive pending replacements, and an image arriving during submission.
 Local macOS full-workspace tests with both native desktop features passed, as
 did default and native-feature strict workspace Clippy, formatting and cargo-deny.
+The final occlusion/resume follow-up passed all 107 expanded desktop and 16 CLI
+library tests plus strict native-feature workspace Clippy and formatting.
 Installed-device latency and sustained connection acceptance are separate from
 these classification tests. Private runtime evidence belongs to the consumer.

@@ -193,6 +193,9 @@ impl SubmissionDebt {
     fn presented(&mut self, next_queued_ms: Option<u64>) {
         self.0 = next_queued_ms;
     }
+    fn hidden(&mut self) {
+        self.0 = None;
+    }
     fn age(&self, now_ms: u64) -> Option<u64> {
         self.0.map(|since| now_ms.saturating_sub(since))
     }
@@ -330,7 +333,9 @@ impl ViewerHandle {
     fn queue_frame(&self, raw: RawFrame, received: Instant, frame_seq: Option<u64>) {
         let mut state = lock(&self.state);
         let queued_ms = self.started.elapsed().as_millis() as u64;
-        state.submission_debt.queued(queued_ms);
+        if !state.occluded && state.render_stage != "surface occluded" {
+            state.submission_debt.queued(queued_ms);
+        }
         state.report.frames_received += 1;
         state.report.video_width = raw.width;
         state.report.video_height = raw.height;
@@ -686,7 +691,15 @@ impl App {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
-        lock(&self.handle.state).render_stage = "acquiring surface".into();
+        {
+            let mut state = lock(&self.handle.state);
+            if pending.is_some() {
+                state
+                    .submission_debt
+                    .queued(self.handle.started.elapsed().as_millis() as u64);
+            }
+            state.render_stage = "acquiring surface".into();
+        }
         let result = gpu.draw(pending.as_ref().map(|frame| &frame.raw));
         lock(&self.handle.state).report.gpu_uploads = gpu.uploads();
         match result {
@@ -721,6 +734,9 @@ impl App {
                 }
             }
             Ok(outcome) => {
+                if matches!(outcome, DrawOutcome::Occluded) {
+                    lock(&self.handle.state).submission_debt.hidden();
+                }
                 if matches!(outcome, DrawOutcome::Occluded)
                     && let Some(probe) = &mut lock(&self.handle.state).visual_probe
                 {
@@ -821,6 +837,13 @@ impl ApplicationHandler<()> for App {
             WindowEvent::Occluded(hidden) => {
                 let mut state = lock(&self.handle.state);
                 state.occluded = hidden;
+                if hidden {
+                    state.submission_debt.hidden();
+                } else if state.pending.is_some() {
+                    state
+                        .submission_debt
+                        .queued(self.handle.started.elapsed().as_millis() as u64);
+                }
                 if hidden && let Some(probe) = &mut state.visual_probe {
                     probe.unavailable();
                 }
@@ -1019,6 +1042,11 @@ mod tests {
         assert_eq!(debt.age(92_000), Some(100));
         debt.presented(None);
         assert_eq!(debt.age(180_000), None);
+        debt.queued(180_000);
+        debt.hidden();
+        assert_eq!(debt.age(360_000), None); // Covered windows owe no visible submission.
+        debt.queued(360_000); // The retained image becomes eligible again.
+        assert_eq!(debt.age(360_001), Some(1));
     }
     fn event(seq: u64, kind: InputKind) -> ViewerInput {
         ViewerInput::Control(DesktopControl::Input(InputEvent {

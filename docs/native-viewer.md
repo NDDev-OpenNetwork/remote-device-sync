@@ -353,7 +353,10 @@ successful submission clears it or starts the interval of an image that arrived
 during the draw. The flight recorder uses this outstanding-work age for visible
 renderer stalls. Damage-driven idle refreshes and a first update after a quiet
 period must not produce a renderer-stall incident. Occlusion still suppresses
-that visible-screen diagnosis.
+that visible-screen diagnosis and clears its waiting interval. A retained image
+starts a fresh interval when it becomes eligible again; time hidden by the OS
+is not counted as a newly resumed window's visible stall. The surface's own
+occluded outcome also suppresses diagnosis if the window event has not arrived.
 
 Private `rds_desktop::input_timing=trace` records add the managed IPC receipt,
 bounded control-queue admission and network control-write start/completion.

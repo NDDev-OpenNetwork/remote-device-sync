@@ -67,6 +67,7 @@ impl Recorder {
         }
         // Occlusion is a normal OS policy, not a frozen visible screen.
         if !snapshot.occluded
+            && snapshot.render_stage != "surface occluded"
             && snapshot.status == "Connected"
             && snapshot
                 .unpresented_frame_age_ms
@@ -161,9 +162,15 @@ mod tests {
         let mut recorder = Recorder::default();
         let mut hidden = snapshot(0);
         hidden.occluded = true;
+        hidden.unpresented_frame_age_ms = Some(90_000);
         hidden.submission_age_ms = Some(90_000);
         recorder.observe(&hidden);
         assert!(recorder.finish(true).is_none());
+        hidden.occluded = false; // Metal can report occlusion before the window event.
+        hidden.render_stage = "surface occluded".into();
+        recorder.observe(&hidden);
+        assert!(recorder.finish(true).is_none());
+        hidden.occluded = true;
         hidden.elapsed_ms = 2000;
         hidden.decoded_frame_age_ms = Some(4000);
         hidden.report.reconnects = 1;
