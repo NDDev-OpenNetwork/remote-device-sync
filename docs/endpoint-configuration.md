@@ -37,6 +37,24 @@ configuration (role/service/authority/timeout sections).
 | `bind_addrs` | Socket addresses; at most one on iroh, at most 16 entries on noq; fixed addresses are distinct, repeated port 0 requests allocate separate ephemeral sockets |
 | `relay` | One explicit reachability preset below |
 | `max_multipath_paths` | Optional integer 1–32; absent preserves the backend default |
+| `transports` | `all` (default), `direct-only`, or `relay-only`; bounds usable path kinds |
+| `packetization` | `adaptive` (default), or `conservative`: 1200-byte primary QUIC UDP payloads, MTU discovery and GSO disabled |
+
+The conservative policy supports qualification of tunnel/packet-inspection paths;
+it is not a claim that every such path needs it. It leaves congestion control,
+receive/send windows, keepalive, TLS and endpoint identity unchanged. Relay
+encapsulation has its own outer transport; the limit describes the primary RDS
+QUIC datagram, not every packet of an independently attached relay connection.
+Path kinds and packetization apply at bind, without modifying OS routes or VPN
+settings. Direct-only refuses configured relays; relay-only on iroh requires an
+explicit relay. Library validation supplies the same checks as the file API.
+
+Both new fields are omitted when serializing their defaults, preserving the old
+default file shape. Strict older binaries reject explicit new fields; install a
+compatible binary before applying them. Real loopback proxy tests echo 256 KiB
+in both directions on Iroh/Noq, require all payload bytes to cross the proxy and
+inspect actual UDP lengths for the 1200-byte bound. These tests do not establish
+WAN latency, native input responsiveness or a preferred production policy.
 
 At library bind entry points, `EndpointConfig` also validates 1–16 distinct
 ALPN identifiers of 1–255 bytes. `EndpointSettings::into_endpoint` performs

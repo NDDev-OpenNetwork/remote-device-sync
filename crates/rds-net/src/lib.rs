@@ -111,6 +111,18 @@ pub enum Transports {
     RelayOnly,
 }
 
+/// UDP packetization policy, independent of identities and reachable path kinds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Packetization {
+    /// Use the QUIC engine's adaptive MTU discovery and supported offloads.
+    #[default]
+    Adaptive,
+    /// Fixed 1200-byte QUIC UDP payloads, without segmentation offload.
+    /// Useful for qualifying paths through tunnels and packet inspection.
+    Conservative,
+}
+
 /// How an endpoint reaches the network.
 #[derive(Debug, Clone)]
 pub struct EndpointConfig {
@@ -157,6 +169,8 @@ pub struct EndpointConfig {
     /// Measurement worlds set this to the advertised path so traffic
     /// cannot silently escape onto a kind the report does not claim.
     pub transports: Transports,
+    /// Packet-size/offload policy. Default `Adaptive`.
+    pub packetization: Packetization,
     /// Owned-relay attachments (`noq` backend only): each entry is a
     /// relay server's endpoint address and joins the socket mux as one
     /// relay tunnel in its own synthetic-address slot. The endpoint
@@ -185,6 +199,7 @@ impl Default for EndpointConfig {
             max_multipath_paths: None,
             observed_address_reports: true,
             transports: Transports::default(),
+            packetization: Packetization::default(),
             #[cfg(feature = "transport-noq")]
             relay_endpoints: Vec::new(),
             #[cfg(feature = "transport-noq")]

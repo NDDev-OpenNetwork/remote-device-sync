@@ -25,6 +25,28 @@ fn strict_schema_bounds_versions_and_roundtrip() {
 }
 
 #[test]
+fn packetization_and_path_kind_survive_file_overrides_and_validate_before_bind() {
+    let file = br#"{"schema_version":1,"transports":"relay-only","packetization":"conservative","relay":{"mode":"iroh","urls":["https://relay.example/"]}}"#;
+    let settings = EndpointSettings::from_json(file).unwrap();
+    let settings = settings.apply(EndpointOverrides::default()).unwrap();
+    let roundtrip = EndpointSettings::from_json(&serde_json::to_vec(&settings).unwrap()).unwrap();
+    assert_eq!(settings, roundtrip);
+    let config = settings.into_endpoint().unwrap();
+    assert_eq!(config.transports, crate::Transports::RelayOnly);
+    assert_eq!(config.packetization, crate::Packetization::Conservative);
+    for invalid in [
+        br#"{"schema_version":1,"transports":"relay-only"}"#.as_slice(),
+        br#"{"schema_version":1,"transports":"direct-only","relay":{"mode":"iroh","urls":["https://relay.example/"]}}"#.as_slice(),
+        br#"{"schema_version":1,"packetization":"unknown"}"#.as_slice(),
+    ] {
+        assert!(EndpointSettings::from_json(invalid).and_then(EndpointSettings::into_endpoint).is_err());
+    }
+    let legacy = serde_json::to_string(&EndpointSettings::default()).unwrap();
+    assert!(!legacy.contains("packetization"));
+    assert!(!legacy.contains("transports"));
+}
+
+#[test]
 fn explicit_flags_replace_file_lists_without_resetting_other_settings() {
     let from_file = EndpointSettings::from_json(br#"{"schema_version":1,"bind_addrs":["127.0.0.1:1234"],"relay":{"mode":"iroh","urls":["https://old.example/"]},"max_multipath_paths":3}"#).unwrap();
     let unchanged = from_file

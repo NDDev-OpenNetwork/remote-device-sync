@@ -294,7 +294,8 @@ impl ProducerControls {
 /// `controls.idr` each call and count a slot missed into
 /// `controls.deadline_misses` when a frame lands after its cadence slot.
 pub trait FrameProducer: Send + 'static {
-    /// Session admission deliberately paused capture. Rebase elapsed cadence
+    /// Session admission deliberately paused capture for delivery or its
+    /// negotiated rate cap. Rebase elapsed cadence
     /// without counting that wait as capture/encoder starvation.
     fn resume_after_backpressure(&mut self) {}
     /// A codec may intentionally emit no frame without changing its reference
@@ -669,6 +670,7 @@ pub async fn serve_desktop_with(
             };
             let mut seq = 0u64;
             let mut generation = 0;
+            let mut next_capture = Instant::now();
             loop {
                 // The channel is the session's lifecycle: when the
                 // session ends the writer drops `rx` and this loop exits
@@ -703,9 +705,21 @@ pub async fn serve_desktop_with(
                     paused = true;
                     std::thread::sleep(Duration::from_millis(1));
                 };
+                // Damage can wake a platform producer immediately. Enforce
+                // the negotiated cap at admission, independently of its idle
+                // wait or implementation. Capture cost consumes this interval.
+                while let Some(wait) = next_capture.checked_duration_since(Instant::now()) {
+                    paused = true;
+                    if tx.is_closed() {
+                        return;
+                    }
+                    std::thread::sleep(wait.min(Duration::from_millis(20)));
+                }
                 if paused {
+                    // Deliberate admission waits are not encoder starvation.
                     source.resume_after_backpressure();
                 }
+                let produce_started = Instant::now();
                 let frame_generation = repair.generation();
                 if generation != frame_generation {
                     generation = frame_generation;
@@ -716,6 +730,15 @@ pub async fn serve_desktop_with(
                 feedback.producing.store(false, Ordering::Relaxed);
                 match result {
                     Some(p) => {
+                        // A producer may wait for damage/cadence before it
+                        // starts capture. Anchor the next admission to that
+                        // shared-clock timestamp, without adding encoding cost.
+                        let capture_started = clock
+                            .start
+                            .checked_add(Duration::from_millis(p.header.capture_ts_ms))
+                            .unwrap_or(produce_started)
+                            .clamp(produce_started, Instant::now());
+                        next_capture = capture_started + frame_interval;
                         // A repair can race a blocking encode. Its mutated
                         // references are discarded; the next epoch forces IDR.
                         if repair.generation() != frame_generation {

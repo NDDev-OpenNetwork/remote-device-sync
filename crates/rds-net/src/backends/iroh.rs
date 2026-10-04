@@ -129,6 +129,13 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
         ))
         .stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024))
         .send_window(32 * 1024 * 1024);
+    if config.packetization == crate::Packetization::Conservative {
+        transport = transport
+            .initial_mtu(1200)
+            .min_mtu(1200)
+            .mtu_discovery_config(None)
+            .enable_segmentation_offload(false);
+    }
     if let Some(max_paths) = config.max_multipath_paths {
         transport = transport.max_concurrent_multipath_paths(max_paths);
         if max_paths == 1 {

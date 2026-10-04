@@ -126,6 +126,17 @@ pub struct EndpointSettings {
     pub relay: RelaySettings,
     #[serde(default)]
     pub max_multipath_paths: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_all_transports")]
+    pub transports: crate::Transports,
+    #[serde(default, skip_serializing_if = "is_adaptive_packetization")]
+    pub packetization: crate::Packetization,
+}
+
+fn is_all_transports(value: &crate::Transports) -> bool {
+    *value == crate::Transports::All
+}
+fn is_adaptive_packetization(value: &crate::Packetization) -> bool {
+    *value == crate::Packetization::Adaptive
 }
 
 impl Default for EndpointSettings {
@@ -136,6 +147,8 @@ impl Default for EndpointSettings {
             bind_addrs: Vec::new(),
             relay: RelaySettings::default(),
             max_multipath_paths: None,
+            transports: crate::Transports::default(),
+            packetization: crate::Packetization::default(),
         }
     }
 }
@@ -235,6 +248,8 @@ impl EndpointSettings {
             backend: self.backend,
             bind_addrs: self.bind_addrs,
             max_multipath_paths: self.max_multipath_paths,
+            transports: self.transports,
+            packetization: self.packetization,
             discovery: self.backend == Backend::Iroh,
             ..Default::default()
         };

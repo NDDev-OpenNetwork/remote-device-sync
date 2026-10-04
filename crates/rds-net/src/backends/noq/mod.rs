@@ -58,7 +58,10 @@ const DATAGRAM_BUFFER_SIZE: usize = 1 << 20;
 
 /// QUIC transport parameters, mirroring the iroh backend's choices so
 /// behavior — and benchmark numbers — are comparable across backends.
-fn transport_config(max_multipath_paths: Option<u32>) -> Arc<noq::TransportConfig> {
+fn transport_config(
+    max_multipath_paths: Option<u32>,
+    packetization: crate::Packetization,
+) -> Arc<noq::TransportConfig> {
     let mut cfg = noq::TransportConfig::default();
     cfg.keep_alive_interval(Some(HEARTBEAT_INTERVAL));
     cfg.default_path_keep_alive_interval(Some(HEARTBEAT_INTERVAL));
@@ -74,6 +77,12 @@ fn transport_config(max_multipath_paths: Option<u32>) -> Arc<noq::TransportConfi
     cfg.congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()));
     cfg.stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024));
     cfg.send_window(32 * 1024 * 1024);
+    if packetization == crate::Packetization::Conservative {
+        cfg.initial_mtu(1200);
+        cfg.min_mtu(1200);
+        cfg.mtu_discovery_config(None);
+        cfg.enable_segmentation_offload(false);
+    }
     Arc::new(cfg)
 }
 
@@ -209,7 +218,7 @@ async fn bind_socket(
     let endpoint_config =
         noq::EndpointConfig::new(Arc::new(hmac::Blake3HmacKey::new(&mut rand::rng())));
 
-    let transport = transport_config(config.max_multipath_paths);
+    let transport = transport_config(config.max_multipath_paths, config.packetization);
     let mut server_config = noq::ServerConfig::with_crypto(Arc::new(server_crypto));
     server_config.transport = transport.clone();
     // An immutable per-protocol offer avoids both silent ALPN fallback and
