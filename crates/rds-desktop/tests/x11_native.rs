@@ -220,6 +220,54 @@ fn native_evdev_button_mapping() {
 
 #[test]
 #[ignore = "requires a dedicated Xvfb server; injects native input"]
+fn rapid_button_pairs_reach_the_native_event_queue_in_order() {
+    use std::time::{Duration, Instant};
+    use x11rb::protocol::{
+        Event,
+        xproto::{ChangeWindowAttributesAux, EventMask},
+    };
+    let (observer, root) = observer();
+    observer
+        .change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    let mut sink = XtestInput::new().unwrap();
+    sink.inject(&event(InputKind::PointerMove { x: 100.0, y: 100.0 }))
+        .unwrap();
+    let mut expected = Vec::new();
+    for pair in 0..100 {
+        let (button, detail) = [(0x110, 1), (0x111, 3), (0x112, 2)][pair % 3];
+        for pressed in [true, false] {
+            sink.inject(&event(InputKind::PointerButton { button, pressed }))
+                .unwrap();
+            expected.push((detail, pressed));
+        }
+    }
+    let mut observed = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while observed.len() < expected.len() && Instant::now() < deadline {
+        match observer.poll_for_event().unwrap() {
+            Some(Event::ButtonPress(button)) => observed.push((button.detail, true)),
+            Some(Event::ButtonRelease(button)) => observed.push((button.detail, false)),
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    assert_eq!(
+        observed, expected,
+        "rapid native button transitions were lost or reordered"
+    );
+    let mask = observer.query_pointer(root).unwrap().reply().unwrap().mask;
+    assert!(!mask.intersects(KeyButMask::BUTTON1 | KeyButMask::BUTTON2 | KeyButMask::BUTTON3));
+}
+
+#[test]
+#[ignore = "requires a dedicated Xvfb server; injects native input"]
 fn native_relative_motion_preserves_position() {
     let (observer, root) = observer();
     let mut sink = XtestInput::new().unwrap();
