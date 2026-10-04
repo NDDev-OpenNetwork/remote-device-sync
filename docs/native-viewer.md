@@ -9,7 +9,8 @@ beyond one second or a reconnect. It saves ten seconds after the trigger and
 uses a thirty-second cooldown. Occlusion alone does not trigger a surface fault.
 Graceful shutdown preserves an interrupted window; abrupt process death can
 leave only the regular live snapshot and logs. Two-second sampling can miss
-short incidents, so rate-limited slow completed-ACK warnings remain independent.
+short pending incidents, so completed slow-ACK counter changes also trigger a
+window, alongside independent rate-limited warnings.
 
 `session_epoch`, `input_queue_depth`, `input_acks_canceled`, `slow_input_acks`
 and `last_input_ack_ms` complement the existing bounded latency percentiles.
@@ -28,8 +29,9 @@ desktop setting or remote protocol extension.
 Only native left presses inside that rectangle begin a sample, after a matching
 marker has already been presented. The exact pending BGRA frame must reach
 `DrawOutcome::Presented` with the expected marker/counter before completing it.
-ACKs and decoded-but-unpresented images cannot finish the measurement. Reconnect
-or counter rollback cancels pending samples. At most 128 clicks and 1024 latency
+ACKs and decoded-but-unpresented images cannot finish the measurement. Reconnect,
+counter rollback, unavailable/occluded surfaces or a missing marker cancel
+pending samples and require a fresh presented anchor. At most 128 clicks and 1024 latency
 samples are retained; replaced intermediate frames can expose cumulative results.
 Reports contain timing/counts, missing-marker and cancellation/eviction counters,
 without retaining pixels or input text. Marker detection is tested through actual

@@ -83,6 +83,7 @@ pub struct VisualProbeReport {
     pub canceled: u64,
     pub evicted: u64,
     pub frames_without_marker: u64,
+    pub unavailable_presentations: u64,
     pub input_to_submit_min_ms: Option<f64>,
     pub input_to_submit_p50_ms: Option<f64>,
     pub input_to_submit_p95_ms: Option<f64>,
@@ -127,6 +128,9 @@ impl VisualProbe {
     pub(super) fn presented(&mut self, frame: &RawFrame, now: Instant) {
         let Some(counter) = self.spec.counter(frame) else {
             self.report.frames_without_marker += 1;
+            // A covered/moved target cannot prove later clicks correspond to
+            // the earlier counter. Require a fresh anchor before measuring.
+            self.reset();
             return;
         };
         if self
@@ -159,6 +163,10 @@ impl VisualProbe {
         self.pending.clear();
         self.next = None;
         self.report.last_counter = None;
+    }
+    pub(super) fn unavailable(&mut self) {
+        self.report.unavailable_presentations += 1;
+        self.reset();
     }
     pub(super) fn report(&self) -> VisualProbeReport {
         let mut report = self.report.clone();
@@ -227,10 +235,13 @@ mod tests {
             start + std::time::Duration::from_millis(20),
         );
         assert_eq!(probe.report().samples, 0);
+        assert_eq!(probe.report().canceled, 2);
         probe.presented(
             &marker(spec.prefix, 0),
             start + std::time::Duration::from_millis(25),
         );
+        probe.click((2., 26.), 2, start);
+        probe.click((3., 27.), 3, start + std::time::Duration::from_millis(10));
         assert_eq!(probe.report().pending, 2);
         // A newer cumulative response proves both clicks even if an
         // intermediate frame was replaced before native presentation.
@@ -249,9 +260,32 @@ mod tests {
         assert_eq!(probe.report().samples, 2);
         probe.click((3., 27.), 4, start);
         probe.reset();
-        assert_eq!(probe.report().canceled, 1);
+        assert_eq!(probe.report().canceled, 3);
         probe.presented(&marker(spec.prefix, 3), start);
         assert_eq!(probe.report().samples, 2);
+    }
+    #[test]
+    fn unavailable_surface_cancels_samples_and_requires_a_fresh_presented_anchor() {
+        let spec = spec();
+        let start = Instant::now();
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.click((2., 26.), 1, start);
+        probe.unavailable();
+        probe.click((2., 26.), 2, start);
+        let report = probe.report();
+        assert_eq!(report.canceled, 1);
+        assert_eq!(report.unanchored_clicks, 1);
+        assert_eq!(report.pending, 0);
+        probe.presented(&marker(spec.prefix, 2), start);
+        assert_eq!(probe.report().samples, 0);
+        probe.click((2., 26.), 3, start);
+        probe.presented(
+            &marker(spec.prefix, 3),
+            start + std::time::Duration::from_millis(40),
+        );
+        assert_eq!(probe.report().samples, 1);
+        assert_eq!(probe.report().input_to_submit_min_ms, Some(40.));
     }
     #[test]
     fn marker_bounds_and_ambiguous_pixels_fail_without_panicking() {

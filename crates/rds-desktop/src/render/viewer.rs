@@ -666,6 +666,11 @@ impl App {
                 }
             }
             Ok(outcome) => {
+                if matches!(outcome, DrawOutcome::Occluded)
+                    && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+                {
+                    probe.unavailable();
+                }
                 lock(&self.handle.state).render_stage = outcome.stage().into();
                 lock(&self.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
@@ -759,7 +764,12 @@ impl ApplicationHandler<()> for App {
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(false) => self.release(event_loop),
             WindowEvent::Occluded(hidden) => {
-                lock(&self.handle.state).occluded = hidden;
+                let mut state = lock(&self.handle.state);
+                state.occluded = hidden;
+                if hidden && let Some(probe) = &mut state.visual_probe {
+                    probe.unavailable();
+                }
+                drop(state);
                 if !hidden && let Some(window) = &self.window {
                     window.request_redraw();
                 }

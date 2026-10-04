@@ -17,6 +17,7 @@ pub(super) struct Recorder {
     history: VecDeque<serde_json::Value>,
     pending: Option<Incident>,
     previous_reconnects: Option<u64>,
+    previous_slow_acks: Option<u64>,
     cooldown_until_ms: u64,
 }
 
@@ -31,6 +32,10 @@ impl Recorder {
             .previous_reconnects
             .is_some_and(|previous| snapshot.report.reconnects > previous);
         self.previous_reconnects = Some(snapshot.report.reconnects);
+        let slow_ack = self
+            .previous_slow_acks
+            .is_some_and(|previous| snapshot.report.slow_input_acks > previous);
+        self.previous_slow_acks = Some(snapshot.report.slow_input_acks);
         if let Some(incident) = &mut self.pending {
             // Keep memory bounded even if the diagnostic timer runs rapidly.
             if incident.snapshots.len() < HISTORY + 6 {
@@ -46,6 +51,10 @@ impl Recorder {
             return None;
         }
         let mut reasons = Vec::new();
+        if slow_ack {
+            // Completed stalls can fall entirely between periodic snapshots.
+            reasons.push("input_ack_delayed");
+        }
         if snapshot
             .report
             .oldest_input_ack_age_ms
@@ -162,5 +171,17 @@ mod tests {
             data["reasons"],
             serde_json::json!(["decoded_video_stalled", "desktop_reconnected"])
         );
+    }
+    #[test]
+    fn a_completed_slow_ack_between_snapshots_still_records_an_incident() {
+        let mut recorder = Recorder::default();
+        recorder.observe(&snapshot(0));
+        let mut completed = snapshot(2000);
+        completed.report.slow_input_acks = 2;
+        assert_eq!(completed.report.pending_input_acks, 0);
+        recorder.observe(&completed);
+        let data: serde_json::Value =
+            serde_json::from_slice(&recorder.finish(true).unwrap()).unwrap();
+        assert_eq!(data["reasons"][0], "input_ack_delayed");
     }
 }

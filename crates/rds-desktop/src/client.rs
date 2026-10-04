@@ -17,6 +17,7 @@ use rds_core::{
 use rds_net::{Connection, read_frame, write_frame};
 use tokio::sync::{Semaphore, SemaphorePermit, mpsc};
 use tokio::task::JoinSet;
+use tracing::Instrument;
 
 use crate::{DesktopError, RawFrame, SessionClock, mailbox};
 
@@ -416,57 +417,69 @@ impl DesktopSession {
         let mut tasks = JoinSet::new();
         let probes = Arc::new(tokio::sync::Mutex::new(HeartbeatProbes::default()));
         let sending_probes = probes.clone();
-        tasks.spawn(async move {
-            while let Some(msg) = ctrl_rx.recv().await {
-                if let DesktopControl::Heartbeat { seq, ts_ms } = &msg {
-                    sending_probes.lock().await.sent(*seq, *ts_ms);
-                }
-                if !matches!(
-                    tokio::time::timeout(FRAME_STREAM_TIMEOUT, write_frame(&mut send.0, &msg))
-                        .await,
-                    Ok(Ok(()))
-                ) {
-                    break;
+        tasks.spawn(
+            async move {
+                while let Some(msg) = ctrl_rx.recv().await {
+                    if let DesktopControl::Heartbeat { seq, ts_ms } = &msg {
+                        sending_probes.lock().await.sent(*seq, *ts_ms);
+                    }
+                    if !matches!(
+                        tokio::time::timeout(FRAME_STREAM_TIMEOUT, write_frame(&mut send.0, &msg))
+                            .await,
+                        Ok(Ok(()))
+                    ) {
+                        break;
+                    }
                 }
             }
-        });
+            .in_current_span(),
+        );
 
         let rtt_marker = control_rtt_ms.clone();
-        tasks.spawn(async move {
-            loop {
-                match read_frame::<_, DesktopEvent>(&mut recv).await {
-                    Ok(ev @ DesktopEvent::Heartbeat { seq, ts_ms }) => {
-                        if let Some(rtt) = probes.lock().await.echoed(seq, ts_ms) {
-                            rtt_marker.store(rtt.as_millis() as u64, Ordering::Relaxed);
+        tasks.spawn(
+            async move {
+                loop {
+                    match read_frame::<_, DesktopEvent>(&mut recv).await {
+                        Ok(ev @ DesktopEvent::Heartbeat { seq, ts_ms }) => {
+                            if let Some(rtt) = probes.lock().await.echoed(seq, ts_ms) {
+                                rtt_marker.store(rtt.as_millis() as u64, Ordering::Relaxed);
+                            }
+                            events_tx.send(ev);
                         }
-                        events_tx.send(ev);
+                        Ok(ev) => {
+                            events_tx.send(ev);
+                        }
+                        Err(_) => break,
                     }
-                    Ok(ev) => {
-                        events_tx.send(ev);
-                    }
-                    Err(_) => break,
                 }
             }
-        });
-        tasks.spawn(receive_frames(
-            uni,
-            ReceiveContext {
-                frame_tx,
-                header_tx,
-                encoded_tx,
-                next_seq: next_seq.clone(),
-                ctrl: ctrl_tx.clone(),
-                clock: clock.clone(),
-                receiving: receiving.clone(),
-                control_rtt_ms: control_rtt_ms.clone(),
-            },
-        ));
-        let task = tokio::spawn(async move {
-            // EOF/error on any session leg ends all sibling work even while
-            // the underlying connection remains available for other services.
-            let _ = tasks.join_next().await;
-            tasks.shutdown().await;
-        });
+            .in_current_span(),
+        );
+        tasks.spawn(
+            receive_frames(
+                uni,
+                ReceiveContext {
+                    frame_tx,
+                    header_tx,
+                    encoded_tx,
+                    next_seq: next_seq.clone(),
+                    ctrl: ctrl_tx.clone(),
+                    clock: clock.clone(),
+                    receiving: receiving.clone(),
+                    control_rtt_ms: control_rtt_ms.clone(),
+                },
+            )
+            .in_current_span(),
+        );
+        let task = tokio::spawn(
+            async move {
+                // EOF/error on any session leg ends all sibling work even while
+                // the underlying connection remains available for other services.
+                let _ = tasks.join_next().await;
+                tasks.shutdown().await;
+            }
+            .in_current_span(),
+        );
 
         Ok(Self {
             frames,
@@ -847,7 +860,7 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 ctx.receiving.fetch_add(1, Ordering::Relaxed);
                 let budget = FrameBudget { _slot: slot, receiving: ctx.receiving.clone() };
                 let next_seq = ctx.next_seq.clone();
-                readers.spawn(read_one(stream, next_seq, budget));
+                readers.spawn(read_one(stream, next_seq, budget).in_current_span());
             }
         }
     }

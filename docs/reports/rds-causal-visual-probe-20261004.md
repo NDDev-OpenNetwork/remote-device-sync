@@ -9,6 +9,8 @@ The viewer also retains up to ten private metadata incident windows: thirty
 two-second snapshots before a trigger and ten seconds afterward. Pending input
 ACKs at 250 ms, video inactivity at three seconds, visible submission inactivity
 at one second and reconnect counter changes trigger recording with a cooldown.
+Completed slow ACK counter changes also trigger recording when their entire
+delay fell between periodic snapshots.
 Graceful shutdown saves an incomplete window. These are diagnostic thresholds,
 not latency guarantees. Sub-two-second faults can fall between snapshots; slow
 completed ACKs also emit rate-limited warnings at the default log level.
@@ -36,7 +38,8 @@ Queue/sample limits and missing-marker/eviction counters make failed or incomple
 qualification visible. The ordinary viewer path has no marker sampling enabled.
 
 Unit tests cover unrelated/ambiguous frames, malformed geometry/data, outside
-clicks, cumulative rapid responses, duplicate presentation, canceled reconnect
+clicks, cumulative rapid responses, duplicate presentation, canceled reconnect,
+occluded/unavailable surfaces, lost marker anchors and completed short ACK stalls,
 samples and actual H.264 marker encode/decode. These do not establish physical
 network latency. Native installed qualification follows separately, without
 equating GPU submission with optical scanout or retaining desktop content.
