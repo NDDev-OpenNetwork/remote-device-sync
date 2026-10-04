@@ -20,6 +20,14 @@ production/decode and input injection/ACK-write durations without key codes,
 clipboard, pixel or application text. Session IDs are local process correlation
 IDs; timestamps on different hosts must not be subtracted as network latency.
 
+The diagnostic subscriber previously excluded INFO connection spans under a
+WARN filter. Its per-layer `event_scope` then emitted diagnostics with no
+session ID even while operational events retained it. A negative regression
+reproduced `session_id: null` on the preceding implementation; retaining numeric
+connection spans in the diagnostic layer fixes it without enabling filtered
+INFO messages or duplicating operational records. All observe tests and strict
+clippy pass after the correction.
+
 The remote controlled target owns a known 48-bit marker prefix and increments a
 16-bit counter once per button press. The viewer samples only that descriptor's
 64 cells, rejects ambiguous/wrong-prefix/truncated data and records counts and

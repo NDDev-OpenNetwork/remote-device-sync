@@ -11,7 +11,7 @@ use serde::Serialize;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
 use tracing::{Event as TraceEvent, Subscriber};
-use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::filter::{FilterExt, filter_fn};
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Layer};
@@ -174,7 +174,12 @@ fn subscriber<W: std::io::Write + Send + 'static>(
         meta.target() == TARGET || (meta.is_span() && meta.name() == "rds.conn")
     }));
     let diagnostics = layer
-        .with_filter(config.filter)
+        // Per-layer filters also filter event_scope(). Retain the numeric
+        // connection span even when its INFO level is below the requested
+        // diagnostic threshold; otherwise WARN records lose session context.
+        .with_filter(config.filter.or(filter_fn(|meta| {
+            meta.is_span() && meta.name() == "rds.conn"
+        })))
         .with_filter(filter_fn(|meta| meta.target() != TARGET));
     Ok((
         tracing_subscriber::registry()

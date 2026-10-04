@@ -1,5 +1,10 @@
 # Observability contract and execution plan
 
+Diagnostic filters retain numeric `rds.conn` spans even when INFO diagnostics
+are disabled. Warning records therefore keep connection context across scoped
+workers. Operational event filtering and export allowlists remain independent;
+retaining a span does not enable its filtered diagnostic messages.
+
 Scope: W10.1/W10.2, implemented incrementally alongside correctness work.
 This is not a closure of W10, a production deployment or a distributed tracing
 implementation. See [current remediation state](remediation-progress.md).
