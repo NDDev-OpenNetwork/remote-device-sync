@@ -48,3 +48,9 @@ workspace Clippy; all eight native X11 input cases on disposable Xvfb. Default
 workspace and published-candidate CI results are recorded by their actual run,
 not inferred from these feature-specific checks. No real desktop input was
 injected by the native regression fixture.
+
+The first Linux CI run exposed an existing metrics-fixture race: server sampling
+immediately after send.finish() could precede actual UDP delivery. The echo test
+now uses a peer-observation fence before sampling, retaining the traffic
+assertions without arbitrary sleep. This changes test synchronization only;
+it does not change production transport accounting.
