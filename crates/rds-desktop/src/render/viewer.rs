@@ -830,11 +830,21 @@ impl ApplicationHandler<()> for App {
                         self.sync_modifiers(event_loop);
                     }
                     if event.state == ElementState::Pressed {
-                        if code == 47 && (self.keys.contains(&29) || self.keys.contains(&97)) {
+                        let command_paste = cfg!(target_os = "macos")
+                            && code == 47
+                            && (self.keys.contains(&125) || self.keys.contains(&126));
+                        if code == 47
+                            && (command_paste || self.keys.contains(&29) || self.keys.contains(&97))
+                        {
                             match super::platform::paste_text() {
                                 Ok(Some(text)) => {
                                     let id = rand::random();
                                     let total = text.len() as u32;
+                                    tracing::info!(
+                                        bytes = total,
+                                        command_paste,
+                                        "explicit local clipboard text queued"
+                                    );
                                     let chunks =
                                         text.as_bytes().chunks(crate::clipboard::SEND_CHUNK_BYTES);
                                     for (index, chunk) in chunks.enumerate() {
@@ -883,6 +893,10 @@ impl ApplicationHandler<()> for App {
                                         return;
                                     }
                                 }
+                                Ok(None) if command_paste => {
+                                    tracing::info!("explicit local clipboard paste has no text");
+                                    return;
+                                }
                                 Ok(None) => {}
                                 Err(error) => {
                                     self.handle
@@ -890,6 +904,14 @@ impl ApplicationHandler<()> for App {
                                     return;
                                 }
                             }
+                        }
+                        if command_paste {
+                            for kind in super::input::command_paste_chord(&self.keys) {
+                                self.input(event_loop, kind);
+                            }
+                            // The physical V is consumed locally: its release
+                            // and OS repeats must not replay paste effects.
+                            return;
                         }
                         self.keys.insert(code);
                         self.input(event_loop, InputKind::KeyDown { code });

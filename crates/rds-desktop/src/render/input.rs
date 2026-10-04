@@ -1,4 +1,65 @@
+use rds_core::InputKind;
 use winit::keyboard::KeyCode;
+
+/// Translate a local Command paste while restoring every physically held key.
+/// Control brackets Super release/restore so Super is never released alone.
+pub(super) fn command_paste_chord(held: &std::collections::BTreeSet<u32>) -> Vec<InputKind> {
+    let add_control = !held.contains(&29) && !held.contains(&97);
+    let mut chord = Vec::with_capacity(8);
+    if add_control {
+        chord.push(InputKind::KeyDown { code: 29 });
+    }
+    for code in [125, 126] {
+        if held.contains(&code) {
+            chord.push(InputKind::KeyUp { code });
+        }
+    }
+    chord.push(InputKind::KeyDown { code: 47 });
+    chord.push(InputKind::KeyUp { code: 47 });
+    for code in [125, 126] {
+        if held.contains(&code) {
+            chord.push(InputKind::KeyDown { code });
+        }
+    }
+    if add_control {
+        chord.push(InputKind::KeyUp { code: 29 });
+    }
+    chord
+}
+
+#[cfg(test)]
+mod command_paste_tests {
+    use super::*;
+    #[test]
+    fn command_paste_restores_held_modifiers_and_never_pastes_with_super_held() {
+        for held in [vec![125], vec![126], vec![42, 125], vec![97, 125, 126]] {
+            let mut pressed: std::collections::BTreeSet<u32> = held.into_iter().collect();
+            let original = pressed.clone();
+            let mut presses = 0;
+            for event in command_paste_chord(&original) {
+                match event {
+                    InputKind::KeyDown { code } => {
+                        if code == 47 {
+                            assert!(pressed.contains(&29) || pressed.contains(&97));
+                            assert!(!pressed.contains(&125) && !pressed.contains(&126));
+                            presses += 1;
+                        }
+                        assert!(pressed.insert(code), "duplicate synthetic key down");
+                    }
+                    InputKind::KeyUp { code } => {
+                        if code == 125 || code == 126 {
+                            assert!(pressed.contains(&29) || pressed.contains(&97));
+                        }
+                        assert!(pressed.remove(&code), "release without held ownership");
+                    }
+                    _ => panic!("paste chord must only contain key transitions"),
+                }
+            }
+            assert_eq!(presses, 1);
+            assert_eq!(pressed, original);
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Viewport {
