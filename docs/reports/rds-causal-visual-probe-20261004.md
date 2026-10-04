@@ -37,6 +37,14 @@ uses the retained attempt span rather than inheriting an unrelated event-loop
 context. The legacy untagged/direct raw-frame API remains available and reports
 no sequence instead of guessing from an independently consumed header mailbox.
 
+The macOS workspace CI also exposed a pre-existing Noq churn-test assumption:
+it expected exactly one live path after closing the original path, although
+discovery may establish additional validated paths. The fixture now records
+every explicitly retired ID and requires all to be absent while retaining the
+high-ID successor, coverage and sticky-lag assertions. The original failure
+was not reproduced in a serial local run; the corrected contract passed three
+local repetitions and strict Noq clippy. CI acceptance remains required.
+
 The remote controlled target owns a known 48-bit marker prefix and increments a
 16-bit counter once per button press. The viewer samples only that descriptor's
 64 cells, rejects ambiguous/wrong-prefix/truncated data and records counts and
