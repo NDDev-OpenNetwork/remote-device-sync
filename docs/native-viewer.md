@@ -346,6 +346,28 @@ effects. An explicit Command paste with no text sends no stale remote paste.
 
 ## Persistent viewer diagnostics
 
+The live snapshot separates time since the last submitted image from
+`unpresented_frame_age_ms`: the latter exists only while a decoded image awaits
+submission. Replacement by fresher images preserves that waiting interval;
+successful submission clears it or starts the interval of an image that arrived
+during the draw. The flight recorder uses this outstanding-work age for visible
+renderer stalls. Damage-driven idle refreshes and a first update after a quiet
+period must not produce a renderer-stall incident. Occlusion still suppresses
+that visible-screen diagnosis and clears its waiting interval. A retained image
+starts a fresh interval when it becomes eligible again; time hidden by the OS
+is not counted as a newly resumed window's visible stall. The surface's own
+occluded outcome also suppresses diagnosis if the window event has not arrived.
+
+Private `rds_desktop::input_timing=trace` records add the managed IPC receipt,
+bounded control-queue admission and network control-write start/completion.
+They include only input sequence numbers and local durations, never key codes,
+coordinates or clipboard contents. Together with viewer dispatch/ACK and server
+injection records, these identify previously unobserved local waits. A completed
+write means local transport admission, not remote execution or visible response;
+timestamps from different hosts require clock qualification before subtraction.
+Concurrent desktops must also be distinguished by their owning connection and
+attempt context, rather than joining an input sequence alone.
+
 `rds-viewer` automatically writes private logs under `viewer-logs` beside the
 endpoint configuration (normally `~/.config/remote-device-sync/viewer-logs`).
 Each log part is 8 MiB maximum; ten generated parts are retained. Files are 0600
