@@ -1,5 +1,20 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+## 2026-10-05 explicit media receipt boundary
+
+The pinned [Noq stopped contract](https://docs.rs/noq/1.3.0/noq/struct.SendStream.html#method.stopped)
+distinguishes transport acknowledgement from application processing and warns
+that an application response can avoid delayed transport acknowledgements.
+[RDP's frame acknowledgement](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/0241e258-77ef-4a58-b426-5039ed6296ce)
+is an example of explicit graphics feedback, confirming decoded logical frames.
+RDS does not implement RDP or claim the same boundary: DesktopV4 proves only a
+bounded complete encoded-payload read, using the exact frame sequence and BLAKE3
+body digest. Decode/GPU/physical response are separately measured. This lets
+already received pictures free bounded sender admission without treating a slow
+FIN acknowledgement as proof of missing payload. Explicit greeting/acknowledgement
+and additive managed commands preserve legacy behavior; native acceptance remains
+a separate gate.
+
 Second-pass research, deeper than `architecture.md`. Goal: the lowest-latency,
 fully-Rust remote access + sync system serviced by the GDS server. This
 document separates verified facts (crate versions, APIs read in vendored

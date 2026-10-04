@@ -34,6 +34,9 @@ impl Resolution {
 
 #[derive(Args, Clone)]
 pub struct Options {
+    /// Use validated frame receipts; requires updated local and remote agents.
+    #[arg(long, action=clap::ArgAction::Set, num_args=0..=1, require_equals=true, default_missing_value="true", default_value="false")]
+    pub payload_receipts: bool,
     /// Video quality profile; preserve source aspect ratio without upscaling.
     #[arg(long, value_enum, default_value = "full-hd")]
     pub resolution: Resolution,
@@ -398,9 +401,27 @@ mod native {
         started: Instant,
     ) -> anyhow::Result<bool> {
         view.stage("opening desktop");
-        let (mut channel, mut events) = client
-            .desktop_profile_separated(Some(session), hello(options), options.resolution.height())
-            .await?;
+        let (mut channel, mut events) = if options.payload_receipts {
+            client
+                .desktop_profile_separated_receipts(
+                    Some(session),
+                    hello(options),
+                    options.resolution.height(),
+                )
+                .await?
+        } else {
+            client
+                .desktop_profile_separated(
+                    Some(session),
+                    hello(options),
+                    options.resolution.height(),
+                )
+                .await?
+        };
+        tracing::info!(
+            payload_receipts = options.payload_receipts,
+            "native desktop delivery receipt mode"
+        );
         view.managed_events_separated();
         extent(view, &channel.caps, options.display)?;
         view.status("Waiting for screen");
@@ -509,6 +530,7 @@ mod native {
             SessionOpts {
                 session: Some(rand_id()),
                 output_height: Some(options.resolution.height()),
+                payload_receipts: options.payload_receipts,
                 ..Default::default()
             },
         )
@@ -572,12 +594,25 @@ mod native {
                     Some(g) => rds_client::connect_authorized(&endpoint, target, &g).await?,
                     None => rds_client::connect(&endpoint, target).await?,
                 };
-                rds_desktop::client::run_desktop_client(
-                    conn,
-                    options.display,
-                    options.max_fps.get(),
+                let mut session = DesktopSession::connect_opts(
+                    &conn,
+                    hello(&options),
+                    SessionOpts {
+                        session: Some(rand::random()),
+                        output_height: Some(options.resolution.height()),
+                        payload_receipts: options.payload_receipts,
+                        ..Default::default()
+                    },
                 )
                 .await?;
+                println!("desktop caps: {:?}", session.caps());
+                let mut count = 0u64;
+                while let Some(frame) = session.frames.recv().await {
+                    count += 1;
+                    if count.is_multiple_of(30) {
+                        println!("decoded {count} frames, {}x{}", frame.width, frame.height);
+                    }
+                }
             }
             Source::Managed {
                 client,
@@ -598,13 +633,23 @@ mod native {
                         _ => anyhow::bail!("unexpected local connection response"),
                     },
                 };
-                let mut channel = client
-                    .desktop_profile(
-                        Some(session),
-                        hello(&options),
-                        Some(options.resolution.height()),
-                    )
-                    .await?;
+                let mut channel = if options.payload_receipts {
+                    client
+                        .desktop_profile_receipts(
+                            Some(session),
+                            hello(&options),
+                            options.resolution.height(),
+                        )
+                        .await?
+                } else {
+                    client
+                        .desktop_profile(
+                            Some(session),
+                            hello(&options),
+                            Some(options.resolution.height()),
+                        )
+                        .await?
+                };
                 let mut decoder = RelayDecoder::new();
                 let mut count = 0u64;
                 loop {

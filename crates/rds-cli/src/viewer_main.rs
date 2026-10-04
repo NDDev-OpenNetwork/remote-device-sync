@@ -25,6 +25,7 @@ struct Config {
     max_fps: Option<NonZeroU32>,
     grant_file: Option<PathBuf>,
     resolution: Option<rds_cli::desktop::Resolution>,
+    payload_receipts: Option<bool>,
 }
 
 #[tokio::main]
@@ -112,6 +113,11 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                     && matches.value_source("max_fps") != Some(ValueSource::CommandLine)
                 {
                     cli.options.max_fps = fps;
+                }
+                if let Some(enabled) = config.payload_receipts
+                    && matches.value_source("payload_receipts") != Some(ValueSource::CommandLine)
+                {
+                    cli.options.payload_receipts = enabled;
                 }
                 if cli.grant_file.is_none() {
                     cli.grant_file = config.grant_file;

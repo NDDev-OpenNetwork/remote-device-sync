@@ -508,12 +508,20 @@ async fn execute(
         | Command::DesktopSeparated {
             session, ref hello, ..
         }
+        | Command::DesktopSeparatedReceipts {
+            session, ref hello, ..
+        }
+        | Command::DesktopProfileReceipts {
+            session, ref hello, ..
+        }
         | Command::DesktopProfile {
             session, ref hello, ..
         } => {
             let output_height = match &command {
                 Command::DesktopProfile { output_height, .. }
-                | Command::DesktopSeparated { output_height, .. } => Some(*output_height),
+                | Command::DesktopSeparated { output_height, .. }
+                | Command::DesktopSeparatedReceipts { output_height, .. }
+                | Command::DesktopProfileReceipts { output_height, .. } => Some(*output_height),
                 _ => None,
             };
             let permit = streams
@@ -531,12 +539,20 @@ async fn execute(
                     session: Some(rand::random()),
                     output_height,
                     relay_encoded: true,
+                    payload_receipts: matches!(
+                        command,
+                        Command::DesktopSeparatedReceipts { .. }
+                            | Command::DesktopProfileReceipts { .. }
+                    ),
                     ..Default::default()
                 },
             )
             .await
             .map_err(|_| ErrorCode::Remote)?;
-            let registration = if matches!(command, Command::DesktopSeparated { .. }) {
+            let registration = if matches!(
+                command,
+                Command::DesktopSeparated { .. } | Command::DesktopSeparatedReceipts { .. }
+            ) {
                 Some(events.register()?)
             } else {
                 None
@@ -583,6 +599,8 @@ impl Client {
                 | Command::Desktop { .. }
                 | Command::DesktopProfile { .. }
                 | Command::DesktopSeparated { .. }
+                | Command::DesktopSeparatedReceipts { .. }
+                | Command::DesktopProfileReceipts { .. }
                 | Command::DesktopEvents { .. }
         );
         let timeout = if matches!(command, Command::Sync { .. }) {
@@ -626,6 +644,8 @@ impl Client {
                 | Command::Desktop { .. }
                 | Command::DesktopProfile { .. }
                 | Command::DesktopSeparated { .. }
+                | Command::DesktopSeparatedReceipts { .. }
+                | Command::DesktopProfileReceipts { .. }
                 | Command::DesktopEvents { .. }
         ) {
             return Err(Error::Protocol);
@@ -650,9 +670,37 @@ impl Client {
         hello: rds_core::DesktopHello,
         output_height: Option<u32>,
     ) -> Result<ManagedDesktop, Error> {
+        self.desktop_profile_mode(session, hello, output_height, false)
+            .await
+    }
+
+    /// Explicit DesktopV4 receipts on the existing combined desktop socket.
+    pub async fn desktop_profile_receipts(
+        &self,
+        session: Option<SessionId>,
+        hello: rds_core::DesktopHello,
+        output_height: u32,
+    ) -> Result<ManagedDesktop, Error> {
+        self.desktop_profile_mode(session, hello, Some(output_height), true)
+            .await
+    }
+
+    async fn desktop_profile_mode(
+        &self,
+        session: Option<SessionId>,
+        hello: rds_core::DesktopHello,
+        output_height: Option<u32>,
+        payload_receipts: bool,
+    ) -> Result<ManagedDesktop, Error> {
         let display = hello.display;
-        let (reply, stream) = self
-            .exchange(match output_height {
+        let command = if payload_receipts {
+            Command::DesktopProfileReceipts {
+                session,
+                hello: Box::new(hello),
+                output_height: output_height.unwrap_or(0),
+            }
+        } else {
+            match output_height {
                 Some(output_height) => Command::DesktopProfile {
                     session,
                     hello: Box::new(hello),
@@ -662,8 +710,9 @@ impl Client {
                     session,
                     hello: Box::new(hello),
                 },
-            })
-            .await?;
+            }
+        };
+        let (reply, stream) = self.exchange(command).await?;
         match reply {
             Reply::DesktopOpened { session, caps } => {
                 Ok(ManagedDesktop::new(stream, session, caps, display))
@@ -680,14 +729,44 @@ impl Client {
         hello: rds_core::DesktopHello,
         output_height: u32,
     ) -> Result<(ManagedDesktop, ManagedEvents), Error> {
+        self.desktop_separated_mode(session, hello, output_height, false)
+            .await
+    }
+
+    /// Explicit DesktopV4 payload receipts; unsupported managers/peers refuse
+    /// before session work. No legacy fallback changes this requested mode.
+    pub async fn desktop_profile_separated_receipts(
+        &self,
+        session: Option<SessionId>,
+        hello: rds_core::DesktopHello,
+        output_height: u32,
+    ) -> Result<(ManagedDesktop, ManagedEvents), Error> {
+        self.desktop_separated_mode(session, hello, output_height, true)
+            .await
+    }
+
+    async fn desktop_separated_mode(
+        &self,
+        session: Option<SessionId>,
+        hello: rds_core::DesktopHello,
+        output_height: u32,
+        payload_receipts: bool,
+    ) -> Result<(ManagedDesktop, ManagedEvents), Error> {
         let display = hello.display;
-        let (reply, stream) = self
-            .exchange(Command::DesktopSeparated {
+        let command = if payload_receipts {
+            Command::DesktopSeparatedReceipts {
                 session,
                 hello: Box::new(hello),
                 output_height,
-            })
-            .await?;
+            }
+        } else {
+            Command::DesktopSeparated {
+                session,
+                hello: Box::new(hello),
+                output_height,
+            }
+        };
+        let (reply, stream) = self.exchange(command).await?;
         let Reply::DesktopSeparatedOpened {
             session,
             caps,

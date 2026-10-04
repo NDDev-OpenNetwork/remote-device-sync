@@ -4266,6 +4266,7 @@ dependencies = [
 name = "rds-desktop"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bytes",
  "memmap2",
  "noq",

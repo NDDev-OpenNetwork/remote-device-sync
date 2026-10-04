@@ -164,6 +164,19 @@ pub enum Command {
     DesktopEvents {
         route: SessionId,
     },
+    /// Explicit validated-payload receipts plus the existing separated event
+    /// socket. Both the manager and remote agent must support this extension.
+    DesktopSeparatedReceipts {
+        session: Option<SessionId>,
+        hello: Box<crate::DesktopHello>,
+        output_height: u32,
+    },
+    /// Validated-payload receipts with the original combined desktop socket.
+    DesktopProfileReceipts {
+        session: Option<SessionId>,
+        hello: Box<crate::DesktopHello>,
+        output_height: u32,
+    },
 }
 
 /// Never Debug: paths may contain private information.
@@ -439,6 +452,22 @@ mod tests {
                 12,
             ),
             (Command::DesktopEvents { route: id }, 13),
+            (
+                Command::DesktopSeparatedReceipts {
+                    session: Some(id),
+                    hello: hello(),
+                    output_height: 1080,
+                },
+                14,
+            ),
+            (
+                Command::DesktopProfileReceipts {
+                    session: Some(id),
+                    hello: hello(),
+                    output_height: 1080,
+                },
+                15,
+            ),
         ] {
             let bytes = postcard::to_stdvec(&command).unwrap();
             assert_eq!(bytes[0], tag);

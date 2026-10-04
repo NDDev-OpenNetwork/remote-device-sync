@@ -263,6 +263,26 @@ async fn directional_sync(backend: Backend) {
             .to_string()
             .contains("service Sync not granted")
     );
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    write_frame(
+        &mut send,
+        &rds_core::StreamHello::DesktopV4 {
+            session: [9; 16],
+            hello: rds_core::DesktopHello {
+                display: 0,
+                max_fps: 30,
+                codec: rds_core::Codec::H264,
+                input_acks: false,
+            },
+            output_height: 1080,
+        },
+    )
+    .await
+    .unwrap();
+    let ack = read_frame::<_, rds_core::HelloAck>(&mut recv)
+        .await
+        .unwrap();
+    assert!(matches!(ack,rds_core::HelloAck::Error { message } if message==desktop_refusal));
     rds_client::ping(&conn, 100).await.unwrap();
     client.close().await;
     server.close().await;

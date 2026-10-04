@@ -55,6 +55,9 @@ async fn serve_separated_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let up = async {
         loop {
             match read_frame::<_, DesktopUp>(&mut reader).await {
+                Ok(DesktopUp::Control(DesktopControl::FrameReceived { .. })) => {
+                    return Err(invalid());
+                }
                 Ok(DesktopUp::Control(control)) => ctrl
                     .send(control)
                     .await
@@ -145,6 +148,9 @@ pub(super) async fn serve(
     let up = async {
         loop {
             match read_frame::<_, DesktopUp>(&mut reader).await {
+                Ok(DesktopUp::Control(DesktopControl::FrameReceived { .. })) => {
+                    return Err(invalid());
+                }
                 Ok(DesktopUp::Control(control)) => ctrl
                     .send(control)
                     .await
@@ -990,7 +996,10 @@ mod tests {
                 vec![rds_net::Backend::Iroh]
             }
         };
-        for backend in backends {
+        for (backend, payload_receipts) in backends
+            .into_iter()
+            .flat_map(|backend| [(backend, false), (backend, true)])
+        {
             let config = || rds_net::EndpointConfig {
                 backend,
                 bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
@@ -1011,19 +1020,22 @@ mod tests {
                                 let (mut send, mut recv) = match streams { Ok(pair) => pair, Err(_) => break };
                                 let conn = conn.clone();
                                 workers.spawn(async move {
-                                    match read_frame::<_, StreamHello>(&mut recv).await.unwrap() {
+                                    let greeting = read_frame::<_, StreamHello>(&mut recv).await.unwrap();
+                                    let negotiated = matches!(&greeting,StreamHello::DesktopV4 { .. });
+                                    match greeting {
                                         StreamHello::Ping { nonce } => {
                                             write_frame(&mut send, &HelloAck::Ok).await.unwrap();
                                             send.write_all(&nonce.to_be_bytes()).await.unwrap();
                                             send.finish().unwrap();
                                         }
-                                        StreamHello::DesktopV3 { session, hello, output_height } => {
+                                        StreamHello::DesktopV3 { session, hello, output_height } | StreamHello::DesktopV4 { session, hello, output_height } => {
+                                            assert_eq!(negotiated,payload_receipts);
                                             assert_eq!(output_height, 1080);
-                                            write_frame(&mut send, &HelloAck::Desktop(DesktopCaps {
-                                                displays: vec![], codecs: vec![rds_core::Codec::H264],
-                                            })).await.unwrap();
+                                            let caps=DesktopCaps { displays: vec![], codecs: vec![rds_core::Codec::H264] };
+                                            write_frame(&mut send, &if negotiated { HelloAck::DesktopV4(caps) } else { HelloAck::Desktop(caps) }).await.unwrap();
                                             rds_desktop::serve_desktop_with(conn, send, recv, hello, rds_desktop::SessionConfig {
                                                 frame_route: Some(UniHello::DesktopFrames { id: session }),
+                                                payload_receipts: negotiated,
                                                 input_sink: Some(Box::new(NoopInput)),
                                                 producer: Some(Box::new(rds_desktop::SyntheticProducer::new(30, 640, 480, 1024))),
                                                 ..Default::default()
@@ -1066,19 +1078,32 @@ mod tests {
             else {
                 panic!("missing session")
             };
-            let (desktop, mut events) = client
-                .desktop_profile_separated(
-                    Some(id),
-                    rds_core::DesktopHello {
-                        display: 0,
-                        max_fps: 30,
-                        codec: rds_core::Codec::H264,
-                        input_acks: true,
-                    },
-                    1080,
-                )
-                .await
-                .unwrap();
+            let hello = rds_core::DesktopHello {
+                display: 0,
+                max_fps: 30,
+                codec: rds_core::Codec::H264,
+                input_acks: true,
+            };
+            let (mut desktop, mut events) = if payload_receipts {
+                client
+                    .desktop_profile_separated_receipts(Some(id), hello, 1080)
+                    .await
+                    .unwrap()
+            } else {
+                client
+                    .desktop_profile_separated(Some(id), hello, 1080)
+                    .await
+                    .unwrap()
+            };
+            for _ in 0..5 {
+                assert!(matches!(
+                    tokio::time::timeout(Duration::from_secs(2), desktop.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    Some(ManagedMessage::Frame(_))
+                ));
+            }
             let controls = desktop.control_handle();
             let seq = controls
                 .send_input(InputKind::KeyDown { code: 30 })
