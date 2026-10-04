@@ -16,6 +16,16 @@ Buttons map explicitly: left/right/middle to X buttons 1/3/2 and evdev
 side/extra/forward/back/task to 8–12. Server pointer remapping still applies;
 unsupported native buttons produce an error rather than a successful ACK.
 
+Native repeat is disabled only for an injected held key. The viewer supplies
+intentional local OS repeats as repeated KeyDown events; non-modifier repeats
+pulse one release/press while retaining the hold. Network-delayed KeyUp does
+not generate server-side typematic letters. Shared per-key leases across
+controllers/screens restore the original repeat bit after the final release.
+Viewer and serving agent must be updated together. Native state restoration is
+best effort on teardown; a killed process or failed X connection cannot guarantee
+cleanup. Other local X clients and distinct agent processes do not participate
+in this process-local ownership. Concurrent local-seat ownership remains open.
+
 Absolute motion uses the selected root window and checked display coordinates.
 Relative motion uses XTEST's relative flag, with checked signed 16-bit deltas;
 it never interprets offsets as absolute coordinates. Absolute positions round
@@ -68,5 +78,6 @@ Xvfb is a test fixture only. Physical/composited X11, Wayland and macOS native
 qualification and a graphical viewer still have their own gates.
 
 Primary contracts: [XTEST](https://www.x.org/releases/X11R7.7/doc/xextproto/xtest.pdf),
+[per-key repeat control](https://xorg.freedesktop.org/archive/current/doc/libX11/libX11/libX11.html#Manipulating_the_Keyboard_and_Pointer_Settings),
 [Xorg evdev mapping](https://cgit.freedesktop.org/xorg/driver/xf86-input-evdev/tree/src/evdev.c),
 [Linux event codes](https://docs.kernel.org/input/event-codes.html).

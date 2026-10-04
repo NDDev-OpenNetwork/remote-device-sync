@@ -700,10 +700,24 @@ impl ApplicationHandler<()> for App {
                 self.modifiers = modifiers;
                 self.sync_modifiers(event_loop);
             }
-            WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
+            WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(key) = event.physical_key
                     && let Some(code) = evdev(key)
                 {
+                    if event.repeat {
+                        // Repeat only a key actually forwarded and still held.
+                        // Never re-run clipboard/local shortcut side effects.
+                        if event.state == ElementState::Pressed
+                            && self.keys.contains(&code)
+                            && !matches!(
+                                code,
+                                29 | 42 | 54 | 56 | 97 | 100 | 125 | 126 | 58 | 69 | 70
+                            )
+                        {
+                            self.input(event_loop, InputKind::KeyDown { code });
+                        }
+                        return;
+                    }
                     if !matches!(code, 29 | 42 | 54 | 56 | 97 | 100 | 125 | 126) {
                         self.sync_modifiers(event_loop);
                     }

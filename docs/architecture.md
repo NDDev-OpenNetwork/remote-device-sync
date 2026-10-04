@@ -89,6 +89,14 @@ input ACK/heartbeat observation. Both sockets share desktop termination, without
 closing the manager's unrelated peer streams. Existing combined APIs and remote
 wire formats remain; see [the native contract](native-viewer.md).
 
+Explicit video repair advances a session-local media epoch and interrupts only
+obsolete media work. An independent-picture lease holds admission until receipt;
+repeated requests coalesce during that recovery. X11 keyboard holds similarly
+own per-key native repeat suppression: the viewer forwards local OS repeats,
+so network delay cannot manufacture additional letters. Both native endpoints
+need the coordinated update. See [the regression receipt](reports/rds-interactive-repair-20261004.md)
+for tested boundaries and remaining installed-device qualification.
+
 Owned path policy now uses [validated eligibility](path-selection.md): only the
 handshake path is seeded; application-opened candidates stay Backup until an
 Established event. An owned bounded queue retries temporary path-credit

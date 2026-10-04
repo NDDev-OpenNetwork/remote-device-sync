@@ -24,6 +24,158 @@ fn observer() -> (RustConnection, u32) {
 
 #[test]
 #[ignore = "requires a dedicated Xvfb server; injects native input"]
+fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
+    use std::time::{Duration, Instant};
+    use x11rb::protocol::{
+        Event,
+        xkb::{BoolCtrl, ConnectionExt as _, Control, ID},
+        xproto::{
+            AutoRepeatMode, ChangeKeyboardControlAux, ChangeWindowAttributesAux, EventMask,
+            InputFocus,
+        },
+    };
+    let (observer, root) = observer();
+    observer.xkb_use_extension(1, 0).unwrap().reply().unwrap();
+    let original = observer
+        .xkb_get_controls(ID::USE_CORE_KBD.into())
+        .unwrap()
+        .reply()
+        .unwrap();
+    let rate = |delay, interval| {
+        observer
+            .xkb_set_controls(
+                ID::USE_CORE_KBD.into(),
+                0u16.into(),
+                0u16.into(),
+                0u16.into(),
+                0u16.into(),
+                0u16.into(),
+                0u16.into(),
+                0u16.into(),
+                0u16.into(),
+                original.mouse_keys_dflt_btn,
+                original.groups_wrap,
+                original.access_x_option,
+                BoolCtrl::REPEAT_KEYS,
+                BoolCtrl::REPEAT_KEYS,
+                Control::from(u32::from(BoolCtrl::REPEAT_KEYS)),
+                delay,
+                interval,
+                original.slow_keys_delay,
+                original.debounce_delay,
+                original.mouse_keys_delay,
+                original.mouse_keys_interval,
+                original.mouse_keys_time_to_max,
+                original.mouse_keys_max_speed,
+                original.mouse_keys_curve,
+                original.access_x_timeout,
+                original.access_x_timeout_mask,
+                original.access_x_timeout_values,
+                original.access_x_timeout_options_mask,
+                original.access_x_timeout_options_values,
+                &original.per_key_repeat,
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+    };
+    rate(40, 20);
+    observer
+        .change_keyboard_control(
+            &ChangeKeyboardControlAux::new()
+                .key(38u32)
+                .auto_repeat_mode(AutoRepeatMode::ON),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    observer
+        .change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::KEY_PRESS | EventMask::KEY_RELEASE),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    observer
+        .set_input_focus(InputFocus::POINTER_ROOT, root, x11rb::CURRENT_TIME)
+        .unwrap()
+        .check()
+        .unwrap();
+    let mut sink = XtestInput::new().unwrap();
+    sink.inject(&event(InputKind::KeyDown { code: 30 }))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(160)); // delayed network KeyUp
+    let keys = observer.query_keymap().unwrap().reply().unwrap().keys;
+    assert_ne!(
+        keys[38 / 8] & (1 << (38 % 8)),
+        0,
+        "genuine key hold was released early"
+    );
+    sink.inject(&event(InputKind::KeyUp { code: 30 })).unwrap();
+    let mut presses = 0;
+    let deadline = Instant::now() + Duration::from_millis(50);
+    while Instant::now() < deadline {
+        if let Some(Event::KeyPress(key)) = observer.poll_for_event().unwrap() {
+            if key.detail == 38 {
+                presses += 1;
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert_eq!(
+        presses, 1,
+        "a delayed release manufactured extra letters on the server"
+    );
+    for _ in 0..3 {
+        sink.inject(&event(InputKind::KeyDown { code: 30 }))
+            .unwrap();
+    }
+    sink.inject(&event(InputKind::KeyUp { code: 30 })).unwrap();
+    let mut repeats = 0;
+    while let Some(e) = observer.poll_for_event().unwrap() {
+        if matches!(e, Event::KeyPress(key) if key.detail == 38) {
+            repeats += 1;
+        }
+    }
+    assert_eq!(
+        repeats, 3,
+        "intentional client repeats were lost or duplicated"
+    );
+    let mut other = XtestInput::new().unwrap();
+    sink.inject(&event(InputKind::KeyDown { code: 30 }))
+        .unwrap();
+    other
+        .inject(&event(InputKind::KeyDown { code: 30 }))
+        .unwrap();
+    sink.inject(&event(InputKind::KeyUp { code: 30 })).unwrap();
+    let keys = observer.query_keymap().unwrap().reply().unwrap().keys;
+    assert_ne!(
+        keys[38 / 8] & (1 << (38 % 8)),
+        0,
+        "one controller released another's hold"
+    );
+    drop(other);
+    let keys = observer.query_keymap().unwrap().reply().unwrap().keys;
+    assert_eq!(
+        keys[38 / 8] & (1 << (38 % 8)),
+        0,
+        "last controller retained the key after drop"
+    );
+    let keyboard = observer.get_keyboard_control().unwrap().reply().unwrap();
+    assert_ne!(
+        keyboard.auto_repeats[38 / 8] & (1 << (38 % 8)),
+        0,
+        "original native repeat setting was not restored"
+    );
+    drop(sink);
+    rate(original.repeat_delay, original.repeat_interval);
+}
+
+#[test]
+#[ignore = "requires a dedicated Xvfb server; injects native input"]
 fn native_evdev_keyboard_mapping() {
     let (observer, _) = observer();
     let mut sink = XtestInput::new().unwrap();

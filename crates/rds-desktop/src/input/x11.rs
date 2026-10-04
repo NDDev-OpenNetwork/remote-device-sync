@@ -4,8 +4,10 @@
 //! live in `input/portal` and `input/wlr`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 mod keymap;
+mod repeat;
 use keymap::KeyMap;
 use x11rb::protocol::xkb::ConnectionExt as _;
 
@@ -17,8 +19,6 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::{DesktopError, InputSink};
 
-const KEY_PRESS: u8 = 2;
-const KEY_RELEASE: u8 = 3;
 const BUTTON_PRESS: u8 = 4;
 const BUTTON_RELEASE: u8 = 5;
 const MOTION_NOTIFY: u8 = 6;
@@ -27,13 +27,14 @@ const MAX_SCROLL_CLICKS: f64 = 32.0;
 /// XTEST input bound to one X screen, resolving evdev through actual XKB key names.
 /// Extended evdev keys outside core X11's 8-bit keycodes are refused.
 pub struct XtestInput {
-    conn: RustConnection,
+    conn: Arc<RustConnection>,
     root: x11rb::protocol::xproto::Window,
     screen: u32,
     width: u16,
     height: u16,
     keymap: KeyMap,
-    keys: BTreeMap<u32, u8>,
+    server: String,
+    keys: BTreeMap<u32, repeat::Hold>,
     buttons: BTreeSet<u8>,
     scroll_x: f64,
     scroll_y: f64,
@@ -77,17 +78,26 @@ impl XtestInput {
             ));
         }
         let keymap = load_keymap(&conn)?;
+        let display =
+            std::env::var("DISPLAY").map_err(|_| error("X11 display name is unavailable"))?;
+        // X screens share the same core keyboard. Normalize the screen suffix
+        // so parallel controllers retain one per-key repeat/hold reference.
+        let server = display
+            .rsplit_once('.')
+            .filter(|(_, suffix)| suffix.parse::<u32>().is_ok())
+            .map_or(display.clone(), |(server, _)| server.to_owned());
         tracing::info!(
             mapped_keys = keymap.len(),
             "X11 physical keyboard map ready"
         );
         Ok(Self {
-            conn,
+            conn: Arc::new(conn),
             root,
             screen,
             width,
             height,
             keymap,
+            server,
             keys: BTreeMap::new(),
             buttons: BTreeSet::new(),
             scroll_x: 0.0,
@@ -160,8 +170,8 @@ impl XtestInput {
                 self.keymap = load_keymap(&self.conn)?;
             }
         }
-        let key = if let Some(key) = self.keys.get(&code) {
-            *key
+        let key = if let Some(hold) = self.keys.get(&code) {
+            hold.key
         } else {
             let key = self.keymap.resolve(code)?;
             if !pressed {
@@ -171,12 +181,18 @@ impl XtestInput {
         };
         if pressed {
             self.keyboard_on_screen()?;
-        }
-        self.fake(if pressed { KEY_PRESS } else { KEY_RELEASE }, key, 0, 0)?;
-        if pressed {
-            self.keys.insert(code, key);
-        } else {
-            self.keys.remove(&code);
+            let modifier = matches!(
+                code,
+                29 | 42 | 54 | 56 | 97 | 100 | 125 | 126 | 58 | 69 | 70
+            );
+            if let Some(hold) = self.keys.get(&code) {
+                return hold.repeat(modifier);
+            }
+            let hold =
+                repeat::Hold::press(self.conn.clone(), self.root, &self.server, key, modifier)?;
+            self.keys.insert(code, hold);
+        } else if let Some(mut hold) = self.keys.remove(&code) {
+            hold.release()?;
         }
         Ok(())
     }
@@ -318,11 +334,7 @@ impl Drop for XtestInput {
     fn drop(&mut self) {
         // Best-effort release of only this sink's injected holds. The worker
         // drops the sink after its last in-flight call, outside Tokio workers.
-        for key in self.keys.values() {
-            let _ = self
-                .conn
-                .xtest_fake_input(KEY_RELEASE, *key, 0, self.root, 0, 0, 0);
-        }
+        self.keys.clear();
         for button in &self.buttons {
             let _ = self
                 .conn
