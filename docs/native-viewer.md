@@ -518,3 +518,17 @@ Enqueue spans stream opening/writes and scheduling of the receipt worker; ACK
 spans that worker's transport receipt wait. Neither is an application input ACK
 or a physical presentation measurement. Timely frame completions remain trace
 level. The diagnostic addition changes no pacing, admission or deadlines.
+
+Explicit receiver repair now advances a session-owned media epoch. It retires
+obsolete writes/receipt waits without closing control or other connection
+services, and forces an independent producer reference. Repeated requests
+coalesce until that independent picture is transport-confirmed. Health logs
+expose repair generation, accepted/coalesced requests and the active repair gate.
+
+Native keyboard repeat is client-paced: the viewer forwards native OS repeats
+only for keys it already forwarded and still holds, without repeating clipboard
+side effects. The X11 sink suppresses autonomous per-key repeat during those
+holds, pulses an intentional client repeat and restores the original setting
+when its last controller releases. This prevents a late KeyUp from manufacturing
+letters. Update both native viewer and serving agent together. See the
+[regression receipt](reports/rds-interactive-repair-20261004.md) for scope limits.

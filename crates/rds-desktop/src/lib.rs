@@ -28,6 +28,7 @@ mod decode_work;
 mod delivery_rate;
 pub mod input;
 pub mod mailbox;
+mod media_repair;
 mod order;
 pub mod render;
 #[cfg(any(all(target_os = "linux", feature = "x11"), test))]

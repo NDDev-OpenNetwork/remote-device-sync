@@ -28,10 +28,30 @@ async fn echo_once(ep: &rds_net::Endpoint) {
     let n = recv.read(&mut buf).await.unwrap().unwrap();
     send.write_all(&buf[..n]).await.unwrap();
     send.finish().unwrap();
+    // finish() queues the echo; it does not prove the UDP driver sent it.
+    // Fence on the client's observation before sampling server traffic.
+    let (mut fence_send, mut fence_recv) = conn.accept_bi().await.unwrap();
+    let mut observed = [0];
+    fence_recv.read_exact(&mut observed).await.unwrap();
+    assert_eq!(observed, [1]);
     sampler.sample();
+    fence_send.write_all(&observed).await.unwrap();
+    fence_send.finish().unwrap();
     // Hold the connection until the peer closes it — dropping the last
     // handle now could cut the echo reply before the client reads it.
     let _ = conn.accept_bi().await;
+}
+
+async fn reply_observed(conn: &rds_net::Connection) {
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    send.write_all(&[1]).await.unwrap();
+    send.finish().unwrap();
+    let mut sampled = [0];
+    tokio::time::timeout(Duration::from_secs(5), recv.read_exact(&mut sampled))
+        .await
+        .expect("server did not sample observed echo")
+        .unwrap();
+    assert_eq!(sampled, [1]);
 }
 
 fn counter(reg: &Registry, name: &str) -> u64 {
@@ -72,6 +92,7 @@ async fn direct_traffic_counts_direct_not_relay() {
     let mut buf = [0u8; 9];
     recv.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"ping-pong");
+    reply_observed(&conn).await;
 
     let mut sampler = client.metrics().sampler(conn.clone());
     sampler.sample();
@@ -157,6 +178,7 @@ async fn relay_only_traffic_counts_relay_not_direct() {
         .await
         .expect("relay echo timed out")
         .unwrap();
+    reply_observed(&conn).await;
 
     let mut sampler = client.metrics().sampler(conn.clone());
     sampler.sample();

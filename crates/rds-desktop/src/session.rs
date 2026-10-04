@@ -161,7 +161,7 @@ impl DeliveryPressure {
 
 #[derive(Clone)]
 struct FrameDelivery {
-    keyframe_pending: Arc<AtomicBool>,
+    repair: Arc<crate::media_repair::MediaRepair>,
     idr: Arc<AtomicBool>,
     feedback: Arc<DeliveryFeedback>,
     latest_key_seq: Arc<AtomicU64>,
@@ -225,6 +225,8 @@ impl Drop for CapturePermit {
 }
 struct AdmittedFrame {
     produced: Produced,
+    generation: u64,
+    key: Option<crate::media_repair::KeyPermit>,
     permit: CapturePermit,
 }
 impl Borrow<Produced> for AdmittedFrame {
@@ -632,7 +634,7 @@ pub async fn serve_desktop_with(
 
     // Capture+encode runs on a blocking thread; frames flow to the writer.
     let (tx, mut rx) = mpsc::channel::<AdmittedFrame>(2);
-    let keyframe_pending = Arc::new(AtomicBool::new(false));
+    let (media_repair, mut media_changes) = crate::media_repair::MediaRepair::new();
     let latest_key_seq = Arc::new(AtomicU64::new(u64::MAX));
     let capture_admission = Arc::new(AtomicU64::new(0));
     let delivery_feedback = Arc::new(DeliveryFeedback::default());
@@ -645,7 +647,7 @@ pub async fn serve_desktop_with(
         let input_refresh_until_ms = Arc::clone(&controls.input_refresh_until_ms);
         let input_refresh_pending = Arc::clone(&controls.input_refresh_pending);
         let mut producer = config.producer;
-        let keyframe_pending = keyframe_pending.clone();
+        let repair = media_repair.clone();
         let latest_key_seq = latest_key_seq.clone();
         let capture_admission = capture_admission.clone();
         let feedback = delivery_feedback.clone();
@@ -666,6 +668,7 @@ pub async fn serve_desktop_with(
                 None => platform_producer(hello.display, frame_interval, config.output_height),
             };
             let mut seq = 0u64;
+            let mut generation = 0;
             loop {
                 // The channel is the session's lifecycle: when the
                 // session ends the writer drops `rx` and this loop exits
@@ -679,7 +682,7 @@ pub async fn serve_desktop_with(
                 // force repeated expensive IDRs while QUIC was backlogged.
                 let mut paused = false;
                 let permit = loop {
-                    while tx.capacity() == 0 || keyframe_pending.load(Ordering::Acquire) {
+                    while tx.capacity() == 0 || repair.key_pending() {
                         paused = true;
                         if tx.is_closed() {
                             return;
@@ -703,11 +706,21 @@ pub async fn serve_desktop_with(
                 if paused {
                     source.resume_after_backpressure();
                 }
+                let frame_generation = repair.generation();
+                if generation != frame_generation {
+                    generation = frame_generation;
+                    producer_controls.idr.store(true, Ordering::Release);
+                }
                 feedback.producing.store(true, Ordering::Relaxed);
                 let result = source.produce(seq, &producer_controls, &clock);
                 feedback.producing.store(false, Ordering::Relaxed);
                 match result {
                     Some(p) => {
+                        // A repair can race a blocking encode. Its mutated
+                        // references are discarded; the next epoch forces IDR.
+                        if repair.generation() != frame_generation {
+                            continue;
+                        }
                         if p.payload.is_empty() && source.preserves_reference() {
                             feedback.codec_skips.fetch_add(1, Ordering::Relaxed);
                             continue;
@@ -718,16 +731,25 @@ pub async fn serve_desktop_with(
                                 .store(clock.now_ms(), Ordering::Relaxed);
                             feedback.produced.fetch_add(1, Ordering::Relaxed);
                         }
-                        if p.header.keyframe && !p.payload.is_empty() {
+                        let key = if p.header.keyframe && !p.payload.is_empty() {
+                            let Some(key) =
+                                repair.key(frame_generation, producer_controls.idr.clone())
+                            else {
+                                continue;
+                            };
                             latest_key_seq.store(p.header.seq, Ordering::Release);
-                            keyframe_pending.store(true, Ordering::Release);
-                        }
+                            Some(key)
+                        } else {
+                            None
+                        };
                         // Losing any encoded reference breaks its successors,
                         // not only losing an IDR. Keep the two-slot bound and
                         // ask the producer for an independent replacement.
                         if tx
                             .try_send(AdmittedFrame {
                                 produced: p,
+                                generation: frame_generation,
+                                key,
                                 permit,
                             })
                             .is_err()
@@ -754,7 +776,7 @@ pub async fn serve_desktop_with(
         let misses = Arc::clone(&controls.deadline_misses);
         let feedback = delivery_feedback.clone();
         let admission = capture_admission.clone();
-        let pending_key = keyframe_pending.clone();
+        let repair = media_repair.clone();
         let progress_clock = clock.clone();
         let mut controller = BitrateController::new(4_000_000, ceiling);
         let mut delivery_rate = crate::delivery_rate::DeliveryRate::default();
@@ -865,7 +887,11 @@ pub async fn serve_desktop_with(
                         codec_skips = feedback.codec_skips.load(Ordering::Relaxed),
                         last_produced_age_ms = ?(produced > 0).then(|| progress_clock.now_ms().saturating_sub(feedback.last_produced_ms.load(Ordering::Relaxed))),
                         pending_media_frames = admission.load(Ordering::Acquire),
-                        keyframe_pending = pending_key.load(Ordering::Acquire),
+                        keyframe_pending = repair.key_pending(),
+                        media_repair_generation = repair.generation(),
+                        media_repair_active = repair.active(),
+                        media_repair_requests = repair.requests.load(Ordering::Relaxed),
+                        media_repair_coalesced = repair.coalesced.load(Ordering::Relaxed),
                         bitrate_bps = bps,
                         delayed_delivery = delayed,
                         timely_delivery_floor_bps = delivery_floor,
@@ -909,6 +935,7 @@ pub async fn serve_desktop_with(
     let writer_idr = Arc::clone(&controls.idr);
     let writer_feedback = delivery_feedback.clone();
     let frame_route = config.frame_route.unwrap_or(rds_core::UniHello::Desktop);
+    let repair = media_repair.clone();
     workers.spawn(async move {
         // Token bucket on the paced bitrate: offering faster than the
         // path sustains only backlogs QUIC's send buffer with frames
@@ -925,7 +952,31 @@ pub async fn serve_desktop_with(
         let mut obsolete = 0u64;
         let mut failed_delivery = 0u64;
         let mut health = Instant::now();
+        let mut generation = 0;
         'writer: loop {
+            let current_generation = repair.generation();
+            if current_generation != generation {
+                let canceled_receipts = acknowledgements.len();
+                // Only this desktop writer owns these tasks. Their reset-on-
+                // drop streams release obsolete media without closing control
+                // or any other connection service.
+                acknowledgements.shutdown().await;
+                if pending
+                    .as_ref()
+                    .is_some_and(|p| p.generation != current_generation)
+                {
+                    pending = None;
+                }
+                chain = FrameChain::default();
+                budget = 0.0;
+                last = Instant::now();
+                generation = current_generation;
+                tracing::info!(
+                    media_repair_generation = generation,
+                    canceled_receipts,
+                    "desktop obsolete media retired for explicit repair"
+                );
+            }
             drain_frame_receipts(
                 &mut acknowledgements,
                 &mut chain,
@@ -935,7 +986,15 @@ pub async fn serve_desktop_with(
                 &mut failed_delivery,
             );
             if acknowledgements.len() >= MAX_PENDING_FRAME_ACKS {
-                match acknowledgements.join_next().await {
+                let receipt = tokio::select! {
+                    biased;
+                    changed = repair.changed(&mut media_changes, generation) => {
+                        if changed.is_err() { break 'writer; }
+                        continue 'writer;
+                    }
+                    receipt = acknowledgements.join_next() => receipt,
+                };
+                match receipt {
                     Some(Ok((_, FrameReceipt::Delivered))) => acknowledged += 1,
                     Some(Ok((_, FrameReceipt::Obsolete))) => obsolete += 1,
                     Some(Ok((seq, FrameReceipt::Failed))) => {
@@ -952,11 +1011,24 @@ pub async fn serve_desktop_with(
             }
             let mut produced = match pending.take() {
                 Some(p) => p,
-                None => match rx.recv().await {
-                    Some(p) => p,
-                    None => break,
-                },
+                None => {
+                    let next = tokio::select! {
+                        biased;
+                        changed = repair.changed(&mut media_changes, generation) => {
+                            if changed.is_err() { break 'writer; }
+                            continue 'writer;
+                        }
+                        frame = rx.recv() => frame,
+                    };
+                    match next {
+                        Some(p) => p,
+                        None => break 'writer,
+                    }
+                }
             };
+            if produced.generation != generation {
+                continue;
+            }
             if produced.payload.is_empty() {
                 chain.next = None;
                 request_frame_repair(&latest_key_seq, &writer_idr, produced.header.seq);
@@ -998,7 +1070,14 @@ pub async fn serve_desktop_with(
                 );
             }
             if !wait.is_zero() {
-                tokio::time::sleep(wait).await;
+                tokio::select! {
+                    biased;
+                    changed = repair.changed(&mut media_changes, generation) => {
+                        if changed.is_err() { break 'writer; }
+                        continue 'writer;
+                    }
+                    _ = tokio::time::sleep(wait) => {},
+                }
             }
             // Admission follows the final selection: advancing this before
             // the pacing wait would lose track of frames collapsed afterward.
@@ -1022,21 +1101,21 @@ pub async fn serve_desktop_with(
                     .saturating_sub(produced.header.encode_done_ts_ms),
                 "desktop frame sending"
             );
-            match send_frame(
-                &writer_conn,
-                frame_route,
-                produced,
-                &mut rx,
-                &mut acknowledgements,
-                FrameDelivery {
-                    keyframe_pending: keyframe_pending.clone(),
-                    idr: writer_idr.clone(),
-                    feedback: writer_feedback.clone(),
-                    latest_key_seq: latest_key_seq.clone(),
-                },
-            )
-            .await
-            {
+            let outcome = tokio::select! {
+                biased;
+                changed = repair.changed(&mut media_changes, generation) => {
+                    if changed.is_err() { break 'writer; }
+                    continue 'writer;
+                }
+                outcome = send_frame(
+                    &writer_conn, frame_route, produced, &mut rx, &mut acknowledgements,
+                    FrameDelivery {
+                        repair: repair.clone(), idr: writer_idr.clone(),
+                        feedback: writer_feedback.clone(), latest_key_seq: latest_key_seq.clone(),
+                    },
+                ) => outcome,
+            };
+            match outcome {
                 SendOutcome::Sent => {
                     sent += 1;
                 }
@@ -1065,7 +1144,7 @@ pub async fn serve_desktop_with(
                     failed_delivery,
                     pending_acknowledgements = acknowledgements.len(),
                     pending_media_frames = capture_admission.load(Ordering::Acquire),
-                    keyframe_pending = keyframe_pending.load(Ordering::Acquire),
+                    keyframe_pending = repair.key_pending(),
                     bitrate_bps = writer_bitrate.load(Ordering::Relaxed),
                     delayed_delivery = writer_feedback.delayed.load(Ordering::Relaxed),
                     last_ack_ms = writer_feedback.last_ack_ms.load(Ordering::Relaxed),
@@ -1156,9 +1235,21 @@ pub async fn serve_desktop_with(
                         }
                     }
                 }
-                Ok(DesktopControl::RequestIdr) => {
-                    controls.idr.store(true, Ordering::Relaxed);
-                }
+                Ok(DesktopControl::RequestIdr) => match media_repair.request() {
+                    crate::media_repair::Request::Accepted => {
+                        tracing::info!(
+                            media_repair_generation = media_repair.generation(),
+                            "desktop explicit media repair accepted"
+                        );
+                    }
+                    crate::media_repair::Request::Coalesced => {
+                        tracing::debug!("desktop repair already delivering an independent picture");
+                    }
+                    crate::media_repair::Request::Exhausted => {
+                        tracing::warn!("desktop repair generation exhausted");
+                        break;
+                    }
+                },
                 Ok(DesktopControl::SetBitrate(bps)) => {
                     let bps = u64::from(bps.max(50_000)).min(ceiling);
                     controls.requested.store(bps, Ordering::Relaxed);
@@ -1663,9 +1754,6 @@ fn obsolete_send(
 ) -> SendOutcome {
     sending.finished = true;
     delivery.feedback.obsolete.fetch_add(1, Ordering::Relaxed);
-    if produced.header.keyframe {
-        delivery.keyframe_pending.store(false, Ordering::Release);
-    }
     tracing::info!(
         frame_seq = produced.header.seq,
         payload_bytes = produced.payload.len(),
@@ -1733,7 +1821,12 @@ async fn send_frame_inner(
     delivery: FrameDelivery,
 ) -> SendOutcome {
     let transfer_started = Instant::now();
-    let AdmittedFrame { produced, permit } = produced;
+    let AdmittedFrame {
+        produced,
+        permit,
+        generation,
+        mut key,
+    } = produced;
     let mut sending = match conn.open_uni().await {
         Ok(stream) => FrameSend {
             stream,
@@ -1798,7 +1891,7 @@ async fn send_frame_inner(
     let payload_bytes = produced.payload.len();
     let delay_budget = delivery_delay_budget(conn.current_path_stats());
     let FrameDelivery {
-        keyframe_pending,
+        repair,
         idr,
         feedback,
         latest_key_seq,
@@ -1824,9 +1917,13 @@ async fn send_frame_inner(
             }
         };
         feedback.last_ack_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
-        let acknowledged = match result {
+        let acknowledged = if repair.generation() != generation {
+            feedback.obsolete.fetch_add(1, Ordering::Relaxed);
+            FrameReceipt::Obsolete
+        } else { match result {
             Ok(Ok(None)) => {
                 sending.finished = true;
+                if let Some(key) = key.as_mut() { key.confirmed = true; }
                 feedback.acknowledged(payload_bytes, transfer_started.elapsed(), delay_budget);
                 if late.is_some() {
                     // Complete the soft-delay record at ordinary diagnostic
@@ -1856,15 +1953,13 @@ async fn send_frame_inner(
                 tracing::warn!(frame_seq=seq,keyframe,payload_bytes,ack_ms=started.elapsed().as_millis(),outcome=?result,"desktop frame delivery unconfirmed");
                 FrameReceipt::Failed
             }
-        };
+        }};
         drop(late);
         // Capture the complete reset owner, including its Drop implementation,
         // rather than allowing disjoint field captures in the async closure.
         drop(sending);
+        drop(key);
         drop(permit);
-        if keyframe {
-            keyframe_pending.store(false, Ordering::Release);
-        }
         (seq, acknowledged)
     });
     outcome
@@ -2416,12 +2511,14 @@ mod tests {
                         },
                         payload: Bytes::from(vec![1; 32 * 1024 * 1024]),
                     },
+                    generation: 0,
+                    key: None,
                     permit: CapturePermit(admission.clone()),
                 };
                 let (_tx, mut rx) = mpsc::channel(2);
                 let mut receipts = JoinSet::new();
                 let delivery = FrameDelivery {
-                    keyframe_pending: Arc::new(AtomicBool::new(false)),
+                    repair: crate::media_repair::MediaRepair::new().0,
                     idr: idr.clone(),
                     feedback: feedback.clone(),
                     latest_key_seq: Arc::new(AtomicU64::new(u64::MAX)),
