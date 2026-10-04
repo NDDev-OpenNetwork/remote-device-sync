@@ -29,6 +29,7 @@ pub fn prioritize_control(
             | rds_core::StreamHello::Desktop(_)
             | rds_core::StreamHello::DesktopV2 { .. }
             | rds_core::StreamHello::DesktopV3 { .. }
+            | rds_core::StreamHello::DesktopV4 { .. }
     ) {
         send.set_priority(CONTROL_STREAM_PRIORITY)?;
     }

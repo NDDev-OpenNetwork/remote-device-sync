@@ -27,6 +27,288 @@ use rds_net::{Endpoint, EndpointAddr, EndpointConfig, bind_noq_with_socket};
 // loopback/soak measurements. Concurrency inside each scenario is unchanged.
 static SESSION_CASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+async fn validated_payload_receipt_is_required_before_releasing_a_keyframe() {
+    use rds_core::{DesktopControl, FrameHeader, UniHello};
+    let _case = SESSION_CASE.lock().await;
+    let (server, client, _, target) = endpoints(None).await;
+    let task = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+        let StreamHello::DesktopV4 { session, hello, .. } = read_frame(&mut recv).await.unwrap()
+        else {
+            panic!("wrong greeting")
+        };
+        rds_net::write_frame(
+            &mut send,
+            &HelloAck::DesktopV4(rds_core::DesktopCaps {
+                displays: vec![],
+                codecs: vec![Codec::H264],
+            }),
+        )
+        .await
+        .unwrap();
+        serve_desktop_with(
+            conn,
+            send,
+            recv,
+            hello,
+            SessionConfig {
+                payload_receipts: true,
+                view_only: true,
+                frame_route: Some(UniHello::DesktopFrames { id: session }),
+                producer: Some(Box::new(
+                    SyntheticProducer::new(60, 32, 32, 1024).keyframe_every(1000),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let conn = client.connect(target, rds_core::ALPN).await.unwrap();
+    let id = next_session_id();
+    let mut frames = conn.uni_streams(UniHello::DesktopFrames { id }).unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    rds_net::write_frame(
+        &mut send,
+        &StreamHello::DesktopV4 {
+            session: id,
+            hello: DesktopHello {
+                display: 0,
+                max_fps: 60,
+                codec: Codec::H264,
+                input_acks: false,
+            },
+            output_height: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        read_frame::<_, HelloAck>(&mut recv).await.unwrap(),
+        HelloAck::DesktopV4(_)
+    ));
+    let mut frame = tokio::time::timeout(Duration::from_secs(2), frames.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let header: FrameHeader = read_frame(&mut frame).await.unwrap();
+    assert!(header.keyframe);
+    let body = frame.read_to_end(4096).await.unwrap();
+    assert_eq!(body.len(), 1024);
+    let digest = *blake3::hash(&body).as_bytes();
+    // QUIC can acknowledge the FIN, but that is not the requested payload proof.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), frames.recv())
+            .await
+            .is_err()
+    );
+    for proof in [
+        DesktopControl::FrameReceived {
+            seq: header.seq,
+            digest: [0; 32],
+            obsolete: false,
+        },
+        DesktopControl::FrameReceived {
+            seq: header.seq + 100,
+            digest,
+            obsolete: false,
+        },
+    ] {
+        rds_net::write_frame(&mut send, &proof).await.unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), frames.recv())
+            .await
+            .is_err()
+    );
+    rds_net::write_frame(
+        &mut send,
+        &DesktopControl::FrameReceived {
+            seq: header.seq,
+            digest,
+            obsolete: false,
+        },
+    )
+    .await
+    .unwrap();
+    let mut next = tokio::time::timeout(Duration::from_secs(2), frames.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let next_header: FrameHeader = read_frame(&mut next).await.unwrap();
+    assert_eq!(next_header.seq, header.seq + 1);
+    assert_eq!(next.read_to_end(4096).await.unwrap().len(), 1024);
+    rds_net::write_frame(&mut send, &DesktopControl::Heartbeat { seq: 44, ts_ms: 55 })
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            read_frame::<_, DesktopEvent>(&mut recv)
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        DesktopEvent::Heartbeat { seq: 44, ts_ms: 55 }
+    ));
+    send.finish().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    client.close().await;
+}
+
+#[tokio::test]
+async fn validated_wire_reader_receipts_progress_while_encoded_output_is_blocked() {
+    use rds_core::{DesktopControl, FrameHeader, UniHello};
+    let _case = SESSION_CASE.lock().await;
+    let (server, client, _, target) = endpoints(None).await;
+    let listener = server.clone();
+    let server_conn = tokio::spawn(async move { listener.accept().await.unwrap().await.unwrap() });
+    let conn = client.connect(target, rds_core::ALPN).await.unwrap();
+    let peer = server_conn.await.unwrap();
+    let handshake_peer = peer.clone();
+    let handshake = tokio::spawn(async move {
+        let (mut send, mut recv) = handshake_peer.accept_bi().await.unwrap();
+        let StreamHello::DesktopV4 { session, .. } = read_frame(&mut recv).await.unwrap() else {
+            panic!("wrong greeting")
+        };
+        rds_net::write_frame(
+            &mut send,
+            &HelloAck::DesktopV4(rds_core::DesktopCaps {
+                displays: vec![],
+                codecs: vec![Codec::H264],
+            }),
+        )
+        .await
+        .unwrap();
+        (send, recv, session)
+    });
+    let session = DesktopSession::connect_opts(
+        &conn,
+        DesktopHello {
+            display: 0,
+            max_fps: 60,
+            codec: Codec::H264,
+            input_acks: false,
+        },
+        SessionOpts {
+            session: Some(next_session_id()),
+            relay_encoded: true,
+            payload_receipts: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (_control_send, mut control_recv, id) = handshake.await.unwrap();
+    let body = vec![7u8; 128];
+    let mut streams = Vec::new();
+    for seq in 0..3 {
+        let mut stream = peer.open_uni().await.unwrap();
+        rds_net::write_frame(&mut stream, &UniHello::DesktopFrames { id })
+            .await
+            .unwrap();
+        rds_net::write_frame(
+            &mut stream,
+            &FrameHeader {
+                seq,
+                keyframe: seq == 0,
+                capture_ts_ms: 0,
+                encode_done_ts_ms: 0,
+                send_ts_ms: 0,
+                codec: Codec::H264,
+                width: 32,
+                height: 32,
+            },
+        )
+        .await
+        .unwrap();
+        stream.write_all(&body).await.unwrap();
+        streams.push(stream);
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while session.receive_stats().in_flight < 3 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Reader 0 fills the one-entry encoded queue; reader 1 blocks its main pump.
+    // Reader 2 must still prove its bounded EOF read on the independent writer.
+    let digest = *blake3::hash(&body).as_bytes();
+    for (seq, stream) in streams.iter_mut().enumerate() {
+        stream.finish().unwrap();
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(2),read_frame::<_,DesktopControl>(&mut control_recv)).await.unwrap().unwrap(),DesktopControl::FrameReceived { seq:got,digest:proof,obsolete:false } if got==seq as u64 && proof==digest)
+        );
+    }
+    assert!(session.receive_stats().in_flight <= session.receive_stats().max_in_flight);
+    drop(session);
+    drop(streams);
+    drop(peer);
+    client.close().await;
+}
+
+#[tokio::test]
+async fn validated_receipts_require_the_explicit_ack_and_release_failed_route_claims() {
+    let _case = SESSION_CASE.lock().await;
+    let (server, client, _, target) = endpoints(None).await;
+    let listener = server.clone();
+    let task = tokio::spawn(async move {
+        let peer = listener.accept().await.unwrap().await.unwrap();
+        let (mut send, mut recv) = peer.accept_bi().await.unwrap();
+        assert!(matches!(
+            read_frame::<_, StreamHello>(&mut recv).await.unwrap(),
+            StreamHello::DesktopV4 { .. }
+        ));
+        // A generic acceptance must not silently change the requested mode.
+        rds_net::write_frame(
+            &mut send,
+            &HelloAck::Desktop(rds_core::DesktopCaps {
+                displays: vec![],
+                codecs: vec![Codec::H264],
+            }),
+        )
+        .await
+        .unwrap();
+        let mut trailing = [0u8; 1];
+        let _ = recv.read(&mut trailing).await;
+    });
+    let conn = client.connect(target, rds_core::ALPN).await.unwrap();
+    let id = next_session_id();
+    let result = DesktopSession::connect_opts(
+        &conn,
+        DesktopHello {
+            display: 0,
+            max_fps: 30,
+            codec: Codec::H264,
+            input_acks: false,
+        },
+        SessionOpts {
+            session: Some(id),
+            payload_receipts: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        matches!(result,Err(rds_desktop::DesktopError::Capture(message)) if message.contains("negotiation"))
+    );
+    assert!(
+        conn.uni_streams(rds_core::UniHello::DesktopFrames { id })
+            .is_ok()
+    );
+    client.close().await;
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 /// Deterministic unique session IDs for the tests — uniqueness within a
 /// connection is what the route isolates, not entropy.
 fn next_session_id() -> [u8; 16] {
@@ -930,6 +1212,7 @@ async fn relay_mode_publishes_encoded_frames_and_viewer_decodes() {
             session: Some(next_session_id()),
             relay_encoded: true,
             output_height: None,
+            payload_receipts: false,
         },
     )
     .await

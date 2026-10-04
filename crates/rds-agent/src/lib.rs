@@ -663,7 +663,7 @@ async fn serve_stream(
             }
         };
     rds_net::wire::prioritize_control(&send, &hello)?;
-    if matches!(&hello,StreamHello::DesktopV3 { output_height,.. } if *output_height!=0 && !(16..=4320).contains(output_height))
+    if matches!(&hello,StreamHello::DesktopV3 { output_height,.. } | StreamHello::DesktopV4 { output_height,.. } if *output_height!=0 && !(16..=4320).contains(output_height))
     {
         write_frame(
             &mut send,
@@ -799,16 +799,21 @@ async fn serve_stream(
     // consumes it, and that arm is feature-gated.
     #[cfg(feature = "desktop")]
     let desktop_frame_route = match &hello {
-        StreamHello::DesktopV2 { session, .. } | StreamHello::DesktopV3 { session, .. } => {
+        StreamHello::DesktopV2 { session, .. }
+        | StreamHello::DesktopV3 { session, .. }
+        | StreamHello::DesktopV4 { session, .. } => {
             rds_core::UniHello::DesktopFrames { id: *session }
         }
         _ => rds_core::UniHello::Desktop,
     };
     #[cfg(feature = "desktop")]
     let output_height = match &hello {
-        StreamHello::DesktopV3 { output_height, .. } => Some(*output_height),
+        StreamHello::DesktopV3 { output_height, .. }
+        | StreamHello::DesktopV4 { output_height, .. } => Some(*output_height),
         _ => None,
     };
+    #[cfg(feature = "desktop")]
+    let payload_receipts = matches!(&hello, StreamHello::DesktopV4 { .. });
     async move {
         match hello {
             StreamHello::Ping { nonce } => {
@@ -887,12 +892,21 @@ async fn serve_stream(
             }
             StreamHello::Desktop(hello)
             | StreamHello::DesktopV2 { hello, .. }
-            | StreamHello::DesktopV3 { hello, .. } => {
+            | StreamHello::DesktopV3 { hello, .. }
+            | StreamHello::DesktopV4 { hello, .. } => {
                 if desktop {
                     #[cfg(feature = "desktop")]
                     match rds_desktop::capabilities() {
                         Ok(caps) => {
-                            write_frame(&mut send, &HelloAck::Desktop(caps)).await?;
+                            write_frame(
+                                &mut send,
+                                &if payload_receipts {
+                                    HelloAck::DesktopV4(caps)
+                                } else {
+                                    HelloAck::Desktop(caps)
+                                },
+                            )
+                            .await?;
                             let max_bps = grant.as_ref().and_then(|g| g.max_bps());
                             rds_desktop::serve_desktop_with(
                                 conn,
@@ -906,6 +920,7 @@ async fn serve_stream(
                                         .is_some_and(|g| !g.permits_desktop_control()),
                                     frame_route: Some(desktop_frame_route),
                                     output_height,
+                                    payload_receipts,
                                     ..Default::default()
                                 },
                             )
@@ -1065,9 +1080,10 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         StreamHello::Ping { .. } => ServiceKind::Ping,
         StreamHello::Info => ServiceKind::Info,
         StreamHello::TcpConnect { .. } => ServiceKind::Tcp,
-        StreamHello::Desktop(_) | StreamHello::DesktopV2 { .. } | StreamHello::DesktopV3 { .. } => {
-            ServiceKind::Desktop
-        }
+        StreamHello::Desktop(_)
+        | StreamHello::DesktopV2 { .. }
+        | StreamHello::DesktopV3 { .. }
+        | StreamHello::DesktopV4 { .. } => ServiceKind::Desktop,
         StreamHello::Sync
         | StreamHello::SyncTransfer { .. }
         | StreamHello::SyncTransferV2 { .. } => ServiceKind::Sync,
@@ -1086,6 +1102,7 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
         StreamHello::Desktop(h)
         | StreamHello::DesktopV2 { hello: h, .. }
         | StreamHello::DesktopV3 { hello: h, .. }
+        | StreamHello::DesktopV4 { hello: h, .. }
             if !grant.permits_display(h.display) =>
         {
             return Err(format!("display {} outside grant constraints", h.display));

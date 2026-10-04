@@ -18,6 +18,14 @@ updated build order — lives in [research.md](research.md).
 
 Agent local service starts after endpoint bind, independently of external relay
 availability. It does not await iroh's unbounded relay-only `online()` predicate.
+
+The explicit DesktopV4 extension releases media admission on a session-bound,
+digest-checked encoded-payload receipt instead of waiting for transport FIN
+acknowledgement. It retains the three-frame bound, reference ordering, negotiated
+geometry/grant policy and QUIC control. Receipts originate in bounded wire readers,
+before native decode/IPC waits, and use an independent bounded control queue.
+Legacy sessions retain their existing wire and delivery semantics. See
+[native delivery receipts](native-viewer.md#validated-payload-delivery-receipts).
 The directory announcer republishes evolving addresses; the printed ticket is
 only a startup snapshot. Local readiness and remote reachability are distinct.
 

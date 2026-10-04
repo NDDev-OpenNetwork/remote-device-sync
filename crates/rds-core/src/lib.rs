@@ -41,6 +41,8 @@ pub const MAX_MESSAGE_LEN: u32 = 64 * 1024;
 /// after a newer independent picture. It is neither fresh successful delivery
 /// nor a broken current reference. Older senders may treat it as generic failure.
 pub const DESKTOP_FRAME_OBSOLETE: u32 = 0x5244_5301;
+/// Sender retires a DesktopV4 frame only after the peer proves complete payload receipt.
+pub const DESKTOP_FRAME_RECEIVED: u32 = 0x5244_5302;
 
 /// First frame on every uni-directional stream (v3): routes the stream
 /// to the service that owns it. The accepting side runs one
@@ -120,6 +122,14 @@ pub enum StreamHello {
         hello: DesktopHello,
         output_height: u32,
     },
+    /// Explicit validated-payload receipts on the desktop control stream.
+    /// Frame layout is unchanged. Older agents reject before session work;
+    /// callers must not silently downgrade this requested mode.
+    DesktopV4 {
+        session: [u8; 16],
+        hello: DesktopHello,
+        output_height: u32,
+    },
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -133,6 +143,8 @@ pub enum HelloAck {
     Info(AgentInfo),
     /// Answer to [`StreamHello::Desktop`].
     Desktop(DesktopCaps),
+    /// DesktopV4 accepted with validated-payload receipts enabled.
+    DesktopV4(DesktopCaps),
 }
 
 /// What the serving side offers.
@@ -240,6 +252,14 @@ pub enum DesktopControl {
         total: u32,
         data: Vec<u8>,
     },
+    /// Complete, bounded encoded payload read through EOF on this session's
+    /// frame route. BLAKE3 binds the receipt to the exact payload. This proves
+    /// receipt, not decoding or presentation; enabled only by DesktopV4.
+    FrameReceived {
+        seq: u64,
+        digest: [u8; 32],
+        obsolete: bool,
+    },
 }
 
 impl std::fmt::Debug for DesktopControl {
@@ -265,6 +285,10 @@ impl std::fmt::Debug for DesktopControl {
                 .field("total", total)
                 .field("bytes", &data.len())
                 .finish(),
+            Self::FrameReceived { seq, .. } => f
+                .debug_struct("FrameReceived")
+                .field("seq", seq)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -440,5 +464,53 @@ mod tests {
         assert_eq!(uf2, [vec![5], vec![44; 16]].concat());
         assert!(postcard::from_bytes::<LegacyHello>(&dv2).is_err());
         assert!(postcard::from_bytes::<LegacyUni>(&uf2).is_err());
+    }
+
+    #[test]
+    fn payload_receipts_append_wire_tags_and_redact_the_content_digest() {
+        let hello = || DesktopHello {
+            display: 0,
+            max_fps: 60,
+            codec: Codec::H264,
+            input_acks: true,
+        };
+        let legacy = postcard::to_stdvec(&StreamHello::DesktopV3 {
+            session: [1; 16],
+            hello: hello(),
+            output_height: 1080,
+        })
+        .unwrap();
+        let new = postcard::to_stdvec(&StreamHello::DesktopV4 {
+            session: [1; 16],
+            hello: hello(),
+            output_height: 1080,
+        })
+        .unwrap();
+        assert_eq!(legacy[0], 11);
+        assert_eq!(new[0], 12);
+        assert_eq!(&legacy[1..], &new[1..]);
+        let receipt = DesktopControl::FrameReceived {
+            seq: 7,
+            digest: [0xab; 32],
+            obsolete: false,
+        };
+        let bytes = postcard::to_stdvec(&receipt).unwrap();
+        assert_eq!(bytes[0], 5);
+        assert!(
+            matches!(postcard::from_bytes::<DesktopControl>(&bytes).unwrap(),DesktopControl::FrameReceived { seq:7,digest, obsolete:false } if digest==[0xab;32])
+        );
+        assert!(!format!("{receipt:?}").contains("digest"));
+        let caps = || DesktopCaps {
+            displays: vec![],
+            codecs: vec![Codec::H264],
+        };
+        assert_eq!(
+            postcard::to_stdvec(&HelloAck::Desktop(caps())).unwrap()[0],
+            3
+        );
+        assert_eq!(
+            postcard::to_stdvec(&HelloAck::DesktopV4(caps())).unwrap()[0],
+            4
+        );
     }
 }

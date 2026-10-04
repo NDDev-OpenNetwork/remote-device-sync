@@ -12,6 +12,12 @@ The X11 serving increment removes fixed idle polling and supports explicit
 software downscaling. This advances W6.1–W6.4/W6.6/W6.7; it does not close the
 v0.3 hardware-codec, geometry, quality or glass-to-glass acceptance gates.
 
+The explicit [validated-payload receipt increment](reports/rds-payload-receipts-20261005.md)
+advances W6.8/WS5 delivery: bounded sender admission follows an exact complete-read
+proof instead of a potentially delayed FIN acknowledgement. Legacy behavior and
+reference/deadline limits remain. Installed mixed-load/idle latency and stability
+gates are still required.
+
 The [native SSH client](ssh.md) now uses russh and standard remote PTY requests
 over managed/direct TCP streams. W5 remains open for host/account enrollment,
 broker/reattachment and macOS/real-network/mixed-load qualification.

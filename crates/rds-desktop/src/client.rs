@@ -278,6 +278,9 @@ impl Drop for FrameBudget {
 /// Options for [`DesktopSession::connect_opts`].
 #[derive(Default)]
 pub struct SessionOpts {
+    /// Request DesktopV4 and bounded complete-payload proofs. Older peers must
+    /// reject the requested mode; no implicit legacy fallback is performed.
+    pub payload_receipts: bool,
     /// Override the session clock. Tests pass the same `SessionClock`
     /// to both peers so `FrameHeader` timestamps compare directly to
     /// local receive times; production leaves each side on its own
@@ -353,25 +356,42 @@ impl DesktopSession {
         let uni = conn
             .uni_streams(route)
             .map_err(|e| DesktopError::Io(std::io::Error::other(e.to_string())))?;
-        let greeting = match (opts.session, opts.output_height) {
-            (Some(session), Some(output_height)) => {
-                if output_height != 0 && !(16..=4320).contains(&output_height) {
+        let greeting = if opts.payload_receipts {
+            let session = opts.session.ok_or_else(|| {
+                DesktopError::Capture("payload receipts require an isolated session route".into())
+            })?;
+            let output_height = opts.output_height.unwrap_or(0);
+            if output_height != 0 && !(16..=4320).contains(&output_height) {
+                return Err(DesktopError::Capture(
+                    "video height must be 0 or 16..=4320".into(),
+                ));
+            }
+            StreamHello::DesktopV4 {
+                session,
+                hello,
+                output_height,
+            }
+        } else {
+            match (opts.session, opts.output_height) {
+                (Some(session), Some(output_height)) => {
+                    if output_height != 0 && !(16..=4320).contains(&output_height) {
+                        return Err(DesktopError::Capture(
+                            "video height must be 0 or 16..=4320".into(),
+                        ));
+                    }
+                    StreamHello::DesktopV3 {
+                        session,
+                        hello,
+                        output_height,
+                    }
+                }
+                (Some(session), None) => StreamHello::DesktopV2 { session, hello },
+                (None, None) => StreamHello::Desktop(hello),
+                (None, Some(_)) => {
                     return Err(DesktopError::Capture(
-                        "video height must be 0 or 16..=4320".into(),
+                        "video profile requires an isolated session route".into(),
                     ));
                 }
-                StreamHello::DesktopV3 {
-                    session,
-                    hello,
-                    output_height,
-                }
-            }
-            (Some(session), None) => StreamHello::DesktopV2 { session, hello },
-            (None, None) => StreamHello::Desktop(hello),
-            (None, Some(_)) => {
-                return Err(DesktopError::Capture(
-                    "video profile requires an isolated session route".into(),
-                ));
             }
         };
         let (mut send, mut recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
@@ -380,13 +400,18 @@ impl DesktopSession {
             rds_net::wire::prioritize_control(&send.0, &greeting)?;
             write_frame(&mut send.0, &greeting).await?;
             let caps = match read_frame::<_, HelloAck>(&mut recv).await? {
-                HelloAck::Desktop(caps) => caps,
-                HelloAck::Ok => DesktopCaps {
+                HelloAck::DesktopV4(caps) if opts.payload_receipts => caps,
+                HelloAck::Desktop(caps) if !opts.payload_receipts => caps,
+                HelloAck::Ok if !opts.payload_receipts => DesktopCaps {
                     displays: vec![],
                     codecs: vec![],
                 },
                 HelloAck::Error { message } => return Err(DesktopError::Capture(message)),
-                HelloAck::Info(_) => return Err(DesktopError::Capture("unexpected ack".into())),
+                _ => {
+                    return Err(DesktopError::Capture(
+                        "unexpected desktop receipt negotiation ack".into(),
+                    ));
+                }
             };
             Ok((send, recv, caps))
         })
@@ -396,6 +421,7 @@ impl DesktopSession {
         let (frame_tx, frames) = mailbox::channel(4);
         let (header_tx, frame_headers) = mailbox::channel(64);
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<DesktopControl>(64);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel::<DesktopControl>(MAX_FRAME_READERS);
         let (events_tx, events) = mailbox::channel::<DesktopEvent>(128);
         let (encoded_tx, encoded) = match opts.relay_encoded {
             true => {
@@ -419,7 +445,16 @@ impl DesktopSession {
         let sending_probes = probes.clone();
         tasks.spawn(
             async move {
-                while let Some(msg) = ctrl_rx.recv().await {
+                loop {
+                    // Fair selection keeps both input and bounded payload proofs
+                    // progressing; no video/FIFO/decode wait runs on this writer.
+                    let msg = tokio::select! {
+                        msg = ctrl_rx.recv() => msg,
+                        msg = receipt_rx.recv(), if opts.payload_receipts => msg,
+                    };
+                    let Some(msg) = msg else {
+                        break;
+                    };
                     if let DesktopControl::Heartbeat { seq, ts_ms } = &msg {
                         sending_probes.lock().await.sent(*seq, *ts_ms);
                     }
@@ -467,6 +502,7 @@ impl DesktopSession {
                     clock: clock.clone(),
                     receiving: receiving.clone(),
                     control_rtt_ms: control_rtt_ms.clone(),
+                    receipts: opts.payload_receipts.then_some(receipt_tx),
                 },
             )
             .in_current_span(),
@@ -701,6 +737,7 @@ struct ReceiveContext {
     clock: SessionClock,
     receiving: Arc<AtomicUsize>,
     control_rtt_ms: Arc<AtomicU64>,
+    receipts: Option<mpsc::Sender<DesktopControl>>,
 }
 
 /// Successors of one missing reference must not queue repeated large IDRs
@@ -860,17 +897,18 @@ async fn receive_frames(mut uni: rds_net::UniStreams, ctx: ReceiveContext) {
                 ctx.receiving.fetch_add(1, Ordering::Relaxed);
                 let budget = FrameBudget { _slot: slot, receiving: ctx.receiving.clone() };
                 let next_seq = ctx.next_seq.clone();
-                readers.spawn(read_one(stream, next_seq, budget).in_current_span());
+                readers.spawn(read_one_with_receipt(stream, next_seq, budget, ctx.receipts.clone()).in_current_span());
             }
         }
     }
     readers.shutdown().await;
 }
 
-async fn read_one(
+async fn read_one_with_receipt(
     mut stream: rds_net::RecvStream,
     next_seq: Arc<AtomicU64>,
     budget: FrameBudget,
+    receipts: Option<mpsc::Sender<DesktopControl>>,
 ) -> FrameRead {
     let mut body_bytes = 0usize;
     let started = std::time::Instant::now();
@@ -923,6 +961,25 @@ async fn read_one(
             }
             body.extend_from_slice(&chunk[..count]);
             body_bytes = body.len();
+        }
+        if let Some(receipts) = receipts {
+            if body.is_empty() {
+                return None;
+            }
+            let digest = *blake3::hash(&body).as_bytes();
+            let obsolete = header.seq < next_seq.load(Ordering::Relaxed);
+            // The proof belongs to the bounded wire reader, before ordered
+            // decode or local IPC can backpressure completed payloads.
+            receipts
+                .send(DesktopControl::FrameReceived {
+                    seq: header.seq,
+                    digest,
+                    obsolete,
+                })
+                .await
+                .ok()?;
+            tracing::trace!(target:"rds_desktop::frame_timing",frame_seq=header.seq,payload_bytes=body.len(),obsolete,
+                "desktop complete payload receipt queued");
         }
         Some((header, body, budget))
     };

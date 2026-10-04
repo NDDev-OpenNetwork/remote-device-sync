@@ -16,6 +16,39 @@ window, alongside independent rate-limited warnings.
 and `last_input_ack_ms` complement the existing bounded latency percentiles.
 Percentiles summarize the retained sample buffer, not a timed rolling interval.
 
+## Validated payload delivery receipts
+
+`--payload-receipts` (or `payload_receipts: true` in the version-1 native viewer
+configuration) explicitly requests DesktopV4. Both the local manager and remote
+agent must support it. An unsupported greeting or a legacy desktop acknowledgement
+fails this requested mode; there is no silent fallback. Existing calls and sessions
+without this option retain Desktop/V2/V3 wire shapes and FIN-based delivery.
+`--payload-receipts=false` overrides an enabled native configuration for comparison.
+
+DesktopV4 confirms an encoded frame's complete, bounded EOF read on its isolated
+session route. The proof carries the frame sequence, BLAKE3 payload digest and an
+obsolete disposition if a newer independent picture made the frame unnecessary.
+The digest is never diagnostic output. This is an encoded-payload receipt, not a
+decoder-success, GPU-submission or optical-presentation acknowledgement.
+
+One session-owned registry retains at most the existing three pending frames.
+Unknown, mismatched, duplicate and retired proofs cannot free another frame or
+increase delivery feedback. Cancellation releases its exact registration before
+capture admission is released. A proof retires redundant transport retransmission
+state; QUIC congestion/flow control and the existing write/read/receipt deadlines
+remain. Obsolete proofs do not count as fresh delivered bytes.
+
+The reader queues proofs before ordered decode or local video FIFO waits. A
+separate bounded queue shares a fair control writer with input/heartbeat traffic.
+The managed combined and separated APIs expose explicit receipt variants, using
+additive v5 commands and unchanged same-UID/event-route checks. Viewer-originated
+receipt messages are refused by the IPC bridge; its encoded reader owns proofs.
+
+Receipt mode is logged at session open. `rds_desktop::frame_timing=trace` correlates
+complete-read proof queuing, accepted/rejected proofs and sender delivery evidence
+(`Payload` or legacy `Transport`) by frame sequence. Installed latency and sustained
+stability must still be qualified on the actual devices.
+
 ## Controlled causal visual diagnostics
 
 The optional `--diagnostic-visual-probe FILE` accepts a strict, regular JSON

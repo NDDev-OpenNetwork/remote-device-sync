@@ -23,6 +23,7 @@ use tokio::task::JoinSet;
 use tracing::Instrument;
 
 use crate::DesktopError;
+use crate::receipts::Evidence as ReceiptEvidence;
 
 use rds_net::wire::{CONTROL_STREAM_PRIORITY, MEDIA_STREAM_PRIORITY};
 
@@ -52,7 +53,7 @@ const RTT_MIN_INCREASE_MS: u64 = 10;
 const RTT_SAMPLE_MIN_BYTES: u64 = 32 * 1024;
 // A queued FIN is not a delivery receipt. Keep fewer unacknowledged media
 // streams than the receiver's four readers, leaving capacity for recovery.
-const MAX_PENDING_FRAME_ACKS: usize = 3;
+pub(crate) const MAX_PENDING_FRAME_ACKS: usize = 3;
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const KEYFRAME_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 // A delayed few-packet desktop update is not evidence that encoder load
@@ -169,6 +170,7 @@ struct FrameDelivery {
     idr: Arc<AtomicBool>,
     feedback: Arc<DeliveryFeedback>,
     latest_key_seq: Arc<AtomicU64>,
+    payload_receipts: Option<crate::receipts::Receipts>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -319,6 +321,8 @@ pub trait FrameProducer: Send + 'static {
 /// Everything `serve_desktop` needs beyond the negotiated hello.
 #[derive(Default)]
 pub struct SessionConfig {
+    /// Explicit DesktopV4 payload proofs; legacy sessions keep FIN receipts.
+    pub payload_receipts: bool,
     /// Explicit per-session height overrides the deployment fallback. Zero
     /// keeps native geometry; None uses RDS_DESKTOP_OUTPUT_HEIGHT if supplied.
     pub output_height: Option<u32>,
@@ -616,6 +620,16 @@ pub async fn serve_desktop_with(
     config: SessionConfig,
 ) -> Result<(), DesktopError> {
     let mut send = SessionSend(send);
+    if config.payload_receipts
+        && !matches!(
+            config.frame_route,
+            Some(rds_core::UniHello::DesktopFrames { .. })
+        )
+    {
+        return Err(DesktopError::Capture(
+            "payload receipts require an isolated session route".into(),
+        ));
+    }
     if config
         .output_height
         .is_some_and(|h| h != 0 && !(16..=4320).contains(&h))
@@ -655,6 +669,11 @@ pub async fn serve_desktop_with(
     let latest_key_seq = Arc::new(AtomicU64::new(u64::MAX));
     let capture_admission = Arc::new(AtomicU64::new(0));
     let delivery_feedback = Arc::new(DeliveryFeedback::default());
+    let payload_receipts = config.payload_receipts.then(crate::receipts::Receipts::new);
+    tracing::info!(
+        payload_receipts = config.payload_receipts,
+        "desktop delivery receipt mode"
+    );
     {
         let clock = clock.clone();
         let bitrate = Arc::clone(&controls.bitrate);
@@ -979,6 +998,7 @@ pub async fn serve_desktop_with(
     let writer_idr = Arc::clone(&controls.idr);
     let writer_feedback = delivery_feedback.clone();
     let frame_route = config.frame_route.unwrap_or(rds_core::UniHello::Desktop);
+    let writer_receipts = payload_receipts.clone();
     let repair = media_repair.clone();
     workers.spawn(async move {
         // Token bucket on the paced bitrate: offering faster than the
@@ -1156,6 +1176,7 @@ pub async fn serve_desktop_with(
                     FrameDelivery {
                         repair: repair.clone(), idr: writer_idr.clone(),
                         feedback: writer_feedback.clone(), latest_key_seq: latest_key_seq.clone(),
+                        payload_receipts: writer_receipts.clone(),
                     },
                 ) => outcome,
             };
@@ -1316,6 +1337,22 @@ pub async fn serve_desktop_with(
                     ) {
                         break;
                     }
+                }
+                Ok(DesktopControl::FrameReceived {
+                    seq,
+                    digest,
+                    obsolete,
+                }) => {
+                    let Some(receipts) = &payload_receipts else {
+                        tracing::warn!(
+                            frame_seq = seq,
+                            "payload receipt on a legacy desktop session refused"
+                        );
+                        break;
+                    };
+                    let accepted = receipts.confirm(seq, &digest, obsolete);
+                    tracing::trace!(target:"rds_desktop::frame_timing",frame_seq=seq,accepted,obsolete,
+                        "desktop validated payload receipt observed");
                 }
                 Ok(DesktopControl::ClipboardChunk {
                     id,
@@ -1878,6 +1915,22 @@ async fn send_frame_inner(
         generation,
         mut key,
     } = produced;
+    let mut payload_ticket = match &delivery.payload_receipts {
+        Some(receipts) => match receipts.register(
+            produced.header.seq,
+            *blake3::hash(&produced.payload).as_bytes(),
+        ) {
+            Some(ticket) => Some(ticket),
+            None => {
+                tracing::warn!(
+                    frame_seq = produced.header.seq,
+                    "desktop payload receipt admission failed"
+                );
+                return SendOutcome::Failed;
+            }
+        },
+        None => None,
+    };
     let mut sending = match conn.open_uni().await {
         Ok(stream) => FrameSend {
             stream,
@@ -1946,6 +1999,7 @@ async fn send_frame_inner(
         idr,
         feedback,
         latest_key_seq,
+        payload_receipts: _,
     } = delivery;
     // Retain the reset-on-drop owner until delivery is acknowledged. The
     // bounded task group is owned by this writer; cancellation resets its
@@ -1955,7 +2009,15 @@ async fn send_frame_inner(
         let deadline = if keyframe {KEYFRAME_ACK_TIMEOUT} else {FRAME_ACK_TIMEOUT};
         let mut late = None;
         let result = {
-            let receipt = tokio::time::timeout(deadline, sending.stream.stopped());
+            let transport = async {
+                match sending.stream.stopped().await {
+                    Ok(None) => Ok(ReceiptEvidence::Transport),
+                    Ok(Some(code)) if code == rds_core::DESKTOP_FRAME_OBSOLETE.into() => Ok(ReceiptEvidence::Obsolete),
+                    Ok(Some(_)) => Err("peer stopped frame".to_owned()),
+                    Err(error) => Err(error.to_string()),
+                }
+            };
+            let receipt = tokio::time::timeout(deadline, crate::receipts::wait(&mut payload_ticket, transport));
             tokio::pin!(receipt);
             tokio::select! {
                 result = &mut receipt => result,
@@ -1972,7 +2034,12 @@ async fn send_frame_inner(
             feedback.obsolete.fetch_add(1, Ordering::Relaxed);
             FrameReceipt::Obsolete
         } else { match result {
-            Ok(Ok(None)) => {
+            Ok(Ok(evidence @ (ReceiptEvidence::Transport | ReceiptEvidence::Payload))) => {
+                if evidence == ReceiptEvidence::Payload {
+                    // The reader consumed EOF and proved the exact body. Retire
+                    // redundant retransmission state without waiting for FIN ACK.
+                    let _ = sending.stream.reset(rds_core::DESKTOP_FRAME_RECEIVED.into());
+                }
                 sending.finished = true;
                 if let Some(key) = key.as_mut() { key.confirmed = true; }
                 feedback.acknowledged(payload_bytes, transfer_started.elapsed(), delay_budget);
@@ -1986,13 +2053,15 @@ async fn send_frame_inner(
                         enqueue_ms = started.duration_since(transfer_started).as_millis(),
                         ack_ms = started.elapsed().as_millis(),
                         transfer_ms = transfer_started.elapsed().as_millis(),
-                        "desktop delayed frame transport acknowledged"
+                        receipt_evidence=?evidence,
+                        "desktop delayed frame delivery acknowledged"
                     );
                 }
-                tracing::trace!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop frame transport acknowledged");
+                tracing::trace!(target:"rds_desktop::frame_timing",frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),receipt_evidence=?evidence,"desktop frame delivery acknowledged");
                 FrameReceipt::Delivered
             }
-            Ok(Ok(Some(code))) if code == rds_core::DESKTOP_FRAME_OBSOLETE.into() => {
+            Ok(Ok(ReceiptEvidence::Obsolete)) => {
+                if payload_ticket.is_some() { let _ = sending.stream.reset(rds_core::DESKTOP_FRAME_OBSOLETE.into()); }
                 sending.finished = true;
                 feedback.obsolete.fetch_add(1, Ordering::Relaxed);
                 tracing::info!(frame_seq=seq,payload_bytes,ack_ms=started.elapsed().as_millis(),"desktop obsolete frame receipt");
@@ -2009,6 +2078,7 @@ async fn send_frame_inner(
         // Capture the complete reset owner, including its Drop implementation,
         // rather than allowing disjoint field captures in the async closure.
         drop(sending);
+        drop(payload_ticket);
         drop(key);
         drop(permit);
         (seq, acknowledged)
@@ -2573,6 +2643,7 @@ mod tests {
                     idr: idr.clone(),
                     feedback: feedback.clone(),
                     latest_key_seq: Arc::new(AtomicU64::new(u64::MAX)),
+                    payload_receipts: None,
                 };
                 let (outcome, ()) = tokio::join!(
                     send_frame(

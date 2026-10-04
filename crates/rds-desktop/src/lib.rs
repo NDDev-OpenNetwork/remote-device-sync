@@ -30,6 +30,7 @@ pub mod input;
 pub mod mailbox;
 mod media_repair;
 mod order;
+mod receipts;
 pub mod render;
 #[cfg(any(all(target_os = "linux", feature = "x11"), test))]
 mod scaling;
