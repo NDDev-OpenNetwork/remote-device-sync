@@ -9,7 +9,7 @@ transitions in the exact order. It also requires every button released afterward
 This test runs only in the dedicated ignored-test Xvfb lane, never on an ambient
 developer desktop. It uses the production XTEST sink, with no artificial hold
 sleep between transitions. Its one-second final receive bound is a fixture
-failure deadline, not an interactive performance target. Linux native execution
-and strict clippy are being verified; macOS compilation excludes this Linux-only
-fixture. Actual composited application handling and WAN input-to-visible-response
+failure deadline, not an interactive performance target. Native Linux execution passed all 200 ordered transitions in the dedicated
+Xvfb fixture. Strict Linux clippy also passed. Final CI remains the integration gate; macOS compilation
+excludes this Linux-only fixture. Actual composited application handling and WAN input-to-visible-response
 remain separate requirements.
