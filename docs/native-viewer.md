@@ -37,6 +37,11 @@ Reports contain timing/counts, missing-marker and cancellation/eviction counters
 without retaining pixels or input text. Marker detection is tested through actual
 H.264 encoding/decoding in the codec lane.
 
+Managed delivery attaches the exact encoded frame sequence to its pending raw
+frame. Visual response and submission traces carry it alongside the local
+attempt context, allowing stage correlation. Untagged/direct raw delivery
+retains a missing sequence; it does not pair unrelated header/frame mailboxes.
+
 `input_to_submit_*` measures the software native input-to-GPU submission boundary
 on one local monotonic clock. It includes the input queue, network, native remote
 application response, capture/codec and local rendering. It excludes automation

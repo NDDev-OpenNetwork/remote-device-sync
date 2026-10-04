@@ -270,8 +270,8 @@ mod native {
         let started = Instant::now();
         let mut failures = 0u32;
         loop {
-            view.begin_session();
             let span = rds_observe::conn_span(rds_observe::next_session_id());
+            view.begin_session(span.clone());
             let received = view.report().frames_received;
             let result = tokio::select! {
                 _ = stop.cancelled() => return Ok(()),
@@ -420,6 +420,7 @@ mod native {
                     Some(ManagedMessage::Frame(frame)) => {
                         view.stage("decoding");
                         let received = Instant::now();
+                        let frame_seq = frame.header.seq;
                         view.media_timing(&frame.header);
                         let (next, outcome) = tokio::time::timeout(
                             Duration::from_secs(5),
@@ -431,7 +432,7 @@ mod native {
                         match outcome {
                             RelayOutcome::Frame(raw) => {
                                 progress.send_replace(tokio::time::Instant::now());
-                                view.frame(raw, received);
+                                view.frame_with_seq(raw, received, frame_seq);
                             }
                             RelayOutcome::NeedIdr => {
                                 tokio::time::timeout(Duration::from_secs(2), control.request_idr())

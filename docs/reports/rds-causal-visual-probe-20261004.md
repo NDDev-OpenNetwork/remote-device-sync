@@ -30,6 +30,13 @@ connection spans in the diagnostic layer fixes it without enabling filtered
 INFO messages or duplicating operational records. All observe tests and strict
 clippy pass after the correction.
 
+Managed native delivery preserves the encoded sequence in the exact pending
+raw frame. A matching visual response logs both input and frame sequence, so it
+can be joined to production, pacing, transport and decode traces. The GUI thread
+uses the retained attempt span rather than inheriting an unrelated event-loop
+context. The legacy untagged/direct raw-frame API remains available and reports
+no sequence instead of guessing from an independently consumed header mailbox.
+
 The remote controlled target owns a known 48-bit marker prefix and increments a
 16-bit counter once per button press. The viewer samples only that descriptor's
 64 cells, rejects ambiguous/wrong-prefix/truncated data and records counts and

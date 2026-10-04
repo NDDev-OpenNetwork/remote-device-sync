@@ -177,6 +177,7 @@ pub struct ViewerSnapshot {
 struct Pending {
     raw: RawFrame,
     received: Instant,
+    frame_seq: Option<u64>,
 }
 /// Local event-to-ack measurements never compare clocks on different hosts.
 /// Coalesced pointer events are tracked only after dequeue; the event's own
@@ -228,6 +229,7 @@ struct State {
     last_encoded_ms: Option<u64>,
     occluded: bool,
     visual_probe: Option<super::visual_probe::VisualProbe>,
+    session_span: tracing::Span,
 }
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state
@@ -299,6 +301,13 @@ impl ViewerHandle {
         }
     }
     pub fn frame(&self, raw: RawFrame, received: Instant) {
+        self.queue_frame(raw, received, None);
+    }
+    /// Preserve an encoded frame's sequence for causal stage correlation.
+    pub fn frame_with_seq(&self, raw: RawFrame, received: Instant, seq: u64) {
+        self.queue_frame(raw, received, Some(seq));
+    }
+    fn queue_frame(&self, raw: RawFrame, received: Instant, frame_seq: Option<u64>) {
         let mut state = lock(&self.state);
         state.report.frames_received += 1;
         state.report.video_width = raw.width;
@@ -308,7 +317,15 @@ impl ViewerHandle {
             state.report.last_recovery_ms = Some(interrupted.elapsed().as_millis() as u64);
         }
         state.status = "Connected".into();
-        if state.pending.replace(Pending { raw, received }).is_some() {
+        if state
+            .pending
+            .replace(Pending {
+                raw,
+                received,
+                frame_seq,
+            })
+            .is_some()
+        {
             state.report.frames_replaced += 1;
         }
         self.wake(&mut state);
@@ -333,10 +350,11 @@ impl ViewerHandle {
         lock(&self.state).extent = (width, height);
     }
     /// A local epoch distinguishes frame/input sequence numbers after reconnect.
-    pub fn begin_session(&self) {
+    pub fn begin_session(&self, span: tracing::Span) {
         let mut state = lock(&self.state);
+        state.session_span = span;
         state.report.session_epoch = state.report.session_epoch.saturating_add(1);
-        tracing::info!(
+        tracing::info!(parent: &state.session_span,
             viewer_pid = std::process::id(),
             viewer_epoch = state.report.session_epoch,
             "native desktop attempt started"
@@ -511,6 +529,7 @@ impl Viewer {
                 last_encoded_ms: None,
                 occluded: false,
                 visual_probe: None,
+                session_span: tracing::Span::none(),
             })),
             input_state,
             proxy: event_loop.create_proxy(),
@@ -648,8 +667,14 @@ impl App {
                 lock(&self.handle.state).render_stage = "presented".into();
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
+                    let parent = state.session_span.clone();
+                    tracing::trace!(target:"rds_desktop::frame_timing", parent:&parent, frame_seq=frame.frame_seq,
+                        viewer_epoch=state.report.session_epoch, receive_to_submit_ms=frame.received.elapsed().as_secs_f64()*1000.,
+                        "native frame submitted");
                     if let Some(probe) = &mut state.visual_probe {
-                        probe.presented(&frame.raw, Instant::now());
+                        parent.in_scope(|| {
+                            probe.presented_with_seq(&frame.raw, Instant::now(), frame.frame_seq)
+                        });
                     }
                     state.report.frames_submitted += 1;
                     state.report.last_submission_ms =

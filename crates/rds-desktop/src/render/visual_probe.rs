@@ -125,7 +125,16 @@ impl VisualProbe {
     }
     /// Called only after this exact raw frame was presented by the native GPU path.
     /// No network ACK or merely decoded frame can complete the measurement.
-    pub(super) fn presented(&mut self, frame: &RawFrame, now: Instant) {
+    #[cfg(test)]
+    fn presented(&mut self, frame: &RawFrame, now: Instant) {
+        self.presented_with_seq(frame, now, None);
+    }
+    pub(super) fn presented_with_seq(
+        &mut self,
+        frame: &RawFrame,
+        now: Instant,
+        frame_seq: Option<u64>,
+    ) {
         let Some(counter) = self.spec.counter(frame) else {
             self.report.frames_without_marker += 1;
             // A covered/moved target cannot prove later clicks correspond to
@@ -154,7 +163,7 @@ impl VisualProbe {
                 }
                 self.latencies.push(delay);
                 self.report.samples += 1;
-                tracing::info!(target:"rds_desktop::visual_probe", input_seq=seq, marker_counter=counter, input_to_submit_ms=delay, "controlled visual response submitted");
+                tracing::info!(target:"rds_desktop::visual_probe", input_seq=seq, frame_seq, marker_counter=counter, input_to_submit_ms=delay, "controlled visual response submitted");
             }
         }
     }
