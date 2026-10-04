@@ -626,7 +626,11 @@ impl App {
         ) && let Some(point) = self.pointer_point
             && let Some(probe) = &mut lock(&self.handle.state).visual_probe
         {
-            probe.click(point, self.seq, Instant::now());
+            if self.modifiers.state().is_empty() {
+                probe.click(point, self.seq, Instant::now());
+            } else {
+                probe.modified_click(point);
+            }
         }
         self.seq = next;
         if self.input.send(ViewerInput::Control(message)).is_err() {
