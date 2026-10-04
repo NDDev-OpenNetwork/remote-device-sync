@@ -110,6 +110,7 @@ impl Drop for InputSender {
 
 #[derive(Clone, Default, Debug, serde::Serialize)]
 pub struct ViewerReport {
+    pub session_epoch: u64,
     pub frames_received: u64,
     pub frames_submitted: u64,
     pub gpu_uploads: u64,
@@ -128,6 +129,10 @@ pub struct ViewerReport {
     pub last_control_echo_ms: Option<u64>,
     pub input_acks: u64,
     pub inputs_dispatched: u64,
+    pub input_queue_depth: usize,
+    pub input_acks_canceled: u64,
+    pub slow_input_acks: u64,
+    pub last_input_ack_ms: Option<f64>,
     pub input_acks_matched: u64,
     pub input_acks_unmatched: u64,
     pub input_ack_tracking_evicted: u64,
@@ -148,6 +153,8 @@ pub struct ViewerReport {
     pub last_frame_ms: Option<u64>,
     pub video_width: u32,
     pub video_height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visual_probe: Option<super::VisualProbeReport>,
 }
 
 #[derive(serde::Serialize)]
@@ -170,6 +177,7 @@ pub struct ViewerSnapshot {
 struct Pending {
     raw: RawFrame,
     received: Instant,
+    frame_seq: Option<u64>,
 }
 /// Local event-to-ack measurements never compare clocks on different hosts.
 /// Coalesced pointer events are tracked only after dequeue; the event's own
@@ -180,6 +188,7 @@ struct InputLatency {
     queued: Vec<f64>,
     acknowledged: Vec<f64>,
     evicted: u64,
+    last_slow_log_ms: Option<u64>,
 }
 impl InputLatency {
     fn sent(&mut self, seq: u64, created_ms: u64, now_ms: u64) {
@@ -219,6 +228,8 @@ struct State {
     last_ui_ms: u64,
     last_encoded_ms: Option<u64>,
     occluded: bool,
+    visual_probe: Option<super::visual_probe::VisualProbe>,
+    session_span: tracing::Span,
 }
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state
@@ -290,6 +301,13 @@ impl ViewerHandle {
         }
     }
     pub fn frame(&self, raw: RawFrame, received: Instant) {
+        self.queue_frame(raw, received, None);
+    }
+    /// Preserve an encoded frame's sequence for causal stage correlation.
+    pub fn frame_with_seq(&self, raw: RawFrame, received: Instant, seq: u64) {
+        self.queue_frame(raw, received, Some(seq));
+    }
+    fn queue_frame(&self, raw: RawFrame, received: Instant, frame_seq: Option<u64>) {
         let mut state = lock(&self.state);
         state.report.frames_received += 1;
         state.report.video_width = raw.width;
@@ -299,7 +317,15 @@ impl ViewerHandle {
             state.report.last_recovery_ms = Some(interrupted.elapsed().as_millis() as u64);
         }
         state.status = "Connected".into();
-        if state.pending.replace(Pending { raw, received }).is_some() {
+        if state
+            .pending
+            .replace(Pending {
+                raw,
+                received,
+                frame_seq,
+            })
+            .is_some()
+        {
             state.report.frames_replaced += 1;
         }
         self.wake(&mut state);
@@ -308,7 +334,11 @@ impl ViewerHandle {
         let mut state = lock(&self.state);
         state.status = text.into();
         if state.status == "Reconnecting" {
+            state.report.input_acks_canceled += state.input_latency.pending.len() as u64;
             state.input_latency.pending.clear();
+            if let Some(probe) = &mut state.visual_probe {
+                probe.reset();
+            }
         }
         if state.status == "Reconnecting" && state.interrupted.is_none() {
             state.interrupted = Some(Instant::now());
@@ -318,6 +348,22 @@ impl ViewerHandle {
     }
     pub fn display_extent(&self, width: u32, height: u32) {
         lock(&self.state).extent = (width, height);
+    }
+    /// A local epoch distinguishes frame/input sequence numbers after reconnect.
+    pub fn begin_session(&self, span: tracing::Span) {
+        let mut state = lock(&self.state);
+        state.session_span = span;
+        state.report.session_epoch = state.report.session_epoch.saturating_add(1);
+        tracing::info!(parent: &state.session_span,
+            viewer_pid = std::process::id(),
+            viewer_epoch = state.report.session_epoch,
+            "native desktop attempt started"
+        );
+    }
+    /// Configure an opt-in controlled marker; no pixels or text enter reports.
+    pub fn visual_probe(&self, spec: super::VisualProbeSpec) -> Result<(), DesktopError> {
+        lock(&self.state).visual_probe = Some(super::visual_probe::VisualProbe::new(spec)?);
+        Ok(())
     }
     pub fn control_rtt(&self, ms: u64) {
         let mut state = lock(&self.state);
@@ -345,7 +391,8 @@ impl ViewerHandle {
                 InputKind::PointerButton { pressed: false, .. } => "button_up",
                 InputKind::Scroll { .. } => "scroll",
             };
-            tracing::trace!(target: "rds_desktop::input_timing", input_seq=event.seq,event_class,event_created_ms=event.event_ts_ms,input_sent_ms=sent_ms,queue_ms=sent_ms.saturating_sub(event.event_ts_ms),"native input dispatched");
+            let epoch = lock(&self.state).report.session_epoch;
+            tracing::trace!(target: "rds_desktop::input_timing", viewer_epoch=epoch, input_seq=event.seq,event_class,event_created_ms=event.event_ts_ms,input_sent_ms=sent_ms,queue_ms=sent_ms.saturating_sub(event.event_ts_ms),"native input dispatched");
         }
     }
     pub fn video_repair_requested(&self) {
@@ -359,13 +406,30 @@ impl ViewerHandle {
         state.report.input_acks += 1;
         let ack_ms = self.started.elapsed().as_millis() as u64;
         let latency = state.input_latency.ack(seq, ack_ms);
+        state.report.last_input_ack_ms = latency;
+        let epoch = state.report.session_epoch;
+        let slow = latency.is_some_and(|ms| ms >= 250.);
+        if slow {
+            state.report.slow_input_acks += 1;
+        }
+        let log_slow = slow
+            && state
+                .input_latency
+                .last_slow_log_ms
+                .is_none_or(|last| ack_ms.saturating_sub(last) >= 1000);
+        if log_slow {
+            state.input_latency.last_slow_log_ms = Some(ack_ms);
+        }
         if latency.is_some() {
             state.report.input_acks_matched += 1;
         } else {
             state.report.input_acks_unmatched += 1;
         }
         drop(state);
-        tracing::trace!(target: "rds_desktop::input_timing", input_seq=seq, input_ack_ms=ack_ms,
+        if log_slow {
+            tracing::warn!(target: "rds_desktop::input_timing", viewer_epoch=epoch, input_seq=seq, event_to_ack_ms=?latency, "native input acknowledgement delayed");
+        }
+        tracing::trace!(target: "rds_desktop::input_timing", viewer_epoch=epoch, input_seq=seq, input_ack_ms=ack_ms,
             event_to_ack_ms=?latency, "native input acknowledgement observed");
     }
     pub fn clipboard_ready(&self, bytes: u32) {
@@ -414,6 +478,13 @@ impl ViewerHandle {
         report.input_pointer_coalesced = self.input_state.pointer_coalesced.load(Ordering::Relaxed);
         report.input_events_dropped = self.input_state.input_dropped.load(Ordering::Relaxed);
         report.input_queue_max_depth = self.input_state.max_depth.load(Ordering::Relaxed);
+        report.input_queue_depth = self
+            .input_state
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        report.visual_probe = state.visual_probe.as_ref().map(|probe| probe.report());
         report
     }
 }
@@ -457,6 +528,8 @@ impl Viewer {
                 last_ui_ms: 0,
                 last_encoded_ms: None,
                 occluded: false,
+                visual_probe: None,
+                session_span: tracing::Span::none(),
             })),
             input_state,
             proxy: event_loop.create_proxy(),
@@ -473,6 +546,7 @@ impl Viewer {
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
             pointer: false,
+            pointer_point: None,
             error: None,
         };
         Ok((Self { event_loop, app }, handle, receiver))
@@ -500,6 +574,7 @@ struct App {
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
     pointer: bool,
+    pointer_point: Option<(f64, f64)>,
     error: Option<DesktopError>,
 }
 impl App {
@@ -539,6 +614,20 @@ impl App {
             display_id: self.display,
             kind,
         });
+        if matches!(
+            &message,
+            DesktopControl::Input(InputEvent {
+                kind: InputKind::PointerButton {
+                    button: 0x110,
+                    pressed: true
+                },
+                ..
+            })
+        ) && let Some(point) = self.pointer_point
+            && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+        {
+            probe.click(point, self.seq, Instant::now());
+        }
         self.seq = next;
         if self.input.send(ViewerInput::Control(message)).is_err() {
             // Closing the remote session releases its held keys/buttons. Never
@@ -578,6 +667,15 @@ impl App {
                 lock(&self.handle.state).render_stage = "presented".into();
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
+                    let parent = state.session_span.clone();
+                    tracing::trace!(target:"rds_desktop::frame_timing", parent:&parent, frame_seq=frame.frame_seq,
+                        viewer_epoch=state.report.session_epoch, receive_to_submit_ms=frame.received.elapsed().as_secs_f64()*1000.,
+                        "native frame submitted");
+                    if let Some(probe) = &mut state.visual_probe {
+                        parent.in_scope(|| {
+                            probe.presented_with_seq(&frame.raw, Instant::now(), frame.frame_seq)
+                        });
+                    }
                     state.report.frames_submitted += 1;
                     state.report.last_submission_ms =
                         Some(self.handle.started.elapsed().as_millis() as u64);
@@ -593,6 +691,11 @@ impl App {
                 }
             }
             Ok(outcome) => {
+                if matches!(outcome, DrawOutcome::Occluded)
+                    && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+                {
+                    probe.unavailable();
+                }
                 lock(&self.handle.state).render_stage = outcome.stage().into();
                 lock(&self.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
@@ -686,7 +789,12 @@ impl ApplicationHandler<()> for App {
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(false) => self.release(event_loop),
             WindowEvent::Occluded(hidden) => {
-                lock(&self.handle.state).occluded = hidden;
+                let mut state = lock(&self.handle.state);
+                state.occluded = hidden;
+                if hidden && let Some(probe) = &mut state.visual_probe {
+                    probe.unavailable();
+                }
+                drop(state);
                 if !hidden && let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -797,6 +905,7 @@ impl ApplicationHandler<()> for App {
                     let point = Viewport::new(size.width, size.height, extent.0, extent.1)
                         .pointer(position.x, position.y, extent.0, extent.1);
                     self.pointer = point.is_some();
+                    self.pointer_point = point;
                     if let Some((x, y)) = point {
                         self.input(event_loop, InputKind::PointerMove { x, y });
                     }

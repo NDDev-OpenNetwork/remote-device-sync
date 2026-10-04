@@ -738,3 +738,28 @@ restriction through endpoint files. Real UDP-proxy regressions inspect packet
 lengths during byte-verified bidirectional transfers on both backends. Native
 two-device comparison and loss/latency acceptance remain required; defaults are
 not changed based on the loopback fixture.
+
+## 2026-10-04 causal desktop response and incident recording
+
+[Tracing's task instrumentation contract](https://docs.rs/tracing/latest/tracing/trait.Instrument.html)
+requires explicit span propagation for spawned futures. Blocking capture enters
+the captured parent only on its worker thread; async workers use
+`in_current_span` rather than holding an entered guard across an await.
+This makes sender health and receipt warnings attributable to the owning
+connection instead of losing their session context at task boundaries.
+
+An input ACK proves injection, while a decoded frame may precede the application
+response. Controlled counter markers bind native presses to their rendered
+responses. Their timestamps share the viewer's local monotonic clock, avoiding
+cross-host wall-clock subtraction. GPU submission still does not establish
+optical scanout. Automatic bounded before/after incident windows preserve
+short failures; ordinary OS occlusion is excluded from visible-surface alarms.
+
+RTT-driven encoder cuts additionally require fresh offered traffic (32 KiB over
+two observations). Sparse idle updates and repeated cached path readings do not
+establish excess application load. This policy follows the distinction between
+application-limited traffic and transport congestion in
+[RFC 9002](https://www.rfc-editor.org/rfc/rfc9002.html); its byte threshold is an
+RDS heuristic, not an RFC recommendation. Loss and actual delivery/producer
+pressure remain independent signals. See the causal diagnostic receipt for the
+negative regression and recovered-delivery CI failure.

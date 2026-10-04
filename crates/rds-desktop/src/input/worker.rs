@@ -27,7 +27,9 @@ impl InputWorker {
         let (jobs, mut receiver) = mpsc::channel::<Job>(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let stopped = cancelled.clone();
+        let parent = tracing::Span::current();
         let task = tokio::task::spawn_blocking(move || {
+            let _entered = parent.enter();
             while let Some(job) = receiver.blocking_recv() {
                 if stopped.load(Ordering::Acquire) || job.reply.is_closed() {
                     break;

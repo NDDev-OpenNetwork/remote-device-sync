@@ -109,6 +109,33 @@ async fn ssh_operations_export_only_fixed_names_and_lifecycle_outcomes() {
 }
 
 #[test]
+fn warning_diagnostics_keep_connection_context_when_info_is_filtered() {
+    let capture = Capture::default();
+    let (subscriber, telemetry) = subscriber(
+        Service::Agent,
+        Config::new(Format::Json, "warn").unwrap(),
+        capture.clone(),
+    )
+    .unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        let span = conn_span(43);
+        let _entered = span.enter();
+        tracing::warn!(target:"fixture", "slow frame");
+        tracing::info!(target:"fixture", "must stay filtered");
+        emit(Event::PeerAccepted);
+    });
+    assert!(telemetry.shutdown().drained);
+    let records = capture.records();
+    assert_eq!(
+        records.len(),
+        2,
+        "diagnostic and operational layers must not duplicate events"
+    );
+    assert_eq!(records[0]["session_id"], 43);
+    assert_eq!(records[1]["session_id"], 43);
+}
+
+#[test]
 fn operational_events_and_session_context_survive_diagnostic_filter_off() {
     let capture = Capture::default();
     let (subscriber, telemetry) = subscriber(

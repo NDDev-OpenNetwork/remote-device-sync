@@ -159,7 +159,9 @@ pub(crate) async fn run<T: Send + 'static>(
     })?;
     probe.mark(QUEUED);
     let task_probe = probe.clone();
+    let parent = tracing::Span::current();
     let task = tokio::task::spawn_blocking(move || {
+        let _entered = parent.enter();
         let _slot = slot;
         let cpu_started = cpu::now();
         task_probe.mark(NATIVE);

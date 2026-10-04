@@ -53,6 +53,9 @@ pub struct Options {
     /// Private directory for live diagnostic snapshots.
     #[arg(long)]
     pub diagnostics_dir: Option<PathBuf>,
+    /// Controlled-marker descriptor for causal input-to-submit diagnostics.
+    #[arg(long, conflicts_with = "headless")]
+    pub diagnostic_visual_probe: Option<PathBuf>,
 }
 
 /// Shared bounded credential loading for CLI and native application clients.
@@ -85,6 +88,9 @@ pub async fn read_grant(
 mod control;
 
 #[cfg(feature = "desktop")]
+mod diagnostics;
+
+#[cfg(feature = "desktop")]
 mod native {
     use super::*;
     use rds_client::local::ManagedMessage;
@@ -94,6 +100,7 @@ mod native {
     };
     use std::time::Instant;
     use tokio_util::sync::CancellationToken;
+    use tracing::Instrument;
 
     pub(super) enum Source {
         Managed {
@@ -138,6 +145,26 @@ mod native {
             };
         }
         let (viewer, handle, mut input) = Viewer::new(options.display)?;
+        if let Some(path) = &options.diagnostic_visual_probe {
+            use std::io::Read;
+            let file = std::fs::File::from(rustix::fs::open(
+                path,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::NONBLOCK
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )?);
+            anyhow::ensure!(
+                file.metadata()?.is_file(),
+                "visual probe descriptor must be a regular file"
+            );
+            let mut bytes = Vec::new();
+            file.take(4097).read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= 4096, "visual probe descriptor exceeds 4 KiB");
+            let spec: rds_desktop::render::VisualProbeSpec = serde_json::from_slice(&bytes)?;
+            handle.visual_probe(spec)?;
+        }
         let stop = CancellationToken::new();
         let mut workers = tokio::task::JoinSet::new();
         let worker_stop = stop.clone();
@@ -148,13 +175,16 @@ mod native {
         let diagnostic_dir = options.diagnostics_dir.clone();
         workers.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
-            let path = diagnostic_dir.map(|d| d.join(format!("state-{}.json",std::process::id())));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let path = diagnostic_dir.as_ref().map(|d| d.join(format!("state-{}.json",std::process::id())));
+            let mut recorder = diagnostics::Recorder::default();
             loop {
                 tokio::select! {
                     _ = diagnostic_stop.cancelled() => break,
                     _ = tick.tick() => {
                         diagnostic_view.heartbeat_ui();
                         let snapshot = diagnostic_view.snapshot();
+                        let incident = recorder.observe(&snapshot);
                         if let Ok(json) = serde_json::to_string(&snapshot) {
                             tracing::info!(snapshot=%json, "viewer health");
                             if let Some(path) = &path {
@@ -165,9 +195,11 @@ mod native {
                                 if !matches!(result,Ok(Ok(()))) { tracing::warn!(error=?result,"viewer snapshot write failed"); }
                             }
                         }
+                        persist_incident(diagnostic_dir.as_deref(), incident).await;
                     },
                 }
             }
+            persist_incident(diagnostic_dir.as_deref(), recorder.finish(true)).await;
             Ok(())
         });
         workers.spawn(async move {
@@ -238,6 +270,8 @@ mod native {
         let started = Instant::now();
         let mut failures = 0u32;
         loop {
+            let span = rds_observe::conn_span(rds_observe::next_session_id());
+            view.begin_session(span.clone());
             let received = view.report().frames_received;
             let result = tokio::select! {
                 _ = stop.cancelled() => return Ok(()),
@@ -260,7 +294,7 @@ mod native {
                         },
                         Source::Direct { endpoint,target,grant } => direct_session(endpoint,(target.clone(),grant.as_ref()),options,view,input,&stop,started).await,
                     }
-                } => result,
+                }.instrument(span) => result,
             };
             if stop.is_cancelled() || matches!(result, Ok(true)) {
                 return Ok(());
@@ -296,6 +330,20 @@ mod native {
                     return Ok(());
                 }
             }
+        }
+    }
+
+    async fn persist_incident(directory: Option<&std::path::Path>, bytes: Option<Vec<u8>>) {
+        let (Some(directory), Some(bytes)) = (directory, bytes) else {
+            return;
+        };
+        let directory = directory.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::logging::viewer_incident(&directory, &bytes)
+        })
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            tracing::warn!(error=?result, "viewer incident write failed");
         }
     }
 
@@ -372,6 +420,7 @@ mod native {
                     Some(ManagedMessage::Frame(frame)) => {
                         view.stage("decoding");
                         let received = Instant::now();
+                        let frame_seq = frame.header.seq;
                         view.media_timing(&frame.header);
                         let (next, outcome) = tokio::time::timeout(
                             Duration::from_secs(5),
@@ -383,7 +432,7 @@ mod native {
                         match outcome {
                             RelayOutcome::Frame(raw) => {
                                 progress.send_replace(tokio::time::Instant::now());
-                                view.frame(raw, received);
+                                view.frame_with_seq(raw, received, frame_seq);
                             }
                             RelayOutcome::NeedIdr => {
                                 tokio::time::timeout(Duration::from_secs(2), control.request_idr())

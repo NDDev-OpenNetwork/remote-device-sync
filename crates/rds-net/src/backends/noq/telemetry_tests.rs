@@ -57,6 +57,7 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
         let delayed = telemetry::Telemetry::new(a.inner());
         let guard = delayed.guard();
         let mut last = None;
+        let mut retired = Vec::new();
         for iteration in 0..70 {
             let path = tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
@@ -106,6 +107,7 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
                 break;
             }
             path.close().unwrap();
+            retired.push(opened_id);
             tokio::time::timeout(Duration::from_secs(2), async {
                 while path.status().is_ok() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -119,6 +121,7 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
         assert!(id >= 64, "fixture must cross the old scan limit");
         let initial_path = a.inner().path(noq::PathId::ZERO).unwrap();
         initial_path.close().unwrap();
+        retired.push(0);
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 // Selecting the successor does not mean the engine has
@@ -135,10 +138,18 @@ async fn high_path_ids_survive_churn_and_lag_is_sticky() {
         .unwrap();
         a.send_datagram(b"after 70 paths".to_vec().into()).unwrap();
         assert_eq!(&b.read_datagram().await.unwrap()[..], b"after 70 paths");
-        assert_eq!(
-            facade.path_stats().len(),
-            1,
-            "closed path history is not live"
+        // A still-advertised primary can be rediscovered after its old path
+        // closes. Count all genuinely live paths; assert retired IDs are gone
+        // rather than mistaking a new validated path for leaked history.
+        let live = facade.path_stats();
+        assert!(
+            live.iter().any(|p| p.path_id == id),
+            "validated successor is observable"
+        );
+        assert!(
+            live.iter().all(|p| !retired.contains(&p.path_id)),
+            "retired paths remain observable; live IDs={:?}, retired IDs={retired:?}",
+            live.iter().map(|p| p.path_id).collect::<Vec<_>>()
         );
 
         let observer = policy::Observer {
