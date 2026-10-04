@@ -1,5 +1,47 @@
 # Native desktop viewer
 
+Automatic diagnostics also save `incident-<timestamp>-<pid>.json` windows in the
+private viewer log directory. Up to ten windows survive ordinary log rotation;
+each is capped at 256 KiB. They contain at most thirty prior snapshots and six
+following samples, metadata only. The recorder warns on a pending ACK beyond
+250 ms, three-second decoded-video inactivity, visible submission inactivity
+beyond one second or a reconnect. It saves ten seconds after the trigger and
+uses a thirty-second cooldown. Occlusion alone does not trigger a surface fault.
+Graceful shutdown preserves an interrupted window; abrupt process death can
+leave only the regular live snapshot and logs. Two-second sampling can miss
+short incidents, so rate-limited slow completed-ACK warnings remain independent.
+
+`session_epoch`, `input_queue_depth`, `input_acks_canceled`, `slow_input_acks`
+and `last_input_ack_ms` complement the existing bounded latency percentiles.
+Percentiles summarize the retained sample buffer, not a timed rolling interval.
+
+## Controlled causal visual diagnostics
+
+The optional `--diagnostic-visual-probe FILE` accepts a strict, regular JSON
+descriptor capped at 4 KiB. It selects a known 64-cell black/white marker, a
+nonzero 48-bit prefix, a 16-bit cumulative response counter and the remote
+source-pixel click rectangle. The controlled application must increment the
+counter once per left-button press; no unrelated actor may drive that target
+during qualification. The descriptor is an explicit diagnostic, not a normal
+desktop setting or remote protocol extension.
+
+Only native left presses inside that rectangle begin a sample, after a matching
+marker has already been presented. The exact pending BGRA frame must reach
+`DrawOutcome::Presented` with the expected marker/counter before completing it.
+ACKs and decoded-but-unpresented images cannot finish the measurement. Reconnect
+or counter rollback cancels pending samples. At most 128 clicks and 1024 latency
+samples are retained; replaced intermediate frames can expose cumulative results.
+Reports contain timing/counts, missing-marker and cancellation/eviction counters,
+without retaining pixels or input text. Marker detection is tested through actual
+H.264 encoding/decoding in the codec lane.
+
+`input_to_submit_*` measures the software native input-to-GPU submission boundary
+on one local monotonic clock. It includes the input queue, network, native remote
+application response, capture/codec and local rendering. It excludes automation
+delay before the native event and does not claim compositor scanout or optical
+glass-to-glass timing. Source resolution, marker geometry, occlusion and input
+delivery must be verified on the installed devices before accepting a result.
+
 The `desktop` CLI feature builds a native winit window with a wgpu surface:
 Metal on macOS and supported native GPU backends on Linux. Software H.264
 decoding stays on bounded blocking workers. The serving device needs a real

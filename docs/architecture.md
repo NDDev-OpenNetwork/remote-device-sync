@@ -659,3 +659,11 @@ Managed desktop IPC has one bounded read worker independent of canceled caller
 waits. The renderer acquires a usable surface before queuing GPU writes. Private
 rotating startup logs and live snapshots distinguish dispatch, transport, decode,
 GPU submission and OS occlusion; stages remain measurements, not physical pixels.
+
+Native diagnostics retain bounded metadata incident windows independently of
+ordinary log rotation. Local viewer epochs disambiguate reconnects, canceled
+ACK tracking remains counted, and slow ACKs are visible at the default warning
+level. Serving capture, pacing, media writers and receipts inherit their owning
+tracing span across task boundaries. Opt-in controlled visual response markers
+measure native input to submission of the matching response; the ordinary
+viewer does not inspect markers. See [the measurement receipt](reports/rds-causal-visual-probe-20261004.md).

@@ -238,10 +238,91 @@ pub fn viewer_snapshot(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::rename(temporary, path)
 }
 
+/// Keep ten completed fault windows independently of ordinary log rotation.
+pub fn viewer_incident(directory: &Path, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > 256 * 1024 {
+        return Err(io::Error::other("viewer incident exceeds 256 KiB"));
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let path = directory.join(format!("incident-{stamp}-{}.json", std::process::id()));
+    let mut file = PrivateLog::create(&path)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    let mut owned = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((stamp, pid)) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("incident-"))
+            .and_then(|n| n.strip_suffix(".json"))
+            .and_then(|n| n.split_once('-'))
+        else {
+            continue;
+        };
+        let (Ok(stamp), Ok(_)) = (stamp.parse::<u128>(), pid.parse::<u32>()) else {
+            continue;
+        };
+        let meta = std::fs::symlink_metadata(entry.path())?;
+        if meta.is_file()
+            && meta.uid() == rustix::process::geteuid().as_raw()
+            && meta.mode() & 0o777 == 0o600
+            && meta.nlink() == 1
+        {
+            owned.push((stamp, entry.path(), meta.dev(), meta.ino()));
+        }
+    }
+    owned.sort_by_key(|item| item.0);
+    let remove = owned.len().saturating_sub(10);
+    for (_, path, dev, ino) in owned.into_iter().take(remove) {
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_file() && meta.dev() == dev && meta.ino() == ino && meta.nlink() == 1 {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::{DirBuilderExt, symlink};
+
+    #[test]
+    fn incident_retention_is_bounded_and_preserves_unowned_entries() {
+        let root = Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!("rds-incidents-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let sentinel = root.join("sentinel");
+        std::fs::write(&sentinel, b"retain").unwrap();
+        let alias = root.join("incident-0-1.json");
+        symlink(&sentinel, &alias).unwrap();
+        for _ in 0..12 {
+            viewer_incident(&root, b"{}").unwrap();
+        }
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .filter(|entry| {
+                    let entry = entry.as_ref().unwrap();
+                    entry.file_name().to_string_lossy().starts_with("incident-")
+                        && std::fs::symlink_metadata(entry.path()).unwrap().is_file()
+                })
+                .count(),
+            10
+        );
+        assert_eq!(std::fs::read(&alias).unwrap(), b"retain");
+        assert!(viewer_incident(&root, &vec![0; 256 * 1024 + 1]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn log_is_private_capped_and_never_replaces_existing_entries() {

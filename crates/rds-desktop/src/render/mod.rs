@@ -12,7 +12,11 @@ pub use platform::choose_resolution;
 #[cfg(feature = "viewer")]
 mod viewer;
 #[cfg(feature = "viewer")]
+mod visual_probe;
+#[cfg(feature = "viewer")]
 pub use viewer::{InputReceiver, Viewer, ViewerHandle, ViewerInput, ViewerReport, ViewerSnapshot};
+#[cfg(feature = "viewer")]
+pub use visual_probe::{VisualProbeReport, VisualProbeSpec};
 
 /// The native viewer was compiled; actual adapter/window creation can still fail.
 pub fn available() -> bool {

@@ -168,7 +168,12 @@ impl Delivery {
                 data: bytes::Bytes::from(body),
                 keyframe: header.keyframe,
             };
-            match self.decoder.as_mut().unwrap().decode(&encoded) {
+            let started = std::time::Instant::now();
+            let outcome = self.decoder.as_mut().unwrap().decode(&encoded);
+            tracing::trace!(target:"rds_desktop::frame_timing", frame_seq=header.seq,
+                decode_us=started.elapsed().as_micros(), payload_bytes=encoded.data.len(),
+                "desktop frame decode completed");
+            match outcome {
                 Ok(Some(raw)) if raw.width == header.width && raw.height == header.height => {
                     tracing::debug!(
                         "frame seq={} {}x{} decoded",

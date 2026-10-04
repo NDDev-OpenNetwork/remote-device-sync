@@ -20,6 +20,7 @@ use std::borrow::Borrow;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tracing::Instrument;
 
 use crate::DesktopError;
 
@@ -616,7 +617,7 @@ pub async fn serve_desktop_with(
     let clock = config.clock.clone().unwrap_or_default();
     let max_fps = hello.max_fps.clamp(1, 240);
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(max_fps));
-    tracing::info!(display=hello.display,max_fps,output_height=?config.output_height,view_only=config.view_only,"desktop serving started");
+    tracing::info!(display=hello.display,max_fps,output_height=?config.output_height,view_only=config.view_only,frame_route=?config.frame_route,"desktop serving started");
     let acks = hello.input_acks;
     if config.bitrate_ceiling.is_some_and(|rate| rate < 100_000) {
         return Err(DesktopError::Encode(
@@ -652,7 +653,9 @@ pub async fn serve_desktop_with(
         let latest_key_seq = latest_key_seq.clone();
         let capture_admission = capture_admission.clone();
         let feedback = delivery_feedback.clone();
+        let parent = tracing::Span::current();
         capture.spawn_blocking(move || {
+            let _entered = parent.enter();
             let producer_controls = ProducerControls {
                 bitrate,
                 idr,
@@ -749,6 +752,9 @@ pub async fn serve_desktop_with(
                             continue;
                         }
                         if !p.payload.is_empty() {
+                            tracing::trace!(target:"rds_desktop::frame_timing", frame_seq=p.header.seq,
+                                capture_ms=p.header.capture_ts_ms, encode_done_ms=p.header.encode_done_ts_ms,
+                                payload_bytes=p.payload.len(), keyframe=p.header.keyframe, "desktop frame produced");
                             feedback
                                 .last_produced_ms
                                 .store(clock.now_ms(), Ordering::Relaxed);
@@ -946,7 +952,7 @@ pub async fn serve_desktop_with(
                     health = Instant::now();
                 }
             }
-        })
+        }.in_current_span())
     };
 
     // Writer task: one uni stream per frame. Backpressure retains references
@@ -1176,7 +1182,7 @@ pub async fn serve_desktop_with(
                 health = Instant::now();
             }
         }
-    });
+    }.in_current_span());
 
     // Control loop: input + encoder steering + heartbeat, until the
     // peer goes away. `send` also carries DesktopEvent replies.
@@ -1208,6 +1214,7 @@ pub async fn serve_desktop_with(
                         super::input::worker::InputWorker::new(input_sink.take())
                     });
                     let seq = ev.seq;
+                    let received_ms = send_clock.now_ms();
                     let input_started = Instant::now();
                     match tokio::time::timeout(FRAME_SEND_TIMEOUT, worker.inject(ev)).await {
                         Ok(Ok(())) => input = Some(worker),
@@ -1241,7 +1248,11 @@ pub async fn serve_desktop_with(
                         input_started.elapsed().as_millis() as u64,
                         Ordering::Relaxed,
                     );
+                    tracing::trace!(target:"rds_desktop::input_timing", input_seq=seq,
+                        received_ms, handled_ms=send_clock.now_ms(), inject_ms=input_started.elapsed().as_millis(),
+                        "desktop input injected");
                     if acks {
+                        let ack_started = Instant::now();
                         let ack = DesktopEvent::InputAck {
                             seq,
                             handled_ts_ms: send_clock.now_ms(),
@@ -1256,6 +1267,8 @@ pub async fn serve_desktop_with(
                         ) {
                             break;
                         }
+                        tracing::trace!(target:"rds_desktop::input_timing", input_seq=seq,
+                            ack_write_ms=ack_started.elapsed().as_millis(), "desktop input acknowledgement written");
                     }
                 }
                 Ok(DesktopControl::RequestIdr) => match media_repair.request() {
@@ -1984,7 +1997,7 @@ async fn send_frame_inner(
         drop(key);
         drop(permit);
         (seq, acknowledged)
-    });
+    }.in_current_span());
     outcome
 }
 
