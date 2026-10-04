@@ -279,8 +279,8 @@ fallback. Zero selects original geometry, otherwise the bound is 16–4320 pixel
 
 ## Explicit text paste
 
-On macOS, copying text in a local app with Cmd+C and pressing Ctrl+V inside RDS
-reads the native NSPasteboard for that paste gesture. Text transfers on the
+On macOS, copying text in a local app with Cmd+C and pressing Ctrl+V or Cmd+V
+inside RDS reads the native NSPasteboard for that paste gesture. Text transfers on the
 ordered control channel before V reaches the remote application. The X11 agent
 owns the CLIPBOARD selection and serves UTF8_STRING/TARGETS/TIMESTAMP and ICCCM
 INCR for larger data, without a clipboard helper process. This is real clipboard
@@ -293,7 +293,12 @@ View-only sessions refuse publication. Publication failure ends the control
 session before subsequent paste input can consume an unrelated old clipboard.
 Contents are neither logged nor written to disk. There is no background scan or
 automatic export of every local clipboard change. Images, files, rich formats,
-reverse clipboard and macOS Cmd+V translation remain outside this text path.
+reverse clipboard remain outside this text path. Cmd+V becomes a bounded remote
+Ctrl+V chord; Cmd+Shift+V retains Shift for terminal Ctrl+Shift+V. Temporarily
+held Super keys are released/restored while Control brackets the chord; the
+original held modifier state is retained afterward. Other Super shortcuts keep
+their physical mapping. A repeated physical V cannot repeat local clipboard
+effects. An explicit Command paste with no text sends no stale remote paste.
 
 ## Persistent viewer diagnostics
 
