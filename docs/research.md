@@ -754,3 +754,12 @@ responses. Their timestamps share the viewer's local monotonic clock, avoiding
 cross-host wall-clock subtraction. GPU submission still does not establish
 optical scanout. Automatic bounded before/after incident windows preserve
 short failures; ordinary OS occlusion is excluded from visible-surface alarms.
+
+RTT-driven encoder cuts additionally require fresh offered traffic (32 KiB over
+two observations). Sparse idle updates and repeated cached path readings do not
+establish excess application load. This policy follows the distinction between
+application-limited traffic and transport congestion in
+[RFC 9002](https://www.rfc-editor.org/rfc/rfc9002.html); its byte threshold is an
+RDS heuristic, not an RFC recommendation. Loss and actual delivery/producer
+pressure remain independent signals. See the causal diagnostic receipt for the
+negative regression and recovered-delivery CI failure.

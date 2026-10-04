@@ -47,6 +47,9 @@ const RTT_STEP_UP: f64 = 1.5;
 // 1–3 ms loopback fluctuation into a repeated 30% encoder penalty. QUIC's
 // own congestion control still handles the underlying path independently.
 const RTT_MIN_INCREASE_MS: u64 = 10;
+// RTT jitter on tiny idle updates is not evidence of excessive offered media.
+// QUIC retains congestion control below this application-level sample bound.
+const RTT_SAMPLE_MIN_BYTES: u64 = 32 * 1024;
 // A queued FIN is not a delivery receipt. Keep fewer unacknowledged media
 // streams than the receiver's four readers, leaving capacity for recovery.
 const MAX_PENDING_FRAME_ACKS: usize = 3;
@@ -357,11 +360,13 @@ pub struct BitrateController {
     ceiling: u64,
     previous_rtt_ms: Option<u64>,
     last_sent: u64,
+    last_sent_bytes: u64,
     last_lost: u64,
     loss_sample_sent: u64,
     loss_sample_lost: u64,
     loss_hold: bool,
     rtt_rise_baseline: Option<u64>,
+    rtt_rise_bytes: u64,
     path_cut_cooldown_ticks: u8,
     reduction_reason: Option<&'static str>,
     primed: bool,
@@ -379,11 +384,13 @@ impl BitrateController {
             ceiling,
             previous_rtt_ms: None,
             last_sent: 0,
+            last_sent_bytes: 0,
             last_lost: 0,
             loss_sample_sent: 0,
             loss_sample_lost: 0,
             loss_hold: false,
             rtt_rise_baseline: None,
+            rtt_rise_bytes: 0,
             path_cut_cooldown_ticks: 0,
             reduction_reason: None,
             primed: false,
@@ -417,15 +424,18 @@ impl BitrateController {
                 self.last_path = Some(p.path_id);
                 self.previous_rtt_ms = None;
                 self.last_sent = 0;
+                self.last_sent_bytes = 0;
                 self.last_lost = 0;
                 self.loss_sample_sent = 0;
                 self.loss_sample_lost = 0;
                 self.loss_hold = false;
                 self.rtt_rise_baseline = None;
+                self.rtt_rise_bytes = 0;
                 self.path_cut_cooldown_ticks = 0;
                 self.primed = false;
             }
             let d_sent = p.sent.saturating_sub(self.last_sent);
+            let d_bytes = p.sent_bytes.saturating_sub(self.last_sent_bytes);
             let d_lost = p.lost.saturating_sub(self.last_lost);
             if self.primed {
                 self.loss_sample_sent = self.loss_sample_sent.saturating_add(d_sent);
@@ -457,15 +467,20 @@ impl BitrateController {
                 if let Some(baseline) = self.rtt_rise_baseline.take() {
                     // Confirm on a second pacing observation. A delayed ACK
                     // or scheduling spike must not compound encoder penalties.
-                    rtt_high = rises_from(baseline);
+                    rtt_high = rises_from(baseline)
+                        && d_bytes > 0
+                        && self.rtt_rise_bytes.saturating_add(d_bytes) >= RTT_SAMPLE_MIN_BYTES;
+                    self.rtt_rise_bytes = 0;
                 } else if let Some(baseline) = self.previous_rtt_ms
                     && rises_from(baseline)
                 {
                     self.rtt_rise_baseline = Some(baseline);
+                    self.rtt_rise_bytes = d_bytes;
                 }
                 self.previous_rtt_ms = Some(rtt_ms);
             }
             self.last_sent = p.sent;
+            self.last_sent_bytes = p.sent_bytes;
             self.last_lost = p.lost;
             self.path_cut_cooldown_ticks = self.path_cut_cooldown_ticks.saturating_sub(1);
 
@@ -2851,6 +2866,37 @@ mod tests {
         c.step(Some(path(2000, 0, 60, 0)), 0); // first elevated sample
         let bps = c.step(Some(path(2100, 0, 60, 0)), 0); // confirmed 3× baseline RTT
         assert!(bps < 4_000_000, "RTT growth must cut bitrate, got {bps}");
+    }
+
+    #[test]
+    fn sparse_idle_rtt_changes_do_not_drive_healthy_media_to_floor() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step_with_delivery(Some(path(1000, 0, 90, 0)), 0, false, true);
+        for i in 1..=160 {
+            let rtt = [90, 240, 240, 90][i as usize % 4];
+            let mut p = path(1000 + i, 0, rtt, 0);
+            p.sent_bytes = 1_200_000 + i * 128;
+            c.step_with_delivery(Some(p), 0, false, true);
+        }
+        assert_eq!(
+            c.current(),
+            8_000_000,
+            "tiny acknowledged updates are not offered media congestion"
+        );
+    }
+
+    #[test]
+    fn a_cached_rtt_sample_without_new_offered_bytes_cannot_confirm_a_cut() {
+        let mut c = BitrateController::new(4_000_000, 8_000_000);
+        c.step_with_delivery(Some(path(1000, 0, 20, 0)), 0, false, false);
+        let elevated = path(2000, 0, 60, 0);
+        c.step_with_delivery(Some(elevated), 0, false, false);
+        c.step_with_delivery(Some(elevated), 0, false, false);
+        assert_eq!(
+            c.current(),
+            4_000_000,
+            "one unchanged path snapshot is not two RTT observations"
+        );
     }
 
     #[test]

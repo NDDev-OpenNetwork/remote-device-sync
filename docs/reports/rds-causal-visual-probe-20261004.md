@@ -45,6 +45,18 @@ high-ID successor, coverage and sticky-lag assertions. The original failure
 was not reproduced in a serial local run; the corrected contract passed three
 local repetitions and strict Noq clippy. CI acceptance remains required.
 
+The next macOS CI failure reported a recovered-delivery bitrate cut with zero
+producer misses, zero packet losses and only 24922 total sent bytes. A separate
+negative controller regression reproduced repeated sparse RTT changes driving
+healthy acknowledged updates from 4 Mbps to about 102 kbps. The controller now
+requires at least 32 KiB offered across its two elevated RTT observations and
+new transmitted bytes in the confirmation observation. Re-reading one cached
+snapshot cannot confirm a cut. This is an application load heuristic, not an
+estimate of available link capacity; transport congestion control, sampled loss,
+producer deadline and actual delivery pressure retain their responses.
+Both new controller regressions, the full expanded desktop unit suite and three
+repetitions of real recovered/sustained delivery-pressure tests passed locally.
+
 The remote controlled target owns a known 48-bit marker prefix and increments a
 16-bit counter once per button press. The viewer samples only that descriptor's
 64 cells, rejects ambiguous/wrong-prefix/truncated data and records counts and
