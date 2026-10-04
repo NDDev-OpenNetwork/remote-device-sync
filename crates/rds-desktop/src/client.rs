@@ -458,11 +458,24 @@ impl DesktopSession {
                     if let DesktopControl::Heartbeat { seq, ts_ms } = &msg {
                         sending_probes.lock().await.sent(*seq, *ts_ms);
                     }
-                    if !matches!(
-                        tokio::time::timeout(FRAME_STREAM_TIMEOUT, write_frame(&mut send.0, &msg))
-                            .await,
+                    let input_seq = match &msg {
+                        DesktopControl::Input(event) => Some(event.seq),
+                        _ => None,
+                    };
+                    let started = std::time::Instant::now();
+                    if let Some(input_seq) = input_seq {
+                        tracing::trace!(target:"rds_desktop::input_timing", input_seq,
+                            "desktop input control write started");
+                    }
+                    let written = matches!(
+                        tokio::time::timeout(FRAME_STREAM_TIMEOUT, write_frame(&mut send.0, &msg)).await,
                         Ok(Ok(()))
-                    ) {
+                    );
+                    if let Some(input_seq) = input_seq {
+                        tracing::trace!(target:"rds_desktop::input_timing", input_seq, written,
+                            write_us=started.elapsed().as_micros(), "desktop input control write completed");
+                    }
+                    if !written {
                         break;
                     }
                 }

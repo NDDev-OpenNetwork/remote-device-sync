@@ -169,6 +169,9 @@ pub struct ViewerSnapshot {
     pub encoded_frame_age_ms: Option<u64>,
     pub control_echo_age_ms: Option<u64>,
     pub submission_age_ms: Option<u64>,
+    /// Time with a decoded image awaiting submission, preserved across replacement.
+    /// Unlike submission_age_ms, a quiet screen with no new image has no debt.
+    pub unpresented_frame_age_ms: Option<u64>,
     pub pending_frame_bytes: usize,
     pub occluded: bool,
     pub report: ViewerReport,
@@ -178,6 +181,21 @@ struct Pending {
     raw: RawFrame,
     received: Instant,
     frame_seq: Option<u64>,
+    queued_ms: u64,
+}
+
+#[derive(Default)]
+struct SubmissionDebt(Option<u64>);
+impl SubmissionDebt {
+    fn queued(&mut self, now_ms: u64) {
+        self.0.get_or_insert(now_ms);
+    }
+    fn presented(&mut self, next_queued_ms: Option<u64>) {
+        self.0 = next_queued_ms;
+    }
+    fn age(&self, now_ms: u64) -> Option<u64> {
+        self.0.map(|since| now_ms.saturating_sub(since))
+    }
 }
 /// Local event-to-ack measurements never compare clocks on different hosts.
 /// Coalesced pointer events are tracked only after dequeue; the event's own
@@ -213,6 +231,7 @@ impl InputLatency {
 
 struct State {
     pending: Option<Pending>,
+    submission_debt: SubmissionDebt,
     wake_pending: bool,
     status: String,
     extent: (u32, u32),
@@ -289,6 +308,7 @@ impl ViewerHandle {
                 .last_control_echo_ms
                 .map(|v| elapsed.saturating_sub(v)),
             submission_age_ms: report.last_submission_ms.map(|v| elapsed.saturating_sub(v)),
+            unpresented_frame_age_ms: state.submission_debt.age(elapsed),
             pending_frame_bytes: state.pending.as_ref().map_or(0, |p| p.raw.data.len()),
             occluded: state.occluded,
             report,
@@ -309,10 +329,12 @@ impl ViewerHandle {
     }
     fn queue_frame(&self, raw: RawFrame, received: Instant, frame_seq: Option<u64>) {
         let mut state = lock(&self.state);
+        let queued_ms = self.started.elapsed().as_millis() as u64;
+        state.submission_debt.queued(queued_ms);
         state.report.frames_received += 1;
         state.report.video_width = raw.width;
         state.report.video_height = raw.height;
-        state.report.last_frame_ms = Some(self.started.elapsed().as_millis() as u64);
+        state.report.last_frame_ms = Some(queued_ms);
         if let Some(interrupted) = state.interrupted.take() {
             state.report.last_recovery_ms = Some(interrupted.elapsed().as_millis() as u64);
         }
@@ -323,6 +345,7 @@ impl ViewerHandle {
                 raw,
                 received,
                 frame_seq,
+                queued_ms,
             })
             .is_some()
         {
@@ -513,6 +536,7 @@ impl Viewer {
         let handle = ViewerHandle {
             state: Arc::new(Mutex::new(State {
                 pending: None,
+                submission_debt: SubmissionDebt::default(),
                 wake_pending: false,
                 status: "Connecting".into(),
                 extent: (0, 0),
@@ -671,6 +695,8 @@ impl App {
                 lock(&self.handle.state).render_stage = "presented".into();
                 if let Some(frame) = pending {
                     let mut state = lock(&self.handle.state);
+                    let next_queued_ms = state.pending.as_ref().map(|next| next.queued_ms);
+                    state.submission_debt.presented(next_queued_ms);
                     let parent = state.session_span.clone();
                     tracing::trace!(target:"rds_desktop::frame_timing", parent:&parent, frame_seq=frame.frame_seq,
                         viewer_epoch=state.report.session_epoch, receive_to_submit_ms=frame.received.elapsed().as_secs_f64()*1000.,
@@ -980,6 +1006,20 @@ impl ApplicationHandler<()> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn submission_debt_distinguishes_idle_replacement_and_concurrent_arrival() {
+        let mut debt = SubmissionDebt::default();
+        assert_eq!(debt.age(90_000), None); // A still screen is not a renderer stall.
+        debt.queued(90_000);
+        assert_eq!(debt.age(90_001), Some(1)); // First update after a long idle.
+        debt.queued(91_000);
+        debt.queued(92_000);
+        assert_eq!(debt.age(92_000), Some(2000)); // Newest images cannot hide a stall.
+        debt.presented(Some(91_900)); // Another image arrived while the GPU drew.
+        assert_eq!(debt.age(92_000), Some(100));
+        debt.presented(None);
+        assert_eq!(debt.age(180_000), None);
+    }
     fn event(seq: u64, kind: InputKind) -> ViewerInput {
         ViewerInput::Control(DesktopControl::Input(InputEvent {
             seq,

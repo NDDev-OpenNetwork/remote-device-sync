@@ -68,7 +68,9 @@ impl Recorder {
         // Occlusion is a normal OS policy, not a frozen visible screen.
         if !snapshot.occluded
             && snapshot.status == "Connected"
-            && snapshot.submission_age_ms.is_some_and(|ms| ms >= 1000)
+            && snapshot
+                .unpresented_frame_age_ms
+                .is_some_and(|ms| ms >= 1000)
         {
             reasons.push("visible_submission_stalled");
         }
@@ -120,6 +122,7 @@ mod tests {
             encoded_frame_age_ms: Some(10),
             control_echo_age_ms: Some(10),
             submission_age_ms: Some(10),
+            unpresented_frame_age_ms: None,
             pending_frame_bytes: 0,
             occluded: false,
             report: ViewerReport::default(),
@@ -183,5 +186,30 @@ mod tests {
         let data: serde_json::Value =
             serde_json::from_slice(&recorder.finish(true).unwrap()).unwrap();
         assert_eq!(data["reasons"][0], "input_ack_delayed");
+    }
+
+    #[test]
+    fn idle_and_a_fresh_update_do_not_report_a_visible_renderer_stall() {
+        let mut recorder = Recorder::default();
+        let mut idle = snapshot(90_000);
+        idle.submission_age_ms = Some(90_000);
+        idle.decoded_frame_age_ms = Some(1050); // Damage-driven idle refresh cadence.
+        recorder.observe(&idle);
+        assert!(recorder.finish(true).is_none());
+        idle.elapsed_ms += 2000;
+        idle.unpresented_frame_age_ms = Some(1);
+        idle.pending_frame_bytes = 4096;
+        recorder.observe(&idle);
+        assert!(recorder.finish(true).is_none());
+        idle.elapsed_ms += 2000;
+        idle.decoded_frame_age_ms = Some(0); // Fresh replacements must not hide debt.
+        idle.unpresented_frame_age_ms = Some(2001);
+        recorder.observe(&idle);
+        let data: serde_json::Value =
+            serde_json::from_slice(&recorder.finish(true).unwrap()).unwrap();
+        assert_eq!(
+            data["reasons"],
+            serde_json::json!(["visible_submission_stalled"])
+        );
     }
 }

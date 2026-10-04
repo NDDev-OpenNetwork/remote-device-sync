@@ -6,6 +6,10 @@ workers. Operational event filtering and export allowlists remain independent;
 retaining a span does not enable its filtered diagnostic messages.
 
 Scope: W10.1/W10.2, implemented incrementally alongside correctness work.
+The native desktop follow-up separates an idle image from actual outstanding
+presentation work and records the managed input queue/control-write boundaries
+in private metadata diagnostics. See
+[the stage receipt](reports/rds-desktop-stage-observability-20261005.md).
 This is not a closure of W10, a production deployment or a distributed tracing
 implementation. See [current remediation state](remediation-progress.md).
 The [O1 2026-09-25 Linux receipt](reports/rds-observability-20260925.md) records

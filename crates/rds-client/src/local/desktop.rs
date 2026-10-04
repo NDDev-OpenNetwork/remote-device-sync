@@ -23,6 +23,31 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid local desktop body")
 }
 
+/// Metadata-only observation of the IPC-to-network queue boundary. Never log
+/// key codes, pointer coordinates, clipboard bodies or complete controls.
+async fn forward_control(
+    ctrl: &tokio::sync::mpsc::Sender<DesktopControl>,
+    control: DesktopControl,
+) -> io::Result<()> {
+    let input_seq = match &control {
+        DesktopControl::Input(event) => Some(event.seq),
+        _ => None,
+    };
+    let started = Instant::now();
+    if let Some(input_seq) = input_seq {
+        tracing::trace!(target:"rds_desktop::input_timing", input_seq,
+            "managed desktop input received from IPC");
+    }
+    ctrl.send(control)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "control closed"))?;
+    if let Some(input_seq) = input_seq {
+        tracing::trace!(target:"rds_desktop::input_timing", input_seq,
+            queue_us=started.elapsed().as_micros(), "managed desktop input queued for network");
+    }
+    Ok(())
+}
+
 /// Write one encoded payload with its u32 length prefix.
 async fn write_payload<W: AsyncWrite + Unpin>(writer: &mut W, payload: &[u8]) -> io::Result<()> {
     let len: u32 = payload
@@ -58,10 +83,7 @@ async fn serve_separated_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 Ok(DesktopUp::Control(DesktopControl::FrameReceived { .. })) => {
                     return Err(invalid());
                 }
-                Ok(DesktopUp::Control(control)) => ctrl
-                    .send(control)
-                    .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "control closed"))?,
+                Ok(DesktopUp::Control(control)) => forward_control(&ctrl, control).await?,
                 Ok(DesktopUp::Finished) => return Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
                 Err(e) => return Err(e),
@@ -151,10 +173,7 @@ pub(super) async fn serve(
                 Ok(DesktopUp::Control(DesktopControl::FrameReceived { .. })) => {
                     return Err(invalid());
                 }
-                Ok(DesktopUp::Control(control)) => ctrl
-                    .send(control)
-                    .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "control closed"))?,
+                Ok(DesktopUp::Control(control)) => forward_control(&ctrl, control).await?,
                 Ok(DesktopUp::Finished) => return Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
                 Err(e) => return Err(e),
