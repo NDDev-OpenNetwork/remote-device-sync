@@ -123,6 +123,26 @@ pub enum Packetization {
     Conservative,
 }
 
+/// Explicit congestion-controller selection for measured path qualification.
+/// This does not change stream priority, path eligibility or packetization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CongestionControl {
+    #[default]
+    Bbr3,
+    Cubic,
+}
+impl CongestionControl {
+    pub(crate) fn factory(
+        self,
+    ) -> std::sync::Arc<dyn noq_proto::congestion::ControllerFactory + Send + Sync> {
+        match self {
+            Self::Bbr3 => std::sync::Arc::new(noq_proto::congestion::Bbr3Config::default()),
+            Self::Cubic => std::sync::Arc::new(noq_proto::congestion::CubicConfig::default()),
+        }
+    }
+}
+
 /// How an endpoint reaches the network.
 #[derive(Debug, Clone)]
 pub struct EndpointConfig {
@@ -171,6 +191,8 @@ pub struct EndpointConfig {
     pub transports: Transports,
     /// Packet-size/offload policy. Default `Adaptive`.
     pub packetization: Packetization,
+    /// Local controller factory; absent file settings retain BBRv3.
+    pub congestion_control: CongestionControl,
     /// Owned-relay attachments (`noq` backend only): each entry is a
     /// relay server's endpoint address and joins the socket mux as one
     /// relay tunnel in its own synthetic-address slot. The endpoint
@@ -200,6 +222,7 @@ impl Default for EndpointConfig {
             observed_address_reports: true,
             transports: Transports::default(),
             packetization: Packetization::default(),
+            congestion_control: CongestionControl::default(),
             #[cfg(feature = "transport-noq")]
             relay_endpoints: Vec::new(),
             #[cfg(feature = "transport-noq")]

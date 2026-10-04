@@ -39,6 +39,15 @@ configuration (role/service/authority/timeout sections).
 | `max_multipath_paths` | Optional integer 1–32; absent preserves the backend default |
 | `transports` | `all` (default), `direct-only`, or `relay-only`; bounds usable path kinds |
 | `packetization` | `adaptive` (default), or `conservative`: 1200-byte primary QUIC UDP payloads, MTU discovery and GSO disabled |
+| `congestion_control` | `bbr3` (default), or `cubic`; explicit local controller selection for measured qualification |
+
+Congestion selection is independent of stream priority, path kinds, packetization,
+receive/send windows and authorization. Both Iroh and owned Noq instantiate the
+selected pinned engine controller. The default BBRv3 field is omitted on
+serialization, retaining legacy file shape. Older strict binaries refuse explicit
+new fields; update binaries before selecting a controller. No controller is
+declared universally fastest or most stable by adding this option: qualify
+latency, delivery and recovery on the actual path before adopting it.
 
 The conservative policy supports qualification of tunnel/packet-inspection paths;
 it is not a claim that every such path needs it. It leaves congestion control,

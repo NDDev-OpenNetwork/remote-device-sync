@@ -33,6 +33,9 @@ Endpoint settings can bound usable path kinds and select conservative primary
 QUIC packetization for measured tunnel qualification. Defaults preserve adaptive
 MTU discovery/offloads and all path kinds. The same policy lowers into Iroh and
 owned Noq; OS routing, endpoint identity and service authorization are separate.
+An optional local congestion-controller choice similarly lowers into both
+backends. BBRv3 remains the default; explicit Cubic enables controlled path
+comparison with unchanged admission, priorities, windows and authentication.
 
 CLI and agent share [versioned endpoint configuration](endpoint-configuration.md)
 with explicit file/flag precedence, backend/relay validation and preflight before

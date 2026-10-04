@@ -1,6 +1,68 @@
 use rds_net::{EndpointConfig, bind_endpoint};
 
 #[tokio::test]
+async fn both_congestion_choices_transfer_complete_payloads_on_each_backend() {
+    let backends = [
+        rds_net::Backend::Iroh,
+        #[cfg(feature = "transport-noq")]
+        rds_net::Backend::Noq,
+    ];
+    for backend in backends {
+        for congestion_control in [
+            rds_net::CongestionControl::Bbr3,
+            rds_net::CongestionControl::Cubic,
+        ] {
+            let config = || EndpointConfig {
+                backend,
+                congestion_control,
+                discovery: false,
+                bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                ..Default::default()
+            };
+            let server = bind_endpoint(config()).await.unwrap();
+            let client = bind_endpoint(config()).await.unwrap();
+            let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
+                    server.accept().await.unwrap().await
+                })
+            })
+            .await
+            .unwrap();
+            let (a, b) = (a.unwrap(), b.unwrap());
+            let body = vec![0x5a; 256 * 1024];
+            let (sent, received) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    async {
+                        let (mut tx, mut rx) = a.open_bi().await.unwrap();
+                        tx.write_all(&body).await.unwrap();
+                        tx.finish().unwrap();
+                        let mut echoed = vec![0; body.len()];
+                        rx.read_exact(&mut echoed).await.unwrap();
+                        echoed
+                    },
+                    async {
+                        let (mut tx, mut rx) = b.accept_bi().await.unwrap();
+                        let mut bytes = vec![0; body.len()];
+                        rx.read_exact(&mut bytes).await.unwrap();
+                        tx.write_all(&bytes).await.unwrap();
+                        tx.finish().unwrap();
+                        bytes
+                    }
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(sent, body);
+            assert_eq!(received, body);
+            a.close(0u32.into(), b"qualification complete");
+            b.close(0u32.into(), b"qualification complete");
+            client.close().await;
+            server.close().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn explicit_loopback_bind_never_advertises_an_unspecified_family() {
     let endpoint = bind_endpoint(EndpointConfig {
         discovery: false,

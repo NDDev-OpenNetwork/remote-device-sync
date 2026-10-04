@@ -61,6 +61,7 @@ const DATAGRAM_BUFFER_SIZE: usize = 1 << 20;
 fn transport_config(
     max_multipath_paths: Option<u32>,
     packetization: crate::Packetization,
+    congestion_control: crate::CongestionControl,
 ) -> Arc<noq::TransportConfig> {
     let mut cfg = noq::TransportConfig::default();
     cfg.keep_alive_interval(Some(HEARTBEAT_INTERVAL));
@@ -71,10 +72,10 @@ fn transport_config(
     cfg.server_handshake_migration(true);
     cfg.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_SIZE));
     cfg.datagram_send_buffer_size(DATAGRAM_BUFFER_SIZE);
-    // Same tuning as the iroh backend: BBRv3 pacing for latency +
-    // bufferbloat resistance, and windows above the 100Mbps x 100ms
+    // Same controller selection as the iroh backend (default BBRv3),
+    // and windows above the 100Mbps x 100ms
     // defaults so bulk streams do not stall on high-BDP links.
-    cfg.congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()));
+    cfg.congestion_controller_factory(congestion_control.factory());
     cfg.stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024));
     cfg.send_window(32 * 1024 * 1024);
     if packetization == crate::Packetization::Conservative {
@@ -218,7 +219,11 @@ async fn bind_socket(
     let endpoint_config =
         noq::EndpointConfig::new(Arc::new(hmac::Blake3HmacKey::new(&mut rand::rng())));
 
-    let transport = transport_config(config.max_multipath_paths, config.packetization);
+    let transport = transport_config(
+        config.max_multipath_paths,
+        config.packetization,
+        config.congestion_control,
+    );
     let mut server_config = noq::ServerConfig::with_crypto(Arc::new(server_crypto));
     server_config.transport = transport.clone();
     // An immutable per-protocol offer avoids both silent ALPN fallback and
