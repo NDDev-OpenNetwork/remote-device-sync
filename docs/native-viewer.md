@@ -26,7 +26,7 @@ counter once per left-button press; no unrelated actor may drive that target
 during qualification. The descriptor is an explicit diagnostic, not a normal
 desktop setting or remote protocol extension.
 
-Only native left presses inside that rectangle begin a sample, after a matching
+Only unmodified native left presses inside that rectangle begin a sample, after a matching
 marker has already been presented. The exact pending BGRA frame must reach
 `DrawOutcome::Presented` with the expected marker/counter before completing it.
 ACKs and decoded-but-unpresented images cannot finish the measurement. Reconnect,
@@ -36,6 +36,17 @@ samples are retained; replaced intermediate frames can expose cumulative results
 Reports contain timing/counts, missing-marker and cancellation/eviction counters,
 without retaining pixels or input text. Marker detection is tested through actual
 H.264 encoding/decoding in the codec lane.
+
+A target press unanswered for five seconds ends correlation for that probe
+attempt. A modified target press does the same: the controlled application may
+interpret it as a shortcut instead of advancing the counter. All pending samples
+are canceled; continuing markers, new clicks and surface resets cannot silently
+resume measurement. Start a new probe attempt with a verified target and fresh
+descriptor. Reports expose `timed_out`, `modified_clicks` and `correlation_lost`.
+These failures are acceptance failures, excluded from latency percentiles rather
+than treated as proof that a later counter increment belongs to the older press.
+The five-second limit bounds this diagnostic's causal assumption; it changes no
+desktop input, transport, repair or session deadline.
 
 Managed delivery attaches the exact encoded frame sequence to its pending raw
 frame. Visual response and submission traces carry it alongside the local

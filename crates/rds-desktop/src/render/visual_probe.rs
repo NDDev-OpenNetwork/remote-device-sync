@@ -1,6 +1,14 @@
 //! Opt-in causal input-to-submit measurement against a controlled visual marker.
 use crate::{DesktopError, RawFrame};
-use std::{collections::VecDeque, time::Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
+
+// Counter markers cannot identify which press caused a late increment once a
+// target has ignored an earlier press. End this measurement attempt instead of
+// matching an unrelated later click to the oldest queued input.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +89,9 @@ pub struct VisualProbeReport {
     pub pending: usize,
     pub unanchored_clicks: u64,
     pub canceled: u64,
+    pub timed_out: u64,
+    pub modified_clicks: u64,
+    pub correlation_lost: bool,
     pub evicted: u64,
     pub frames_without_marker: u64,
     pub unavailable_presentations: u64,
@@ -112,6 +123,11 @@ impl VisualProbe {
         if !self.spec.inside(point) {
             return;
         }
+        self.expire(now);
+        if self.report.correlation_lost {
+            self.report.unanchored_clicks += 1;
+            return;
+        }
         let Some(next) = self.next.and_then(|v| v.checked_add(1)) else {
             self.report.unanchored_clicks += 1;
             return;
@@ -122,6 +138,31 @@ impl VisualProbe {
             self.report.evicted += 1;
         }
         self.pending.push_back((next, seq, now));
+    }
+    pub(super) fn modified_click(&mut self, point: (f64, f64)) {
+        if self.spec.inside(point) {
+            self.report.modified_clicks += 1;
+            self.lose_correlation("modified target click");
+        }
+    }
+    fn expire(&mut self, now: Instant) {
+        let expired = self
+            .pending
+            .iter()
+            .take_while(|(_, _, started)| {
+                now.saturating_duration_since(*started) >= RESPONSE_TIMEOUT
+            })
+            .count();
+        if expired > 0 {
+            self.report.timed_out += expired as u64;
+            self.lose_correlation("unanswered target click");
+        }
+    }
+    fn lose_correlation(&mut self, reason: &'static str) {
+        self.reset();
+        self.report.correlation_lost = true;
+        tracing::warn!(target:"rds_desktop::visual_probe", reason,
+            "controlled visual measurement correlation lost; start a fresh attempt");
     }
     /// Called only after this exact raw frame was presented by the native GPU path.
     /// No network ACK or merely decoded frame can complete the measurement.
@@ -135,6 +176,7 @@ impl VisualProbe {
         now: Instant,
         frame_seq: Option<u64>,
     ) {
+        self.expire(now);
         let Some(counter) = self.spec.counter(frame) else {
             self.report.frames_without_marker += 1;
             // A covered/moved target cannot prove later clicks correspond to
@@ -142,6 +184,10 @@ impl VisualProbe {
             self.reset();
             return;
         };
+        if self.report.correlation_lost {
+            self.report.last_counter = Some(counter);
+            return;
+        }
         if self
             .report
             .last_counter
@@ -238,34 +284,25 @@ mod tests {
         probe.click((600., 26.), 1, start);
         assert_eq!(probe.report().pending, 0);
         probe.click((2., 26.), 2, start);
-        probe.click((3., 27.), 3, start + std::time::Duration::from_millis(10));
+        probe.click((3., 27.), 3, start + Duration::from_millis(10));
         probe.presented(
             &marker(spec.prefix ^ 1, 2),
-            start + std::time::Duration::from_millis(20),
+            start + Duration::from_millis(20),
         );
         assert_eq!(probe.report().samples, 0);
         assert_eq!(probe.report().canceled, 2);
-        probe.presented(
-            &marker(spec.prefix, 0),
-            start + std::time::Duration::from_millis(25),
-        );
+        probe.presented(&marker(spec.prefix, 0), start + Duration::from_millis(25));
         probe.click((2., 26.), 2, start);
-        probe.click((3., 27.), 3, start + std::time::Duration::from_millis(10));
+        probe.click((3., 27.), 3, start + Duration::from_millis(10));
         assert_eq!(probe.report().pending, 2);
         // A newer cumulative response proves both clicks even if an
         // intermediate frame was replaced before native presentation.
-        probe.presented(
-            &marker(spec.prefix, 2),
-            start + std::time::Duration::from_millis(42),
-        );
+        probe.presented(&marker(spec.prefix, 2), start + Duration::from_millis(42));
         let report = probe.report();
         assert_eq!(report.samples, 2);
         assert_eq!(report.pending, 0);
         assert_eq!(report.input_to_submit_min_ms, Some(32.));
-        probe.presented(
-            &marker(spec.prefix, 2),
-            start + std::time::Duration::from_millis(100),
-        );
+        probe.presented(&marker(spec.prefix, 2), start + Duration::from_millis(100));
         assert_eq!(probe.report().samples, 2);
         probe.click((3., 27.), 4, start);
         probe.reset();
@@ -289,12 +326,60 @@ mod tests {
         probe.presented(&marker(spec.prefix, 2), start);
         assert_eq!(probe.report().samples, 0);
         probe.click((2., 26.), 3, start);
-        probe.presented(
-            &marker(spec.prefix, 3),
-            start + std::time::Duration::from_millis(40),
-        );
+        probe.presented(&marker(spec.prefix, 3), start + Duration::from_millis(40));
         assert_eq!(probe.report().samples, 1);
         assert_eq!(probe.report().input_to_submit_min_ms, Some(40.));
+    }
+    #[test]
+    fn an_unanswered_click_cannot_take_a_later_clicks_counter_response() {
+        let spec = spec();
+        let start = Instant::now();
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.click((2., 26.), 1, start);
+        // The target never responds to this press. A much later press increments
+        // the same counter, so FIFO alone cannot prove which input caused it.
+        let later = start + Duration::from_secs(188);
+        probe.click((2., 26.), 2, later);
+        probe.presented(&marker(spec.prefix, 1), later);
+        assert_eq!(probe.report().samples, 0);
+        assert_eq!(probe.report().pending, 0);
+        assert_eq!(probe.report().timed_out, 1);
+        assert!(probe.report().correlation_lost);
+        // Continuing markers or a surface reset cannot silently re-enable an
+        // attempt whose assumed one-press/one-increment contract failed.
+        probe.reset();
+        probe.presented(&marker(spec.prefix, 1), later);
+        probe.click((2., 26.), 3, later);
+        probe.presented(&marker(spec.prefix, 2), later);
+        assert_eq!(probe.report().samples, 0);
+    }
+    #[test]
+    fn timeout_boundary_and_modified_clicks_fail_closed() {
+        let spec = spec();
+        let start = Instant::now();
+        for elapsed in [RESPONSE_TIMEOUT - Duration::from_nanos(1), RESPONSE_TIMEOUT] {
+            let mut probe = VisualProbe::new(spec.clone()).unwrap();
+            probe.presented(&marker(spec.prefix, 0), start);
+            probe.click((2., 26.), 1, start);
+            probe.presented(&marker(spec.prefix, 1), start + elapsed);
+            assert_eq!(
+                probe.report().samples,
+                u64::from(elapsed < RESPONSE_TIMEOUT)
+            );
+            assert_eq!(probe.report().correlation_lost, elapsed >= RESPONSE_TIMEOUT);
+        }
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.modified_click((600., 26.));
+        assert!(!probe.report().correlation_lost);
+        probe.click((2., 26.), 1, start);
+        probe.modified_click((2., 26.));
+        probe.presented(&marker(spec.prefix, 2), start);
+        assert_eq!(probe.report().samples, 0);
+        assert_eq!(probe.report().canceled, 1);
+        assert_eq!(probe.report().modified_clicks, 1);
+        assert!(probe.report().correlation_lost);
     }
     #[test]
     fn marker_bounds_and_ambiguous_pixels_fail_without_panicking() {
