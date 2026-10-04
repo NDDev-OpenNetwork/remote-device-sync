@@ -3,17 +3,34 @@ use bytes::Bytes;
 use rds_core::{Codec, DesktopControl, DesktopHello, FrameHeader};
 use rds_desktop::{FrameProducer, Produced, ProducerControls, SessionClock, SessionConfig};
 use rds_net::{EndpointConfig, read_frame, write_frame};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-struct Burst;
+struct Burst {
+    synthetic: Option<rds_desktop::SyntheticProducer>,
+    misses: Arc<AtomicU64>,
+}
 impl FrameProducer for Burst {
+    fn resume_after_backpressure(&mut self) {
+        if let Some(source) = &mut self.synthetic {
+            source.resume_after_backpressure();
+        }
+    }
     fn produce(
         &mut self,
         seq: u64,
         controls: &ProducerControls,
         clock: &SessionClock,
     ) -> Option<Produced> {
+        if let Some(source) = &mut self.synthetic {
+            let frame = source.produce(seq, controls, clock);
+            self.misses.store(
+                controls.deadline_misses.load(Ordering::Relaxed),
+                Ordering::Release,
+            );
+            return frame;
+        }
         Some(Produced {
             header: FrameHeader {
                 seq,
@@ -32,6 +49,15 @@ impl FrameProducer for Burst {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn immediate_damage_producer_cannot_exceed_negotiated_fps() {
+    cadence_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_wait_does_not_manufacture_encoder_starvation() {
+    cadence_case(true).await;
+}
+
+async fn cadence_case(synthetic: bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let config = EndpointConfig {
             discovery: false,
@@ -53,6 +79,7 @@ async fn immediate_damage_producer_cannot_exceed_negotiated_fps() {
         .await
         .unwrap();
         let (send, recv) = server.accept_bi().await.unwrap();
+        let misses = Arc::new(AtomicU64::new(0));
         let task = tokio::spawn(rds_desktop::serve_desktop_with(
             server.clone(),
             send,
@@ -65,15 +92,25 @@ async fn immediate_damage_producer_cannot_exceed_negotiated_fps() {
             },
             SessionConfig {
                 view_only: true,
-                producer: Some(Box::new(Burst)),
+                producer: Some(Box::new(Burst {
+                    synthetic: synthetic
+                        .then(|| rds_desktop::SyntheticProducer::new(30, 16, 16, 64)),
+                    misses: misses.clone(),
+                })),
                 ..Default::default()
             },
         ));
         let mut previous = None;
+        let mut initial_misses = None;
         for _ in 0..5 {
             let mut frame = frames.recv().await.unwrap();
             let header: FrameHeader = read_frame(&mut frame).await.unwrap();
-            assert_eq!(frame.read_to_end(32).await.unwrap(), [7; 32]);
+            let body = frame.read_to_end(64).await.unwrap();
+            if synthetic {
+                assert_eq!(&body[..8], &header.seq.to_le_bytes());
+            } else {
+                assert_eq!(body, [7; 32]);
+            }
             if let Some(previous) = previous {
                 assert!(
                     header.capture_ts_ms.saturating_sub(previous) >= 199,
@@ -81,6 +118,15 @@ async fn immediate_damage_producer_cannot_exceed_negotiated_fps() {
                 );
             }
             previous = Some(header.capture_ts_ms);
+            let observed = misses.load(Ordering::Acquire);
+            if let Some(initial) = initial_misses {
+                assert_eq!(
+                    observed, initial,
+                    "admission waiting counted as encoder starvation"
+                );
+            } else {
+                initial_misses = Some(observed);
+            }
         }
         control.finish().unwrap();
         task.await.unwrap().unwrap();

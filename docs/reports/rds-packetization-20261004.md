@@ -29,3 +29,11 @@ The bounded cancellation check remains active while waiting. A real loopback
 regression with an immediate producer failed the 5 FPS wire-timestamp limit
 before the change; the repaired producer must space its five observed frames
 by at least 199 ms (one millisecond timestamp quantization allowance).
+
+The first macOS CI exposed a quality-accounting interaction: intentional rate
+admission waiting must rebase a producer's cadence just like delivery admission
+waiting. Otherwise it can be counted as encoder starvation and lower quality.
+The additional real SyntheticProducer regression runs its 30 FPS cadence under
+a negotiated 5 FPS cap and requires unchanged deadline-miss accounting after
+initialization. Actual capture/encoder work that exceeds the interval remains
+outside that deliberate-wait correction.
