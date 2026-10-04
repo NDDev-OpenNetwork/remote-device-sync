@@ -21,6 +21,11 @@ availability. It does not await iroh's unbounded relay-only `online()` predicate
 The directory announcer republishes evolving addresses; the printed ticket is
 only a startup snapshot. Local readiness and remote reachability are distinct.
 
+Endpoint settings can bound usable path kinds and select conservative primary
+QUIC packetization for measured tunnel qualification. Defaults preserve adaptive
+MTU discovery/offloads and all path kinds. The same policy lowers into Iroh and
+owned Noq; OS routing, endpoint identity and service authorization are separate.
+
 CLI and agent share [versioned endpoint configuration](endpoint-configuration.md)
 with explicit file/flag precedence, backend/relay validation and preflight before
 identity creation. The owned relay uses a separately pinned public identity.

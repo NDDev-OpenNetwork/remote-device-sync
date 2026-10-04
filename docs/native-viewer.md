@@ -194,6 +194,10 @@ desktop from reducing its bitrate solely because it resumed after waiting.
 The software producer treats `max_fps` as a ceiling and accounts for measured
 capture/conversion/codec work when scheduling its next frame. Fixed capture
 CPU cost cannot reduce network bitrate simply by exceeding a 60 FPS interval.
+Session admission enforces that capture-start ceiling independently of damage
+readiness, including an immediately ready platform or injected producer. Time
+spent capturing/encoding counts toward the interval; cancellation is checked
+while waiting. This also bounds low-FPS diagnostic sessions during active damage.
 `RUST_LOG=rds_desktop=debug` reports bitrate changes and deadline-miss counts;
 the `trace` level adds frame sizes and sender stage durations, without pixels.
 

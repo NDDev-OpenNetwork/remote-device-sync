@@ -722,3 +722,19 @@ Release/drop restores original native repeat state after the last owner.
 Abnormal process/X-server failure and competing local clients remain outside
 that cleanup guarantee. See [the combined repair receipt](reports/rds-interactive-repair-20261004.md)
 for the isolated fixture and coordinated-update requirement.
+
+## 2026-10-04 packetization qualification
+
+The pinned Iroh 1.2 `QuicTransportConfigBuilder` exposes initial/minimum MTU,
+MTU discovery and segmentation offload. Its contract warns that unsupported
+offload environments can produce startup loss; raising the guaranteed minimum
+MTU above 1200 can cause unrecoverable loss. These are also documented by
+[Quinn's transport configuration](https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html).
+They support a bounded comparison of engine defaults against fixed 1200-byte
+datagrams without GSO; they do not identify the cause of any particular loss.
+
+RDS now exposes that opt-in packetization policy and its existing path-kind
+restriction through endpoint files. Real UDP-proxy regressions inspect packet
+lengths during byte-verified bidirectional transfers on both backends. Native
+two-device comparison and loss/latency acceptance remain required; defaults are
+not changed based on the loopback fixture.

@@ -669,6 +669,7 @@ pub async fn serve_desktop_with(
             };
             let mut seq = 0u64;
             let mut generation = 0;
+            let mut next_capture = Instant::now();
             loop {
                 // The channel is the session's lifecycle: when the
                 // session ends the writer drops `rx` and this loop exits
@@ -706,6 +707,16 @@ pub async fn serve_desktop_with(
                 if paused {
                     source.resume_after_backpressure();
                 }
+                // Damage can wake a platform producer immediately. Enforce
+                // the negotiated cap at admission, independently of its idle
+                // wait or implementation. Capture cost consumes this interval.
+                while let Some(wait) = next_capture.checked_duration_since(Instant::now()) {
+                    if tx.is_closed() {
+                        return;
+                    }
+                    std::thread::sleep(wait.min(Duration::from_millis(20)));
+                }
+                next_capture = Instant::now() + frame_interval;
                 let frame_generation = repair.generation();
                 if generation != frame_generation {
                     generation = frame_generation;
