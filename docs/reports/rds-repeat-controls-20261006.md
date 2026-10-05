@@ -15,5 +15,10 @@ remote wire change or desktop restart is introduced.
 The native Xvfb delayed-release regression additionally observes map events
 through delayed KeyUp, explicit repeats, multiple owners, drop cleanup,
 modifier edges and Backspace. The pre-existing timing and repeat assertions
-remain. Linux execution/strict checks and installed qualification are pending.
+remain. Local Linux native execution passed all9isolated Xvfb tests, including the
+expanded repeat/map regression. XTEST's initial device adoption is warmed before
+notification observation; the first unprepared fixture recorded its legitimate
+NewKeyboardNotify and failed, so initialization was made explicit without
+allowing any map notifications during the measured holds. Strict checks and
+installed composited-desktop qualification remain pending.
 This receipt does not close the native latency/stability acceptance gates.

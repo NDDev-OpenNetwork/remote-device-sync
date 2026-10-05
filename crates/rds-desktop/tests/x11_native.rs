@@ -104,6 +104,11 @@ fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
         .check()
         .unwrap();
     let mut sink = XtestInput::new().unwrap();
+    // Adopt XTEST's device/keymap before observing ordinary holds. Xvfb may
+    // emit one initial NewKeyboardNotify while lazily initializing that device.
+    sink.inject(&event(InputKind::KeyDown { code: 42 }))
+        .unwrap();
+    sink.inject(&event(InputKind::KeyUp { code: 42 })).unwrap();
     observer
         .xkb_select_events(
             ID::USE_CORE_KBD.into(),
@@ -188,6 +193,19 @@ fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
         0,
         "original native repeat setting was not restored"
     );
+    // Updating one key's bit must retain another controller's different hold.
+    let mut other = XtestInput::new().unwrap();
+    sink.inject(&event(InputKind::KeyDown { code: 30 }))
+        .unwrap();
+    other
+        .inject(&event(InputKind::KeyDown { code: 48 }))
+        .unwrap();
+    sink.inject(&event(InputKind::KeyUp { code: 30 })).unwrap();
+    let keyboard = observer.get_keyboard_control().unwrap().reply().unwrap();
+    assert_eq!(keyboard.auto_repeats[56 / 8] & (1 << (56 % 8)), 0);
+    drop(other);
+    let keyboard = observer.get_keyboard_control().unwrap().reply().unwrap();
+    assert_ne!(keyboard.auto_repeats[56 / 8] & (1 << (56 % 8)), 0);
     // Ordinary modifier transitions and Backspace must also leave the keymap
     // untouched, including already non-repeating modifier keys.
     for code in [29, 42, 14] {
@@ -197,8 +215,9 @@ fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
     drop(sink);
     observer.get_input_focus().unwrap().reply().unwrap(); // server processed all writes
     while let Some(e) = observer.poll_for_event().unwrap() {
-        if matches!(e, Event::XkbMapNotify(_) | Event::XkbNewKeyboardNotify(_)) {
-            map_changes += 1;
+        match e {
+            Event::XkbMapNotify(_) | Event::XkbNewKeyboardNotify(_) => map_changes += 1,
+            _ => {}
         }
     }
     assert_eq!(
