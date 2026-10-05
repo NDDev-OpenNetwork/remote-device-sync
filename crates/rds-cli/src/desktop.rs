@@ -59,6 +59,9 @@ pub struct Options {
     /// Controlled-marker descriptor for causal input-to-submit diagnostics.
     #[arg(long, conflicts_with = "headless")]
     pub diagnostic_visual_probe: Option<PathBuf>,
+    /// Internal, non-owning telemetry observation for the native flight recorder.
+    #[arg(skip)]
+    pub diagnostic_health: Option<rds_observe::HealthObserver>,
 }
 
 /// Shared bounded credential loading for CLI and native application clients.
@@ -92,6 +95,9 @@ mod control;
 
 #[cfg(feature = "desktop")]
 mod diagnostics;
+
+#[cfg(feature = "desktop")]
+mod diagnostic_storage;
 
 #[cfg(feature = "desktop")]
 mod native {
@@ -176,33 +182,31 @@ mod native {
         let diagnostic_stop = stop.clone();
         let diagnostic_view = handle.clone();
         let diagnostic_dir = options.diagnostics_dir.clone();
+        let diagnostic_health = options.diagnostic_health.clone();
         workers.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let path = diagnostic_dir.as_ref().map(|d| d.join(format!("state-{}.json",std::process::id())));
             let mut recorder = diagnostics::Recorder::default();
+            let mut storage = diagnostic_storage::Storage::new(diagnostic_dir);
             loop {
                 tokio::select! {
                     _ = diagnostic_stop.cancelled() => break,
                     _ = tick.tick() => {
                         diagnostic_view.heartbeat_ui();
                         let snapshot = diagnostic_view.snapshot();
-                        let incident = recorder.observe(&snapshot);
-                        if let Ok(json) = serde_json::to_string(&snapshot) {
+                        let health = diagnostic_health.as_ref().and_then(rds_observe::HealthObserver::snapshot);
+                        let (value, incident) = recorder.observe_with_health(&snapshot, health, &storage.health());
+                        let json = serde_json::to_string(&value).ok();
+                        if let Some(json) = &json {
                             tracing::info!(snapshot=%json, "viewer health");
-                            if let Some(path) = &path {
-                                let path = path.clone();
-                                let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-                                    crate::logging::viewer_snapshot(&path,json.as_bytes())
-                                }).await;
-                                if !matches!(result,Ok(Ok(()))) { tracing::warn!(error=?result,"viewer snapshot write failed"); }
-                            }
                         }
-                        persist_incident(diagnostic_dir.as_deref(), incident).await;
+                        storage.persist(json.map(String::into_bytes), incident, snapshot.elapsed_ms).await;
                     },
                 }
             }
-            persist_incident(diagnostic_dir.as_deref(), recorder.finish(true)).await;
+            storage.persist(None, recorder.finish(true), diagnostic_view.snapshot().elapsed_ms).await;
+            let remaining = storage.health().incident_queue_pending;
+            if remaining > 0 { tracing::warn!(remaining, "viewer shutdown retains unsaved incident windows in memory only"); }
             Ok(())
         });
         workers.spawn(async move {
@@ -333,20 +337,6 @@ mod native {
                     return Ok(());
                 }
             }
-        }
-    }
-
-    async fn persist_incident(directory: Option<&std::path::Path>, bytes: Option<Vec<u8>>) {
-        let (Some(directory), Some(bytes)) = (directory, bytes) else {
-            return;
-        };
-        let directory = directory.to_owned();
-        let result = tokio::task::spawn_blocking(move || {
-            crate::logging::viewer_incident(&directory, &bytes)
-        })
-        .await;
-        if !matches!(result, Ok(Ok(()))) {
-            tracing::warn!(error=?result, "viewer incident write failed");
         }
     }
 

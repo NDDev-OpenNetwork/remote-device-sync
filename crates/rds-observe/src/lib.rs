@@ -20,7 +20,7 @@ pub mod admin;
 
 mod output;
 use output::{Buffer, Output};
-pub use output::{ConsolePause, Health, Shutdown};
+pub use output::{ConsolePause, Health, HealthObserver, Shutdown};
 
 const TARGET: &str = "rds_telemetry";
 /// Each queued record, including its newline, is at most this size.
@@ -201,6 +201,11 @@ impl Telemetry {
 
     pub fn health(&self) -> Health {
         self.output.health()
+    }
+
+    /// Observe output loss independently of the potentially failing log sink.
+    pub fn health_observer(&self) -> HealthObserver {
+        self.output.health_observer()
     }
 
     /// This heartbeat means the main future is being polled, not readiness or

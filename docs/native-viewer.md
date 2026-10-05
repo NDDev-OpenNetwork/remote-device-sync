@@ -677,3 +677,30 @@ holds, pulses an intentional client repeat and restores the original setting
 when its last controller releases. This prevents a late KeyUp from manufacturing
 letters. Update both native viewer and serving agent together. See the
 [regression receipt](reports/rds-interactive-repair-20261004.md) for scope limits.
+
+
+### Diagnostic evidence health
+
+Native live snapshots and incident windows append a `diagnostics` object.
+`telemetry` reports dropped, oversized and output-write-error counters through
+a weak observer independent of the log sink; unavailable observation is `null`,
+not a fabricated zero. `storage` reports snapshot/incident write success/error,
+last success time, four-window retry backlog, eviction and oversize counters.
+Counters in a snapshot describe completed persistence work before that snapshot.
+The native application wires this observation automatically; embedded/ordinary
+CLI desktop callers without the internal observer retain `null` telemetry.
+
+The recorder merges reasons found during its ten-second post-trigger window.
+Control-echo silence of at least3seconds, media repair, logging loss and storage
+failure supplement existing input/video reasons. New recovery/evidence-loss
+transitions bypass ordinary age-symptom cooldown. Four incident payloads of at
+most256KiB are retained for retry, with one write attempt per diagnostic tick;
+a new window evicts the oldest only at that explicit capacity. An in-flight
+attempt may copy one further payload. Final shutdown is best effort: unsaved
+memory is not durable, and a permanently full filesystem cannot store evidence.
+
+Snapshot replacement is atomic; new incident publication is complete and
+no-replace. Failed publication removes only its temporary inode. Neither
+boundary claims fsync/power-loss durability. Bounded file retention and the
+log queue can still lose records; health counts make that uncertainty visible.
+Content, key identity, clipboard payload and typed characters are not added.

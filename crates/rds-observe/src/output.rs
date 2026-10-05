@@ -6,7 +6,7 @@
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Weak, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -19,6 +19,18 @@ pub struct Health {
     pub telemetry_dropped_total: u64,
     pub telemetry_oversize_total: u64,
     pub telemetry_write_errors_total: u64,
+}
+
+/// Read-only counters without retaining the writer, queue or output worker.
+#[derive(Clone)]
+pub struct HealthObserver(Weak<Counters>);
+
+impl HealthObserver {
+    /// `None` means the counter lifetime has ended, not zero errors. Presence
+    /// alone does not establish writer readiness or successful delivery.
+    pub fn snapshot(&self) -> Option<Health> {
+        self.0.upgrade().map(|counters| counters.health())
+    }
 }
 
 #[derive(Default)]
@@ -166,6 +178,9 @@ impl Output {
     }
     pub fn health(&self) -> Health {
         self.sink.health()
+    }
+    pub fn health_observer(&self) -> HealthObserver {
+        HealthObserver(Arc::downgrade(&self.sink.counters))
     }
 
     pub async fn pause(&self) -> io::Result<ConsolePause> {
