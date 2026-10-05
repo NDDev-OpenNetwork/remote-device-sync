@@ -20,7 +20,7 @@ use winit::{
 
 use super::{
     gpu::{DrawOutcome, Gpu},
-    input::{Viewport, evdev, modifier_changes},
+    input::{Viewport, evdev, key_transition, modifier_changes},
 };
 use crate::{DesktopError, RawFrame};
 
@@ -745,10 +745,8 @@ impl App {
     }
     fn sync_modifiers(&mut self, event_loop: &ActiveEventLoop) {
         for (code, pressed) in modifier_changes(&self.keys, self.modifiers) {
-            if pressed {
-                self.keys.insert(code);
-            } else {
-                self.keys.remove(&code);
+            if !key_transition(&mut self.keys, code, pressed) {
+                continue;
             }
             self.input(
                 event_loop,
@@ -791,6 +789,22 @@ impl App {
             } else {
                 probe.modified_click(point);
             }
+        }
+        if let DesktopControl::Input(InputEvent {
+            kind: InputKind::KeyDown { code } | InputKind::KeyUp { code },
+            ..
+        }) = &message
+            && matches!(code, 29 | 42 | 54 | 56 | 97 | 100 | 125 | 126)
+        {
+            let pressed = matches!(
+                &message,
+                DesktopControl::Input(InputEvent {
+                    kind: InputKind::KeyDown { .. },
+                    ..
+                })
+            );
+            tracing::trace!(target: "rds_desktop::input_timing", input_seq=self.seq, modifier_code=*code, pressed,
+                "native modifier transition queued");
         }
         self.seq = next;
         if self.input.send(ViewerInput::Control(message)).is_err() {
@@ -1014,6 +1028,9 @@ impl ApplicationHandler<()> for App {
                         self.sync_modifiers(event_loop);
                     }
                     if event.state == ElementState::Pressed {
+                        if self.keys.contains(&code) {
+                            return;
+                        }
                         let command_paste = cfg!(target_os = "macos")
                             && code == 47
                             && (self.keys.contains(&125) || self.keys.contains(&126));
@@ -1103,9 +1120,10 @@ impl ApplicationHandler<()> for App {
                             // and OS repeats must not replay paste effects.
                             return;
                         }
-                        self.keys.insert(code);
-                        self.input(event_loop, InputKind::KeyDown { code });
-                    } else if self.keys.remove(&code) {
+                        if key_transition(&mut self.keys, code, true) {
+                            self.input(event_loop, InputKind::KeyDown { code });
+                        }
+                    } else if key_transition(&mut self.keys, code, false) {
                         self.input(event_loop, InputKind::KeyUp { code });
                     }
                 }
