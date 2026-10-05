@@ -704,3 +704,23 @@ no-replace. Failed publication removes only its temporary inode. Neither
 boundary claims fsync/power-loss durability. Bounded file retention and the
 log queue can still lose records; health counts make that uncertainty visible.
 Content, key identity, clipboard payload and typed characters are not added.
+
+
+### Independent control progress
+
+A picture or successful local control write does not prove current remote input
+handling. Managed and direct native sessions now require an exact outstanding
+heartbeat confirmation independent of decoded video. Probes have distinct,
+checked per-session sequence numbers and opaque timestamp matching;16entries
+bound tracking. Confirmation advances to the matched probe's monotonic send
+time, not the time a stale response arrived. Older responses cannot rewind it.
+
+The native control tick observes an8-second ordinary progress budget with its
+own initial grace. A live clipboard transfer keeps the existing30-second
+absolute allowance until exact completed ID/size confirmation; repeated starts
+do not extend that unconfirmed allowance. Write/decode/media deadlines remain
+separate. A control expiry ends the owning desktop attempt without replaying
+input or paste; managed sessions retain the authenticated peer and unrelated
+streams. This does not guarantee8-second recovery when networking is unavailable
+or revoke already applied input. The existing no-replay/canceled-ACK diagnostics
+remain essential to interpreting uncertain delivery.
