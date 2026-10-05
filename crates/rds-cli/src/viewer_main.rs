@@ -43,6 +43,7 @@ async fn main() -> std::process::ExitCode {
     })();
     match setup {
         Ok(telemetry) => {
+            cli.options.diagnostic_health = Some(telemetry.health_observer());
             let previous = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 tracing::error!(panic=%info,"native viewer panic");

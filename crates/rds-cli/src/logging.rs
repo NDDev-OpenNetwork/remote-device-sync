@@ -227,15 +227,51 @@ pub fn viewer_snapshot(path: &Path, bytes: &[u8]) -> io::Result<()> {
             "unsafe existing viewer snapshot",
         ));
     }
+    publish_private(path, true, |file| file.write_all(bytes))
+}
+
+/// An incomplete write never occupies the final JSON name. Failed writes clean
+/// their owned temporary inode; new incidents use no-replace publication.
+fn publish_private(
+    path: &Path,
+    replace: bool,
+    write: impl FnOnce(&mut PrivateLog) -> io::Result<()>,
+) -> io::Result<()> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos();
     let temporary = path.with_extension(format!("{stamp}.pending"));
     let mut file = PrivateLog::create(&temporary)?;
-    file.write_all(bytes)?;
+    let metadata = file.file.metadata()?;
+    struct Pending {
+        path: std::path::PathBuf,
+        dev: u64,
+        ino: u64,
+    }
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
+                && metadata.is_file()
+                && metadata.dev() == self.dev
+                && metadata.ino() == self.ino
+            {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+    let pending = Pending {
+        path: temporary,
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    };
+    write(&mut file)?;
     file.flush()?;
-    std::fs::rename(temporary, path)
+    if replace {
+        std::fs::rename(&pending.path, path)
+    } else {
+        std::fs::hard_link(&pending.path, path)
+    }
 }
 
 /// Keep ten completed fault windows independently of ordinary log rotation.
@@ -248,9 +284,7 @@ pub fn viewer_incident(directory: &Path, bytes: &[u8]) -> io::Result<()> {
         .map_err(io::Error::other)?
         .as_nanos();
     let path = directory.join(format!("incident-{stamp}-{}.json", std::process::id()));
-    let mut file = PrivateLog::create(&path)?;
-    file.write_all(bytes)?;
-    file.flush()?;
+    publish_private(&path, false, |file| file.write_all(bytes))?;
     let mut owned = Vec::new();
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
@@ -290,6 +324,31 @@ pub fn viewer_incident(directory: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{DirBuilderExt, symlink};
+
+    #[test]
+    fn a_failed_partial_publication_leaves_no_json_or_pending_file() {
+        let root = Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!("rds-partial-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let path = root.join("incident.json");
+        let failed = publish_private(&path, false, |file| {
+            file.write_all(b"{\"partial\":")?;
+            Err(io::Error::from_raw_os_error(28))
+        });
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::StorageFull);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        publish_private(&path, false, |file| file.write_all(b"{\"complete\":true}")).unwrap();
+        assert!(publish_private(&path, false, |file| file.write_all(b"overwrite")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"complete\":true}");
+        assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 1);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn incident_retention_is_bounded_and_preserves_unowned_entries() {

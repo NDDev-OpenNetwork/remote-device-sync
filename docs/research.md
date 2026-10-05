@@ -1,5 +1,33 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+## 2026-10-05 relay loss and evidence preservation
+
+[Iroh1.2 documentation](https://docs.rs/iroh/1.2.0/iroh/#relay-servers)
+confirms its relay carrier uses TCP, while validated direct connectivity uses
+QUIC. [Upstream issue4319](https://github.com/n0-computer/iroh/issues/4319)
+reports an approximately30-second reachability gap after home-relay loss,
+including existing connections despite multiple configured relay hints.
+This is a reported analogous failure, not proof of the same defect/version or
+a reason to assume a second relay is already a warm failover path. Real route,
+network-change and relay actor evidence are required for installed diagnosis.
+Allowing direct paths preserves the relay as fallback; it does not authorize
+an OS routing or VPN change or guarantee physical-network availability.
+
+The [Noq stopped contract](https://docs.rs/noq/1.3.0/noq/struct.SendStream.html#method.stopped)
+still distinguishes transport receipt from application processing. RDS retains
+its existing exact payload receipts and input semantics. [Tokio's bounded-channel
+contract](https://docs.rs/tokio/latest/tokio/sync/mpsc/) supports bounded observation
+outside the interactive path; retries cannot grow an unbounded diagnostics queue.
+
+The flight recorder now retains later reasons in the same window, captures
+control silence and repair transitions, and exposes log/storage loss counters.
+A non-owning health observer avoids waiting on a failed log sink to discover
+its failures. Four pending incident windows survive retryable storage failures;
+overflow is explicit. Complete private JSON publication prevents a partial
+write from masquerading as a completed incident. These boundaries do not provide
+lossless audit or power-loss durability. See
+[the increment receipt](reports/rds-incident-evidence-20261005.md).
+
 ## 2026-10-05 bounded paste/control observation
 
 QUIC [stream flow control](https://www.rfc-editor.org/rfc/rfc9000.html#section-4)

@@ -19,12 +19,47 @@ pub(super) struct Recorder {
     previous_reconnects: Option<u64>,
     previous_slow_acks: Option<u64>,
     previous_slow_clipboards: Option<u64>,
+    previous_repairs: Option<u64>,
+    previous_log_errors: u64,
+    previous_storage_errors: u64,
     cooldown_until_ms: u64,
 }
 
 impl Recorder {
-    pub(super) fn observe(&mut self, snapshot: &ViewerSnapshot) -> Option<Vec<u8>> {
-        let value = serde_json::to_value(snapshot).ok()?;
+    #[cfg(test)]
+    fn observe(&mut self, snapshot: &ViewerSnapshot) -> Option<Vec<u8>> {
+        self.observe_with_health(
+            snapshot,
+            None,
+            &super::diagnostic_storage::Health::default(),
+        )
+        .1
+    }
+
+    pub(super) fn observe_with_health(
+        &mut self,
+        snapshot: &ViewerSnapshot,
+        telemetry: Option<rds_observe::Health>,
+        storage: &super::diagnostic_storage::Health,
+    ) -> (serde_json::Value, Option<Vec<u8>>) {
+        let mut value = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null);
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "diagnostics".into(),
+                serde_json::json!({"telemetry":telemetry,"storage":storage}),
+            );
+        }
+        let incident = self.observe_value(snapshot, value.clone(), telemetry, storage);
+        (value, incident)
+    }
+
+    fn observe_value(
+        &mut self,
+        snapshot: &ViewerSnapshot,
+        value: serde_json::Value,
+        telemetry: Option<rds_observe::Health>,
+        storage: &super::diagnostic_storage::Health,
+    ) -> Option<Vec<u8>> {
         self.history.push_back(value.clone());
         if self.history.len() > HISTORY {
             self.history.pop_front();
@@ -41,20 +76,26 @@ impl Recorder {
             .previous_slow_clipboards
             .is_some_and(|previous| snapshot.report.slow_clipboard_transfers > previous);
         self.previous_slow_clipboards = Some(snapshot.report.slow_clipboard_transfers);
-        if let Some(incident) = &mut self.pending {
-            // Keep memory bounded even if the diagnostic timer runs rapidly.
-            if incident.snapshots.len() < HISTORY + 6 {
-                incident.snapshots.push(value);
-            }
-            if snapshot.elapsed_ms.saturating_sub(incident.triggered_ms) >= AFTER_MS {
-                self.cooldown_until_ms = snapshot.elapsed_ms.saturating_add(COOLDOWN_MS);
-                return self.finish(false);
-            }
-            return None;
+        let repaired = self
+            .previous_repairs
+            .is_some_and(|n| snapshot.report.video_repair_requests > n);
+        self.previous_repairs = Some(snapshot.report.video_repair_requests);
+        let log_errors = telemetry.map(|h| {
+            h.telemetry_dropped_total
+                .saturating_add(h.telemetry_oversize_total)
+                .saturating_add(h.telemetry_write_errors_total)
+        });
+        let lost_logs = log_errors.is_some_and(|n| n > self.previous_log_errors);
+        if let Some(n) = log_errors {
+            self.previous_log_errors = n;
         }
-        if snapshot.elapsed_ms < self.cooldown_until_ms {
-            return None;
-        }
+        let storage_errors = storage
+            .snapshot_write_errors_total
+            .saturating_add(storage.incident_write_errors_total)
+            .saturating_add(storage.incident_queue_evicted_total)
+            .saturating_add(storage.incident_oversize_total);
+        let failed_storage = storage_errors > self.previous_storage_errors;
+        self.previous_storage_errors = storage_errors;
         let mut reasons = Vec::new();
         if slow_ack {
             // Completed stalls can fall entirely between periodic snapshots.
@@ -80,6 +121,11 @@ impl Recorder {
         if snapshot.decoded_frame_age_ms.is_some_and(|ms| ms >= 3000) {
             reasons.push("decoded_video_stalled");
         }
+        if snapshot.status == "Connected"
+            && snapshot.control_echo_age_ms.is_some_and(|ms| ms >= 3000)
+        {
+            reasons.push("control_echo_stalled");
+        }
         // Occlusion is a normal OS policy, not a frozen visible screen.
         if !snapshot.occluded
             && snapshot.render_stage != "surface occluded"
@@ -92,6 +138,39 @@ impl Recorder {
         }
         if reconnected {
             reasons.push("desktop_reconnected");
+        }
+        if repaired {
+            reasons.push("video_repair_requested");
+        }
+        if lost_logs {
+            reasons.push("telemetry_records_lost");
+        }
+        if failed_storage {
+            reasons.push("diagnostic_storage_failed");
+        }
+        if let Some(incident) = &mut self.pending {
+            // Later control loss/recovery must not disappear behind the first
+            // symptom. The reason vocabulary and snapshot count remain bounded.
+            for reason in reasons {
+                if !incident.reasons.contains(&reason) {
+                    incident.reasons.push(reason);
+                }
+            }
+            if incident.snapshots.len() < HISTORY + 6 {
+                incident.snapshots.push(value);
+            }
+            if snapshot.elapsed_ms.saturating_sub(incident.triggered_ms) >= AFTER_MS {
+                self.cooldown_until_ms = snapshot.elapsed_ms.saturating_add(COOLDOWN_MS);
+                return self.finish(false);
+            }
+            return None;
+        }
+        // A new recovery or evidence-loss event is distinct from repeated age
+        // samples and must survive the ordinary symptom cooldown.
+        if snapshot.elapsed_ms < self.cooldown_until_ms
+            && !(reconnected || repaired || lost_logs || failed_storage)
+        {
+            return None;
         }
         if !reasons.is_empty() {
             tracing::warn!(
@@ -254,6 +333,78 @@ mod tests {
         assert_eq!(
             data["reasons"],
             serde_json::json!(["visible_submission_stalled"])
+        );
+    }
+
+    #[test]
+    fn later_control_loss_and_recovery_survive_an_open_window_and_cooldown() {
+        let mut recorder = Recorder::default();
+        recorder.observe(&snapshot(0));
+        let mut s = snapshot(2000);
+        s.decoded_frame_age_ms = Some(4000);
+        recorder.observe(&s);
+        s.elapsed_ms = 4000;
+        s.control_echo_age_ms = Some(5000);
+        s.report.video_repair_requests = 1;
+        recorder.observe(&s);
+        s.elapsed_ms = 12_000;
+        s.report.reconnects = 1;
+        let data: serde_json::Value =
+            serde_json::from_slice(&recorder.observe(&s).unwrap()).unwrap();
+        assert_eq!(
+            data["reasons"],
+            serde_json::json!([
+                "decoded_video_stalled",
+                "control_echo_stalled",
+                "video_repair_requested",
+                "desktop_reconnected"
+            ])
+        );
+        s.elapsed_ms = 14_000;
+        s.report.reconnects = 2;
+        recorder.observe(&s); // Still in ordinary age-symptom cooldown.
+        let data: serde_json::Value =
+            serde_json::from_slice(&recorder.finish(true).unwrap()).unwrap();
+        assert!(
+            data["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("desktop_reconnected"))
+        );
+    }
+
+    #[test]
+    fn evidence_loss_is_recorded_independently_of_the_log_sink() {
+        let mut recorder = Recorder::default();
+        let storage = super::super::diagnostic_storage::Health::default();
+        recorder.observe_with_health(&snapshot(0), Some(rds_observe::Health::default()), &storage);
+        let telemetry = rds_observe::Health {
+            telemetry_write_errors_total: 1,
+            telemetry_dropped_total: 2,
+            ..Default::default()
+        };
+        let failed_storage = super::super::diagnostic_storage::Health {
+            incident_write_errors_total: 1,
+            incident_queue_pending: 1,
+            ..Default::default()
+        };
+        let (value, _) =
+            recorder.observe_with_health(&snapshot(2000), Some(telemetry), &failed_storage);
+        assert_eq!(
+            value["diagnostics"]["telemetry"]["telemetry_dropped_total"],
+            2
+        );
+        assert_eq!(value["diagnostics"]["storage"]["incident_queue_pending"], 1);
+        let data: serde_json::Value =
+            serde_json::from_slice(&recorder.finish(true).unwrap()).unwrap();
+        assert_eq!(
+            data["reasons"],
+            serde_json::json!(["telemetry_records_lost", "diagnostic_storage_failed"])
+        );
+        let (value, _) = recorder.observe_with_health(&snapshot(4000), None, &storage);
+        assert!(
+            value["diagnostics"]["telemetry"].is_null(),
+            "unavailable counters must not pretend to be zero"
         );
     }
 }
