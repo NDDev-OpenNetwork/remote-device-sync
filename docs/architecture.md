@@ -105,6 +105,12 @@ input ACK/heartbeat observation. Both sockets share desktop termination, without
 closing the manager's unrelated peer streams. Existing combined APIs and remote
 wire formats remain; see [the native contract](native-viewer.md).
 
+Native control liveness is independent of decoded-frame progress. Exact bounded
+heartbeat confirmations advance per-session monotonic send-time evidence;
+late/duplicate replies cannot mask stalled control with a live picture. The
+viewer retains clipboard's absolute budget and ends only the owning desktop
+attempt, without replay or managed peer teardown. See [native control progress](native-viewer.md#independent-control-progress).
+
 Explicit video repair advances a session-local media epoch and interrupts only
 obsolete media work. An independent-picture lease holds admission until receipt;
 repeated requests coalesce during that recovery. X11 keyboard holds similarly

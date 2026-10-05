@@ -94,6 +94,9 @@ pub async fn read_grant(
 mod control;
 
 #[cfg(feature = "desktop")]
+mod liveness;
+
+#[cfg(feature = "desktop")]
 mod diagnostics;
 
 #[cfg(feature = "desktop")]
@@ -417,6 +420,7 @@ mod native {
         view.status("Waiting for screen");
         let control = channel.control_handle();
         let (progress, last_frame) = tokio::sync::watch::channel(tokio::time::Instant::now());
+        let control_progress = liveness::ControlWatchdog::default();
         // Keep the entire receive/decode future alive while controls progress.
         // Selecting individual recv calls and awaiting decode in their handler
         // prevents input, heartbeat and close from being polled during decode.
@@ -462,10 +466,16 @@ mod native {
         let event_observation = async {
             loop {
                 match events.recv().await.transpose()? {
-                    Some(rds_core::DesktopEvent::Heartbeat { ts_ms, .. }) => view
-                        .control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
+                    Some(rds_core::DesktopEvent::Heartbeat { seq, ts_ms }) => {
+                        if control_progress.echoed(seq, ts_ms) {
+                            view.control_rtt(
+                                (started.elapsed().as_millis() as u64).saturating_sub(ts_ms),
+                            );
+                        }
+                    }
                     Some(rds_core::DesktopEvent::InputAck { seq, .. }) => view.input_ack(seq),
                     Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {
+                        control_progress.clipboard_ready(id, bytes);
                         view.clipboard_ack(id, bytes);
                     }
                     None => {
@@ -481,9 +491,16 @@ mod native {
                 result = media => result,
             }
         };
-        let controls = control::pump(input, &control, &last_frame, started, |message| {
-            view.input_sent(message);
-        });
+        let controls = control::pump_with_liveness(
+            input,
+            &control,
+            &last_frame,
+            &control_progress,
+            started,
+            |message| {
+                view.input_sent(message);
+            },
+        );
         let result = control::run(controls, incoming, stop).await;
         // A winning leg may cancel a partially written control on the other
         // leg. EOF closes the manager's desktop; never append Finished to a
@@ -529,6 +546,7 @@ mod native {
         let ctrl = session.control_sender();
         let mut last_frame = tokio::time::Instant::now();
         let mut watchdog = control::VideoWatchdog::default();
+        let control_progress = liveness::ControlWatchdog::default();
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = loop {
@@ -537,11 +555,13 @@ mod native {
                 message = input.recv() => match message {
                     Some(ViewerInput::Control(message)) => {
                         view.input_sent(&message);
+                        control_progress.sent(&message);
                         tokio::time::timeout(Duration::from_secs(2),ctrl.send(message)).await.map_err(|_|anyhow::anyhow!("direct desktop control stalled"))??;
                     },
                     Some(ViewerInput::Close)|None => break Ok(true),
                 },
                 _ = tick.tick() => {
+                    control_progress.check()?;
                     match watchdog.observe(last_frame) {
                         control::VideoAction::Reconnect => anyhow::bail!("remote video stopped making progress"),
                         control::VideoAction::Repair => {
@@ -550,12 +570,16 @@ mod native {
                         },
                         control::VideoAction::Healthy => {},
                     }
-                    tokio::time::timeout(Duration::from_secs(2),ctrl.send(rds_core::DesktopControl::Heartbeat { seq: 0,ts_ms: started.elapsed().as_millis() as u64 })).await.map_err(|_|anyhow::anyhow!("direct desktop heartbeat stalled"))??;
+                    let heartbeat = control_progress.heartbeat(started.elapsed().as_millis() as u64)?;
+                    control_progress.sent(&heartbeat);
+                    tokio::time::timeout(Duration::from_secs(2),ctrl.send(heartbeat)).await.map_err(|_|anyhow::anyhow!("direct desktop heartbeat stalled"))??;
                 },
                 event = session.events.recv() => match event {
-                    Some(rds_core::DesktopEvent::Heartbeat { ts_ms,.. }) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
+                    Some(rds_core::DesktopEvent::Heartbeat { seq, ts_ms }) => {
+                        if control_progress.echoed(seq, ts_ms) { view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)); }
+                    },
                     Some(rds_core::DesktopEvent::InputAck { seq,.. }) => view.input_ack(seq),
-                    Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {view.clipboard_ack(id, bytes);},
+                    Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {control_progress.clipboard_ready(id, bytes);view.clipboard_ack(id, bytes);},
                     None => break Ok(false),
                 },
                 frame = session.frames.recv() => match frame {

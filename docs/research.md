@@ -1,5 +1,37 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+## 2026-10-05 independent control liveness
+
+QUIC delivers bytes in order within a stream; progress on another stream does
+not establish progress of an earlier control record ([RFC9000§2.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2)).
+The [Noq write/cancellation contract](https://docs.rs/noq/1.3.0/noq/struct.SendStream.html)
+and its `stopped` documentation distinguish writable/transport state from
+application processing. RDS's short write deadline therefore cannot substitute
+for an application heartbeat confirmation.
+
+The native viewer now tracks at most16outstanding exact `(seq,timestamp)` probes
+per desktop session. Monotonic send time establishes acknowledged progress;
+very late, duplicate, unmatched or retired replies cannot make old control
+look current. Fresh video never rearms control progress. The ordinary budget is
+8seconds, observed at the next one-second control tick; writes retain their
+separate2-second bound. Scheduling and reopening are not hard real-time promises.
+Clipboard keeps its existing30-second absolute transfer budget with one bounded
+metadata entry. Only exact ID/size confirmation after the final chunk advances
+that entry; repeated starts cannot extend the first unconfirmed grace forever.
+
+Both native managed/direct paths apply the policy. Managed failure drops only
+the desktop's two IPC legs and retains the manager's peer/unrelated streams.
+Direct mode keeps its existing owned-connection cleanup. No input/paste replay,
+remote wire change, endpoint replacement, bitrate/path default or server restart
+is added. This improves a proved missing-control-watchdog boundary, not proof of
+the root cause of every installed network outage.
+
+[Upstream Iroh4424](https://github.com/n0-computer/iroh/issues/4424) describes
+periodic direct-path loss attributed by its reporter to absolute CGNAT mapping
+expiry despite heartbeats. It is a useful analogous report on different versions
+and networks, not evidence identifying this installation's provider or cause.
+Do not blindly shorten transport idle policy or change VPN/routing from it.
+
 ## 2026-10-05 relay loss and evidence preservation
 
 [Iroh1.2 documentation](https://docs.rs/iroh/1.2.0/iroh/#relay-servers)
