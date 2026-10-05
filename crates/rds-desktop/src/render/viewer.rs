@@ -807,6 +807,26 @@ impl App {
                 probe.modified_click(point);
             }
         }
+        if matches!(&message, DesktopControl::Input(InputEvent {
+            kind: InputKind::PointerButton { button, pressed: true }, ..
+        }) if *button != 0x110)
+            && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+        {
+            probe.keyboard_focus_lost();
+        }
+        if let DesktopControl::Input(InputEvent {
+            kind: InputKind::KeyDown { code },
+            ..
+        }) = &message
+            && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+        {
+            probe.key(
+                *code,
+                self.modifiers.state().is_empty(),
+                self.seq,
+                Instant::now(),
+            );
+        }
         if let DesktopControl::Input(InputEvent {
             kind: InputKind::KeyDown { code } | InputKind::KeyUp { code },
             ..
@@ -1002,7 +1022,12 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
-            WindowEvent::Focused(false) => self.release(event_loop),
+            WindowEvent::Focused(false) => {
+                if let Some(probe) = &mut lock(&self.handle.state).visual_probe {
+                    probe.keyboard_focus_lost();
+                }
+                self.release(event_loop);
+            }
             WindowEvent::Occluded(hidden) => {
                 let mut state = lock(&self.handle.state);
                 state.occluded = hidden;

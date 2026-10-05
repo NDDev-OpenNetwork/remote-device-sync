@@ -93,6 +93,28 @@ than treated as proof that a later counter increment belongs to the older press.
 The five-second limit bounds this diagnostic's causal assumption; it changes no
 desktop input, transport, repair or session deadline.
 
+A descriptor may additionally opt in with `keyboard_codes`, at most16distinct
+physical evdev codes. Empty/absent preserves click-only diagnostics. Modifier and
+lock/toggle codes are refused. The controlled field increments the same marker
+once per target click and once per listed unmodified KeyDown, after its native
+insertion/deletion handler. KeyUp does not advance it. Keyboard measurement arms
+only after a target click's response reaches native GPU presentation. Merely
+visible markers do not prove focus. Native focus loss, outside clicks, other
+pointer-button presses, unavailable/missing markers and reset disarm/cancel it.
+Modified tracked keys or a counter ahead of queued inputs fail the attempt;
+subsequent frames cannot restore lost correlation. The original timeout and
+shared128-pending bound remain. Keyboard latency has a separate1024-sample
+series and count/min/p50/p95/max fields, with no character/keycode logging.
+
+All marker qualification still assumes one actor and a controlled application
+that advances once per delivered tracked event. Require matching application
+counts, no correlation-loss/timeout/eviction, and actual native presentation;
+never treat a partial/invalid attempt as a passed latency gate. This extends the
+software input-to-submission boundary, not optical scanout measurement. The
+native version-1 viewer config may select `diagnostic_visual_probe` as a path;
+an explicit CLI flag wins. Existing regular-file/size/strict descriptor checks
+apply. Remove the opt-in config field after a controlled run.
+
 Managed delivery attaches the exact encoded frame sequence to its pending raw
 frame. Visual response and submission traces carry it alongside the local
 attempt context, allowing stage correlation. Untagged/direct raw delivery

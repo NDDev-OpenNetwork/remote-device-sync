@@ -26,6 +26,7 @@ struct Config {
     grant_file: Option<PathBuf>,
     resolution: Option<rds_cli::desktop::Resolution>,
     payload_receipts: Option<bool>,
+    diagnostic_visual_probe: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -119,6 +120,12 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                     && matches.value_source("payload_receipts") != Some(ValueSource::CommandLine)
                 {
                     cli.options.payload_receipts = enabled;
+                }
+                if let Some(probe) = config.diagnostic_visual_probe
+                    && matches.value_source("diagnostic_visual_probe")
+                        != Some(ValueSource::CommandLine)
+                {
+                    cli.options.diagnostic_visual_probe = Some(probe);
                 }
                 if cli.grant_file.is_none() {
                     cli.grant_file = config.grant_file;
