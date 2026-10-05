@@ -855,3 +855,22 @@ application-limited traffic and transport congestion in
 RDS heuristic, not an RFC recommendation. Loss and actual delivery/producer
 pressure remain independent signals. See the causal diagnostic receipt for the
 negative regression and recovered-delivery CI failure.
+
+## 2026-10-06 repeat controls without keymap invalidation
+
+X11's core ChangeKeyboardControl path calls XkbDisableComputedAutoRepeats,
+which marks the affected key's repeat setting explicit and emits a map
+notification. See the primary [X server implementation](https://github.com/mirror/xserver/blob/master/xkb/xkbUtils.c).
+This can happen even when the requested bit already has that value. GNOME46
+[Mutter's X11 backend](https://github.com/GNOME/mutter/blob/46.0/src/backends/x11/meta-backend-x11.c)
+invalidates its cached map and emits keymap-changed for MapNotify. A keyboard
+hold must not require rebuilding the whole desktop keymap on both edges.
+
+RDS now uses XKB SetControls with only PerKeyRepeat selected, changing one bit
+in the current repeat array and skipping an unchanged bit. Its process-wide
+hold mutex serializes RDS controllers; fresh reads preserve unrelated bits and
+controls. It does not serialize independent external XKB settings writers.
+Real holds, client repeats, shared ownership and restoration remain required.
+The dedicated Xvfb regression observes map notifications alongside delayed
+release, repeats, modifiers and Backspace. Native composited-desktop timing
+must still establish how much this defect contributed to a reported stall.
