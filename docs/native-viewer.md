@@ -379,6 +379,17 @@ starts a fresh interval when it becomes eligible again; time hidden by the OS
 is not counted as a newly resumed window's visible stall. The surface's own
 occluded outcome also suppresses diagnosis if the window event has not arrived.
 
+On macOS, `native_window` records only the viewer's own AppKit flags:
+application activation, visibility, key-window status, active Space, minimization
+and native occlusion. The sample is read on the main thread before UI event
+handling, outside the viewer state lock. `native_window_sample_age_ms` exposes
+stale observations if that thread stops servicing events; unsupported platforms
+report absence. These flags are diagnostic evidence, not a renderer eligibility
+or foreground policy. An occluded snapshot taken after switching to another app
+cannot establish that a preceding typing stall happened while visible. The title
+is updated only when connection status changes, avoiding identical title writes
+on frame wakeups. See [the observation receipt](reports/rds-native-window-observation-20261006.md).
+
 Private `rds_desktop::input_timing=trace` records add the managed IPC receipt,
 bounded control-queue admission and network control-write start/completion.
 They include only input sequence numbers and local durations, never key codes,
