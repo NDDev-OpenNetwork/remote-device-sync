@@ -220,6 +220,8 @@ mod tests {
             unpresented_frame_age_ms: None,
             pending_frame_bytes: 0,
             occluded: false,
+            native_window: None,
+            native_window_sample_age_ms: None,
             report: ViewerReport::default(),
         }
     }

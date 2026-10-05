@@ -190,6 +190,8 @@ pub struct ViewerSnapshot {
     pub unpresented_frame_age_ms: Option<u64>,
     pub pending_frame_bytes: usize,
     pub occluded: bool,
+    pub native_window: Option<super::NativeWindowState>,
+    pub native_window_sample_age_ms: Option<u64>,
     pub report: ViewerReport,
 }
 
@@ -319,6 +321,7 @@ struct State {
     last_ui_ms: u64,
     last_encoded_ms: Option<u64>,
     occluded: bool,
+    native_window: Option<super::NativeWindowState>,
     visual_probe: Option<super::visual_probe::VisualProbe>,
     session_span: tracing::Span,
 }
@@ -383,6 +386,10 @@ impl ViewerHandle {
             unpresented_frame_age_ms: state.submission_debt.age(elapsed),
             pending_frame_bytes: state.pending.as_ref().map_or(0, |p| p.raw.data.len()),
             occluded: state.occluded,
+            native_window: state.native_window,
+            native_window_sample_age_ms: state
+                .native_window
+                .map(|sample| elapsed.saturating_sub(sample.sampled_elapsed_ms)),
             report,
         }
     }
@@ -688,6 +695,7 @@ impl Viewer {
                 last_ui_ms: 0,
                 last_encoded_ms: None,
                 occluded: false,
+                native_window: None,
                 visual_probe: None,
                 session_span: tracing::Span::none(),
             })),
@@ -708,6 +716,7 @@ impl Viewer {
             pointer: false,
             pointer_point: None,
             error: None,
+            last_window_status: None,
         };
         Ok((Self { event_loop, app }, handle, receiver))
     }
@@ -736,8 +745,16 @@ struct App {
     pointer: bool,
     pointer_point: Option<(f64, f64)>,
     error: Option<DesktopError>,
+    last_window_status: Option<String>,
 }
 impl App {
+    fn sample_window(&self) {
+        if let Some(window) = &self.window {
+            let elapsed = self.handle.started.elapsed().as_millis() as u64;
+            let sample = super::platform::window_state(window, elapsed);
+            lock(&self.handle.state).native_window = sample;
+        }
+    }
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: DesktopError) {
         self.error = Some(error);
         let _ = self.input.send(ViewerInput::Close);
@@ -941,6 +958,7 @@ impl ApplicationHandler<()> for App {
         }
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        self.sample_window();
         let mut state = lock(&self.handle.state);
         state.wake_pending = false;
         let close = state.close;
@@ -948,7 +966,12 @@ impl ApplicationHandler<()> for App {
         let status = state.status.clone();
         drop(state);
         if let Some(window) = &self.window {
-            window.set_title(&format!("RDS — {status}"));
+            // Media wakeups do not change status. Avoid repeated AppKit title
+            // allocations/notifications on the latency-sensitive UI thread.
+            if self.last_window_status.as_deref() != Some(status.as_str()) {
+                window.set_title(&format!("RDS — {status}"));
+                self.last_window_status = Some(status);
+            }
             window.request_redraw();
         }
         if close {
@@ -962,6 +985,7 @@ impl ApplicationHandler<()> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        self.sample_window();
         lock(&self.handle.state).last_ui_ms = self.handle.started.elapsed().as_millis() as u64;
         match event {
             WindowEvent::CloseRequested => {

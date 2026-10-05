@@ -38,7 +38,7 @@ rustix = { workspace = true, features = ["event", "time"], optional = true }
 # launched directly from the CLI as well as from a packaged application.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.5.2", optional = true }
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSPasteboard"], optional = true }
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSPasteboard", "NSView", "NSWindow"], optional = true }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["std", "NSData", "NSObject", "NSProcessInfo"], optional = true }
 
 [dev-dependencies]

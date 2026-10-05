@@ -8,7 +8,7 @@ mod input;
 #[cfg(feature = "viewer")]
 mod platform;
 #[cfg(feature = "viewer")]
-pub use platform::choose_resolution;
+pub use platform::{NativeWindowState, choose_resolution};
 #[cfg(feature = "viewer")]
 mod viewer;
 #[cfg(feature = "viewer")]
