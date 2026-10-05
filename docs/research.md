@@ -1,5 +1,22 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+## 2026-10-05 bounded paste/control observation
+
+QUIC [stream flow control](https://www.rfc-editor.org/rfc/rfc9000.html#section-4)
+can block an application writer independently of average RTT. A higher stream
+priority does not remove that wait. [Tokio timeout](https://docs.rs/tokio/latest/tokio/time/fn.timeout.html)
+limits the awaited write but cancellation can leave a partial framed record.
+RDS therefore resets its owning desktop control stream after a reply failure,
+using a separate two-second control budget for ACK, heartbeat and clipboard
+metadata; it does not resume or replay that write. Media budgets are unchanged.
+
+Keyboard/button samples are separate from pointer motion, and clipboard
+publication is correlated by ID, size and the viewer's local clock. This
+closes an unbounded clipboard-ready write and an observability gap, not a
+claim that those defects explain every native freeze. The synthetic blocked
+writer and tracking tests remain distinct from installed GUI and network
+qualification.
+
 ## 2026-10-05 explicit media receipt boundary
 
 The pinned [Noq stopped contract](https://docs.rs/noq/1.3.0/noq/struct.SendStream.html#method.stopped)

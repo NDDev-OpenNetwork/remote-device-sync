@@ -475,9 +475,8 @@ mod native {
                     Some(rds_core::DesktopEvent::Heartbeat { ts_ms, .. }) => view
                         .control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
                     Some(rds_core::DesktopEvent::InputAck { seq, .. }) => view.input_ack(seq),
-                    Some(rds_core::DesktopEvent::ClipboardReady { bytes, .. }) => {
-                        view.clipboard_ready(bytes);
-                        tracing::info!(bytes, "remote clipboard ready");
+                    Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {
+                        view.clipboard_ack(id, bytes);
                     }
                     None => {
                         tracing::warn!("managed desktop event channel ended");
@@ -566,7 +565,7 @@ mod native {
                 event = session.events.recv() => match event {
                     Some(rds_core::DesktopEvent::Heartbeat { ts_ms,.. }) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
                     Some(rds_core::DesktopEvent::InputAck { seq,.. }) => view.input_ack(seq),
-                    Some(rds_core::DesktopEvent::ClipboardReady { bytes,.. }) => {view.clipboard_ready(bytes);tracing::info!(bytes,"remote clipboard ready");},
+                    Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {view.clipboard_ack(id, bytes);},
                     None => break Ok(false),
                 },
                 frame = session.frames.recv() => match frame {
