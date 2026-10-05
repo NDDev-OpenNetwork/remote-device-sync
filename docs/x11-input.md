@@ -81,3 +81,16 @@ Primary contracts: [XTEST](https://www.x.org/releases/X11R7.7/doc/xextproto/xtes
 [per-key repeat control](https://xorg.freedesktop.org/archive/current/doc/libX11/libX11/libX11.html#Manipulating_the_Keyboard_and_Pointer_Settings),
 [Xorg evdev mapping](https://cgit.freedesktop.org/xorg/driver/xf86-input-evdev/tree/src/evdev.c),
 [Linux event codes](https://docs.kernel.org/input/event-codes.html).
+
+## Per-key repeat control and compositor notifications
+
+Native holds suppress only the held key's autonomous repeat through XKB
+PerKeyRepeat controls. Unchanged bits skip a write; changed bits preserve the
+other repeat bits and controls. Core ChangeKeyboardControl is deliberately
+avoided because it marks repeat explicit and emits MapNotify, potentially
+invalidating a compositor's entire keymap on each press/release.
+The existing process-wide hold ownership serializes RDS changes. External
+keyboard-settings writers are not governed by this mutex. Intentional local
+OS repeats still pulse a held key, and the last owner restores its original
+repeat bit even during drop. The isolated Xvfb test checks both repeat safety
+and absence of MapNotify/NewKeyboardNotify during ordinary input.

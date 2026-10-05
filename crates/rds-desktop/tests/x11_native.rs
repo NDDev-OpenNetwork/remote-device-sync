@@ -28,7 +28,7 @@ fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
     use std::time::{Duration, Instant};
     use x11rb::protocol::{
         Event,
-        xkb::{BoolCtrl, ConnectionExt as _, Control, ID},
+        xkb::{BoolCtrl, ConnectionExt as _, Control, EventType, ID, MapPart, SelectEventsAux},
         xproto::{
             AutoRepeatMode, ChangeKeyboardControlAux, ChangeWindowAttributesAux, EventMask,
             InputFocus,
@@ -104,6 +104,20 @@ fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
         .check()
         .unwrap();
     let mut sink = XtestInput::new().unwrap();
+    observer
+        .xkb_select_events(
+            ID::USE_CORE_KBD.into(),
+            0u16.into(),
+            EventType::MAP_NOTIFY | EventType::NEW_KEYBOARD_NOTIFY,
+            MapPart::from(0xffu16),
+            MapPart::from(0xffu16),
+            &SelectEventsAux::default(),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    while observer.poll_for_event().unwrap().is_some() {}
+    let mut map_changes = 0;
     sink.inject(&event(InputKind::KeyDown { code: 30 }))
         .unwrap();
     std::thread::sleep(Duration::from_millis(160)); // delayed network KeyUp
@@ -117,9 +131,11 @@ fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
     let mut presses = 0;
     let deadline = Instant::now() + Duration::from_millis(50);
     while Instant::now() < deadline {
-        if let Some(Event::KeyPress(key)) = observer.poll_for_event().unwrap() {
-            if key.detail == 38 {
-                presses += 1;
+        if let Some(e) = observer.poll_for_event().unwrap() {
+            match e {
+                Event::KeyPress(key) if key.detail == 38 => presses += 1,
+                Event::XkbMapNotify(_) | Event::XkbNewKeyboardNotify(_) => map_changes += 1,
+                _ => {}
             }
         } else {
             std::thread::sleep(Duration::from_millis(1));
@@ -136,8 +152,10 @@ fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
     sink.inject(&event(InputKind::KeyUp { code: 30 })).unwrap();
     let mut repeats = 0;
     while let Some(e) = observer.poll_for_event().unwrap() {
-        if matches!(e, Event::KeyPress(key) if key.detail == 38) {
-            repeats += 1;
+        match e {
+            Event::KeyPress(key) if key.detail == 38 => repeats += 1,
+            Event::XkbMapNotify(_) | Event::XkbNewKeyboardNotify(_) => map_changes += 1,
+            _ => {}
         }
     }
     assert_eq!(
@@ -170,7 +188,23 @@ fn delayed_key_release_does_not_generate_remote_typematic_repeats() {
         0,
         "original native repeat setting was not restored"
     );
+    // Ordinary modifier transitions and Backspace must also leave the keymap
+    // untouched, including already non-repeating modifier keys.
+    for code in [29, 42, 14] {
+        sink.inject(&event(InputKind::KeyDown { code })).unwrap();
+        sink.inject(&event(InputKind::KeyUp { code })).unwrap();
+    }
     drop(sink);
+    observer.get_input_focus().unwrap().reply().unwrap(); // server processed all writes
+    while let Some(e) = observer.poll_for_event().unwrap() {
+        if matches!(e, Event::XkbMapNotify(_) | Event::XkbNewKeyboardNotify(_)) {
+            map_changes += 1;
+        }
+    }
+    assert_eq!(
+        map_changes, 0,
+        "repeat management invalidated the native keymap"
+    );
     rate(original.repeat_delay, original.repeat_interval);
 }
 
