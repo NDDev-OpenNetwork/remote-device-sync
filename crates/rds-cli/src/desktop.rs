@@ -110,7 +110,26 @@ mod native {
         client::{DesktopSession, RelayDecoder, RelayOutcome, SessionOpts},
         render::{InputReceiver, Viewer, ViewerHandle, ViewerInput},
     };
-    use std::time::Instant;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Instant,
+    };
+
+    struct Attempt {
+        started: Instant,
+        healthy: Arc<AtomicBool>,
+    }
+
+    fn retry_delay(failures: &mut u32, frames_advanced: bool, healthy: bool) -> Duration {
+        if frames_advanced && healthy {
+            *failures = 0;
+        }
+        *failures = failures.saturating_add(1);
+        Duration::from_millis((250u64 << (*failures).min(5)).min(8000))
+    }
     use tokio_util::sync::CancellationToken;
     use tracing::Instrument;
 
@@ -283,6 +302,10 @@ mod native {
             let span = rds_observe::conn_span(rds_observe::next_session_id());
             view.begin_session(span.clone());
             let received = view.report().frames_received;
+            let attempt = Attempt {
+                started,
+                healthy: Arc::new(AtomicBool::new(false)),
+            };
             let result = tokio::select! {
                 _ = stop.cancelled() => return Ok(()),
                 result = async {
@@ -300,19 +323,20 @@ mod native {
                                 *peer = reconnect_target(peer,authenticated)?;
                                 *session = Some(id);
                             }
-                            managed_session(client,session.ok_or_else(|| anyhow::anyhow!("no managed session"))?,options,view,input,&stop,started).await
+                            managed_session(client,session.ok_or_else(|| anyhow::anyhow!("no managed session"))?,options,view,input,&stop,&attempt).await
                         },
-                        Source::Direct { endpoint,target,grant } => direct_session(endpoint,(target.clone(),grant.as_ref()),options,view,input,&stop,started).await,
+                        Source::Direct { endpoint,target,grant } => direct_session(endpoint,(target.clone(),grant.as_ref()),options,view,input,&stop,&attempt).await,
                     }
                 }.instrument(span) => result,
             };
             if stop.is_cancelled() || matches!(result, Ok(true)) {
                 return Ok(());
             }
-            if view.report().frames_received > received {
-                failures = 0;
-            }
-            failures = failures.saturating_add(1);
+            let wait = retry_delay(
+                &mut failures,
+                view.report().frames_received > received,
+                attempt.healthy.load(Ordering::Relaxed),
+            );
             let snapshot = view.snapshot();
             tracing::warn!(
                 error = ?result.as_ref().err(), attempt = failures,
@@ -330,7 +354,6 @@ mod native {
             );
             view.status("Reconnecting");
             view.stage("reconnecting");
-            let wait = Duration::from_millis((250u64 << failures.min(5)).min(8000));
             if !retry_pause(wait, &stop, input).await {
                 return Ok(());
             }
@@ -341,6 +364,25 @@ mod native {
                 }
             }
         }
+    }
+
+    #[test]
+    fn repeated_unhealthy_attempts_back_off_even_when_video_arrives() {
+        let mut failures = 0;
+        for ms in [500, 1000, 2000, 4000, 8000, 8000] {
+            assert_eq!(
+                retry_delay(&mut failures, true, false),
+                Duration::from_millis(ms)
+            );
+        }
+        assert_eq!(
+            retry_delay(&mut failures, false, true),
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            retry_delay(&mut failures, true, true),
+            Duration::from_millis(500)
+        );
     }
 
     fn reconnect_target(original: &str, authenticated: String) -> anyhow::Result<String> {
@@ -391,8 +433,9 @@ mod native {
         view: &ViewerHandle,
         input: &mut InputReceiver,
         stop: &CancellationToken,
-        started: Instant,
+        attempt: &Attempt,
     ) -> anyhow::Result<bool> {
+        let started = attempt.started;
         view.stage("opening desktop");
         let (mut channel, mut events) = if options.payload_receipts {
             client
@@ -420,7 +463,7 @@ mod native {
         view.status("Waiting for screen");
         let control = channel.control_handle();
         let (progress, last_frame) = tokio::sync::watch::channel(tokio::time::Instant::now());
-        let control_progress = liveness::ControlWatchdog::default();
+        let control_progress = liveness::ControlWatchdog::with_health(attempt.healthy.clone());
         // Keep the entire receive/decode future alive while controls progress.
         // Selecting individual recv calls and awaiting decode in their handler
         // prevents input, heartbeat and close from being polled during decode.
@@ -516,8 +559,9 @@ mod native {
         view: &ViewerHandle,
         input: &mut InputReceiver,
         stop: &CancellationToken,
-        started: Instant,
+        attempt: &Attempt,
     ) -> anyhow::Result<bool> {
+        let started = attempt.started;
         let (target, grant) = target;
         let conn = match grant {
             Some(g) => rds_client::connect_authorized(endpoint, target, g).await?,
@@ -546,7 +590,7 @@ mod native {
         let ctrl = session.control_sender();
         let mut last_frame = tokio::time::Instant::now();
         let mut watchdog = control::VideoWatchdog::default();
-        let control_progress = liveness::ControlWatchdog::default();
+        let control_progress = liveness::ControlWatchdog::with_health(attempt.healthy.clone());
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = loop {

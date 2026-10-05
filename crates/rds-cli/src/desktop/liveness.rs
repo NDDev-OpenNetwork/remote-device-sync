@@ -2,12 +2,18 @@
 use rds_core::DesktopControl;
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::time::Instant;
 
 const CONTROL_STALL: Duration = Duration::from_secs(8);
+const HEALTHY_WINDOW: Duration = Duration::from_secs(30);
+const TIMELY_ECHO: Duration = Duration::from_secs(2);
+const HEALTHY_PROBE_GAP: Duration = Duration::from_secs(3);
 const MAX_PROBES: usize = 16;
 const CLIPBOARD_GRACE: Duration = Duration::from_secs(30);
 
@@ -20,6 +26,9 @@ struct Clipboard {
 }
 
 struct State {
+    healthy: Option<Arc<AtomicBool>>,
+    stable_since: Option<Instant>,
+    last_timely: Option<Instant>,
     next: u64,
     confirmed: Instant,
     pending: VecDeque<(u64, u64, Instant)>,
@@ -32,6 +41,9 @@ pub(super) struct ControlWatchdog(Arc<Mutex<State>>);
 impl Default for ControlWatchdog {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(State {
+            healthy: None,
+            stable_since: None,
+            last_timely: None,
             next: 0,
             confirmed: Instant::now(),
             pending: VecDeque::new(),
@@ -41,6 +53,12 @@ impl Default for ControlWatchdog {
 }
 
 impl ControlWatchdog {
+    pub(super) fn with_health(healthy: Arc<AtomicBool>) -> Self {
+        let monitor = Self::default();
+        monitor.0.lock().unwrap_or_else(|p| p.into_inner()).healthy = Some(healthy);
+        monitor
+    }
+
     pub(super) fn heartbeat(&self, ts_ms: u64) -> anyhow::Result<DesktopControl> {
         let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let seq = state.next;
@@ -120,6 +138,25 @@ impl ControlWatchdog {
         };
         if let Some((_, _, sent)) = state.pending.remove(index) {
             state.confirmed = state.confirmed.max(sent);
+            if sent.elapsed() <= TIMELY_ECHO {
+                if state
+                    .last_timely
+                    .is_none_or(|last| sent.saturating_duration_since(last) > HEALTHY_PROBE_GAP)
+                {
+                    state.stable_since = Some(sent);
+                }
+                state.last_timely = Some(state.last_timely.map_or(sent, |last| last.max(sent)));
+                if state
+                    .stable_since
+                    .is_some_and(|since| sent.saturating_duration_since(since) >= HEALTHY_WINDOW)
+                    && let Some(healthy) = &state.healthy
+                {
+                    healthy.store(true, Ordering::Relaxed);
+                }
+            } else {
+                state.stable_since = None;
+                state.last_timely = None;
+            }
             true
         } else {
             false
@@ -148,6 +185,37 @@ impl ControlWatchdog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_health_requires_continuous_timely_matched_control() {
+        let healthy = Arc::new(AtomicBool::new(false));
+        let monitor = ControlWatchdog::with_health(healthy.clone());
+        for seq in 0..15 {
+            let message = monitor.heartbeat(seq).unwrap();
+            monitor.sent(&message);
+            assert!(monitor.echoed(seq, seq));
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        assert!(!healthy.load(Ordering::Relaxed));
+        // A pause and a delayed response break the qualification window.
+        let delayed = monitor.heartbeat(15).unwrap();
+        monitor.sent(&delayed);
+        tokio::time::advance(Duration::from_secs(20)).await;
+        assert!(!monitor.echoed(15, 16));
+        assert!(monitor.echoed(15, 15));
+        assert!(!healthy.load(Ordering::Relaxed));
+        for seq in 16..=46 {
+            let message = monitor.heartbeat(seq).unwrap();
+            monitor.sent(&message);
+            assert!(monitor.echoed(seq, seq));
+            assert_eq!(healthy.load(Ordering::Relaxed), seq == 46);
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        // Once qualified, this attempt remains eligible to reset its streak.
+        tokio::time::advance(Duration::from_secs(20)).await;
+        assert!(monitor.check().is_err());
+        assert!(healthy.load(Ordering::Relaxed));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn late_wrong_duplicate_and_retired_echoes_cannot_mask_stalled_control() {

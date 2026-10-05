@@ -724,3 +724,5 @@ input or paste; managed sessions retain the authenticated peer and unrelated
 streams. This does not guarantee8-second recovery when networking is unavailable
 or revoke already applied input. The existing no-replay/canceled-ACK diagnostics
 remain essential to interpreting uncertain delivery.
+
+The [interactive retry and modifier follow-up](reports/rds-control-retry-modifiers-20261005.md) requires stable control confirmation before resetting retry backoff and deduplicates physical/flags key transitions.
