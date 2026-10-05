@@ -21,13 +21,27 @@ pub struct VisualProbeSpec {
     pub click_rect: [u32; 4],
     /// High 48 bits of the controlled 64-cell marker; low 16 bits are its counter.
     pub prefix: u64,
+    /// Explicit physical keys whose unmodified KeyDown increments the same marker.
+    /// Empty preserves click-only measurement. Modifiers/toggles are forbidden.
+    #[serde(default)]
+    pub keyboard_codes: Vec<u32>,
 }
 impl VisualProbeSpec {
     pub fn validate(&self) -> Result<(), DesktopError> {
         let extent = |start: u32, size: u32| {
             size > 0 && start.checked_add(size).is_some_and(|end| end <= 16384)
         };
-        if !(4..=32).contains(&self.cell_width)
+        let keyboard_valid = self.keyboard_codes.len() <= 16
+            && self.keyboard_codes.iter().enumerate().all(|(index, code)| {
+                (1..=255).contains(code)
+                    && !matches!(
+                        code,
+                        29 | 42 | 54 | 56 | 58 | 69 | 70 | 97 | 100 | 125 | 126
+                    )
+                    && !self.keyboard_codes[..index].contains(code)
+            });
+        if !keyboard_valid
+            || !(4..=32).contains(&self.cell_width)
             || !(4..=64).contains(&self.marker_height)
             || self.prefix == 0
             || self.prefix >= (1 << 48)
@@ -87,6 +101,14 @@ impl VisualProbeSpec {
 pub struct VisualProbeReport {
     pub samples: u64,
     pub pending: usize,
+    pub keyboard_samples: u64,
+    pub keyboard_armed: bool,
+    pub unanchored_keys: u64,
+    pub modified_keys: u64,
+    pub keyboard_input_to_submit_min_ms: Option<f64>,
+    pub keyboard_input_to_submit_p50_ms: Option<f64>,
+    pub keyboard_input_to_submit_p95_ms: Option<f64>,
+    pub keyboard_input_to_submit_max_ms: Option<f64>,
     pub unanchored_clicks: u64,
     pub canceled: u64,
     pub timed_out: u64,
@@ -101,12 +123,19 @@ pub struct VisualProbeReport {
     pub last_counter: Option<u16>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProbeInput {
+    Click,
+    Key,
+}
+
 pub(super) struct VisualProbe {
     spec: VisualProbeSpec,
     report: VisualProbeReport,
-    pending: VecDeque<(u16, u64, Instant)>,
+    pending: VecDeque<(u16, u64, Instant, ProbeInput)>,
     next: Option<u16>,
     latencies: Vec<f64>,
+    key_latencies: Vec<f64>,
 }
 impl VisualProbe {
     pub(super) fn new(spec: VisualProbeSpec) -> Result<Self, DesktopError> {
@@ -117,19 +146,45 @@ impl VisualProbe {
             pending: VecDeque::new(),
             next: None,
             latencies: Vec::new(),
+            key_latencies: Vec::new(),
         })
     }
     pub(super) fn click(&mut self, point: (f64, f64), seq: u64, now: Instant) {
         if !self.spec.inside(point) {
+            self.keyboard_focus_lost();
+            return;
+        }
+        self.enqueue(seq, now, ProbeInput::Click);
+    }
+    pub(super) fn key(&mut self, code: u32, unmodified: bool, seq: u64, now: Instant) {
+        if !self.spec.keyboard_codes.contains(&code) {
+            return;
+        }
+        if !unmodified {
+            self.report.modified_keys += 1;
+            self.lose_correlation("modified controlled key");
             return;
         }
         self.expire(now);
+        if !self.report.keyboard_armed {
+            self.report.unanchored_keys += 1;
+            return;
+        }
+        self.enqueue(seq, now, ProbeInput::Key);
+    }
+    pub(super) fn keyboard_focus_lost(&mut self) {
+        if !self.spec.keyboard_codes.is_empty() {
+            self.reset();
+        }
+    }
+    fn enqueue(&mut self, seq: u64, now: Instant, kind: ProbeInput) {
+        self.expire(now);
         if self.report.correlation_lost {
-            self.report.unanchored_clicks += 1;
+            self.unanchored(kind);
             return;
         }
         let Some(next) = self.next.and_then(|v| v.checked_add(1)) else {
-            self.report.unanchored_clicks += 1;
+            self.unanchored(kind);
             return;
         };
         self.next = Some(next);
@@ -137,19 +192,27 @@ impl VisualProbe {
             self.pending.pop_front();
             self.report.evicted += 1;
         }
-        self.pending.push_back((next, seq, now));
+        self.pending.push_back((next, seq, now, kind));
+    }
+    fn unanchored(&mut self, kind: ProbeInput) {
+        match kind {
+            ProbeInput::Click => self.report.unanchored_clicks += 1,
+            ProbeInput::Key => self.report.unanchored_keys += 1,
+        }
     }
     pub(super) fn modified_click(&mut self, point: (f64, f64)) {
         if self.spec.inside(point) {
             self.report.modified_clicks += 1;
             self.lose_correlation("modified target click");
+        } else {
+            self.keyboard_focus_lost();
         }
     }
     fn expire(&mut self, now: Instant) {
         let expired = self
             .pending
             .iter()
-            .take_while(|(_, _, started)| {
+            .take_while(|(_, _, started, _)| {
                 now.saturating_duration_since(*started) >= RESPONSE_TIMEOUT
             })
             .count();
@@ -188,6 +251,10 @@ impl VisualProbe {
             self.report.last_counter = Some(counter);
             return;
         }
+        if self.next.is_some_and(|expected| counter > expected) {
+            self.lose_correlation("unrequested controlled response");
+            return;
+        }
         if self
             .report
             .last_counter
@@ -200,16 +267,30 @@ impl VisualProbe {
         while self
             .pending
             .front()
-            .is_some_and(|(wanted, _, _)| *wanted <= counter)
+            .is_some_and(|(wanted, _, _, _)| *wanted <= counter)
         {
-            if let Some((_, seq, started)) = self.pending.pop_front() {
+            if let Some((_, seq, started, kind)) = self.pending.pop_front() {
                 let delay = now.saturating_duration_since(started).as_secs_f64() * 1000.;
                 if self.latencies.len() == 1024 {
                     self.latencies.remove(0);
                 }
                 self.latencies.push(delay);
                 self.report.samples += 1;
-                tracing::info!(target:"rds_desktop::visual_probe", input_seq=seq, frame_seq, marker_counter=counter, input_to_submit_ms=delay, "controlled visual response submitted");
+                let input_class = match kind {
+                    ProbeInput::Click => {
+                        self.report.keyboard_armed = !self.spec.keyboard_codes.is_empty();
+                        "click"
+                    }
+                    ProbeInput::Key => {
+                        if self.key_latencies.len() == 1024 {
+                            self.key_latencies.remove(0);
+                        }
+                        self.key_latencies.push(delay);
+                        self.report.keyboard_samples += 1;
+                        "keyboard"
+                    }
+                };
+                tracing::info!(target:"rds_desktop::visual_probe", input_class, input_seq=seq, frame_seq, marker_counter=counter, input_to_submit_ms=delay, "controlled visual response submitted");
             }
         }
     }
@@ -218,6 +299,7 @@ impl VisualProbe {
         self.pending.clear();
         self.next = None;
         self.report.last_counter = None;
+        self.report.keyboard_armed = false;
     }
     pub(super) fn unavailable(&mut self) {
         self.report.unavailable_presentations += 1;
@@ -232,6 +314,14 @@ impl VisualProbe {
             report.input_to_submit_min_ms = Some(sorted[0]);
             report.input_to_submit_p50_ms = Some(sorted[(sorted.len() - 1) * 50 / 100]);
             report.input_to_submit_p95_ms = Some(sorted[(sorted.len() - 1) * 95 / 100]);
+        }
+        let mut keys = self.key_latencies.clone();
+        keys.sort_by(f64::total_cmp);
+        if !keys.is_empty() {
+            report.keyboard_input_to_submit_min_ms = Some(keys[0]);
+            report.keyboard_input_to_submit_p50_ms = Some(keys[(keys.len() - 1) * 50 / 100]);
+            report.keyboard_input_to_submit_p95_ms = Some(keys[(keys.len() - 1) * 95 / 100]);
+            report.keyboard_input_to_submit_max_ms = keys.last().copied();
         }
         report
     }
@@ -248,6 +338,7 @@ mod tests {
             marker_height: 24,
             click_rect: [0, 24, 512, 8],
             prefix: 0x1234_5678_abcd,
+            keyboard_codes: Vec::new(),
         }
     }
     fn marker(prefix: u64, counter: u16) -> RawFrame {
@@ -380,6 +471,101 @@ mod tests {
         assert_eq!(probe.report().canceled, 1);
         assert_eq!(probe.report().modified_clicks, 1);
         assert!(probe.report().correlation_lost);
+    }
+    #[test]
+    fn keyboard_requires_a_presented_focus_click_and_measures_keydown_only() {
+        let mut spec = spec();
+        spec.keyboard_codes = vec![30, 14];
+        let start = Instant::now();
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.key(30, true, 1, start);
+        assert_eq!(probe.report().unanchored_keys, 1);
+        assert_eq!(probe.report().pending, 0);
+        probe.click((2., 26.), 2, start);
+        assert!(!probe.report().keyboard_armed);
+        probe.presented(&marker(spec.prefix, 1), start + Duration::from_millis(30));
+        assert!(probe.report().keyboard_armed);
+        probe.key(31, true, 3, start); // Not a controlled key.
+        assert_eq!(probe.report().pending, 0);
+        probe.key(30, true, 4, start + Duration::from_millis(40));
+        probe.key(14, true, 5, start + Duration::from_millis(45));
+        probe.presented(&marker(spec.prefix, 3), start + Duration::from_millis(90));
+        let report = probe.report();
+        assert_eq!(report.keyboard_samples, 2);
+        assert_eq!(report.samples, 3);
+        assert_eq!(report.keyboard_input_to_submit_min_ms, Some(45.));
+        assert_eq!(report.keyboard_input_to_submit_max_ms, Some(50.));
+        assert_eq!(report.pending, 0);
+        probe.presented(&marker(spec.prefix, 3), start + Duration::from_millis(110));
+        assert_eq!(probe.report().keyboard_samples, 2);
+    }
+    #[test]
+    fn focus_loss_modifiers_and_unrequested_counters_cannot_fabricate_key_samples() {
+        let mut spec = spec();
+        spec.keyboard_codes = vec![30, 14];
+        let start = Instant::now();
+        for outside_click in [false, true] {
+            let mut probe = VisualProbe::new(spec.clone()).unwrap();
+            probe.presented(&marker(spec.prefix, 0), start);
+            probe.click((2., 26.), 1, start);
+            probe.presented(&marker(spec.prefix, 1), start);
+            probe.key(30, true, 2, start);
+            if outside_click {
+                probe.click((600., 26.), 3, start);
+            } else {
+                probe.keyboard_focus_lost();
+            }
+            probe.presented(&marker(spec.prefix, 2), start);
+            probe.key(14, true, 4, start);
+            assert!(!probe.report().keyboard_armed);
+            assert_eq!(probe.report().keyboard_samples, 0);
+            assert_eq!(probe.report().canceled, 1);
+            assert_eq!(probe.report().unanchored_keys, 1);
+        }
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.click((2., 26.), 1, start);
+        probe.presented(&marker(spec.prefix, 1), start);
+        probe.key(30, false, 2, start);
+        probe.presented(&marker(spec.prefix, 2), start);
+        assert!(probe.report().correlation_lost);
+        assert_eq!(probe.report().modified_keys, 1);
+        assert_eq!(probe.report().keyboard_samples, 0);
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.click((2., 26.), 1, start);
+        probe.presented(&marker(spec.prefix, 1), start);
+        probe.key(30, true, 2, start);
+        probe.presented(&marker(spec.prefix, 3), start); // Extra actor/counter increment.
+        assert!(probe.report().correlation_lost);
+        assert_eq!(probe.report().keyboard_samples, 0);
+        assert_eq!(probe.report().canceled, 1);
+    }
+    #[test]
+    fn keyboard_descriptor_bounds_preserve_click_only_defaults() {
+        let spec = spec();
+        let start = Instant::now();
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.key(30, true, 1, start);
+        assert_eq!(probe.report().unanchored_keys, 0);
+        assert_eq!(probe.report().pending, 0);
+        for codes in [
+            vec![30, 30],
+            vec![29],
+            vec![58],
+            vec![0],
+            vec![256],
+            (1..=17).collect(),
+        ] {
+            let mut invalid = spec.clone();
+            invalid.keyboard_codes = codes;
+            assert!(invalid.validate().is_err());
+        }
+        let mut valid = spec;
+        valid.keyboard_codes = vec![14, 30];
+        assert!(valid.validate().is_ok());
     }
     #[test]
     fn marker_bounds_and_ambiguous_pixels_fail_without_panicking() {
