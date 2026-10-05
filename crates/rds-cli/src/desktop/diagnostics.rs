@@ -18,6 +18,7 @@ pub(super) struct Recorder {
     pending: Option<Incident>,
     previous_reconnects: Option<u64>,
     previous_slow_acks: Option<u64>,
+    previous_slow_clipboards: Option<u64>,
     cooldown_until_ms: u64,
 }
 
@@ -36,6 +37,10 @@ impl Recorder {
             .previous_slow_acks
             .is_some_and(|previous| snapshot.report.slow_input_acks > previous);
         self.previous_slow_acks = Some(snapshot.report.slow_input_acks);
+        let slow_clipboard = self
+            .previous_slow_clipboards
+            .is_some_and(|previous| snapshot.report.slow_clipboard_transfers > previous);
+        self.previous_slow_clipboards = Some(snapshot.report.slow_clipboard_transfers);
         if let Some(incident) = &mut self.pending {
             // Keep memory bounded even if the diagnostic timer runs rapidly.
             if incident.snapshots.len() < HISTORY + 6 {
@@ -55,12 +60,22 @@ impl Recorder {
             // Completed stalls can fall entirely between periodic snapshots.
             reasons.push("input_ack_delayed");
         }
+        if slow_clipboard {
+            reasons.push("clipboard_ready_delayed");
+        }
         if snapshot
             .report
             .oldest_input_ack_age_ms
             .is_some_and(|ms| ms >= 250)
         {
             reasons.push("input_ack_pending");
+        }
+        if snapshot
+            .report
+            .clipboard_oldest_pending_age_ms
+            .is_some_and(|ms| ms >= 250)
+        {
+            reasons.push("clipboard_ready_pending");
         }
         if snapshot.decoded_frame_age_ms.is_some_and(|ms| ms >= 3000) {
             reasons.push("decoded_video_stalled");
@@ -193,6 +208,28 @@ mod tests {
         let data: serde_json::Value =
             serde_json::from_slice(&recorder.finish(true).unwrap()).unwrap();
         assert_eq!(data["reasons"][0], "input_ack_delayed");
+    }
+
+    #[test]
+    fn pending_and_completed_slow_clipboard_transfers_preserve_an_incident() {
+        for completed in [false, true] {
+            let mut recorder = Recorder::default();
+            recorder.observe(&snapshot(0));
+            let mut delayed = snapshot(2000);
+            let reason = if completed {
+                delayed.report.slow_clipboard_transfers = 1;
+                delayed.report.last_clipboard_transfer_ms = Some(600.);
+                "clipboard_ready_delayed"
+            } else {
+                delayed.report.clipboard_pending_transfers = 1;
+                delayed.report.clipboard_oldest_pending_age_ms = Some(600);
+                "clipboard_ready_pending"
+            };
+            recorder.observe(&delayed);
+            let data: serde_json::Value =
+                serde_json::from_slice(&recorder.finish(true).unwrap()).unwrap();
+            assert_eq!(data["reasons"], serde_json::json!([reason]));
+        }
     }
 
     #[test]

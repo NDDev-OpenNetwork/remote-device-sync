@@ -15,6 +15,18 @@ window, alongside independent rate-limited warnings.
 `session_epoch`, `input_queue_depth`, `input_acks_canceled`, `slow_input_acks`
 and `last_input_ack_ms` complement the existing bounded latency percentiles.
 Percentiles summarize the retained sample buffer, not a timed rolling interval.
+Keyboard and button ACK p50/p95/max are retained independently of motion, so
+fast pointer traffic cannot hide a delayed key or click. Each series retains
+at most 1024 samples. These remain injection acknowledgements, not application
+response or optical display measurements.
+
+Explicit paste gestures track at most eight transfer IDs and byte counts on
+the viewer's local clock. Clipboard-ready replies must match both values;
+duplicates, unknown IDs and wrong sizes do not create successful samples.
+Reconnection cancels outstanding tracking. Evictions, unmatched replies,
+pending age, last/p50/p95/max transfer duration and completed transfers over
+250 ms are reported. Pending and completed clipboard delays trigger the same
+bounded incident recorder; no clipboard content is retained.
 
 ## Validated payload delivery receipts
 
@@ -330,11 +342,20 @@ owns the CLIPBOARD selection and serves UTF8_STRING/TARGETS/TIMESTAMP and ICCCM
 INCR for larger data, without a clipboard helper process. This is real clipboard
 publication, not typing text through keyboard-layout substitutions.
 
-One transfer is bounded to 1 MiB of UTF-8, with 32 KiB control chunks, exact
-ordered offsets and a five-second assembly deadline. There are at most four
+One transfer is bounded to 1 MiB of UTF-8, with at most 32 KiB control chunks
+(the native sender uses 16 KiB), exact ordered offsets, a five-second idle
+deadline and a thirty-second total assembly deadline. There are at most four
 active native selection workers and eight outstanding INCR requests per worker.
 View-only sessions refuse publication. Publication failure ends the control
 session before subsequent paste input can consume an unrelated old clipboard.
+Clipboard publication has its own two-second native deadline. All serving
+control replies (input ACK, heartbeat and clipboard-ready) share a two-second
+write deadline rather than the thirty-second media budget. A stalled or partial
+reply ends and resets that desktop control stream; it is never resumed as a
+clean frame and no input or paste is replayed automatically. The transport
+connection and unrelated service streams remain outside that session shutdown.
+Publication start/completion and reply completion record transfer ID, byte
+count and stage duration only.
 Contents are neither logged nor written to disk. There is no background scan or
 automatic export of every local clipboard change. Images, files, rich formats,
 reverse clipboard remain outside this text path. Cmd+V becomes a bounded remote
