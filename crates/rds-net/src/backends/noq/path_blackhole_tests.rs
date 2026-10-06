@@ -150,14 +150,11 @@ async fn exercise(automatic: bool) {
             async { server.inner.accept().await.unwrap().await }
         );
         let (a, b) = (a.unwrap(), b.unwrap());
-        let telemetry = if automatic {
-            Some((
-                client.wire_connection(&a, Vec::new(), Vec::new()).unwrap(),
-                server.wire_connection(&b, Vec::new(), Vec::new()).unwrap(),
-            ))
-        } else {
-            None
-        };
+        // Subscribe before establishing the standby. Do not start discovery
+        // during setup: QNT can legitimately add/promote routes before the
+        // intended failure, making the injected socket no longer primary.
+        let path_events = b.path_events();
+        let qnt = b.nat_traversal_updates();
         let (mut request, mut reply) = a.open_bi().await.unwrap();
         request.write_all(b"warm").await.unwrap();
         let (mut send, mut recv) = b.accept_bi().await.unwrap();
@@ -189,6 +186,23 @@ async fn exercise(automatic: bool) {
             .unwrap()
             .set_status(PathStatus::Available)
             .unwrap();
+        // Validation completion and positive delivery acknowledgement are
+        // separate boundaries. Prove the standby can acknowledge before
+        // blackholing the path used to deliver its validation/ACK traffic.
+        remote_secondary.ping().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if b.congestion_state(remote_secondary.id())
+                    .and_then(crate::ack_progress::snapshot)
+                    .is_some_and(|state| state.confirmed(remote_secondary.stats().rtt))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("standby validation did not yield acknowledgement proof");
         let before = b.path_stats(noq::PathId::ZERO).unwrap().frame_tx.stream;
         enabled.store(true, Ordering::Release);
         send.write_all(b"pending reliable bytes").await.unwrap();
@@ -207,6 +221,31 @@ async fn exercise(automatic: bool) {
                 .await
                 .is_err()
         );
+        let (_relay_sender, relay_dead) = tokio::sync::watch::channel(0u64);
+        let driver = if automatic {
+            let telemetry = super::telemetry::Telemetry::new(&b);
+            let mut validated = telemetry.paths();
+            // The completed open_path future and the real remote path prove
+            // this fixture's already-established standby, not guessed credit.
+            validated.insert(remote_secondary.id(), remote_secondary.weak_handle());
+            telemetry.publish(&validated, Some(noq::PathId::ZERO));
+            Some(tokio::spawn(super::policy::connection_driver_observed(
+                b.weak_handle(),
+                qnt,
+                super::policy::Observer {
+                    events: path_events,
+                    telemetry,
+                    transport: None,
+                },
+                crate::metrics::Registry::default(),
+                Vec::new(),
+                Vec::new(),
+                relay_dead,
+                true,
+            )))
+        } else {
+            None
+        };
         let started = Instant::now();
         if !automatic {
             remote_secondary.set_status(PathStatus::Available).unwrap();
@@ -215,6 +254,22 @@ async fn exercise(automatic: bool) {
         let result =
             tokio::time::timeout(Duration::from_secs(2), reply.read_exact(&mut body)).await;
         let delivered_ms = started.elapsed().as_millis();
+        if result.is_err() {
+            for id in [noq::PathId::ZERO, remote_secondary.id()] {
+                let Some(path) = b.path(id) else {
+                    eprintln!("recovery path {id} no longer open");
+                    continue;
+                };
+                eprintln!(
+                    "recovery path {} status={:?} stats={:?} progress={:?}",
+                    path.id(),
+                    path.status(),
+                    path.stats(),
+                    b.congestion_state(path.id())
+                        .and_then(crate::ack_progress::snapshot)
+                );
+            }
+        }
         // Clean up the isolated endpoints even when the engine boundary fails.
         tokio::join!(client.close(), server.close());
         result
@@ -222,7 +277,12 @@ async fn exercise(automatic: bool) {
             .unwrap();
         assert_eq!(&body, b"pending reliable bytes");
         assert!(delivered_ms < 2000);
-        drop(telemetry);
+        if let Some(driver) = driver {
+            tokio::time::timeout(Duration::from_secs(1), driver)
+                .await
+                .expect("policy survived connection closure")
+                .unwrap();
+        }
     })
     .await
     .expect("isolated blackhole fixture did not terminate");

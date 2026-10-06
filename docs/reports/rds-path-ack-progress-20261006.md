@@ -44,13 +44,22 @@ delivered the pending22bytes via the actor/policy in about1.1seconds. The fixtur
 uses Iroh's declared custom-transport types; `iroh-base`1.3.0 and `n0-watcher`1.0.0
 are test-only direct dependencies on already resolved transitive packages.
 
-The first expanded Mac unit run passed100tests, including both native recovery
-fixtures and controller-clock/clone/idle boundaries. A high-RTT boundary was
-added afterward. Final exact-source fmt/strict Clippy, complete regression,
-Linux lane and installed two-device qualification are still pending. An earlier
-full-workspace link failed on temporary-cache ENOSPC after Clippy had passed;
-only owned inactive generated artifacts were removed, and subsequent checks use
-a disk guard. The original failure is retained, not reported as passed.
+The final local Mac net run passed101tests, including both native recovery
+fixtures and controller-clock/clone/idle/high-RTT boundaries; fmt and strict
+all-target net Clippy also passed. A previous complete workspace regression
+passed after raising the check process file-descriptor limit to4096.
+Cross-platform CI exposed fixture setup races: Iroh must await an available
+preferred link, and Noq must establish standby ACK evidence before injected
+loss. The Noq fixture now starts the real production policy only after explicit
+validation, positive acknowledgement and proof that the primary emitted the
+lost stream frame. Discovery during setup cannot promote an unrelated route.
+Linux and refreshed CI qualification remain pending for this fixture revision.
+
+An earlier full-workspace link failed on temporary-cache ENOSPC after Clippy had
+passed; only owned inactive generated artifacts were removed, and subsequent
+checks use a disk guard. A later workspace attempt hit the default256descriptor
+limit. Original failures are retained, not reported as passed. No deployment or
+installed two-device qualification has occurred.
 
 No deployment or full latency/stability acceptance is claimed by these fixtures.
 They establish bounded same-connection recovery for this specific failure mode.
