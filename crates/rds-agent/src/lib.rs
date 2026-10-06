@@ -1021,12 +1021,13 @@ async fn serve_stream(
                     });
                 if let Some(transfer) = transfer {
                     transfer
-                        .serve(
+                        .serve_with_guard(
                             conn,
                             (send, recv),
                             dir,
                             access,
                             rds_sync::engine::TRANSFER_TIMEOUT,
+                            (_sync_slot, _service_slot),
                         )
                         .await?;
                 } else {

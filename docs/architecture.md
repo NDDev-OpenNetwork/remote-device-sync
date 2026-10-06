@@ -18,6 +18,22 @@ retire only with a recently confirmed established sibling. The existing reliable
 stream transfers to that sibling through Noq's ordinary path-abandon machinery;
 the last open path is never retired. See [the recovery evidence](reports/rds-path-ack-progress-20261006.md).
 
+Tagged sync completion now transfers connection exclusion and the data-lane
+admission permit into the engine. Filesystem/control work and its reader close before that guard releases,
+and only then is the terminal server FIN exposed to the peer. This makes an
+immediate next transfer admissible without retrying application work. Dropping
+the owning future still releases the guard on cancellation. Failure logs retain
+the greeting/transfer stage and ID without changing the IPC error contract.
+
+Directory publication also isolates a full disk from established transport.
+Only ENOSPC/quota failures are retryable. The publisher retains its exclusive
+lock and accepts only the pre-commit state or its exact attempted successor;
+it synchronizes those verified bytes before resuming signed publication. Clock
+rollback, changed history, unsafe files and unrelated I/O remain fatal. No
+record is published without durable revision allocation, and authorization
+expiry still applies independently. The announcer uses its bounded jittered
+retry policy without recreating the endpoint or replaying application input.
+
 Status: v0.1 foundation. This document records the protocol and stack
 research and the decisions that fall out of it. The deeper second-pass
 research — iroh 1.2/noq internals (multipath, path selectors, hooks),

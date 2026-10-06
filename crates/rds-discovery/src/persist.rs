@@ -19,6 +19,8 @@ pub(crate) struct AtomicFile {
     state_name: &'static str,
     #[cfg(test)]
     pub(crate) fault: Option<(Phase, bool)>,
+    #[cfg(test)]
+    pub(crate) storage_full: Option<Phase>,
 }
 
 impl Drop for AtomicFile {
@@ -42,6 +44,18 @@ pub(crate) enum Phase {
 
 fn store(e: impl std::fmt::Display) -> DiscoveryError {
     DiscoveryError::Store(e.to_string())
+}
+
+fn write_error(error: impl Into<std::io::Error>) -> DiscoveryError {
+    let error = error.into();
+    if error.raw_os_error().is_some_and(|code| {
+        code == rustix::io::Errno::NOSPC.raw_os_error()
+            || code == rustix::io::Errno::DQUOT.raw_os_error()
+    }) {
+        DiscoveryError::StorageUnavailable(error)
+    } else {
+        store(error)
+    }
 }
 
 pub(crate) fn regular(file: &File) -> Result<(), DiscoveryError> {
@@ -128,11 +142,18 @@ impl AtomicFile {
             state_name,
             #[cfg(test)]
             fault: None,
+            #[cfg(test)]
+            storage_full: None,
         })
     }
 
     #[cfg(test)]
     fn checkpoint(&self, phase: Phase) -> Result<(), DiscoveryError> {
+        if self.storage_full == Some(phase) {
+            return Err(write_error(std::io::Error::from_raw_os_error(
+                rustix::io::Errno::NOSPC.raw_os_error(),
+            )));
+        }
         if let Some((selected, terminate)) = self.fault
             && selected == phase
         {
@@ -187,23 +208,24 @@ impl AtomicFile {
                     break;
                 }
                 Err(rustix::io::Errno::EXIST) => continue,
-                Err(e) => return Err(store(e)),
+                Err(e) => return Err(write_error(e)),
             }
         }
         let (name, mut file) = staging.ok_or_else(|| store("cannot allocate policy staging"))?;
         let result = (|| {
             #[cfg(test)]
             self.checkpoint(Phase::BeforeWrite)?;
-            file.write_all(bytes).map_err(store)?;
+            file.write_all(bytes).map_err(write_error)?;
             #[cfg(test)]
             self.checkpoint(Phase::AfterWrite)?;
-            file.sync_all().map_err(store)?;
+            file.sync_all().map_err(write_error)?;
             #[cfg(test)]
             self.checkpoint(Phase::AfterFileSync)?;
-            renameat(&self.directory, &name, &self.directory, self.state_name).map_err(store)?;
+            renameat(&self.directory, &name, &self.directory, self.state_name)
+                .map_err(write_error)?;
             #[cfg(test)]
             self.checkpoint(Phase::AfterRename)?;
-            self.directory.sync_all().map_err(store)?;
+            self.directory.sync_all().map_err(write_error)?;
             #[cfg(test)]
             self.checkpoint(Phase::AfterDirectorySync)?;
             Ok(())

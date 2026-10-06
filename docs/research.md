@@ -1,5 +1,32 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+## 2026-10-06 durable publication and transport isolation
+
+A metadata publisher must not terminate authenticated transport merely because
+its next durable advertisement cannot allocate storage. QUIC's separate streams
+([RFC9000 section2](https://www.rfc-editor.org/rfc/rfc9000.html#section-2)) do not
+protect a connection from its process supervisor closing the whole endpoint.
+Publication availability and transport authorization are independent boundaries.
+
+[Rust OS error codes](https://doc.rust-lang.org/std/io/struct.Error.html#method.raw_os_error)
+permit exact ENOSPC/quota classification rather than matching error strings.
+RDS retries only those capacity failures. The durable issuer retains its lock,
+accepts only the verified previous state or its exact attempted successor, and
+synchronizes verified bytes before resuming publication. Both file data and
+namespace synchronization matter after rename; the
+[Linux filesystem proceedings](https://www.kernel.org/doc/mirror/ols2009.pdf)
+describe that durability boundary. Corrupt/unrelated state, unsafe files,
+clock rollback and other errors retain their failure behavior. Transport inputs
+are never replayed, and authorization/feed expiry is unchanged.
+
+Native injected faults cover all five existing write/sync/rename checkpoints,
+including repeated full-storage recovery, exclusive ownership, exact signed
+retry bytes, successor revision and reopening. These tests deliberately do not
+fill a user's disk or claim installed two-device acceptance. Separately,
+[Iroh's multipath API](https://www.iroh.computer/blog/iroh-0-96-0-the-quic-multipaths-to-1-0)
+requires per-path observations; cached RTT alone is not evidence of current
+application progress. Keep source/code tests distinct from physical latency.
+
 ## 2026-10-05 independent control liveness
 
 QUIC delivers bytes in order within a stream; progress on another stream does
