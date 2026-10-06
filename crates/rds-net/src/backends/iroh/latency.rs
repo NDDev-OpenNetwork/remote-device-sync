@@ -14,8 +14,46 @@ impl PathSelector for LatencySelector {
     }
 
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
-        let choice = choose(ctx.paths().filter_map(|path| {
-            let rtt = path.stats()?.rtt;
+        let paths: Vec<_> = ctx
+            .paths()
+            .filter_map(|path| {
+                let rtt = path.stats()?.rtt;
+                let progress = path
+                    .congestion_state()
+                    .and_then(crate::ack_progress::snapshot);
+                if progress.is_some_and(|state| state.needs_probe()) {
+                    path.ping();
+                }
+                Some((path, rtt, progress))
+            })
+            .collect();
+        for (failed, rtt, progress) in &paths {
+            if !progress.is_some_and(|state| state.stalled(*rtt)) {
+                continue;
+            }
+            for (fallback, other_rtt, state) in &paths {
+                if state
+                    .is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
+                    && failed.abandon_with_fallback(fallback)
+                {
+                    tracing::warn!(target:"rds_net::path_policy",
+                        pending_ack_age_ms=?progress.and_then(|state| state.pending_age()).map(|age| age.as_millis()),
+                        fallback_ack_age_ms=?state.and_then(|state| state.confirmation_age()).map(|age| age.as_millis()),
+                        path_rtt_ms=rtt.as_millis(), fallback_rtt_ms=other_rtt.as_millis(),
+                        "unresponsive path retired with a confirmed sibling; reliable streams retained");
+                    break;
+                }
+            }
+        }
+        let has_confirmed = paths.iter().any(|(_, rtt, state)| {
+            state.is_some_and(|state| state.confirmed(*rtt) && !state.stalled(*rtt))
+        });
+        let choice = choose(paths.into_iter().filter_map(|(path, rtt, state)| {
+            if state.is_some_and(|state| state.stalled(rtt))
+                || (has_confirmed && state.is_some_and(|state| !state.confirmed(rtt)))
+            {
+                return None;
+            }
             let current = Some(path.network_path()) == ctx.current();
             Some((path, rtt, current))
         }));

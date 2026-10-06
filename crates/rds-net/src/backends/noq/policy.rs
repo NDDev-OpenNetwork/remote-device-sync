@@ -461,6 +461,9 @@ fn reselect(
     if !conn.is_alive() {
         return;
     }
+    let Some(connection) = conn.upgrade() else {
+        return;
+    };
     // A WeakPathHandle can upgrade even after its path closes: it retains
     // final statistics until dropped. Upgrade alone is not a liveness check.
     paths.retain(|_, weak| weak.upgrade().is_some_and(|path| path.status().is_ok()));
@@ -487,7 +490,7 @@ fn reselect(
         return;
     }
 
-    let rtts: Vec<(noq::PathId, Duration)> = paths
+    let candidates: Vec<_> = paths
         .iter()
         .filter_map(|(id, weak)| {
             let path = weak.upgrade()?;
@@ -509,7 +512,50 @@ fn reselect(
             } else {
                 path.stats().rtt
             };
-            Some((*id, rtt))
+            let progress = connection
+                .congestion_state(*id)
+                .and_then(crate::ack_progress::snapshot);
+            if progress.is_some_and(|state| state.needs_probe()) {
+                let _ = path.ping();
+            }
+            Some((*id, rtt, progress))
+        })
+        .collect();
+    for (id, rtt, state) in &candidates {
+        if !state.is_some_and(|state| state.stalled(*rtt)) {
+            continue;
+        }
+        let fallback = candidates.iter().find(|(other, other_rtt, state)| {
+            other != id
+                && state
+                    .is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
+        });
+        if let Some((other, other_rtt, fallback_state)) = fallback
+            && let Some(path) = connection.path(*other)
+            && path.set_status(noq::PathStatus::Available).is_ok()
+            && let Some(failed) = connection.path(*id)
+            && failed.close().is_ok()
+        {
+            tracing::warn!(target:"rds_net::path_policy", path_id=%id, fallback_path_id=%other,
+                pending_ack_age_ms=?state.and_then(|state| state.pending_age()).map(|age| age.as_millis()),
+                fallback_ack_age_ms=?fallback_state.and_then(|state| state.confirmation_age()).map(|age| age.as_millis()),
+                path_rtt_ms=rtt.as_millis(), fallback_rtt_ms=other_rtt.as_millis(),
+                "unresponsive path retired with a confirmed sibling; reliable streams retained");
+        }
+    }
+    let has_confirmed = candidates.iter().any(|(_, rtt, state)| {
+        state.is_some_and(|state| state.confirmed(*rtt) && !state.stalled(*rtt))
+    });
+    let rtts: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|(id, rtt, state)| {
+            if state.is_some_and(|state| state.stalled(rtt))
+                || (has_confirmed && state.is_some_and(|state| !state.confirmed(rtt)))
+            {
+                None
+            } else {
+                Some((id, rtt))
+            }
         })
         .collect();
     let Some((mut choice, best_rtt)) = rtts.iter().min_by_key(|(_, rtt)| *rtt).copied() else {

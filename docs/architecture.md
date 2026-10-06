@@ -10,6 +10,14 @@ between any two enrolled devices, assisted by a GDS-operated server.
 Design goals, in order: **minimum interactive latency**, **maximum
 connection stability**, defense in depth, no inbound firewall changes.
 
+Explicit latency path preference now observes acknowledgement progress as well
+as RTT. A passive adapter delegates the chosen congestion controller unchanged;
+each established path owns its pending-work proof and runtime clock. A path
+with outstanding ack-eliciting work and no progress for `max(4 RTT, 500ms)` may
+retire only with a recently confirmed established sibling. The existing reliable
+stream transfers to that sibling through Noq's ordinary path-abandon machinery;
+the last open path is never retired. See [the recovery evidence](reports/rds-path-ack-progress-20261006.md).
+
 Status: v0.1 foundation. This document records the protocol and stack
 research and the decisions that fall out of it. The deeper second-pass
 research — iroh 1.2/noq internals (multipath, path selectors, hooks),

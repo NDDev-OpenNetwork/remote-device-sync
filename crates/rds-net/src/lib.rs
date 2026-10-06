@@ -42,6 +42,7 @@ pub mod backends {
     #[cfg(feature = "transport-noq")]
     pub mod noq;
 }
+mod ack_progress;
 pub mod deadline;
 mod identity;
 pub mod metrics;

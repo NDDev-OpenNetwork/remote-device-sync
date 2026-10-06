@@ -1470,6 +1470,39 @@ impl<'a> PathSelectionData<'a> {
             StatsSource::Test(stats) => stats.as_deref().copied(),
         }
     }
+
+    /// Snapshot the selected congestion controller without retaining I/O.
+    pub fn congestion_state(&self) -> Option<Box<dyn noq::congestion::Controller>> {
+        match &self.source {
+            StatsSource::Live { path_id, conn } => conn.congestion_state(*path_id),
+            #[cfg(test)]
+            StatsSource::Test(_) => None,
+        }
+    }
+
+    /// Send an acknowledgement-eliciting probe on this established path.
+    pub fn ping(&self) -> bool {
+        match &self.source {
+            StatsSource::Live { path_id, conn } => conn.path(*path_id).is_some_and(|path| path.ping().is_ok()),
+            #[cfg(test)]
+            StatsSource::Test(_) => false,
+        }
+    }
+
+    /// Retire only this path after activating an established alternative in the
+    /// same connection. Noq refuses closing the last open path. Outstanding
+    /// reliable bytes retain the engine's ordinary retransmission semantics.
+    pub fn abandon_with_fallback(&self, fallback: &Self) -> bool {
+        match (&self.source, &fallback.source) {
+            (StatsSource::Live { path_id, conn }, StatsSource::Live { path_id: other, conn: sibling })
+                if path_id != other && conn.stable_id() == sibling.stable_id() => {
+                let Some(alternative) = conn.path(*other) else { return false };
+                if alternative.set_status(PathStatus::Available).is_err() { return false }
+                conn.path(*path_id).is_some_and(|path| path.close().is_ok())
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Trait to configure path selection.
