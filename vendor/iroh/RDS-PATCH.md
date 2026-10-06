@@ -14,3 +14,11 @@ only weak connection references; refresh does not add connection ownership.
 No default behavior change for other selectors. This temporary source patch
 keeps the working substrate while the owned Noq backend retains its existing
 periodic lowest-RTT policy. Upstream qualification and convergence remain work.
+
+The RDS opt-in latency policy additionally reads the already-public Noq
+congestion-controller snapshot, probes an established path, and can retire a
+failed path after activating an established sibling in the same connection.
+These small `PathSelectionData` methods remain in the same patched source file.
+Noq's last-open-path guard and reliable retransmission remain unchanged. No
+default selector, controller, handshake, TLS, transport eligibility or wire format
+is replaced; the RDS controller adapter delegates the actual congestion algorithm.

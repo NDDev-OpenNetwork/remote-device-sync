@@ -33,6 +33,8 @@ tokio-util = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
+n0-watcher = "1.0.0"
+iroh-base = "1.3.0"
 iroh-relay = { workspace = true, features = ["server"] }
 proptest.workspace = true
 turmoil = "0.7.2"

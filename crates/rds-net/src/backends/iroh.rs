@@ -11,6 +11,8 @@ use iroh::{Endpoint, RelayMap, RelayMode};
 
 use crate::{EndpointAddr, EndpointConfig, EndpointId, RelayUrl, TransportAddr};
 mod latency;
+#[cfg(all(test, feature = "transport-noq"))]
+mod latency_tests;
 
 /// Adapter conversions between the owned shared types and iroh-base.
 ///
@@ -126,8 +128,17 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     //   100 ms; a larger per-stream window keeps a big keyframe or sync
     //   chunk stream from stalling on high-BDP links.
     // - 32 MiB connection send window keeps several bulk streams busy.
+    let controller = config.congestion_control.factory();
+    let controller = if config.path_preference == crate::PathPreference::Latency {
+        crate::ack_progress::factory(
+            controller,
+            std::sync::Arc::new(|| tokio::time::Instant::now().into_std()),
+        )
+    } else {
+        controller
+    };
     let mut transport = iroh::endpoint::QuicTransportConfig::builder()
-        .congestion_controller_factory(config.congestion_control.factory())
+        .congestion_controller_factory(controller)
         .stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024))
         .send_window(32 * 1024 * 1024);
     if config.packetization == crate::Packetization::Conservative {
