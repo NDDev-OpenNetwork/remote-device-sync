@@ -874,3 +874,23 @@ Real holds, client repeats, shared ownership and restoration remain required.
 The dedicated Xvfb regression observes map notifications alongside delayed
 release, repeats, modifiers and Backspace. Native composited-desktop timing
 must still establish how much this defect contributed to a reported stall.
+
+## Transport responsiveness baseline — 2026-10-06
+
+The Iroh adapter now requires the 1.3 release line, with the lockfile binding
+Iroh/base/relay1.3.0. Noq remains1.3.0; transport settings and protocol surfaces
+are unchanged. [Iroh1.3 release](https://github.com/n0-computer/iroh/releases/tag/v1.3.0)
+includes [upstream4512](https://github.com/n0-computer/iroh/pull/4512): a full relay
+send queue previously retained the remote actor while it awaited a datagram
+send. The replacement owns at most16pending sends per peer, sends selected
+paths concurrently, bounds each send to3seconds and disposes pending work when
+the actor exits. The actor can continue handling route and connection events.
+This repairs a known establishment/recovery risk; it is not proof that every
+steady-state desktop input pause had this cause.
+
+[QUIC9000](https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2) guarantees ordered
+delivery within a stream and isolates ordering between different streams; it
+does not remove congestion/flow-control or application-reader delays. Existing
+RDS desktop control priority, isolated media streams, bounded input queues and
+validated payload receipts remain. A fast write means local admission, not
+remote receipt. Installed burst/idle and network-change acceptance remains open.
