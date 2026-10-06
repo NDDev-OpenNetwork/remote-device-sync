@@ -1,7 +1,8 @@
 //! Real Iroh actor over a bounded controllable custom link and UDP fallback.
 use iroh::TransportAddr;
 use iroh::endpoint::transports::{
-    CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
+    CustomEndpoint, CustomSender, CustomTransport, PathSelection, PathSelectionContext,
+    PathSelector, RecvInfo, Transmit,
 };
 use iroh_base::CustomAddr;
 use std::collections::HashMap;
@@ -123,7 +124,33 @@ impl CustomSender for LinkSender {
     }
 }
 
-async fn endpoint(link: Link) -> iroh::Endpoint {
+#[derive(Debug)]
+struct SetupSelector(Arc<AtomicBool>);
+impl PathSelector for SetupSelector {
+    fn refresh_interval(&self) -> Option<Duration> {
+        Some(Duration::from_secs(1))
+    }
+    fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
+        if self.0.load(Ordering::Acquire) {
+            return super::latency::LatencySelector.select(ctx);
+        }
+        // Establish the failure precondition deterministically. On a busy CI
+        // runner the genuinely faster UDP path may otherwise win before loss
+        // is injected, leaving this a test of setup timing rather than recovery.
+        let mut choice = PathSelection::none();
+        if let Some(path) = ctx.paths().find(|path| {
+            matches!(
+                path.network_path().remote(),
+                iroh::endpoint::transports::Addr::Custom(_)
+            )
+        }) {
+            choice.set(&path);
+        }
+        choice
+    }
+}
+
+async fn endpoint(link: Link, armed: Arc<AtomicBool>) -> iroh::Endpoint {
     let mut transport = iroh::endpoint::QuicTransportConfig::builder()
         .congestion_controller_factory(crate::ack_progress::factory(
             crate::CongestionControl::Cubic.factory(),
@@ -140,7 +167,7 @@ async fn endpoint(link: Link) -> iroh::Endpoint {
         .unwrap()
         .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
         .add_custom_transport(Arc::new(link))
-        .path_selector(Arc::new(super::latency::LatencySelector))
+        .path_selector(Arc::new(SetupSelector(armed)))
         .transport_config(transport.build())
         .alpns(vec![rds_core::ALPN.to_vec()])
         .bind()
@@ -152,10 +179,11 @@ async fn endpoint(link: Link) -> iroh::Endpoint {
 async fn actual_iroh_actor_retires_blackholed_preferred_link_and_delivers_pending_stream_bytes() {
     tokio::time::timeout(Duration::from_secs(15),async {
         let fabric=Fabric::default();
+        let armed=Arc::new(AtomicBool::new(false));
         let dropping=Arc::new(AtomicBool::new(false));let dropped=Arc::new(AtomicU64::new(0));
         let a_addr=CustomAddr::from_parts(0x72647374657374,b"a");let b_addr=CustomAddr::from_parts(0x72647374657374,b"b");
-        let a=endpoint(Link {addr:a_addr,fabric:fabric.clone(),drop_packets:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicU64::new(0))}).await;
-        let b=endpoint(Link {addr:b_addr.clone(),fabric,drop_packets:dropping.clone(),dropped:dropped.clone()}).await;
+        let a=endpoint(Link {addr:a_addr,fabric:fabric.clone(),drop_packets:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicU64::new(0))},armed.clone()).await;
+        let b=endpoint(Link {addr:b_addr.clone(),fabric,drop_packets:dropping.clone(),dropped:dropped.clone()},armed.clone()).await;
         let target=iroh::EndpointAddr::from_parts(b.id(),[TransportAddr::Custom(b_addr)]);
         let (client,server)=tokio::join!(a.connect(target,rds_core::ALPN),async {b.accept().await.unwrap().await});
         let (client,server)=(client.unwrap(),server.unwrap());
@@ -169,7 +197,15 @@ async fn actual_iroh_actor_retires_blackholed_preferred_link_and_delivers_pendin
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.expect("fixture did not establish its UDP standby while the custom link was preferred");
+        let selected=server.paths().iter().find(|path|path.is_selected()).unwrap().id();
+        let before=server.paths().get(selected).unwrap().stats().frame_tx.stream;
         dropping.store(true,Ordering::Release);let started=Instant::now();send.write_all(b"pending reliable bytes").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1),async {
+            while dropped.load(Ordering::Relaxed)==0 || server.paths().get(selected).unwrap().stats().frame_tx.stream<=before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("fixture did not emit and drop the already-pending stream frame");
+        armed.store(true,Ordering::Release);
         let mut body=[0;22];let result=tokio::time::timeout(Duration::from_secs(3),reply.read_exact(&mut body)).await;
         let elapsed=started.elapsed().as_millis();let injected=dropped.load(Ordering::Relaxed);
         tokio::join!(a.close(),b.close());
