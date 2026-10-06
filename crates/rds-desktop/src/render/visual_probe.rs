@@ -166,7 +166,16 @@ impl VisualProbe {
             return;
         }
         self.expire(now);
-        if !self.report.keyboard_armed {
+        // Input remains ordered behind the focus click even when its response
+        // has not been presented yet. Retain these provisional keys in the
+        // same counter sequence; skipping them would match their responses to
+        // later keys and report an impossibly short input-to-submit time.
+        // They cannot complete until presentation also confirms the click.
+        let focus_click_pending = self
+            .pending
+            .iter()
+            .any(|(_, _, _, kind)| *kind == ProbeInput::Click);
+        if !self.report.keyboard_armed && !focus_click_pending {
             self.report.unanchored_keys += 1;
             return;
         }
@@ -541,6 +550,77 @@ mod tests {
         assert!(probe.report().correlation_lost);
         assert_eq!(probe.report().keyboard_samples, 0);
         assert_eq!(probe.report().canceled, 1);
+    }
+    #[test]
+    fn typing_before_focus_click_presentation_keeps_the_actual_counter_sequence() {
+        let mut spec = spec();
+        spec.keyboard_codes = vec![30, 14];
+        let start = Instant::now();
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.click((2., 26.), 1, start);
+        probe.key(30, true, 2, start + Duration::from_millis(10));
+        probe.key(14, true, 3, start + Duration::from_millis(20));
+        assert!(!probe.report().keyboard_armed);
+        assert_eq!(probe.report().pending, 3);
+        assert_eq!(probe.report().unanchored_keys, 0);
+        // Presentation of only the click must not complete either later key.
+        probe.presented(&marker(spec.prefix, 1), start + Duration::from_millis(150));
+        assert_eq!(probe.report().keyboard_samples, 0);
+        assert_eq!(probe.report().pending, 2);
+        probe.presented(&marker(spec.prefix, 3), start + Duration::from_millis(180));
+        let report = probe.report();
+        assert_eq!(report.samples, 3);
+        assert_eq!(report.keyboard_samples, 2);
+        assert_eq!(report.keyboard_input_to_submit_min_ms, Some(160.));
+        assert_eq!(report.keyboard_input_to_submit_max_ms, Some(170.));
+        assert!(!report.correlation_lost);
+    }
+    #[test]
+    fn collapsed_fast_typing_frame_and_focus_loss_preserve_measurement_boundaries() {
+        let mut spec = spec();
+        spec.keyboard_codes = vec![30, 14];
+        let start = Instant::now();
+        for lose_focus in [false, true] {
+            let mut probe = VisualProbe::new(spec.clone()).unwrap();
+            probe.presented(&marker(spec.prefix, 0), start);
+            probe.click((2., 26.), 1, start);
+            for seq in 2..=33 {
+                probe.key(30, true, seq, start + Duration::from_millis(seq));
+            }
+            if lose_focus {
+                probe.keyboard_focus_lost();
+            }
+            // The newest frame may contain the click and all 32 characters.
+            probe.presented(&marker(spec.prefix, 33), start + Duration::from_millis(200));
+            let report = probe.report();
+            assert_eq!(report.pending, 0);
+            assert_eq!(report.keyboard_samples, if lose_focus { 0 } else { 32 });
+            assert_eq!(report.canceled, if lose_focus { 33 } else { 0 });
+            if !lose_focus {
+                assert_eq!(report.keyboard_input_to_submit_min_ms, Some(167.));
+                assert_eq!(report.keyboard_input_to_submit_max_ms, Some(198.));
+                assert!(report.keyboard_armed);
+                assert!(!report.correlation_lost);
+            }
+        }
+    }
+    #[test]
+    fn provisional_typing_does_not_survive_an_unanswered_focus_click() {
+        let mut spec = spec();
+        spec.keyboard_codes = vec![30];
+        let start = Instant::now();
+        let mut probe = VisualProbe::new(spec.clone()).unwrap();
+        probe.presented(&marker(spec.prefix, 0), start);
+        probe.click((2., 26.), 1, start);
+        probe.key(30, true, 2, start + Duration::from_millis(10));
+        probe.presented(&marker(spec.prefix, 2), start + RESPONSE_TIMEOUT);
+        let report = probe.report();
+        assert!(report.correlation_lost);
+        assert!(!report.keyboard_armed);
+        assert_eq!(report.samples, 0);
+        assert_eq!(report.canceled, 2);
+        assert_eq!(report.timed_out, 1);
     }
     #[test]
     fn keyboard_descriptor_bounds_preserve_click_only_defaults() {

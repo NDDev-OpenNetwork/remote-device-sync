@@ -98,8 +98,12 @@ physical evdev codes. Empty/absent preserves click-only diagnostics. Modifier an
 lock/toggle codes are refused. The controlled field increments the same marker
 once per target click and once per listed unmodified KeyDown, after its native
 insertion/deletion handler. KeyUp does not advance it. Keyboard measurement arms
-only after a target click's response reaches native GPU presentation. Merely
-visible markers do not prove focus. Native focus loss, outside clicks, other
+only after a target click's response reaches native GPU presentation. Keys
+ordered behind that pending focus click are retained provisionally in the same
+counter sequence, so typing before its first visible response cannot shift
+later measurements onto earlier characters. They complete only in a presented
+frame that also confirms the click. Merely visible markers do not prove focus.
+Native focus loss, outside clicks, other
 pointer-button presses, unavailable/missing markers and reset disarm/cancel it.
 Modified tracked keys or a counter ahead of queued inputs fail the attempt;
 subsequent frames cannot restore lost correlation. The original timeout and
