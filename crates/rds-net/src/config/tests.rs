@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn latency_path_preference_is_explicit_and_cannot_expand_transport_scope() {
+    let legacy = EndpointSettings::from_json(br#"{"schema_version":1}"#).unwrap();
+    assert_eq!(
+        legacy.path_preference,
+        crate::PathPreference::BackendDefault
+    );
+    assert!(
+        !serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("path_preference")
+    );
+    let latency = EndpointSettings::from_json(br#"{"schema_version":1,"path_preference":"latency","max_multipath_paths":1,"transports":"relay-only","relay":{"mode":"iroh","urls":["http://127.0.0.1:3340"]}}"#).unwrap();
+    assert_eq!(
+        EndpointSettings::from_json(&serde_json::to_vec(&latency).unwrap()).unwrap(),
+        latency
+    );
+    let lowered = latency
+        .apply(EndpointOverrides::default())
+        .unwrap()
+        .into_endpoint()
+        .unwrap();
+    assert_eq!(lowered.path_preference, crate::PathPreference::Latency);
+    assert_eq!(lowered.transports, crate::Transports::RelayOnly);
+    assert_eq!(lowered.max_multipath_paths, Some(1));
+    assert!(
+        EndpointSettings::from_json(br#"{"schema_version":1,"path_preference":"unknown"}"#)
+            .is_err()
+    );
+}
+
+#[test]
 fn explicit_congestion_selection_preserves_legacy_defaults_and_lowers_exactly() {
     let legacy = EndpointSettings::from_json(br#"{"schema_version":1}"#).unwrap();
     assert_eq!(legacy.congestion_control, crate::CongestionControl::Bbr3);

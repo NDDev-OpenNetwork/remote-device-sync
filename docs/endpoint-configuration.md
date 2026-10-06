@@ -39,6 +39,7 @@ configuration (role/service/authority/timeout sections).
 | `max_multipath_paths` | Optional integer 1–32; absent preserves the backend default |
 | `transports` | `all` (default), `direct-only`, or `relay-only`; bounds usable path kinds |
 | `packetization` | `adaptive` (default), or `conservative`: 1200-byte primary QUIC UDP payloads, MTU discovery and GSO disabled |
+| `path_preference` | `backend-default` (legacy policy), or `latency`: lower measured RTT across allowed direct/relay paths; explicit single-path pins still win |
 | `congestion_control` | `bbr3` (default), or `cubic`; explicit local controller selection for measured qualification |
 
 Congestion selection is independent of stream priority, path kinds, packetization,
@@ -182,3 +183,21 @@ or dial; these service options do not extend the endpoint JSON schema. See
 
 `rds ssh` opens an [embedded SSH session](ssh.md) on one authorized TCP stream;
 its account/host-key/PTY options are independent of endpoint configuration.
+
+## Measured latency preference
+
+`path_preference: latency` removes Iroh's unconditional direct-primary/relay-
+backup ranking and requests a1s bounded reselection interval. A5ms minimum gain
+keeps the current path under small fluctuations. The owned Noq backend already
+periodically ranks validated live paths by RTT with the same stickiness.
+Transport bounds and max_multipath_paths1 remain authoritative; no OS/VPN route,
+identity, authority, congestion-controller or wire setting changes. Defaults
+retain backend policy, and old strict binaries reject the new explicit field.
+
+Published Iroh1.3 invokes its selector on topology changes only. The exact
+published source is temporarily retained under vendor/iroh with an opt-in
+refresh hook: default selectors remain topology-only; intervals are bounded to
+250ms..60s, and periodic refresh does not reapply an unchanged selection. See
+the patch/provenance notice. No transport engine or cryptographic behavior is
+changed. A low standby RTT does not prove bulk capacity; qualify native latency,
+quality and migration under actual mixed load before adoption.

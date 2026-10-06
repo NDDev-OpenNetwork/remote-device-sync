@@ -60,6 +60,7 @@ async fn conservative_transfer(backend: Backend) {
             discovery: false,
             bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
             max_multipath_paths: Some(1),
+            path_preference: rds_net::PathPreference::Latency,
             observed_address_reports: false,
             ..Default::default()
         };
