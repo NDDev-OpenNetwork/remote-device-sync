@@ -1231,6 +1231,7 @@ pub async fn serve_desktop_with(
         let mut assembly = crate::clipboard::Assembly::default();
         let mut clipboard = None;
         loop {
+            let read_started = Instant::now();
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
                     if config.view_only {
@@ -1323,10 +1324,16 @@ pub async fn serve_desktop_with(
                     controls.requested.store(bps, Ordering::Relaxed);
                 }
                 Ok(DesktopControl::Heartbeat { seq, ts_ms }) => {
-                    if write_control_reply(&mut send.0, &DesktopEvent::Heartbeat { seq, ts_ms })
-                        .await
-                        .is_err()
-                    {
+                    tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq,
+                        read_wait_us=read_started.elapsed().as_micros(), "desktop heartbeat control read");
+                    let reply_started = Instant::now();
+                    let written =
+                        write_control_reply(&mut send.0, &DesktopEvent::Heartbeat { seq, ts_ms })
+                            .await
+                            .is_ok();
+                    tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq, written,
+                        write_us=reply_started.elapsed().as_micros(), "desktop heartbeat reply write completed");
+                    if !written {
                         break;
                     }
                 }
@@ -1408,6 +1415,8 @@ pub async fn serve_desktop_with(
                 }
                 Err(error) => {
                     tracing::debug!(%error,"desktop control ended");
+                    tracing::debug!(target:"rds_desktop::control_timing", error_kind=?error.kind(),
+                        read_wait_us=read_started.elapsed().as_micros(), "desktop control reader ended");
                     break;
                 }
             }

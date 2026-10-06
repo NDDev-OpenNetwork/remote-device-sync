@@ -455,9 +455,12 @@ impl DesktopSession {
                     let Some(msg) = msg else {
                         break;
                     };
-                    if let DesktopControl::Heartbeat { seq, ts_ms } = &msg {
+                    let heartbeat_seq = if let DesktopControl::Heartbeat { seq, ts_ms } = &msg {
                         sending_probes.lock().await.sent(*seq, *ts_ms);
-                    }
+                        Some(*seq)
+                    } else {
+                        None
+                    };
                     let input_seq = match &msg {
                         DesktopControl::Input(event) => Some(event.seq),
                         _ => None,
@@ -467,15 +470,25 @@ impl DesktopSession {
                         tracing::trace!(target:"rds_desktop::input_timing", input_seq,
                             "desktop input control write started");
                     }
+                    if let Some(heartbeat_seq) = heartbeat_seq {
+                        tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq,
+                            "desktop heartbeat control write started");
+                    }
                     let written = matches!(
                         tokio::time::timeout(FRAME_STREAM_TIMEOUT, write_frame(&mut send.0, &msg)).await,
                         Ok(Ok(()))
                     );
+                    if let Some(heartbeat_seq) = heartbeat_seq {
+                        tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq, written,
+                            write_us=started.elapsed().as_micros(), "desktop heartbeat control write completed");
+                    }
                     if let Some(input_seq) = input_seq {
                         tracing::trace!(target:"rds_desktop::input_timing", input_seq, written,
                             write_us=started.elapsed().as_micros(), "desktop input control write completed");
                     }
                     if !written {
+                        tracing::warn!(target:"rds_desktop::control_timing", input_seq, heartbeat_seq,
+                            "desktop control writer ended after incomplete write");
                         break;
                     }
                 }
@@ -487,9 +500,14 @@ impl DesktopSession {
         tasks.spawn(
             async move {
                 loop {
+                    let read_started = std::time::Instant::now();
                     match read_frame::<_, DesktopEvent>(&mut recv).await {
                         Ok(ev @ DesktopEvent::Heartbeat { seq, ts_ms }) => {
-                            if let Some(rtt) = probes.lock().await.echoed(seq, ts_ms) {
+                            let rtt = probes.lock().await.echoed(seq, ts_ms);
+                            tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq,
+                                matched=rtt.is_some(), read_wait_us=read_started.elapsed().as_micros(),
+                                rtt_ms=rtt.map(|rtt| rtt.as_millis()), "desktop heartbeat reply read");
+                            if let Some(rtt) = rtt {
                                 rtt_marker.store(rtt.as_millis() as u64, Ordering::Relaxed);
                             }
                             events_tx.send(ev);
@@ -497,7 +515,11 @@ impl DesktopSession {
                         Ok(ev) => {
                             events_tx.send(ev);
                         }
-                        Err(_) => break,
+                        Err(error) => {
+                            tracing::debug!(target:"rds_desktop::control_timing", error_kind=?error.kind(),
+                                read_wait_us=read_started.elapsed().as_micros(), "desktop event reader ended");
+                            break;
+                        }
                     }
                 }
             }

@@ -759,3 +759,17 @@ or revoke already applied input. The existing no-replay/canceled-ACK diagnostics
 remain essential to interpreting uncertain delivery.
 
 The [interactive retry and modifier follow-up](reports/rds-control-retry-modifiers-20261005.md) requires stable control confirmation before resetting retry backoff and deduplicates physical/flags key transitions.
+
+## Private heartbeat stage observation
+
+`rds_desktop::control_timing=trace` records heartbeat write start/completion at
+the client, framed control read/reply completion at the server, and matched reply
+read at the client. Sequence numbers, match outcomes and local durations only;
+no control bodies, credentials or addresses. Reader termination records its
+I/O error kind and elapsed pending read; incomplete writes have an explicit
+warning. A pending-read duration includes ordinary idle time, transport wait
+and scheduling. It is not network one-way latency. Successful writes establish
+local transport admission, not packet transmission or remote handling. Use exact
+owning connection/attempt context and qualified clocks before cross-host joins;
+sequence numbers alone are not globally unique. Existing bounded log output
+and all control deadlines/probe matching/cleanup rules remain unchanged.
