@@ -30,9 +30,25 @@ recovery, standby restoration before a later failure, Noq original-stream
 pending-byte recovery, backup ACK routing, probe-only debt and runtime clocks.
 The new tests supply the negative proof boundary.
 
-Broader workspace/features, Linux/X11, supply-chain and CI checks are being
-collected. No installed correction or causal improvement is asserted from this
-unit run. Private incident evidence retains source intervals and logging limits;
+Source `5169f0f` passed all 18 CI checks (16 successes and two ordinary skips),
+including both platform test jobs, native builds, supply-chain and Rust/Actions
+CodeQL. Merge `5f2445d` has the identical tree
+`46cd77bfaf8c3ec99e8b607566b6ea3adda67a32`. Mac strict desktop/Noq Clippy,
+workspace tests, net/Noq integrations and cargo-deny passed with FD4096. Linux
+net/Noq, strict workspace desktop/Noq and X11 Clippy, and the desktop-agent
+release passed. An initial command used an invalid feature name; the next
+workspace run exhausted its inherited FD256 limit. Both environment failures
+were retained. The full suite passed with the declared FD4096 profile; no test
+was removed or ignored to manufacture success.
+
+The [owned-relay migration harness](bench-standby-20261007.md) measured
+19.500375 ms drain recovery and 113.465041 ms kill recovery on isolated loopback
+relays using the original connection. These are two recovery samples, not
+recovery percentiles, Iroh three-origin qualification or native input/pixels.
+Installed correction receipts belong to the private estate; code/loopback
+checks do not establish causal native improvement.
+
+Private incident evidence retains source intervals and logging limits;
 correlation of route changes and slow input cannot identify every pause's cause.
 
 ## Remaining qualification

@@ -111,7 +111,6 @@ Notes:
   encoded frames and controls without decoding, so it works on headless
   manager builds; the *remote* still needs a capture backend, and the
   viewer build needs `rds-desktop/x11` for real decode.
-- Historical `transfer` reports predate receiver-verified timing; the
-  verified lane is renamed `transfer-receiver-ack-v1` on
-  `fix/verified-transfer-benchmark` — update this row when it merges
-  (old `transfer` reports stay incomparable, per benchmark doc).
+- Historical `transfer` reports predate receiver-verified timing. The current
+  verified lane is `transfer-receiver-ack-v1`; older sender-finish reports remain
+  incomparable under [the benchmark contract](benchmark-transfer.md).
