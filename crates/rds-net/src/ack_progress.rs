@@ -4,6 +4,7 @@ use noq_proto::RttEstimator;
 use noq_proto::congestion::{Controller, ControllerFactory, ControllerMetrics};
 use std::any::Any;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
@@ -12,8 +13,12 @@ pub(crate) type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 pub(crate) struct Observation {
     progress: Progress,
     now: Instant,
+    active_work: bool,
 }
 impl Observation {
+    pub(crate) fn has_active_work(self) -> bool {
+        self.active_work && self.progress.pending_since.is_some()
+    }
     pub(crate) fn confirmed(self, rtt: Duration) -> bool {
         self.progress.confirmed(self.now, rtt)
     }
@@ -92,6 +97,7 @@ impl ControllerFactory for Factory {
             progress: Progress::default(),
             reset_on_mutation: false,
             clock: self.1.clone(),
+            scope: Arc::new(AtomicU8::new(0)),
         })
     }
 }
@@ -109,7 +115,29 @@ pub(crate) fn snapshot(controller: Box<dyn Controller>) -> Option<Observation> {
         .map(|tracked| Observation {
             progress: tracked.progress,
             now: (tracked.clock)(),
+            active_work: tracked.scope.load(Ordering::Acquire) & 2 != 0,
         })
+}
+
+/// Mark the actual application route through a shared metadata cell. Controller
+/// snapshots do not mutate the CCA; live controller clones start a fresh cell.
+pub(crate) fn observe_active(controller: Box<dyn Controller>, active: bool) -> Option<Observation> {
+    let tracked = controller.into_any().downcast::<Tracked>().ok()?;
+    let _ = tracked
+        .scope
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+            let flags = (flags & !1) | u8::from(active);
+            Some(if active && tracked.progress.pending_since.is_some() {
+                flags | 2
+            } else {
+                flags
+            })
+        });
+    Some(Observation {
+        progress: tracked.progress,
+        now: (tracked.clock)(),
+        active_work: tracked.scope.load(Ordering::Acquire) & 2 != 0,
+    })
 }
 
 struct Tracked {
@@ -120,6 +148,8 @@ struct Tracked {
     // new proof domain without guessing across QUIC packet-number spaces.
     reset_on_mutation: bool,
     clock: Clock,
+    // Bit0: currently selected; bit1: outstanding work from an active tenure.
+    scope: Arc<AtomicU8>,
 }
 impl std::fmt::Debug for Tracked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -134,6 +164,7 @@ impl Tracked {
         if self.reset_on_mutation {
             self.progress = Progress::default();
             self.reset_on_mutation = false;
+            self.scope = Arc::new(AtomicU8::new(0));
         }
     }
 }
@@ -141,6 +172,15 @@ impl Controller for Tracked {
     fn on_sent(&mut self, now: Instant, bytes: u64, packet: u64) {
         self.prepare();
         self.inner.on_sent(now, bytes, packet);
+        if bytes > 0 {
+            let idle = self.progress.pending_since.is_none();
+            let _ = self
+                .scope
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+                    let active_work = flags & 1 != 0 || (!idle && flags & 2 != 0);
+                    Some((flags & !2) | if active_work { 2 } else { 0 })
+                });
+        }
         self.progress.sent(now, bytes);
     }
     fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet: u64) {
@@ -175,6 +215,9 @@ impl Controller for Tracked {
         self.prepare();
         self.inner.on_end_acks(now, in_flight, app_limited, largest);
         self.progress.end_acks(now, in_flight);
+        if in_flight == 0 {
+            self.scope.fetch_and(!2, Ordering::AcqRel);
+        }
     }
     fn on_congestion_event(
         &mut self,
@@ -217,6 +260,7 @@ impl Controller for Tracked {
             progress: self.progress,
             reset_on_mutation: true,
             clock: self.clock.clone(),
+            scope: self.scope.clone(),
         })
     }
     fn initial_window(&self) -> u64 {
@@ -230,6 +274,37 @@ impl Controller for Tracked {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn standby_probes_do_not_erase_outstanding_work_from_a_prior_active_tenure() {
+        let now = Instant::now();
+        let mut controller = factory(
+            crate::CongestionControl::Cubic.factory(),
+            Arc::new(move || now),
+        )
+        .build(now, 1200);
+        controller.on_sent(now, 100, 0);
+        assert!(!snapshot(controller.clone_box()).unwrap().has_active_work());
+        assert!(
+            observe_active(controller.clone_box(), true)
+                .unwrap()
+                .has_active_work()
+        );
+        assert!(
+            observe_active(controller.clone_box(), false)
+                .unwrap()
+                .has_active_work()
+        );
+        controller.on_end_acks(now, 0, true, Some(0));
+        controller.on_sent(now, 100, 1);
+        assert!(!snapshot(controller.clone_box()).unwrap().has_active_work());
+        let _ = observe_active(controller.clone_box(), true);
+        controller.on_sent(now, 100, 2);
+        assert!(snapshot(controller.clone_box()).unwrap().has_active_work());
+        let mut live_clone = controller.clone_box();
+        live_clone.on_sent(now, 100, 3);
+        assert!(!snapshot(live_clone.clone_box()).unwrap().has_active_work());
+        assert!(snapshot(controller.clone_box()).unwrap().has_active_work());
+    }
     #[test]
     fn a_high_rtt_path_is_not_failed_before_its_own_round_trip_budget() {
         let now = Instant::now();
@@ -275,6 +350,7 @@ mod tests {
             progress: Progress::default(),
             reset_on_mutation: false,
             clock: Arc::new(move || now),
+            scope: Arc::new(AtomicU8::new(0)),
         };
         tracked.progress.ack(now, 100);
         let expected_window = tracked.window();

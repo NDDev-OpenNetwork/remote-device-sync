@@ -34,3 +34,25 @@ is a prerequisite for using a new path;
 exposes individual paths and their observations. RDS standby restoration is an
 opt-in application policy, not a standard-mandated timer or a new congestion
 algorithm. Device/runtime evidence remains private in the estate.
+
+## Probe-only debt versus retained active-route work
+
+Final44013ae CI/native Linux exposed a later blackhole still removing the IP
+standby. A standby probe ACK can travel over the selected path; its absence
+alone must not discard the only alternative. Restricting retirement to only the
+current selection also stranded bytes sent during a previous active tenure when
+RTT ranking switched first, so that experiment is retained as a failed check.
+
+A small per-controller metadata cell now tracks selection and outstanding work
+from an active tenure. It delegates the CCA unchanged, preserves that debt after
+demotion, clears it when flight drains, and excludes a new idle standby probe.
+Snapshots share only this metadata; the first mutation of a live controller
+clone starts its own cell. Selection updates all route markers and initial Noq
+selection observes the already active handshake path. Retirement still needs
+stalled active-tenure work plus a positively confirmed established sibling.
+No application bytes are parsed or replayed by this metadata policy.
+
+Mac104net tests, strict workspace desktop/Noq Clippy/fmt and three further
+repetitions of both real restoration fixtures pass for this refinement.
+Full final-source Linux/CI and installed acceptance remain pending. Failed44013ae
+and current-selection-only artifacts are not deployment evidence.

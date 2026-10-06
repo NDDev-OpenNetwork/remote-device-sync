@@ -252,7 +252,16 @@ pub(super) async fn connection_driver_observed(
     // Paths opened to QNT-learned candidates — an Established event on
     // one of these is a QNT success.
     let mut qnt_paths: std::collections::HashSet<noq::PathId> = std::collections::HashSet::new();
-    let mut selected: Option<noq::PathId> = None;
+    // Preserve the handshake's active path before the first selection pass,
+    // including a path already stalled when this driver starts observing it.
+    let mut selected = paths
+        .iter()
+        .filter_map(|(id, weak)| {
+            weak.upgrade()
+                .filter(|path| path.status().ok() == Some(noq::PathStatus::Available))
+                .map(|_| *id)
+        })
+        .min();
 
     let mut pending = Pending::default();
     // `Transports::RelayOnly` endpoints admit only synthetic relay
@@ -576,9 +585,9 @@ fn reselect(
             } else {
                 path.stats().rtt
             };
-            let progress = connection
-                .congestion_state(*id)
-                .and_then(crate::ack_progress::snapshot);
+            let progress = connection.congestion_state(*id).and_then(|controller| {
+                crate::ack_progress::observe_active(controller, Some(*id) == *selected)
+            });
             if progress.is_some_and(|state| state.needs_probe()) {
                 let _ = path.ping();
             }
@@ -586,6 +595,9 @@ fn reselect(
         })
         .collect();
     for (id, rtt, state) in &candidates {
+        if !state.is_some_and(|state| state.has_active_work()) {
+            continue;
+        }
         if !state.is_some_and(|state| state.stalled(*rtt)) {
             continue;
         }
@@ -649,6 +661,12 @@ fn reselect(
         {
             tracing::debug!(?id, ?want, "path status applied");
         }
+        let _ = connection.congestion_state(*id).and_then(|controller| {
+            crate::ack_progress::observe_active(
+                controller,
+                *id == choice && path.status().ok() == Some(noq::PathStatus::Available),
+            )
+        });
     }
     // A close or engine error can race selection. Publish only a successfully
     // applied choice, never an attempted set_status.

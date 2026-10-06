@@ -21,9 +21,12 @@ impl PathSelector for LatencySelector {
             .paths()
             .filter_map(|path| {
                 let rtt = path.stats()?.rtt;
-                let progress = path
-                    .congestion_state()
-                    .and_then(crate::ack_progress::snapshot);
+                let progress = path.congestion_state().and_then(|controller| {
+                    crate::ack_progress::observe_active(
+                        controller,
+                        Some(path.network_path()) == ctx.current(),
+                    )
+                });
                 if progress.is_some_and(|state| state.needs_probe()) {
                     path.ping();
                 }
@@ -31,6 +34,9 @@ impl PathSelector for LatencySelector {
             })
             .collect();
         for (failed, rtt, progress) in &paths {
+            if !progress.is_some_and(|state| state.has_active_work()) {
+                continue;
+            }
             if !progress.is_some_and(|state| state.stalled(*rtt)) {
                 continue;
             }
@@ -60,6 +66,18 @@ impl PathSelector for LatencySelector {
             let current = Some(path.network_path()) == ctx.current();
             Some((path, rtt, current))
         }));
+        let selected = choice
+            .as_ref()
+            .map(|path| path.network_path())
+            .or(ctx.current());
+        for path in ctx.paths() {
+            let _ = path.congestion_state().and_then(|controller| {
+                crate::ack_progress::observe_active(
+                    controller,
+                    Some(path.network_path()) == selected,
+                )
+            });
+        }
         let mut selection = PathSelection::none();
         if let Some(path) = choice {
             selection.set(&path);

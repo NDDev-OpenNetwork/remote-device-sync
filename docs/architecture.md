@@ -767,3 +767,15 @@ the RDS workspace; provenance and licenses are retained. Existing/default and
 explicitly pinned selectors keep their original callback behavior. Noq already
 owns periodic validated-path ranking and needs no policy rewrite for this mode.
 This remains a staged qualification increment, not a new default or native pass.
+
+
+### Active-tenure work and standby probes
+
+ACK-progress retirement distinguishes work observed while a path served as the
+application route from new idle standby probes. A shared metadata cell records
+selection and retains outstanding active-tenure debt after demotion; an empty
+flight clears it before another idle probe. Snapshot clones share metadata, but
+live controller clones detach on first mutation. This does not parse/replay
+application bytes or change CCA callbacks/windows. A stale probe alone cannot
+retire the only alternative; previously selected unconfirmed work still receives
+same-connection path retirement after a confirmed sibling becomes available.
