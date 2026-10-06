@@ -775,6 +775,8 @@ Latency retirement reads unacknowledged STREAM metadata from Noq's existing
 sent-packet state. Probe-only debt does not authorize path retirement. This
 works for a previously selected path after demotion without selection markers,
 payload parsing or application replay. The normal CCA adapter stays passive.
+Pending debt observes Noq's ACK-eliciting on_packet_sent callback, rather than
+on_sent batches which also include ACK-only transmits. Both delegate unchanged.
 When ACK proof grows stale, the existing bounded periodic selector probes again
 even if an earlier probe is still outstanding.
 

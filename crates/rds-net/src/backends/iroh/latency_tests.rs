@@ -126,6 +126,17 @@ impl CustomSender for LinkSender {
 
 #[derive(Debug)]
 struct SetupSelector(Arc<AtomicBool>);
+fn maintain_probe_proof(ctx: &PathSelectionContext<'_>) {
+    for path in ctx.paths() {
+        if path
+            .congestion_state()
+            .and_then(crate::ack_progress::snapshot)
+            .is_some_and(|proof| proof.needs_probe())
+        {
+            path.ping();
+        }
+    }
+}
 impl PathSelector for SetupSelector {
     fn refresh_interval(&self) -> Option<Duration> {
         Some(Duration::from_secs(1))
@@ -134,6 +145,7 @@ impl PathSelector for SetupSelector {
         if self.0.load(Ordering::Acquire) {
             return super::latency::LatencySelector.select(ctx);
         }
+        maintain_probe_proof(ctx);
         // Establish the failure precondition deterministically. On a busy CI
         // runner the genuinely faster UDP path may otherwise win before loss
         // is injected, leaving this a test of setup timing rather than recovery.
@@ -204,7 +216,8 @@ impl PathSelector for StandbySelector {
                         .and_then(crate::ack_progress::snapshot);
                     let stats = path.stats();
                     eprintln!(
-                        "standby selector current={} ip={} stream_tx={:?} stream_work={:?} pending_ms={:?} confirmation_ms={:?} stalled={:?}",
+                        "standby selector route={:?} current={} ip={} stream_tx={:?} stream_work={:?} pending_ms={:?} confirmation_ms={:?} stalled={:?} carrier_acks={:?}",
+                        path.network_path(),
                         Some(path.network_path()) == ctx.current(),
                         matches!(
                             path.network_path().remote(),
@@ -216,12 +229,14 @@ impl PathSelector for StandbySelector {
                         proof
                             .and_then(|s| s.confirmation_age())
                             .map(|d| d.as_millis()),
-                        proof.zip(stats).map(|(p, s)| p.stalled(s.rtt))
+                        proof.zip(stats).map(|(p, s)| p.stalled(s.rtt)),
+                        stats.map(|s| s.frame_rx.path_acks)
                     );
                 }
             }
             return super::latency::LatencySelector.select(ctx);
         }
+        maintain_probe_proof(ctx);
         let ip = ctx.paths().find(|p| {
             matches!(
                 p.network_path().remote(),

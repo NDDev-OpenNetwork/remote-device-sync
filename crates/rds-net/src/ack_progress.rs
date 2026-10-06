@@ -139,11 +139,14 @@ impl Controller for Tracked {
     fn on_sent(&mut self, now: Instant, bytes: u64, packet: u64) {
         self.prepare();
         self.inner.on_sent(now, bytes, packet);
-        self.progress.sent(now, bytes);
     }
     fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet: u64) {
         self.prepare();
         self.inner.on_packet_sent(now, bytes, packet);
+        // Noq invokes on_sent for every transmit, including ACK-only packets.
+        // on_packet_sent is invoked only for ACK-eliciting packets. Observing
+        // pure ACK transmission would create debt that has no required reply.
+        self.progress.sent(now, bytes.into());
     }
     fn on_cwnd_limited(&mut self) {
         self.prepare();
@@ -250,6 +253,7 @@ mod tests {
             Arc::new(move || epoch + Duration::from_millis(ticks.load(Ordering::Relaxed)));
         let mut controller =
             factory(crate::CongestionControl::Cubic.factory(), clock).build(epoch, 1200);
+        controller.on_packet_sent(epoch, 100, 0);
         controller.on_sent(epoch, 100, 0);
         elapsed.store(499, Ordering::Relaxed);
         assert!(
@@ -308,6 +312,30 @@ mod tests {
         assert!(!progress.needs_probe(now + Duration::from_millis(999)));
         assert!(progress.needs_probe(now + Duration::from_secs(1)));
         assert!(progress.needs_probe(now + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn ack_only_transmission_never_creates_pending_ack_debt() {
+        let now = Instant::now();
+        let clock: Clock = Arc::new(move || now + Duration::from_secs(3));
+        let mut controller =
+            factory(crate::CongestionControl::Cubic.factory(), clock).build(now, 1200);
+        controller.on_sent(now, 1200, 1);
+        let proof = snapshot(controller.clone_box()).unwrap();
+        assert_eq!(proof.pending_age(), None);
+        assert!(!proof.stalled(Duration::from_millis(70)));
+        controller.on_packet_sent(now, 1200, 2);
+        assert!(
+            snapshot(controller.clone_box())
+                .unwrap()
+                .stalled(Duration::from_millis(70))
+        );
+        controller.on_end_acks(now, 0, true, Some(2));
+        controller.on_sent(now, 100, 3);
+        assert_eq!(
+            snapshot(controller.clone_box()).unwrap().pending_age(),
+            None
+        );
     }
     #[test]
     fn only_outstanding_ack_eliciting_work_can_stall_and_idle_resumption_gets_its_own_budget() {

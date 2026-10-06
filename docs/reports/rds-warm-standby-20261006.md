@@ -81,3 +81,21 @@ and ACK-routing-without-repeat-probes runs failed the later blackhole and remain
 in private check artifacts. Final source/CI, native Linux, installed and physical
 pixel-latency qualification are still pending. No failed source is eligible for
 deployment; complete native stability is not established by these synthetic tests.
+
+## ACK-only callback correction
+
+A repeated later-blackhole trace still failed after the first revised pass:
+healthy IP ACK carriers advanced their counters, yet the passive observation
+reported old pending debt. Noq 1.3 calls Controller::on_sent for every transmit,
+including ACK-only packets. Its on_packet_sent callback is guarded by the
+packet's ACK-eliciting flag in connection/packet_builder.rs. The adapter had
+used the former callback, creating debt that had no required ACK response.
+
+The observation now starts pending debt only in on_packet_sent; both callbacks
+still delegate unchanged to the real CCA. A regression proves ACK-only batches
+cannot create debt before or after a flight drains. The runtime-clock test
+models the actual pair of callbacks. Controlled setup selectors also retain
+the production cadence for standby probes before injection. The same two
+Iroh fixtures then passed with the original three-second delivery deadline.
+Full exact-source repeats and platform qualification remain pending; the
+earlier initial106-pass run does not erase the subsequent104-pass/2-fail run.
