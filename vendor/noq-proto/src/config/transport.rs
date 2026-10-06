@@ -421,7 +421,7 @@ impl TransportConfig {
     /// existing paths.
     ///
     /// The idle timeout will only apply to paths of a multipath-negotiated connection. Before
-    /// multipath is negotiated, only the connection-wide max idle timeout is in effect.   
+    /// multipath is negotiated, only the connection-wide max idle timeout is in effect.
     ///
     /// [`Connection::set_path_max_idle_timeout`]: crate::Connection::set_path_max_idle_timeout
     pub fn default_path_max_idle_timeout(&mut self, timeout: Option<Duration>) -> &mut Self {
