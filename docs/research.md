@@ -1,5 +1,16 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+## 2026-10-07 contemporaneous replacement proof
+
+[RFC 9000 §8.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-8.2) defines
+path validation, while [§9.4](https://www.rfc-editor.org/rfc/rfc9000.html#section-9.4)
+keeps loss and congestion state specific to a path. Validation and an old RTT
+do not establish current progress during a later outage. RDS's optional
+retirement policy now requires a still-fresh sibling ACK after the failed path's
+outstanding-work interval began. This is an RDS policy refinement, not an RFC
+threshold. Negative pre-failure/high-RTT tests supplement actual engine recovery;
+see [the scoped receipt](reports/rds-contemporaneous-fallback-20261007.md).
+
 ## 2026-10-07 independently registered relay reserves
 
 [Upstream issue 4319](https://github.com/n0-computer/iroh/issues/4319) reports a

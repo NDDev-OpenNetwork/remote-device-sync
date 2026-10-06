@@ -28,7 +28,9 @@ Explicit latency path preference now observes acknowledgement progress as well
 as RTT. A passive adapter delegates the chosen congestion controller unchanged;
 each established path owns its pending-work proof and runtime clock. A path
 with outstanding ack-eliciting work and no progress for `max(4 RTT, 500ms)` may
-retire only with a recently confirmed established sibling. The existing reliable
+retire only with an established sibling whose still-fresh ACK follows the start
+of that outstanding-work interval and which is not itself stalled. An older
+idle ACK cannot prove replacement progress during a common outage. The existing reliable
 stream transfers to that sibling through Noq's ordinary path-abandon machinery;
 the last open path is never retired. See [the recovery evidence](reports/rds-path-ack-progress-20261006.md).
 

@@ -608,10 +608,11 @@ fn reselect(
         if !state.is_some_and(|state| state.stalled(*rtt)) {
             continue;
         }
-        let fallback = candidates.iter().find(|(other, other_rtt, state, _)| {
+        let fallback = candidates.iter().find(|(other, other_rtt, sibling, _)| {
             other != id
-                && state
-                    .is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
+                && (*state)
+                    .zip(*sibling)
+                    .is_some_and(|(failed, sibling)| sibling.can_replace(failed, *other_rtt))
         });
         if let Some((other, other_rtt, fallback_state, _)) = fallback
             && let Some(path) = connection.path(*other)
