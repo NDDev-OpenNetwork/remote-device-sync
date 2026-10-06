@@ -10,7 +10,7 @@ with opt-in bounded actor refresh. Backend defaults remain; single-path pins
 and transport eligibility dominate preference. Noq already periodically ranks
 validated paths by RTT. No identity/authentication/wire/OS-route change.
 
-Exact published Iroh1.3 source and MIT/Apache-2.0 licenses are retained with the
+Exact published Iroh1.3 source and BSD-3-Clause license are retained with the
 small default-None refresh hook; intervals are clamped250ms..60s and unchanged
 selection is not reapplied. The patch is a temporary substrate repair, not a
 QUIC/TLS fork or completion of owned-Noq migration. No new third-party package.
