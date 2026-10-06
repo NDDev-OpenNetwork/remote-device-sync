@@ -684,3 +684,20 @@ level. Serving capture, pacing, media writers and receipts inherit their owning
 tracing span across task boundaries. Opt-in controlled visual response markers
 measure native input to submission of the matching response; the ordinary
 viewer does not inspect markers. See [the measurement receipt](reports/rds-causal-visual-probe-20261004.md).
+
+### Client transmit observation after a delayed control response
+
+`rds-net::WeakPathObserver` exposes backend-neutral live-path metadata without
+retaining the connection facade or transport I/O. Desktop control responses use
+a separate session-owned observation worker: one running blocking query and one
+newest queued request. Input/receipt writes and event reads never await it. Drop
+requests task cancellation; an already-running synchronous backend query may
+finish. Diagnostic failure does not terminate the desktop session.
+
+The worker retains at most eight current path baselines, prioritizing selected
+paths and reporting truncation/coverage. Slow responses report local transmit
+loss/cwnd/bytes and interval deltas, with absent/reset baselines explicitly
+unknown. Reply-to-observation age, query work time and evictions qualify those
+snapshots. The counters describe this endpoint's TX, not the peer's TX or outer
+tunnel losses. Numeric process-local control-instance IDs join write/read/path
+metadata; no key, address, route cookie, clipboard or typed body is logged.

@@ -773,3 +773,12 @@ local transport admission, not packet transmission or remote handling. Use exact
 owning connection/attempt context and qualified clocks before cross-host joins;
 sequence numbers alone are not globally unique. Existing bounded log output
 and all control deadlines/probe matching/cleanup rules remain unchanged.
+
+Slow control responses now include viewer-endpoint transmit-path observations
+on `rds_desktop::control_timing`. A bounded background query keeps backend locks
+outside input admission and the event reader. `control_instance` is local to one
+process attempt, not a wire/session credential. TX loss belongs to the endpoint
+producing the record; a server TX counter does not establish viewer TX loss.
+Snapshot age, evictions, coverage and truncation remain explicit. These are
+transport observations, not exact packet-to-input attribution, capacity or
+optical response measurements.
