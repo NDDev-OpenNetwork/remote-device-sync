@@ -253,7 +253,10 @@ impl RemoteStateActor {
         // Optional custom selection refresh; no interval runs for default selectors.
         let refresh_interval = self.state.path_selector.refresh_interval().map(|interval|
             interval.clamp(Duration::from_millis(250), Duration::from_secs(60)));
-        let refresh_paths = time::interval(refresh_interval.unwrap_or(Duration::from_secs(3600)));
+        let mut refresh_paths = time::interval(refresh_interval.unwrap_or(Duration::from_secs(3600)));
+        // Reselection uses current measurements; missed polls must not burst
+        // after suspension or a stalled actor and compete with fresh traffic.
+        refresh_paths.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         n0_future::pin!(refresh_paths);
 
         loop {

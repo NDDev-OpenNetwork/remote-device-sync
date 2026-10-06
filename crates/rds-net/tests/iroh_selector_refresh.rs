@@ -1,7 +1,7 @@
 //! Real actor refresh against isolated loopback endpoints; no deployed devices.
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 
@@ -11,6 +11,8 @@ use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelect
 struct CountingSelector {
     calls: Arc<AtomicU64>,
     interval: Option<Duration>,
+    stall: Arc<AtomicBool>,
+    stalled: Arc<AtomicBool>,
 }
 
 impl PathSelector for CountingSelector {
@@ -19,6 +21,11 @@ impl PathSelector for CountingSelector {
     }
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.stall.swap(false, Ordering::Relaxed) {
+            // Intentionally block only this isolated test actor to miss ticks.
+            std::thread::sleep(Duration::from_secs(1));
+            self.stalled.store(true, Ordering::Release);
+        }
         let mut choice = PathSelection::none();
         if let Some(path) = ctx.paths().next() {
             choice.set(&path);
@@ -27,8 +34,10 @@ impl PathSelector for CountingSelector {
     }
 }
 
-async fn exercise(interval: Option<Duration>) {
+async fn exercise(interval: Option<Duration>, stall_probe: bool) {
     let calls = Arc::new(AtomicU64::new(0));
+    let stall = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicBool::new(false));
     let a = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .clear_ip_transports()
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
@@ -37,6 +46,8 @@ async fn exercise(interval: Option<Duration>) {
         .path_selector(Arc::new(CountingSelector {
             calls: calls.clone(),
             interval,
+            stall: stall.clone(),
+            stalled: stalled.clone(),
         }))
         .alpns(vec![rds_core::ALPN.to_vec()])
         .bind()
@@ -80,6 +91,22 @@ async fn exercise(interval: Option<Duration>) {
             "default selector unexpectedly became periodic"
         );
     }
+    if stall_probe {
+        let before = calls.load(Ordering::Relaxed);
+        stall.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !stalled.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("isolated actor did not execute the delayed selector");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            calls.load(Ordering::Relaxed) - before < 4,
+            "missed refresh ticks burst instead of sampling only current state"
+        );
+    }
     // Ordinary bytes still flow while refresh runs, without new connections.
     let (mut send, mut recv) = client.open_bi().await.unwrap();
     send.write_all(b"refresh").await.unwrap();
@@ -103,10 +130,15 @@ async fn exercise(interval: Option<Duration>) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn custom_refresh_runs_without_topology_change_and_stops_with_endpoint() {
-    exercise(Some(Duration::from_millis(250))).await;
+    exercise(Some(Duration::from_millis(250)), false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn default_custom_selector_remains_topology_only() {
-    exercise(None).await;
+    exercise(None, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missed_refresh_ticks_do_not_burst_after_actor_stall() {
+    exercise(Some(Duration::from_millis(250)), true).await;
 }

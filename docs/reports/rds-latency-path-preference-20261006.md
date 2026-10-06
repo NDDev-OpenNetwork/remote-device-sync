@@ -31,6 +31,11 @@ weak transport reference, one worker and newest-only queued sample; no extra
 metadata query is added to input/control readers. Tests distinguish initial,
 changed, disappeared and reordered selections from ordinary RTT updates.
 
+Refresh skips missed ticks after suspension/stall; obsolete reselection polls
+must not burst and compete with current input/media work. An isolated real actor
+test stalls one callback long enough to miss multiple periods, checks that they
+are not replayed in a burst, then proves normal traffic and endpoint cleanup.
+
 Before that observation follow-up, strict desktop/owned-backend Clippy and all
 170 network tests passed locally on both supported platforms. Optimized agent
 builds also passed. Supply-chain and native packaging CI passed; the full CI
