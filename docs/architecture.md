@@ -769,13 +769,19 @@ owns periodic validated-path ranking and needs no policy rewrite for this mode.
 This remains a staged qualification increment, not a new default or native pass.
 
 
-### Active-tenure work and standby probes
+### STREAM work and independent standby acknowledgement
 
-ACK-progress retirement distinguishes work observed while a path served as the
-application route from new idle standby probes. A shared metadata cell records
-selection and retains outstanding active-tenure debt after demotion; an empty
-flight clears it before another idle probe. Snapshot clones share metadata, but
-live controller clones detach on first mutation. This does not parse/replay
-application bytes or change CCA callbacks/windows. A stale probe alone cannot
-retire the only alternative; previously selected unconfirmed work still receives
-same-connection path retirement after a confirmed sibling becomes available.
+Latency retirement reads unacknowledged STREAM metadata from Noq's existing
+sent-packet state. Probe-only debt does not authorize path retirement. This
+works for a previously selected path after demotion without selection markers,
+payload parsing or application replay. The normal CCA adapter stays passive.
+When ACK proof grows stale, the existing bounded periodic selector probes again
+even if an earlier probe is still outstanding.
+
+Latency preference also enables default-false same-path ACK scheduling in
+the vendored published Noq-proto 1.3 source. A validated backup can return its
+ACK without depending on the selected data path. ACKs for abandoned/unvalidated
+paths can use another route; single-path/handshake scheduling is unchanged.
+No wire, crypto, congestion or reliable-retransmission algorithm changes.
+See [patch provenance](../vendor/noq-proto/RDS-PATCH.md) and
+[failure/qualification evidence](reports/rds-warm-standby-20261006.md).

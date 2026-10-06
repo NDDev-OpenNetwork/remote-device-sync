@@ -164,6 +164,7 @@ async fn endpoint_with_selector(link: Link, selector: Arc<dyn PathSelector>) -> 
         .initial_mtu(1200)
         .min_mtu(1200)
         .mtu_discovery_config(None)
+        .prefer_same_path_acks(true)
         .enable_segmentation_offload(false);
     iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .clear_ip_transports()
@@ -184,6 +185,7 @@ struct StandbySelector {
     phase: AtomicU8,
     retired: AtomicBool,
     confirmed: AtomicBool,
+    ip_drained: AtomicBool,
 }
 impl PathSelector for StandbySelector {
     fn refresh_interval(&self) -> Option<Duration> {
@@ -195,6 +197,29 @@ impl PathSelector for StandbySelector {
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
         let phase = self.phase.load(Ordering::Acquire);
         if phase == 2 {
+            if std::env::var_os("RDS_TEST_STANDBY_TRACE").is_some() {
+                for path in ctx.paths() {
+                    let proof = path
+                        .congestion_state()
+                        .and_then(crate::ack_progress::snapshot);
+                    let stats = path.stats();
+                    eprintln!(
+                        "standby selector current={} ip={} stream_tx={:?} stream_work={:?} pending_ms={:?} confirmation_ms={:?} stalled={:?}",
+                        Some(path.network_path()) == ctx.current(),
+                        matches!(
+                            path.network_path().remote(),
+                            iroh::endpoint::transports::Addr::Ip(_)
+                        ),
+                        stats.map(|s| s.frame_tx.stream),
+                        stats.map(|s| s.unacknowledged_stream_frames),
+                        proof.and_then(|s| s.pending_age()).map(|d| d.as_millis()),
+                        proof
+                            .and_then(|s| s.confirmation_age())
+                            .map(|d| d.as_millis()),
+                        proof.zip(stats).map(|(p, s)| p.stalled(s.rtt))
+                    );
+                }
+            }
             return super::latency::LatencySelector.select(ctx);
         }
         let ip = ctx.paths().find(|p| {
@@ -215,6 +240,14 @@ impl PathSelector for StandbySelector {
                 choice.set(&path);
             }
         } else if let Some(ip) = ip {
+            if ip
+                .congestion_state()
+                .and_then(crate::ack_progress::snapshot)
+                .zip(ip.stats())
+                .is_some_and(|(_, stats)| !stats.unacknowledged_stream_frames)
+            {
+                self.ip_drained.store(true, Ordering::Release);
+            }
             if let Some(custom) = custom {
                 if !self.retired.load(Ordering::Acquire) {
                     if custom.abandon_with_fallback(&ip) {
@@ -245,6 +278,7 @@ async fn actual_iroh_actor_reopens_a_retired_standby_before_the_next_failure() {
             phase: AtomicU8::new(0),
             retired: AtomicBool::new(false),
             confirmed: AtomicBool::new(false),
+            ip_drained: AtomicBool::new(false),
         });
         let dropping = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicU64::new(0));
@@ -319,6 +353,21 @@ async fn actual_iroh_actor_reopens_a_retired_standby_before_the_next_failure() {
         })
         .await
         .expect("restored standby had no positive ACK proof");
+        // The IP is an actual data-bearing former route, not just a probe-only
+        // fixture. Complete and acknowledge its work before making it standby.
+        request.write_all(b"work").await.unwrap();
+        recv.read_exact(&mut warm).await.unwrap();
+        assert_eq!(&warm, b"work");
+        send.write_all(b"ok").await.unwrap();
+        reply.read_exact(&mut ack).await.unwrap();
+        selector.ip_drained.store(false, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !selector.ip_drained.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("active IP work did not drain before standby transition");
         selector.phase.store(0, Ordering::Release);
         tokio::time::timeout(Duration::from_secs(2), async {
             while !server

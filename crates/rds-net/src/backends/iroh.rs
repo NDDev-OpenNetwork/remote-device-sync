@@ -139,6 +139,7 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     };
     let mut transport = iroh::endpoint::QuicTransportConfig::builder()
         .congestion_controller_factory(controller)
+        .prefer_same_path_acks(config.path_preference == crate::PathPreference::Latency)
         .stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024))
         .send_window(32 * 1024 * 1024);
     if config.packetization == crate::Packetization::Conservative {

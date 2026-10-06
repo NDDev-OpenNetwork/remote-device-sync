@@ -139,6 +139,131 @@ async fn retiring_a_blackholed_path_preserves_already_sent_reliable_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_work_observation_excludes_probes_and_clears_after_ack() {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let (client, server, _, loss, dropped, _) = endpoints().await;
+        let cfg = client.client_configs.get(rds_core::ALPN).unwrap().clone();
+        let name = tls::name::encode(server.id());
+        let (a, b) = tokio::join!(
+            client
+                .inner
+                .connect_with(cfg, server.local_addr(), &name)
+                .unwrap(),
+            async { server.inner.accept().await.unwrap().await }
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        let (mut request, mut reply) = a.open_bi().await.unwrap();
+        request.write_all(b"open").await.unwrap();
+        let (mut send, mut recv) = b.accept_bi().await.unwrap();
+        let mut body = [0; 4];
+        recv.read_exact(&mut body).await.unwrap();
+        let path = b.path(noq::PathId::ZERO).unwrap();
+        assert!(!path.stats().unacknowledged_stream_frames);
+
+        loss.store(true, Ordering::Release);
+        let before = dropped.load(Ordering::Relaxed);
+        path.ping().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while dropped.load(Ordering::Relaxed) == before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("probe was not emitted into the blackhole");
+        assert!(
+            !path.stats().unacknowledged_stream_frames,
+            "PING must not claim STREAM work"
+        );
+
+        send.write_all(b"data").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !path.stats().unacknowledged_stream_frames {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("sent STREAM work was not observed");
+        loss.store(false, Ordering::Release);
+        reply.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"data");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while path.stats().unacknowledged_stream_frames {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("acknowledged STREAM work remained pending");
+        tokio::join!(client.close(), server.close());
+    })
+    .await
+    .expect("STREAM observation fixture did not terminate");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn backup_probe_ack_uses_the_backup_path_while_primary_is_available() {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let (client, server, secondary_addr, loss, _, _) = endpoints().await;
+        let cfg = client.client_configs.get(rds_core::ALPN).unwrap().clone();
+        let name = tls::name::encode(server.id());
+        let (a, b) = tokio::join!(
+            client
+                .inner
+                .connect_with(cfg, server.local_addr(), &name)
+                .unwrap(),
+            async { server.inner.accept().await.unwrap().await }
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        let secondary = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match a.open_path_ensure(secondary_addr, PathStatus::Backup).await {
+                    Ok(path) => break path,
+                    Err(noq::PathError::RemoteCidsExhausted) => {
+                        tokio::time::sleep(Duration::from_millis(5)).await
+                    }
+                    Err(error) => panic!("backup validation failed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("backup CID credit did not arrive");
+        secondary.set_status(PathStatus::Backup).unwrap();
+        let backup = b.path(secondary.id()).unwrap();
+        backup.set_status(PathStatus::Backup).unwrap();
+        a.path(noq::PathId::ZERO)
+            .unwrap()
+            .set_status(PathStatus::Available)
+            .unwrap();
+        b.path(noq::PathId::ZERO)
+            .unwrap()
+            .set_status(PathStatus::Available)
+            .unwrap();
+        // Read the carrier path's counter, rather than inferring the ACK route
+        // from the acknowledged path ID or a connection-wide total.
+        let before = backup.stats().frame_rx.path_acks;
+        loss.store(true, Ordering::Release);
+        backup.ping().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while backup.stats().frame_rx.path_acks <= before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("backup ACK depended on the selected primary carrier");
+        assert_eq!(backup.stats().frame_tx.stream, 0);
+        assert!(!backup.stats().unacknowledged_stream_frames);
+        assert_eq!(backup.status().unwrap(), PathStatus::Backup);
+        assert_eq!(
+            b.path(noq::PathId::ZERO).unwrap().status().unwrap(),
+            PathStatus::Available
+        );
+        loss.store(false, Ordering::Release);
+        tokio::join!(client.close(), server.close());
+    })
+    .await
+    .expect("backup ACK fixture did not terminate");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acknowledgement_starvation_policy_recovers_pending_bytes_without_reconnecting() {
     exercise(true).await;
 }

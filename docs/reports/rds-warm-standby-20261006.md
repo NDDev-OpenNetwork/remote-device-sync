@@ -21,9 +21,9 @@ stream after loss. A real Noq fixture consumes its initial candidate offer,
 closes an established standby, waits for a different validated path ID and ACK
 proof, then exchanges more bytes on the original stream.
 
-The final full Mac run passes103net tests and strict workspace desktop/Noq
+The initial local Mac run passed 103 net tests and strict workspace desktop/Noq
 Clippy after the one-IP and established-candidate guards. Two additional
-repetitions of both native restoration fixtures also pass. Linux/CI
+repetitions of both native restoration fixtures also pass. Later CI failures superseded that local-only result. Linux/CI
 and installed qualification remain pending. Earlier fixture failure and
 Clippy style errors remain in local evidence. This does not claim complete
 physical-network or native pixel latency acceptance.
@@ -43,16 +43,41 @@ alone must not discard the only alternative. Restricting retirement to only the
 current selection also stranded bytes sent during a previous active tenure when
 RTT ranking switched first, so that experiment is retained as a failed check.
 
-A small per-controller metadata cell now tracks selection and outstanding work
-from an active tenure. It delegates the CCA unchanged, preserves that debt after
-demotion, clears it when flight drains, and excludes a new idle standby probe.
-Snapshots share only this metadata; the first mutation of a live controller
-clone starts its own cell. Selection updates all route markers and initial Noq
-selection observes the already active handshake path. Retirement still needs
-stalled active-tenure work plus a positively confirmed established sibling.
-No application bytes are parsed or replayed by this metadata policy.
+The subsequent active-tenure heuristic passed a local 104-test run but failed
+later CI and a stronger data-bearing-IP fixture. That heuristic has been removed;
+those passing runs are historical and do not qualify the current source.
 
-Mac104net tests, strict workspace desktop/Noq Clippy/fmt and three further
-repetitions of both real restoration fixtures pass for this refinement.
-Full final-source Linux/CI and installed acceptance remain pending. Failed44013ae
-and current-selection-only artifacts are not deployment evidence.
+## Exact STREAM observation and independent ACK routing — 2026-10-07
+
+The published Noq-proto 1.3 source is vendored with retained licenses and checksum
+provenance. A PathStats boolean reads existing sent-packet STREAM metadata.
+Retirement now requires that actual pending work, ACK starvation, and an
+established sibling with fresh positive ACK evidence. No selection marker cell,
+payload parsing or application replay is needed. Stats are sampled once per
+candidate per policy evaluation, with opt-in debug records for stream work,
+selection, RTT and ACK ages.
+
+An isolated trace exposed a second issue: a standby could have outstanding PING
+work and stale ACK proof, which suppressed every later liveness probe. Meanwhile
+its PATH_ACK could depend on the selected failing route. Stale confirmation now
+requests another probe on the existing bounded selector cadence. Latency mode
+also enables a default-false same-path ACK option: a live validated Backup can
+carry its own ACK. Abandoned/unvalidated paths retain cross-path ACK fallback;
+handshake and single-path behavior are unchanged. This is permitted scheduling
+under [Multipath QUIC §5.5](https://www.ietf.org/archive/id/draft-ietf-quic-multipath-21.html#section-5.5),
+not a mandatory standard timer or a new congestion/loss algorithm.
+
+The stronger real Iroh fixture transfers and acknowledges data over IP before
+making it standby, then recovers 22 existing-stream bytes after the restored
+custom route fails. A real Noq fixture observes PING-only=false,
+unacknowledged STREAM=true, and acknowledged STREAM=false. Another checks
+PATH_ACK counters on the actual Backup carrier while the primary remains
+Available, without promoting the Backup or sending STREAM frames there.
+
+The first revised full Mac net run passed 106 unit tests and all integration
+suites, including interop, lifecycle, mux isolation and deterministic simulation.
+Default and desktop/Noq workspace Clippy passed. Earlier exact-metadata-only
+and ACK-routing-without-repeat-probes runs failed the later blackhole and remain
+in private check artifacts. Final source/CI, native Linux, installed and physical
+pixel-latency qualification are still pending. No failed source is eligible for
+deployment; complete native stability is not established by these synthetic tests.

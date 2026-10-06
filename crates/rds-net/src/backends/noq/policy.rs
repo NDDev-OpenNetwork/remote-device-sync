@@ -580,33 +580,40 @@ fn reselect(
             }
             // A draining path stays eligible — it may be the only one —
             // but at maximum penalty so any live sibling wins selection.
+            let stats = path.stats();
             let rtt = if draining != 0 && on_masked_slot(&path, draining) {
                 Duration::MAX
             } else {
-                path.stats().rtt
+                stats.rtt
             };
-            let progress = connection.congestion_state(*id).and_then(|controller| {
-                crate::ack_progress::observe_active(controller, Some(*id) == *selected)
-            });
+            let progress = connection
+                .congestion_state(*id)
+                .and_then(crate::ack_progress::snapshot);
             if progress.is_some_and(|state| state.needs_probe()) {
                 let _ = path.ping();
             }
-            Some((*id, rtt, progress))
+            tracing::debug!(target: "rds_net::path_policy", path_id=%id,
+                selected=*selected == Some(*id), stream_work=stats.unacknowledged_stream_frames,
+                path_rtt_ms=rtt.as_millis(),
+                pending_ack_age_ms=?progress.and_then(|s|s.pending_age()).map(|d|d.as_millis()),
+                confirmed_ack_age_ms=?progress.and_then(|s|s.confirmation_age()).map(|d|d.as_millis()),
+                "latency path progress observation");
+            Some((*id, rtt, progress, stats.unacknowledged_stream_frames))
         })
         .collect();
-    for (id, rtt, state) in &candidates {
-        if !state.is_some_and(|state| state.has_active_work()) {
+    for (id, rtt, state, stream_work) in &candidates {
+        if !stream_work {
             continue;
         }
         if !state.is_some_and(|state| state.stalled(*rtt)) {
             continue;
         }
-        let fallback = candidates.iter().find(|(other, other_rtt, state)| {
+        let fallback = candidates.iter().find(|(other, other_rtt, state, _)| {
             other != id
                 && state
                     .is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
         });
-        if let Some((other, other_rtt, fallback_state)) = fallback
+        if let Some((other, other_rtt, fallback_state, _)) = fallback
             && let Some(path) = connection.path(*other)
             && path.set_status(noq::PathStatus::Available).is_ok()
             && let Some(failed) = connection.path(*id)
@@ -619,12 +626,12 @@ fn reselect(
                 "unresponsive path retired with a confirmed sibling; reliable streams retained");
         }
     }
-    let has_confirmed = candidates.iter().any(|(_, rtt, state)| {
+    let has_confirmed = candidates.iter().any(|(_, rtt, state, _)| {
         state.is_some_and(|state| state.confirmed(*rtt) && !state.stalled(*rtt))
     });
     let rtts: Vec<_> = candidates
         .into_iter()
-        .filter_map(|(id, rtt, state)| {
+        .filter_map(|(id, rtt, state, _)| {
             if state.is_some_and(|state| state.stalled(rtt))
                 || (has_confirmed && state.is_some_and(|state| !state.confirmed(rtt)))
             {
@@ -661,12 +668,6 @@ fn reselect(
         {
             tracing::debug!(?id, ?want, "path status applied");
         }
-        let _ = connection.congestion_state(*id).and_then(|controller| {
-            crate::ack_progress::observe_active(
-                controller,
-                *id == choice && path.status().ok() == Some(noq::PathStatus::Available),
-            )
-        });
     }
     // A close or engine error can race selection. Publish only a successfully
     // applied choice, never an attempted set_status.

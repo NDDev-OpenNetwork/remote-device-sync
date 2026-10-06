@@ -86,6 +86,7 @@ fn transport_config(
         controller
     };
     cfg.congestion_controller_factory(controller);
+    cfg.prefer_same_path_acks(path_preference == crate::PathPreference::Latency);
     cfg.stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024));
     cfg.send_window(32 * 1024 * 1024);
     if packetization == crate::Packetization::Conservative {

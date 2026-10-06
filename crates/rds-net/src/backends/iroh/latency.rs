@@ -20,27 +20,32 @@ impl PathSelector for LatencySelector {
         let paths: Vec<_> = ctx
             .paths()
             .filter_map(|path| {
-                let rtt = path.stats()?.rtt;
-                let progress = path.congestion_state().and_then(|controller| {
-                    crate::ack_progress::observe_active(
-                        controller,
-                        Some(path.network_path()) == ctx.current(),
-                    )
-                });
+                let stats = path.stats()?;
+                let rtt = stats.rtt;
+                let progress = path
+                    .congestion_state()
+                    .and_then(crate::ack_progress::snapshot);
                 if progress.is_some_and(|state| state.needs_probe()) {
                     path.ping();
                 }
-                Some((path, rtt, progress))
+                tracing::debug!(target: "rds_net::path_policy",
+                    selected=Some(path.network_path()) == ctx.current(),
+                    stream_work=stats.unacknowledged_stream_frames,
+                    path_rtt_ms=rtt.as_millis(),
+                    pending_ack_age_ms=?progress.and_then(|s|s.pending_age()).map(|d|d.as_millis()),
+                    confirmed_ack_age_ms=?progress.and_then(|s|s.confirmation_age()).map(|d|d.as_millis()),
+                    "latency path progress observation");
+                Some((path, rtt, progress, stats.unacknowledged_stream_frames))
             })
             .collect();
-        for (failed, rtt, progress) in &paths {
-            if !progress.is_some_and(|state| state.has_active_work()) {
+        for (failed, rtt, progress, stream_work) in &paths {
+            if !stream_work {
                 continue;
             }
             if !progress.is_some_and(|state| state.stalled(*rtt)) {
                 continue;
             }
-            for (fallback, other_rtt, state) in &paths {
+            for (fallback, other_rtt, state, _) in &paths {
                 if state
                     .is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
                     && failed.abandon_with_fallback(fallback)
@@ -54,10 +59,10 @@ impl PathSelector for LatencySelector {
                 }
             }
         }
-        let has_confirmed = paths.iter().any(|(_, rtt, state)| {
+        let has_confirmed = paths.iter().any(|(_, rtt, state, _)| {
             state.is_some_and(|state| state.confirmed(*rtt) && !state.stalled(*rtt))
         });
-        let choice = choose(paths.into_iter().filter_map(|(path, rtt, state)| {
+        let choice = choose(paths.into_iter().filter_map(|(path, rtt, state, _)| {
             if state.is_some_and(|state| state.stalled(rtt))
                 || (has_confirmed && state.is_some_and(|state| !state.confirmed(rtt)))
             {
@@ -66,18 +71,6 @@ impl PathSelector for LatencySelector {
             let current = Some(path.network_path()) == ctx.current();
             Some((path, rtt, current))
         }));
-        let selected = choice
-            .as_ref()
-            .map(|path| path.network_path())
-            .or(ctx.current());
-        for path in ctx.paths() {
-            let _ = path.congestion_state().and_then(|controller| {
-                crate::ack_progress::observe_active(
-                    controller,
-                    Some(path.network_path()) == selected,
-                )
-            });
-        }
         let mut selection = PathSelection::none();
         if let Some(path) = choice {
             selection.set(&path);
