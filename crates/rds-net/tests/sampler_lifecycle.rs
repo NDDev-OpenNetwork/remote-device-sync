@@ -41,6 +41,7 @@ async fn exercise(backend: Backend) {
     let (a, b, client, server) = pair(backend).await;
     let registry = a.metrics();
     let mut sampler = registry.sampler(client.clone());
+    let observer = client.path_observer();
     sampler.sample();
     assert_eq!(registry.snapshot()["rds_net_active_connections"], 1);
     drop(client);
@@ -49,6 +50,10 @@ async fn exercise(backend: Backend) {
     drop(sampler);
     tokio::join!(a.close(), b.close());
     assert!(closed.is_ok(), "unpolled sampler retained connection I/O");
+    assert!(
+        observer.snapshot().paths.is_empty(),
+        "observer retained closed paths"
+    );
     assert_released(&registry);
 
     let (a, b, client, server) = pair(backend).await;

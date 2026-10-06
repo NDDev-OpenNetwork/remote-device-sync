@@ -346,6 +346,9 @@ impl DesktopSession {
         opts: SessionOpts,
     ) -> Result<Self, DesktopError> {
         let display = hello.display;
+        let observation =
+            crate::control_observation::ControlObservation::new(conn.path_observer())?;
+        let control_instance = observation.instance;
         let clock = opts.clock.unwrap_or_default();
         let route = opts
             .session
@@ -467,11 +470,11 @@ impl DesktopSession {
                     };
                     let started = std::time::Instant::now();
                     if let Some(input_seq) = input_seq {
-                        tracing::trace!(target:"rds_desktop::input_timing", input_seq,
+                        tracing::trace!(target:"rds_desktop::input_timing", control_instance, input_seq,
                             "desktop input control write started");
                     }
                     if let Some(heartbeat_seq) = heartbeat_seq {
-                        tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq,
+                        tracing::trace!(target:"rds_desktop::control_timing", control_instance, heartbeat_seq,
                             "desktop heartbeat control write started");
                     }
                     let written = matches!(
@@ -479,15 +482,15 @@ impl DesktopSession {
                         Ok(Ok(()))
                     );
                     if let Some(heartbeat_seq) = heartbeat_seq {
-                        tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq, written,
+                        tracing::trace!(target:"rds_desktop::control_timing", control_instance, heartbeat_seq, written,
                             write_us=started.elapsed().as_micros(), "desktop heartbeat control write completed");
                     }
                     if let Some(input_seq) = input_seq {
-                        tracing::trace!(target:"rds_desktop::input_timing", input_seq, written,
+                        tracing::trace!(target:"rds_desktop::input_timing", control_instance, input_seq, written,
                             write_us=started.elapsed().as_micros(), "desktop input control write completed");
                     }
                     if !written {
-                        tracing::warn!(target:"rds_desktop::control_timing", input_seq, heartbeat_seq,
+                        tracing::warn!(target:"rds_desktop::control_timing", control_instance, input_seq, heartbeat_seq,
                             "desktop control writer ended after incomplete write");
                         break;
                     }
@@ -499,15 +502,17 @@ impl DesktopSession {
         let rtt_marker = control_rtt_ms.clone();
         tasks.spawn(
             async move {
+                let observation = observation.spawn();
                 loop {
                     let read_started = std::time::Instant::now();
                     match read_frame::<_, DesktopEvent>(&mut recv).await {
                         Ok(ev @ DesktopEvent::Heartbeat { seq, ts_ms }) => {
                             let rtt = probes.lock().await.echoed(seq, ts_ms);
-                            tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq,
+                            tracing::trace!(target:"rds_desktop::control_timing", control_instance, heartbeat_seq=seq,
                                 matched=rtt.is_some(), read_wait_us=read_started.elapsed().as_micros(),
                                 rtt_ms=rtt.map(|rtt| rtt.as_millis()), "desktop heartbeat reply read");
                             if let Some(rtt) = rtt {
+                                observation.heartbeat(seq, rtt);
                                 rtt_marker.store(rtt.as_millis() as u64, Ordering::Relaxed);
                             }
                             events_tx.send(ev);
@@ -516,7 +521,7 @@ impl DesktopSession {
                             events_tx.send(ev);
                         }
                         Err(error) => {
-                            tracing::debug!(target:"rds_desktop::control_timing", error_kind=?error.kind(),
+                            tracing::debug!(target:"rds_desktop::control_timing", control_instance, error_kind=?error.kind(),
                                 read_wait_us=read_started.elapsed().as_micros(), "desktop event reader ended");
                             break;
                         }

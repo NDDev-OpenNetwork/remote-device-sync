@@ -46,6 +46,7 @@ pub mod deadline;
 mod identity;
 pub mod metrics;
 mod observation;
+pub use observation::WeakPathObserver;
 pub mod relay_control;
 mod uni;
 pub use uni::{UniRoutingStats, UniStreams};
@@ -638,6 +639,11 @@ impl Connection {
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.path_stats_snapshot(),
         }
+    }
+
+    /// Read-only metadata handle that does not keep this connection's I/O alive.
+    pub fn path_observer(&self) -> WeakPathObserver {
+        WeakPathObserver::new(self)
     }
 
     /// Stats of the observed selected path, for media pacing. Returns None

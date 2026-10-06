@@ -24,6 +24,7 @@ pub mod capture;
 pub mod client;
 pub mod clipboard;
 pub mod codec;
+mod control_observation;
 mod decode_work;
 mod delivery_rate;
 pub mod input;
