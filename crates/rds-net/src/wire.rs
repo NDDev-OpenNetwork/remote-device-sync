@@ -42,10 +42,15 @@ where
     W: AsyncWrite + Unpin,
     M: Serialize,
 {
-    let body = postcard::to_stdvec(msg)
+    // Admit prefix and body together. Separate writes can wake a transport
+    // driver after only the four-byte prefix has arrived in its send buffer.
+    // This preserves the wire bytes; it does not promise one network packet or
+    // make write_all cancellation-safe.
+    let mut buffer = Vec::with_capacity(64);
+    buffer.resize(4, 0);
+    let mut buffer = postcard::to_extend(msg, buffer)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let len: u32 = body
-        .len()
+    let len: u32 = (buffer.len() - 4)
         .try_into()
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"))?;
     if len > MAX_MESSAGE_LEN {
@@ -54,8 +59,8 @@ where
             "frame exceeds MAX_MESSAGE_LEN",
         ));
     }
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&body).await
+    buffer[..4].copy_from_slice(&len.to_be_bytes());
+    writer.write_all(&buffer).await
 }
 
 /// Read one length-prefixed postcard frame.
@@ -92,6 +97,89 @@ mod tests {
     use rds_core::{
         Codec, DesktopControl, DesktopEvent, FrameHeader, InputEvent, InputKind, StreamHello,
     };
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        offered: Vec<Vec<u8>>,
+        accepted: Vec<u8>,
+        limit: usize,
+    }
+
+    impl AsyncWrite for RecordingWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.offered.push(buf.to_vec());
+            let count = buf.len().min(self.limit);
+            self.accepted.extend_from_slice(&buf[..count]);
+            std::task::Poll::Ready(Ok(count))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn control_frame_admission_includes_prefix_and_body_and_preserves_partial_writes() {
+        let msg = DesktopControl::Heartbeat {
+            seq: 19,
+            ts_ms: 101,
+        };
+        let body = postcard::to_stdvec(&msg).unwrap();
+        let mut legacy = (body.len() as u32).to_be_bytes().to_vec();
+        legacy.extend_from_slice(&body);
+        for limit in [usize::MAX, 3] {
+            let mut writer = RecordingWriter {
+                limit,
+                ..Default::default()
+            };
+            write_frame(&mut writer, &msg).await.unwrap();
+            assert_eq!(
+                writer.offered[0], legacy,
+                "prefix-only admission woke the transport"
+            );
+            assert_eq!(writer.accepted, legacy);
+            assert_eq!(writer.offered.len(), legacy.len().div_ceil(limit));
+            assert!(matches!(
+                read_frame::<_, DesktopControl>(&mut writer.accepted.as_slice())
+                    .await
+                    .unwrap(),
+                DesktopControl::Heartbeat {
+                    seq: 19,
+                    ts_ms: 101
+                }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_outbound_frame_has_no_partial_wire_effect() {
+        let mut writer = RecordingWriter {
+            limit: usize::MAX,
+            ..Default::default()
+        };
+        let too_large = vec![0u8; MAX_MESSAGE_LEN as usize + 1];
+        assert_eq!(
+            write_frame(&mut writer, &too_large)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(writer.offered.is_empty());
+        assert!(writer.accepted.is_empty());
+    }
 
     #[tokio::test]
     async fn frame_rejects_trailing_postcard_payload() {

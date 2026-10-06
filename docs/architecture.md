@@ -701,3 +701,9 @@ unknown. Reply-to-observation age, query work time and evictions qualify those
 snapshots. The counters describe this endpoint's TX, not the peer's TX or outer
 tunnel losses. Numeric process-local control-instance IDs join write/read/path
 metadata; no key, address, route cookie, clipboard or typed body is logged.
+
+The shared postcard frame writer now serializes the four-byte length prefix and
+body into one buffer before one `write_all` operation. The receiver's wire bytes,
+64 KiB bound, partial-write semantics and error kinds are unchanged. This avoids
+a separate prefix-only transport admission/wakeup; it does not guarantee one
+network packet, atomic delivery or cancellation-safe writes.

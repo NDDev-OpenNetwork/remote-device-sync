@@ -22,3 +22,11 @@ failed at linker ENOSPC before completing tests; the guarded retry completed
 with exit0 and no free-space guard trigger. Cross-platform qualification
 and installed trace evidence remain required. This is a diagnostic gap repair,
 not a claim that residual native input pauses are eliminated.
+
+A follow-up transport increment also removes separate prefix/body writes from
+the shared frame writer. Postcard extends a prefix-reserved buffer without a
+second body copy; limits are checked before any I/O. Ten wire tests pass,
+including legacy byte compatibility, complete first admission, partial-write
+progress and oversized outbound frames with no wire effect. Full qualification
+is rerun because this changes all framed control/greeting paths. No claim of
+eliminated network loss or one-packet delivery follows from coalesced admission.
