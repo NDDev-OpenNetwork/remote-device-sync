@@ -124,6 +124,18 @@ pub enum Packetization {
     Conservative,
 }
 
+/// Preference among already permitted, established transport paths.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PathPreference {
+    /// Retain the backend's policy (Iroh prefers direct over relay).
+    #[default]
+    BackendDefault,
+    /// Prefer lower measured RTT regardless of direct/relay kind, with stickiness.
+    /// The owned Noq backend already uses this policy.
+    Latency,
+}
+
 /// Explicit congestion-controller selection for measured path qualification.
 /// This does not change stream priority, path eligibility or packetization.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -192,6 +204,8 @@ pub struct EndpointConfig {
     pub transports: Transports,
     /// Packet-size/offload policy. Default `Adaptive`.
     pub packetization: Packetization,
+    /// Path ranking only; cannot expand permitted transport kinds or an explicit pin.
+    pub path_preference: PathPreference,
     /// Local controller factory; absent file settings retain BBRv3.
     pub congestion_control: CongestionControl,
     /// Owned-relay attachments (`noq` backend only): each entry is a
@@ -223,6 +237,7 @@ impl Default for EndpointConfig {
             observed_address_reports: true,
             transports: Transports::default(),
             packetization: Packetization::default(),
+            path_preference: PathPreference::default(),
             congestion_control: CongestionControl::default(),
             #[cfg(feature = "transport-noq")]
             relay_endpoints: Vec::new(),

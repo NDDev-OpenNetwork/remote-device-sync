@@ -707,3 +707,15 @@ body into one buffer before one `write_all` operation. The receiver's wire bytes
 64 KiB bound, partial-write semantics and error kinds are unchanged. This avoids
 a separate prefix-only transport admission/wakeup; it does not guarantee one
 network packet, atomic delivery or cancellation-safe writes.
+
+### Optional latency path ranking
+
+EndpointSettings/EndpointConfig PathPreference is lowered in the owning backend.
+Iroh latency mode ranks existing candidate RTTs without transport tiers and uses
+5ms switching stickiness. A bounded1s optional actor refresh makes the decision
+respond to changing RTT while topology is unchanged. The exact published Iroh1.3
+source carries this narrow default-None hook under vendor/iroh, excluded from
+the RDS workspace; provenance and licenses are retained. Existing/default and
+explicitly pinned selectors keep their original callback behavior. Noq already
+owns periodic validated-path ranking and needs no policy rewrite for this mode.
+This remains a staged qualification increment, not a new default or native pass.

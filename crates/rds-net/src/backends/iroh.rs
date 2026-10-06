@@ -10,6 +10,7 @@ use std::str::FromStr;
 use iroh::{Endpoint, RelayMap, RelayMode};
 
 use crate::{EndpointAddr, EndpointConfig, EndpointId, RelayUrl, TransportAddr};
+mod latency;
 
 /// Adapter conversions between the owned shared types and iroh-base.
 ///
@@ -115,6 +116,9 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
         crate::Transports::DirectOnly => builder.clear_relay_transports(),
         crate::Transports::RelayOnly => builder.clear_ip_transports(),
     };
+    if config.path_preference == crate::PathPreference::Latency {
+        builder = builder.path_selector(std::sync::Arc::new(latency::LatencySelector));
+    }
     // Tuning on top of iroh's multipath-aware defaults:
     // - BBRv3 remains our default; explicit Cubic selection enables
     //   same-path qualification without changing priorities or windows.
