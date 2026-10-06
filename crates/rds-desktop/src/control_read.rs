@@ -1,7 +1,8 @@
 //! Passive reply-read progress. The observer never polls or cancels the reader.
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -17,16 +18,36 @@ pub(crate) struct PendingReplies {
     pub oldest_age: Option<Duration>,
 }
 
+// One reader owns all updates. Observer clones only take bounded snapshots.
+// SeqCst fields/version keep snapshots coherent without a diagnostic mutex.
 #[derive(Default)]
 struct State {
-    generation: u64,
-    active: bool,
-    started: Option<Instant>,
-    last_progress: Option<Instant>,
-    polls: u64,
-    inside_poll: bool,
-    bytes: usize,
-    prefix: [u8; 4],
+    origin: OnceLock<Instant>,
+    version: AtomicU64,
+    generation: AtomicU64,
+    active: AtomicBool,
+    started_ns: AtomicU64,
+    progress_ns: AtomicU64,
+    polls: AtomicU64,
+    inside_poll: AtomicBool,
+    bytes: AtomicUsize,
+    prefix: AtomicU32,
+}
+
+impl State {
+    fn now_ns(&self) -> u64 {
+        self.origin
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_nanos()
+            .min(u64::MAX.into()) as u64
+    }
+
+    fn update(&self, change: impl FnOnce(&Self)) {
+        self.version.fetch_add(1, Ordering::SeqCst);
+        change(self);
+        self.version.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -42,41 +63,60 @@ struct Snapshot {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ReadProgress(Arc<Mutex<State>>);
+pub(crate) struct ReadProgress(Arc<State>);
 
 impl ReadProgress {
     pub fn begin(&self) {
-        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        let generation = state.generation.saturating_add(1);
-        *state = State {
-            generation,
-            active: true,
-            started: Some(Instant::now()),
-            ..State::default()
-        };
+        let now = self.0.now_ns();
+        self.0.update(|state| {
+            state.generation.store(
+                state.generation.load(Ordering::SeqCst).saturating_add(1),
+                Ordering::SeqCst,
+            );
+            state.active.store(true, Ordering::SeqCst);
+            state.started_ns.store(now, Ordering::SeqCst);
+            state.progress_ns.store(now, Ordering::SeqCst);
+            state.polls.store(0, Ordering::SeqCst);
+            state.inside_poll.store(false, Ordering::SeqCst);
+            state.bytes.store(0, Ordering::SeqCst);
+            state.prefix.store(0, Ordering::SeqCst);
+        });
     }
 
     pub fn end(&self) {
         self.0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .active = false;
+            .update(|state| state.active.store(false, Ordering::SeqCst));
     }
 
     fn snapshot(&self) -> Option<Snapshot> {
-        // The observer cannot make the reader wait for a diagnostic query.
-        let state = self.0.try_lock().ok()?;
-        let started = state.started?;
-        Some(Snapshot {
-            generation: state.generation,
-            active: state.active,
-            elapsed: started.elapsed(),
-            progress_age: state.last_progress.unwrap_or(started).elapsed(),
-            polls: state.polls,
-            inside_poll: state.inside_poll,
-            bytes: state.bytes,
-            expected_body: (state.bytes >= 4).then(|| u32::from_be_bytes(state.prefix)),
-        })
+        // Never spin or wait for the I/O owner; skip a racing diagnostic sample.
+        let now = self
+            .0
+            .origin
+            .get()?
+            .elapsed()
+            .as_nanos()
+            .min(u64::MAX.into()) as u64;
+        let version = self.0.version.load(Ordering::SeqCst);
+        if !version.is_multiple_of(2) {
+            return None;
+        }
+        let bytes = self.0.bytes.load(Ordering::SeqCst);
+        let snapshot = Snapshot {
+            generation: self.0.generation.load(Ordering::SeqCst),
+            active: self.0.active.load(Ordering::SeqCst),
+            elapsed: Duration::from_nanos(
+                now.saturating_sub(self.0.started_ns.load(Ordering::SeqCst)),
+            ),
+            progress_age: Duration::from_nanos(
+                now.saturating_sub(self.0.progress_ns.load(Ordering::SeqCst)),
+            ),
+            polls: self.0.polls.load(Ordering::SeqCst),
+            inside_poll: self.0.inside_poll.load(Ordering::SeqCst),
+            bytes,
+            expected_body: (bytes >= 4).then(|| self.0.prefix.load(Ordering::SeqCst)),
+        };
+        (version == self.0.version.load(Ordering::SeqCst)).then_some(snapshot)
     }
 
     pub fn observe(
@@ -154,32 +194,33 @@ impl<R: AsyncRead + Unpin> AsyncRead for ObservedRead<R> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        {
-            let mut state = self
-                .progress
-                .0
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            state.polls = state.polls.saturating_add(1);
-            state.inside_poll = true;
-        }
+        self.progress.0.update(|state| {
+            state.polls.store(
+                state.polls.load(Ordering::SeqCst).saturating_add(1),
+                Ordering::SeqCst,
+            );
+            state.inside_poll.store(true, Ordering::SeqCst);
+        });
         let before = buf.filled().len();
-        // Never retain the progress mutex while calling the actual I/O driver.
+        // No observation synchronization is retained across the actual I/O poll.
         let result = Pin::new(&mut self.reader).poll_read(cx, buf);
-        let mut state = self
-            .progress
-            .0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        state.inside_poll = false;
         let bytes = &buf.filled()[before..];
-        if !bytes.is_empty() {
-            let prefix_count = state.bytes.min(4);
-            let copied = (4 - prefix_count).min(bytes.len());
-            state.prefix[prefix_count..prefix_count + copied].copy_from_slice(&bytes[..copied]);
-            state.bytes = state.bytes.saturating_add(bytes.len());
-            state.last_progress = Some(Instant::now());
-        }
+        self.progress.0.update(|state| {
+            state.inside_poll.store(false, Ordering::SeqCst);
+            if !bytes.is_empty() {
+                let count = state.bytes.load(Ordering::SeqCst);
+                let copied = (4 - count.min(4)).min(bytes.len());
+                let mut prefix = state.prefix.load(Ordering::SeqCst);
+                for byte in &bytes[..copied] {
+                    prefix = (prefix << 8) | u32::from(*byte);
+                }
+                state.prefix.store(prefix, Ordering::SeqCst);
+                state
+                    .bytes
+                    .store(count.saturating_add(bytes.len()), Ordering::SeqCst);
+                state.progress_ns.store(state.now_ns(), Ordering::SeqCst);
+            }
+        });
         result
     }
 }
@@ -259,6 +300,33 @@ mod tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             Poll::Pending
         }
+    }
+
+    struct InspectPoll(ReadProgress);
+    impl AsyncRead for InspectPoll {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            // The diagnostic update must already be published before invoking
+            // a possibly stalled backend; never leave the snapshot sealed.
+            assert!(self.0.snapshot().unwrap().inside_poll);
+            buf.put_slice(&[1]);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_remains_available_inside_the_actual_backend_poll() {
+        let progress = ReadProgress::default();
+        progress.begin();
+        let mut reader = ObservedRead::new(InspectPoll(progress.clone()), progress.clone());
+        let mut byte = [0];
+        reader.read_exact(&mut byte).await.unwrap();
+        assert_eq!(byte, [1]);
+        assert!(!progress.snapshot().unwrap().inside_poll);
+        assert_eq!(progress.snapshot().unwrap().bytes, 1);
     }
 
     #[tokio::test]

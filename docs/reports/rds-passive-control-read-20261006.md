@@ -15,9 +15,10 @@ lateness is explicit. No payload, key, clipboard contents or address is logged.
 The reader retains its original wake-driven future: the observer never polls,
 cancels or restarts it. This is important because periodically polling a read
 could hide an underlying missed wake. No wire, timeout, retry, input replay,
-path/bitrate default or application liveness policy changes. Progress locking
-covers only a few local scalar updates and is never retained across I/O;
-observer reads use try-lock and never query transport metadata.
+path/bitrate default or application liveness policy changes. Progress uses single-writer atomic scalar updates with a coherent versioned
+snapshot; racing diagnostic reads are skipped without waiting or spinning.
+Probe reads use try-lock and never query transport metadata. There is no
+progress mutex for a paused observer to hold against the I/O reader.
 
 An already confirmed newer probe prevents an older missing echo from falsely
 classifying ordinary idle periods as stalled. Existing exact matching and
