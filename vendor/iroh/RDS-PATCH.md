@@ -36,3 +36,18 @@ QuicTransportConfigBuilder additionally forwards the default-false
 prefer_same_path_acks option from the vendored Noq-proto patch. RDS enables
 it only for latency preference, so standby proof can return on its own path.
 See ../noq-proto/RDS-PATCH.md for scheduler scope and provenance.
+
+Builder's default-false keep_relays_connected option retains independently
+registered connections for at most three initially configured origins. The
+existing actor task group, retry backoff and shutdown own those connections.
+An actor-lifetime lease withdraws readiness on return, abort or panic. Connected
+registrations are advertised; failures and map removal withdraw them. Dynamic
+additions cannot expand the initial budget. Home status and default address
+publication retain their prior behavior. This is readiness rather than QUIC
+validation or an administrative relay-priority policy; no wire/crypto change.
+
+Known-standby restoration no longer requires a surviving IP path: an established
+relay-only connection can restore its explicitly known relay alternatives. No
+new route is inferred from local relay configuration. Endpoint address watchers
+publish connected registrations while home status remains distinct; explicit
+close synchronously seals readiness while retaining the engine's normal drain.

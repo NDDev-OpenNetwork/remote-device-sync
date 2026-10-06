@@ -172,6 +172,12 @@ pub struct EndpointConfig {
     /// `relay_endpoints`. Empty uses the backend's preset (iroh public relays
     /// when discovery is enabled; otherwise direct only).
     pub relays: Vec<RelayUrl>,
+    /// Keep up to three configured Iroh relays registered and advertise ready
+    /// alternatives. Disabled by default; does not select the media path.
+    pub keep_relays_connected: bool,
+    /// Prefer configured relay order among healthy relay paths; faster direct
+    /// paths remain eligible. Requires persistent registrations and latency mode.
+    pub prefer_relay_order: bool,
     /// Publish/resolve addresses via the backend's lookup services
     /// (iroh: n0 DNS + pkarr). `false` binds the `Minimal` preset —
     /// dialing uses exactly the `EndpointAddr` given, which is what
@@ -233,6 +239,8 @@ impl Default for EndpointConfig {
             secret_key: None,
             bind_addrs: Vec::new(),
             relays: Vec::new(),
+            keep_relays_connected: false,
+            prefer_relay_order: false,
             discovery: true,
             max_multipath_paths: None,
             observed_address_reports: true,

@@ -793,7 +793,7 @@ impl RemoteStateActor {
             .map(|addr| transports::FourTuple::from_remote(addr.clone()))
             .collect::<Vec<_>>();
         for (conn_id, state) in &self.connections {
-            if !state.paths.values().any(|path| path.is_ip()) {
+            if state.paths.is_empty() {
                 continue;
             }
             let Some(conn) = state.handle.upgrade() else { continue };

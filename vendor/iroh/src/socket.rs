@@ -78,7 +78,7 @@ use crate::{
     socket::{
         concurrent_read_map::ReadOnlyMap,
         remote_map::{MappedAddrs, PathSelector, PathStateReceiver, RemoteInfo},
-        transports::{HomeRelayWatch, HomeRelayWatcher},
+        transports::{HomeRelayWatch, HomeRelayWatcher, RegisteredRelays},
     },
     tls::{
         self,
@@ -162,6 +162,7 @@ impl From<mpsc::error::SendError<RemoteStateMessage>> for RemoteStateActorStoppe
 pub(crate) struct Options {
     /// The configuration for the different transports.
     pub(crate) transports: Vec<TransportConfig>,
+    pub(crate) keep_relays_connected: bool,
 
     /// Secret key for this endpoint.
     pub(crate) secret_key: SecretKey,
@@ -359,6 +360,7 @@ pub(crate) struct Socket {
     /// Local addresses
     local_addrs_watch: LocalAddrsWatch,
     home_relay_watch: HomeRelayWatcher,
+    registered_relays: RegisteredRelays,
     /// Currently bound IP addresses of all sockets
     #[cfg(not(wasm_browser))]
     ip_bind_addrs: Vec<SocketAddr>,
@@ -388,13 +390,11 @@ impl Socket {
     ///
     /// If `None`, then we are not connected to any relay endpoints.
     pub(crate) fn my_relay(&self) -> Option<RelayUrl> {
-        self.local_addr().into_iter().find_map(|a| {
-            if let transports::Addr::Relay(url, _) = a {
-                Some(url)
-            } else {
-                None
-            }
-        })
+        self.home_relay_watch
+            .clone()
+            .get()
+            .first()
+            .map(|status| status.url().clone())
     }
 
     /// Whether the iroh endpoint is closed and all its actors stopped.
@@ -481,11 +481,9 @@ impl Socket {
         self.net_report.watch().map(|(r, _)| r)
     }
 
-    /// Watch for changes to the home relay.
-    ///
-    /// Note that this can be used to wait for the initial home relay to be known using
-    /// [`Watcher::initialized`].
-    pub(crate) fn home_relay(&self) -> impl Watcher<Value = Vec<RelayUrl>> + use<> {
+    /// Watch relay addresses: home by default, connected initial registrations
+    /// when bounded persistence is explicitly enabled.
+    pub(crate) fn relay_addrs(&self) -> impl Watcher<Value = Vec<RelayUrl>> + use<> {
         self.local_addrs_watch.clone().map(|addrs| {
             addrs
                 .into_iter()
@@ -664,7 +662,7 @@ impl Socket {
     ///
     /// Called whenever our addresses or home relay endpoint changes.
     fn publish_my_addr(&self) {
-        let relay_url = self.my_relay();
+        let relay_urls = self.relay_addrs().get();
         let mut addrs: Vec<_> = self
             .direct_addrs
             .sockaddrs()
@@ -676,13 +674,11 @@ impl Socket {
             .read()
             .expect("lock poisened")
             .clone();
-        if relay_url.is_none() && addrs.is_empty() && user_data.is_none() {
+        if relay_urls.is_empty() && addrs.is_empty() && user_data.is_none() {
             // do not bother publishing if we don't have any information
             return;
         }
-        if let Some(url) = relay_url {
-            addrs.push(TransportAddr::Relay(url));
-        }
+        addrs.extend(relay_urls.into_iter().map(TransportAddr::Relay));
 
         let mut data = EndpointData::new(addrs);
         data.set_user_data(user_data);
@@ -874,6 +870,7 @@ impl EndpointInner {
         let Options {
             secret_key,
             transports: transport_configs,
+            keep_relays_connected,
             address_lookup_user_data,
             #[cfg(not(wasm_browser))]
             dns_resolver,
@@ -915,10 +912,15 @@ impl EndpointInner {
             .next()
             .unwrap_or_else(RelayMap::empty);
 
+        if keep_relays_connected && relay_map.len() > 3 {
+            bail!(BindError::InvalidTransportConfig);
+        }
+        let registered_relays = RegisteredRelays::new(keep_relays_connected, relay_map.clone());
         let ipv6_reported = Arc::new(AtomicBool::new(false));
 
         let relay_actor_config = RelayActorConfig {
             my_relay: HomeRelayWatch::default(),
+            registered_relays: registered_relays.clone(),
             secret_key: secret_key.clone(),
             #[cfg(not(wasm_browser))]
             dns_resolver: dns_resolver.clone(),
@@ -998,6 +1000,7 @@ impl EndpointInner {
             metrics: metrics.clone(),
             local_addrs_watch: transports.local_addrs_watch(),
             home_relay_watch,
+            registered_relays,
             #[cfg(not(wasm_browser))]
             ip_bind_addrs: transports.ip_bind_addrs(),
             tls_config: tls_config.clone(),
@@ -1134,6 +1137,7 @@ impl EndpointInner {
 
         // Cancel at_close_start token, which cancels running netreports.
         self.sock.shutdown.at_close_start.cancel();
+        self.sock.registered_relays.stop();
 
         // Remove address lookup services
         self.sock.address_lookup().clear();
@@ -1214,6 +1218,7 @@ impl EndpointInner {
 
         // Cancel at_close_start token, which cancels running netreports.
         self.sock.shutdown.at_close_start.cancel();
+        self.sock.registered_relays.stop();
 
         self.sock.address_lookup().clear();
 
@@ -1757,6 +1762,7 @@ impl Actor {
     }
 
     fn handle_relay_map_change(&mut self) {
+        self.transports_network_change.relay_map_changed();
         self.re_stun(UpdateReason::RelayMapChange);
     }
 
@@ -2160,6 +2166,7 @@ mod tests {
         };
         let server_config = static_config.create_server_config(vec![]);
         Options {
+            keep_relays_connected: false,
             transports: vec![
                 TransportConfig::default_ipv4(),
                 TransportConfig::default_ipv6(),
@@ -2577,6 +2584,7 @@ mod tests {
 
         let dns_resolver = DnsResolver::new();
         let opts = Options {
+            keep_relays_connected: false,
             transports: vec![
                 TransportConfig::default_ipv4(),
                 TransportConfig::default_ipv6(),

@@ -20,14 +20,22 @@ use super::{RecvInfo, Transmit};
 use crate::endpoint::RelayStatus;
 
 mod actor;
+mod registrations;
+
+pub(crate) use registrations::RegisteredRelays;
 
 pub(crate) use self::actor::{
     Config as RelayActorConfig, HomeRelayWatch, RelayConnectionFailure, RelayConnectionState,
 };
 use self::actor::{RelayActor, RelayActorMessage, RelayRecvDatagram, RelaySendItem};
 
-type RelayAddrWatcher =
-    n0_watcher::Map<n0_watcher::Direct<Option<RelayStatus>>, Option<(RelayUrl, EndpointId)>>;
+pub(super) type RelayAddrWatcher = n0_watcher::Map<
+    n0_watcher::Tuple<
+        n0_watcher::Direct<Option<RelayStatus>>,
+        n0_watcher::Direct<std::collections::BTreeSet<RelayUrl>>,
+    >,
+    Vec<(RelayUrl, EndpointId)>,
+>;
 
 #[derive(Debug)]
 pub(crate) struct RelayTransport {
@@ -40,6 +48,7 @@ pub(crate) struct RelayTransport {
     actor_sender: mpsc::Sender<RelayActorMessage>,
     _actor_handle: AbortOnDropHandle<()>,
     my_relay: HomeRelayWatch,
+    registered_relays: RegisteredRelays,
     my_endpoint_id: EndpointId,
 }
 
@@ -59,6 +68,7 @@ impl RelayTransport {
 
         let my_endpoint_id = config.secret_key.public();
         let my_relay = config.my_relay.clone();
+        let registered_relays = config.registered_relays.clone();
 
         let relay_actor = RelayActor::new(config, relay_datagram_recv_tx, cancel_token);
 
@@ -78,6 +88,7 @@ impl RelayTransport {
             actor_sender,
             _actor_handle: actor_handle,
             my_relay,
+            registered_relays,
             my_endpoint_id,
         }
     }
@@ -196,9 +207,17 @@ impl RelayTransport {
 
     pub(super) fn local_addr_watch(&self) -> RelayAddrWatcher {
         let my_endpoint_id = self.my_endpoint_id;
+        let warm = self.registered_relays.enabled();
         self.my_relay
             .watch()
-            .map(move |status| status.map(|status| (status.url().clone(), my_endpoint_id)))
+            .or(self.registered_relays.watch())
+            .map(move |(home, ready)| {
+                let mut urls = ready;
+                if !warm && let Some(home) = home {
+                    urls.insert(home.url().clone());
+                }
+                urls.into_iter().map(|url| (url, my_endpoint_id)).collect()
+            })
     }
 
     pub(super) fn my_relay_status(&self) -> n0_watcher::Direct<Option<RelayStatus>> {
@@ -240,6 +259,10 @@ pub(super) struct RelayNetworkChangeSender {
 }
 
 impl RelayNetworkChangeSender {
+    pub(super) fn relay_map_changed(&self) {
+        self.send_relay_actor(RelayActorMessage::RelayMapChange);
+    }
+
     pub(super) fn on_network_change(&self, report: &crate::socket::Report) {
         self.send_relay_actor(RelayActorMessage::NetworkChange {
             report: report.clone(),
@@ -418,6 +441,7 @@ mod tests {
     fn test_relay_transport() -> RelayTransport {
         let config = RelayActorConfig {
             my_relay: HomeRelayWatch::default(),
+            registered_relays: RegisteredRelays::new(false, RelayMap::empty()),
             secret_key: SecretKey::from_bytes(&[7u8; 32]),
             dns_resolver: DnsResolver::new(),
             proxy_url: None,

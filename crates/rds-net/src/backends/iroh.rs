@@ -104,6 +104,7 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
         // No relay, no lookup: Minimal binds a plain QUIC socket.
         (true, false) => Endpoint::builder(iroh::endpoint::presets::Minimal),
     };
+    builder = builder.keep_relays_connected(config.keep_relays_connected);
     if let Some(key) = config.secret_key {
         builder = builder.secret_key(convert::key(&key));
     }
@@ -119,7 +120,13 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
         crate::Transports::RelayOnly => builder.clear_ip_transports(),
     };
     if config.path_preference == crate::PathPreference::Latency {
-        builder = builder.path_selector(std::sync::Arc::new(latency::LatencySelector));
+        builder = if config.prefer_relay_order {
+            builder.path_selector(std::sync::Arc::new(latency::OrderedRelaySelector {
+                order: config.relays.iter().map(convert::relay).collect(),
+            }))
+        } else {
+            builder.path_selector(std::sync::Arc::new(latency::LatencySelector))
+        };
     }
     // Tuning on top of iroh's multipath-aware defaults:
     // - BBRv3 remains our default; explicit Cubic selection enables

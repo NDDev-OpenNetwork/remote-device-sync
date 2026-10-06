@@ -37,6 +37,7 @@ use std::{
     },
 };
 
+use super::RegisteredRelays;
 use backon::{Backoff, BackoffBuilder, ExponentialBuilder};
 use iroh_base::{EndpointId, RelayUrl, SecretKey};
 use iroh_relay::{
@@ -155,6 +156,7 @@ struct ActiveRelayActor {
     stop_token: CancellationToken,
     metrics: Arc<SocketMetrics>,
     my_relay: HomeRelayWatch,
+    registered_relays: RegisteredRelays,
 }
 
 #[derive(Debug)]
@@ -199,6 +201,7 @@ struct ActiveRelayActorOptions {
     stop_token: CancellationToken,
     metrics: Arc<SocketMetrics>,
     my_relay: HomeRelayWatch,
+    registered_relays: RegisteredRelays,
 }
 
 /// Configuration needed to create a connection to a relay server.
@@ -271,6 +274,7 @@ impl ActiveRelayActor {
             stop_token,
             metrics,
             my_relay,
+            registered_relays,
         } = opts;
         let relay_client_builder = Self::create_relay_builder(url.clone(), connection_opts);
         ActiveRelayActor {
@@ -285,6 +289,7 @@ impl ActiveRelayActor {
             stop_token,
             metrics,
             my_relay,
+            registered_relays,
         }
     }
 
@@ -324,10 +329,12 @@ impl ActiveRelayActor {
     ///
     /// Primarily switches between the dialing and connected states.
     async fn run(mut self) {
+        let _registration = self.registered_relays.lease(self.url.clone());
         let mut backoff = Self::build_backoff();
 
         while let Err(err) = self.run_once().await {
             debug!("{err:#}");
+            self.registered_relays.set_connected(&self.url, false);
             let was_established = matches!(err, RelayConnectionError::Established { .. });
             let last_failure = Some(Arc::new(RelayConnectionFailure::new(err)));
             self.my_relay.set_status(
@@ -405,6 +412,7 @@ impl ActiveRelayActor {
     /// be retried with a backoff.
     #[allow(clippy::result_large_err)]
     async fn run_once(&mut self) -> Result<(), RelayConnectionError> {
+        self.registered_relays.set_connected(&self.url, false);
         self.my_relay
             .set_status(&self.url, RelayConnectionState::Connecting);
         let client = match self.run_dialing().instrument(info_span!("dialing")).await {
@@ -415,6 +423,7 @@ impl ActiveRelayActor {
             }
             None => return Ok(()),
         };
+        self.registered_relays.set_connected(&self.url, true);
         self.my_relay
             .set_status(&self.url, RelayConnectionState::Connected);
         self.metrics.relay_conns_success.inc();
@@ -521,7 +530,7 @@ impl ActiveRelayActor {
                         }
                     }
                 }
-                _ = &mut self.inactive_timeout, if !self.is_home_relay => {
+                _ = &mut self.inactive_timeout, if !self.is_home_relay && !self.registered_relays.persistent(&self.url) => {
                     debug!(?RELAY_INACTIVE_CLEANUP_TIME, "Inactive, exiting.");
                     break None;
                 }
@@ -696,7 +705,7 @@ impl ActiveRelayActor {
                         Err(err) => break Err(e!(RunError::ClientStreamRead, err)),
                     }
                 }
-                _ = &mut self.inactive_timeout, if !self.is_home_relay => {
+                _ = &mut self.inactive_timeout, if !self.is_home_relay && !self.registered_relays.persistent(&self.url) => {
                     debug!("Inactive for {RELAY_INACTIVE_CLEANUP_TIME:?}, exiting (running).");
                     break Ok(());
                 }
@@ -846,7 +855,7 @@ impl ActiveRelayActor {
                         Err(err) => break Err(e!(RunError::ClientStreamRead, err)),
                     }
                 }
-                _ = &mut self.inactive_timeout, if !self.is_home_relay => {
+                _ = &mut self.inactive_timeout, if !self.is_home_relay && !self.registered_relays.persistent(&self.url) => {
                     debug!("Inactive for {RELAY_INACTIVE_CLEANUP_TIME:?}, exiting (sending).");
                     break Ok(());
                 }
@@ -905,6 +914,7 @@ pub(super) enum RelayActorMessage {
     /// Sent after a major network change to detect broken connections faster
     /// using RTT-based timeouts instead of the default 5s ping timeout.
     CheckConnectionAfterNetworkChange,
+    RelayMapChange,
 }
 
 #[derive(Debug, Clone)]
@@ -934,6 +944,7 @@ pub(super) struct RelayActor {
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub my_relay: HomeRelayWatch,
+    pub registered_relays: RegisteredRelays,
     pub secret_key: SecretKey,
     #[cfg(not(wasm_browser))]
     pub dns_resolver: DnsResolver,
@@ -1132,6 +1143,7 @@ impl RelayActor {
         mut receiver: mpsc::Receiver<RelayActorMessage>,
         mut datagram_send_channel: mpsc::Receiver<RelaySendItem>,
     ) {
+        self.ensure_registered_relays();
         // When this future is present, it is sending pending datagrams to an
         // ActiveRelayActor.  We can not process further datagrams during this time.
         let mut datagram_send_fut = std::pin::pin!(MaybeFuture::None);
@@ -1186,6 +1198,22 @@ impl RelayActor {
 
     async fn handle_msg(&mut self, msg: RelayActorMessage) {
         match msg {
+            RelayActorMessage::RelayMapChange => {
+                if !self.config.registered_relays.enabled() {
+                    return;
+                }
+                self.ensure_registered_relays();
+                if let Some(home) = self.config.my_relay.get() {
+                    self.set_home_relay(home.url().clone()).await;
+                } else {
+                    for handle in self.active_relays.values() {
+                        let _ = handle
+                            .inbox_addr
+                            .send(ActiveRelayMessage::SetHomeRelay(false))
+                            .await;
+                    }
+                }
+            }
             RelayActorMessage::NetworkChange { report } => {
                 self.on_network_change(report).await;
             }
@@ -1229,7 +1257,15 @@ impl RelayActor {
         }
     }
 
+    fn ensure_registered_relays(&mut self) {
+        self.config.registered_relays.refresh();
+        for url in self.config.registered_relays.configured() {
+            self.active_relay_handle(url);
+        }
+    }
+
     async fn on_network_change(&mut self, report: Report) {
+        self.ensure_registered_relays();
         let prev = self.config.my_relay.get();
         let prev_url = prev.as_ref().map(RelayStatus::url);
         if report.preferred_relay.as_ref() == prev_url {
@@ -1371,6 +1407,7 @@ impl RelayActor {
             stop_token: self.cancel_token.child_token(),
             metrics: self.config.metrics.clone(),
             my_relay: self.config.my_relay.clone(),
+            registered_relays: self.config.registered_relays.clone(),
         };
         let actor = ActiveRelayActor::new(opts);
         self.active_relay_tasks.spawn(
@@ -1437,6 +1474,7 @@ impl RelayActor {
         self.active_relays
             .retain(|_url, handle| !handle.inbox_addr.is_closed());
 
+        self.ensure_registered_relays();
         // Make sure home relay exists
         if let Some(status) = self.config.my_relay.get() {
             self.active_relay_handle(status.url().clone());
@@ -1526,8 +1564,8 @@ mod tests {
 
     use super::{
         ActiveRelayActor, ActiveRelayActorOptions, ActiveRelayMessage, ActiveRelayPrioMessage,
-        Config, RELAY_INACTIVE_CLEANUP_TIME, RelayActor, RelayConnectionOptions, RelayMap,
-        RelayRecvDatagram, RelaySendItem, UNDELIVERABLE_DATAGRAM_TIMEOUT,
+        Config, RELAY_INACTIVE_CLEANUP_TIME, RegisteredRelays, RelayActor, RelayConnectionOptions,
+        RelayMap, RelayRecvDatagram, RelaySendItem, UNDELIVERABLE_DATAGRAM_TIMEOUT,
     };
     use crate::{dns::DnsResolver, metrics::SocketMetrics, test_utils};
 
@@ -1539,6 +1577,7 @@ mod tests {
         let (relay_datagram_recv_queue, _recv_rx) = mpsc::channel(1);
         let config = Config {
             my_relay: Default::default(),
+            registered_relays: RegisteredRelays::new(false, RelayMap::empty()),
             secret_key: SecretKey::from_bytes(&[0u8; 32]),
             dns_resolver: DnsResolver::new(),
             proxy_url: None,
@@ -1594,6 +1633,7 @@ mod tests {
             stop_token,
             metrics,
             my_relay: Default::default(),
+            registered_relays: RegisteredRelays::new(false, RelayMap::empty()),
         };
         let task = tokio::spawn(ActiveRelayActor::new(opts).run().instrument(span));
         AbortOnDropHandle::new(task)
@@ -1959,6 +1999,7 @@ mod tests {
             stop_token: CancellationToken::new(),
             metrics: Default::default(),
             my_relay: Default::default(),
+            registered_relays: RegisteredRelays::new(false, RelayMap::empty()),
         };
         let mut actor = ActiveRelayActor::new(opts);
 
