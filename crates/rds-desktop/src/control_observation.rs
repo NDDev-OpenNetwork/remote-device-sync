@@ -224,10 +224,7 @@ mod tests {
         ));
         assert!(selection_changed(&[], std::slice::from_ref(&direct)));
         assert!(!selection_changed(&[], &[]));
-        assert!(!selection_changed(
-            &[direct.clone(), relay.clone()],
-            &[relay, direct]
-        ));
+        assert!(!selection_changed(&[direct, relay], &[relay, direct]));
     }
 
     #[test]
