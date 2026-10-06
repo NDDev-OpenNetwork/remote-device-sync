@@ -36,6 +36,8 @@ configuration (role/service/authority/timeout sections).
 | `backend` | `iroh` (default), or feature-enabled `noq` |
 | `bind_addrs` | Socket addresses; at most one on iroh, at most 16 entries on noq; fixed addresses are distinct, repeated port 0 requests allocate separate ephemeral sockets |
 | `relay` | One explicit reachability preset below |
+| `keep_relays_connected` | Optional bool, default false; keep 1–3 custom Iroh relays independently registered and advertise connected registrations |
+| `prefer_relay_order` | Optional bool, default false; prioritize relay URL order among eligible relay paths while retaining faster direct paths; requires persistent registrations, latency preference and multiple paths |
 | `max_multipath_paths` | Optional integer 1–32; absent preserves the backend default |
 | `transports` | `all` (default), `direct-only`, or `relay-only`; bounds usable path kinds |
 | `packetization` | `adaptive` (default), or `conservative`: 1200-byte primary QUIC UDP payloads, MTU discovery and GSO disabled |
@@ -73,6 +75,26 @@ points validate the backend selected by their function name; injected transports
 must supply an attached relay handle consistent with their relay configuration.
 
 ## Reachability presets
+
+An explicit `keep_relays_connected: true` keeps the initially configured custom
+Iroh relay connections alive across peer inactivity. Registration completion,
+failure and task exit update advertised addresses; a configured URL alone is
+not readiness. Removing an origin withdraws it; dynamically adding another
+origin does not expand the initial persistent-registration budget. This option
+requires 1–3 custom origins and is refused for the owned backend or a public
+preset. Its default is omitted on serialization. Older strict binaries reject
+the explicit field and must be upgraded before deployment.
+
+Registration is distinct from a validated end-to-end QUIC path. The existing
+latency preference can maintain previously known standby paths and select a
+confirmed alternative; a direct path remains eligible. Configuring persistent
+registrations does not override path pins, controller choice, authorization,
+OS routes or directory authority. Private deployment assigns host roles. The
+optional `prefer_relay_order` uses the existing ordered URL list as its relay
+priority source. Healthy configured relay tiers outrank later relay tiers
+regardless of their RTT; direct paths still compete by RTT against that eligible
+tier. Failed or unconfirmed paths cannot outrank a positively confirmed
+alternative. Defaults and explicit pins retain their prior selection semantics.
 
 | `relay.mode` | Behavior |
 |---|---|

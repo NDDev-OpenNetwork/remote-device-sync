@@ -1,5 +1,23 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+## 2026-10-07 independently registered relay reserves
+
+[Upstream issue 4319](https://github.com/n0-computer/iroh/issues/4319) reports a
+roughly thirty-second home-relay failure gap on Iroh 1.0.0-rc.0. It is evidence
+for that reported version, not proof of the same timing on the pinned 1.3 source.
+The pinned actor still gives only its home relay persistent registration and
+closes idle non-home actors after sixty seconds. Address publication contains
+only home. A configured relay list therefore does not by itself establish
+independent, warm inbound reachability.
+
+The explicit bounded increment keeps at most three initial custom registrations
+on their existing actor/retry/task ownership. Only completed registrations are
+advertised; transport loss, map removal and task exit withdraw readiness. No
+synthetic application traffic or extra identity is needed to hold a registration.
+Readiness does not assert QUIC validation, a preferred route, or WAN recovery
+latency. Isolated real-relay idle, same-stream faults, default preservation and
+administrative withdrawal are tested separately from installed-device acceptance.
+
 ## 2026-10-06 durable publication and transport isolation
 
 A metadata publisher must not terminate authenticated transport merely because

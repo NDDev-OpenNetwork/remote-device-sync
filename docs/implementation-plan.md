@@ -253,6 +253,13 @@ documented with a plan and the default stays iroh.
 
 ## 4. WS2 — owned relay protocol (`rds-relay::proto` → server)
 
+The bounded Iroh registration increment is a default-preserving reference-lane
+readiness prerequisite for multi-relay rollout. Its acceptance requires idle
+registration beyond the sixty-second cleanup, withdrawal on failure/removal,
+bounded initial membership, retained task cleanup, and byte-correct responses on
+one established stream after successive isolated relay faults. It does not
+promote the owned backend or close C2/G2 or installed WAN acceptance by itself.
+
 Reference studied: iroh-relay 1.2 wire protocol (`protos/relay.rs`):
 `ClientToRelayDatagram(+Batch)`, `RelayToClientDatagram(+Batch)`,
 `EndpointGone`, `Ping/Pong`, `Status`, `Restarting`, `Health` — over an

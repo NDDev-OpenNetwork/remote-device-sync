@@ -150,6 +150,7 @@ pub struct Builder {
     net_report_config: NetReportConfig,
     crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
     configured_addrs: BTreeSet<SocketAddr>,
+    keep_relays_connected: bool,
 }
 
 impl From<RelayMode> for Option<TransportConfig> {
@@ -218,6 +219,7 @@ impl Builder {
             net_report_config: Default::default(),
             crypto_provider: None,
             configured_addrs: Default::default(),
+            keep_relays_connected: false,
         }
     }
 
@@ -272,6 +274,7 @@ impl Builder {
 
         let sock_opts = socket::Options {
             transports: self.transports,
+            keep_relays_connected: self.keep_relays_connected,
             secret_key,
             address_lookup_user_data: self.address_lookup_user_data,
             proxy_url: self.proxy_url,
@@ -584,6 +587,17 @@ impl Builder {
                     .retain(|t| !matches!(t, TransportConfig::Relay { .. }));
             }
         }
+        self
+    }
+
+    /// Keep up to three initially configured relays independently registered.
+    ///
+    /// Disabled by default. Connected registrations are advertised as additional
+    /// addresses; this does not select a traffic path or validate a QUIC path.
+    /// Removing a relay withdraws its registration. Dynamic additions are not
+    /// persistent. Binding rejects an initial map larger than three.
+    pub fn keep_relays_connected(mut self, enabled: bool) -> Self {
+        self.keep_relays_connected = enabled;
         self
     }
 
@@ -1288,7 +1302,7 @@ impl Endpoint {
     #[cfg(not(wasm_browser))]
     pub fn watch_addr(&self) -> impl n0_watcher::Watcher<Value = EndpointAddr> + use<> {
         let watch_addrs = self.inner.ip_addrs();
-        let watch_relay = self.inner.home_relay();
+        let watch_relay = self.inner.relay_addrs();
         let endpoint_id = self.id();
 
         watch_addrs.or(watch_relay).map(move |(addrs, relays)| {
@@ -1317,7 +1331,7 @@ impl Endpoint {
         // In browsers, there will never be any direct addresses, so we wait
         // for the home relay instead. This makes the `EndpointAddr` have *some* way
         // of connecting to us.
-        let watch_relay = self.inner.home_relay();
+        let watch_relay = self.inner.relay_addrs();
         let endpoint_id = self.id();
         watch_relay.map(move |mut relays| {
             EndpointAddr::from_parts(endpoint_id, relays.into_iter().map(TransportAddr::Relay))

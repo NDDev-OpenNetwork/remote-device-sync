@@ -1,5 +1,33 @@
 use rds_net::{EndpointConfig, bind_endpoint};
 
+#[test]
+fn persistent_relay_file_requires_bounded_custom_origins_before_bind() {
+    use rds_net::config::EndpointSettings;
+    let legacy = EndpointSettings::from_json(br#"{"schema_version":1}"#).unwrap();
+    assert!(!legacy.keep_relays_connected);
+    assert!(
+        !serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("keep_relays_connected")
+    );
+    for relay in [
+        r#"{"mode":"default"}"#,
+        r#"{"mode":"disabled"}"#,
+        r#"{"mode":"iroh","urls":["https://a.example","https://b.example","https://c.example","https://d.example"]}"#,
+    ] {
+        let json =
+            format!(r#"{{"schema_version":1,"keep_relays_connected":true,"relay":{relay}}}"#);
+        assert!(
+            EndpointSettings::from_json(json.as_bytes())
+                .unwrap()
+                .into_endpoint()
+                .is_err()
+        );
+    }
+    let valid = EndpointSettings::from_json(br#"{"schema_version":1,"keep_relays_connected":true,"relay":{"mode":"iroh","urls":["https://a.example","https://b.example","https://c.example"]}}"#).unwrap().into_endpoint().unwrap();
+    assert!(valid.keep_relays_connected);
+}
+
 #[tokio::test]
 async fn both_congestion_choices_transfer_complete_payloads_on_each_backend() {
     let backends = [

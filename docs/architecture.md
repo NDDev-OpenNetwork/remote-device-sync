@@ -10,6 +10,20 @@ between any two enrolled devices, assisted by a GDS-operated server.
 Design goals, in order: **minimum interactive latency**, **maximum
 connection stability**, defense in depth, no inbound firewall changes.
 
+An explicit bounded Iroh registration option maintains up to three initially
+configured custom relays independently of peer activity. Completed registrations
+contribute advertised addresses; failures, map withdrawal and owned task exit
+remove readiness. The home-status API and default policy remain independent.
+Registration does not establish a QUIC path or assign directory authority.
+Private deployment owns host roles and ordered fallback policy. See
+[endpoint settings](endpoint-configuration.md#reachability-presets).
+
+Configured-order relay preference is a separate explicit setting. Only eligible
+confirmed relay tiers participate; faster direct paths still compete by RTT.
+The order is the existing URL list, with no second authority. Known standby
+restoration also works while the surviving carrier is itself a relay. Endpoint
+close seals readiness before returning, without shortening QUIC draining.
+
 Explicit latency path preference now observes acknowledgement progress as well
 as RTT. A passive adapter delegates the chosen congestion controller unchanged;
 each established path owns its pending-work proof and runtime clock. A path

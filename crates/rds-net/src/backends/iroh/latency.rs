@@ -1,4 +1,4 @@
-//! Rank existing paths by RTT without making a relay permanently secondary.
+//! Rank confirmed paths by RTT, optionally ordering configured relay reserves.
 use std::time::Duration;
 
 use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
@@ -17,7 +17,44 @@ impl PathSelector for LatencySelector {
     }
 
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
-        let paths: Vec<_> = ctx
+        select(ctx, None)
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct OrderedRelaySelector {
+    pub(super) order: Vec<iroh::RelayUrl>,
+}
+
+impl PathSelector for OrderedRelaySelector {
+    fn maintain_standby_paths(&self) -> bool {
+        true
+    }
+    fn refresh_interval(&self) -> Option<Duration> {
+        Some(Duration::from_secs(1))
+    }
+    fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
+        select(ctx, Some(&self.order))
+    }
+}
+
+fn relay_rank(
+    path: &iroh::endpoint::transports::FourTuple,
+    order: &[iroh::RelayUrl],
+) -> Option<usize> {
+    match path {
+        iroh::endpoint::transports::FourTuple::Relay { url, .. } => Some(
+            order
+                .iter()
+                .position(|item| item == url)
+                .unwrap_or(usize::MAX),
+        ),
+        _ => None,
+    }
+}
+
+fn select(ctx: &PathSelectionContext<'_>, order: Option<&[iroh::RelayUrl]>) -> PathSelection {
+    let mut paths: Vec<_> = ctx
             .paths()
             .filter_map(|path| {
                 let stats = path.stats()?;
@@ -38,45 +75,63 @@ impl PathSelector for LatencySelector {
                 Some((path, rtt, progress, stats.unacknowledged_stream_frames))
             })
             .collect();
-        for (failed, rtt, progress, stream_work) in &paths {
-            if !stream_work {
-                continue;
-            }
-            if !progress.is_some_and(|state| state.stalled(*rtt)) {
-                continue;
-            }
-            for (fallback, other_rtt, state, _) in &paths {
-                if state
-                    .is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
-                    && failed.abandon_with_fallback(fallback)
-                {
-                    tracing::warn!(target:"rds_net::path_policy",
+    if let Some(order) = order {
+        paths.sort_by_key(|(path, rtt, _, _)| {
+            (
+                relay_rank(path.network_path(), order).map_or(0, |rank| rank.saturating_add(1)),
+                *rtt,
+            )
+        });
+    }
+    for (failed, rtt, progress, stream_work) in &paths {
+        if !stream_work {
+            continue;
+        }
+        if !progress.is_some_and(|state| state.stalled(*rtt)) {
+            continue;
+        }
+        for (fallback, other_rtt, state, _) in &paths {
+            if state.is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
+                && failed.abandon_with_fallback(fallback)
+            {
+                tracing::warn!(target:"rds_net::path_policy",
                         pending_ack_age_ms=?progress.and_then(|state| state.pending_age()).map(|age| age.as_millis()),
                         fallback_ack_age_ms=?state.and_then(|state| state.confirmation_age()).map(|age| age.as_millis()),
                         path_rtt_ms=rtt.as_millis(), fallback_rtt_ms=other_rtt.as_millis(),
                         "unresponsive path retired with a confirmed sibling; reliable streams retained");
-                    break;
-                }
+                break;
             }
         }
-        let has_confirmed = paths.iter().any(|(_, rtt, state, _)| {
-            state.is_some_and(|state| state.confirmed(*rtt) && !state.stalled(*rtt))
-        });
-        let choice = choose(paths.into_iter().filter_map(|(path, rtt, state, _)| {
+    }
+    let has_confirmed = paths.iter().any(|(_, rtt, state, _)| {
+        state.is_some_and(|state| state.confirmed(*rtt) && !state.stalled(*rtt))
+    });
+    let eligible = paths
+        .into_iter()
+        .filter_map(|(path, rtt, state, _)| {
             if state.is_some_and(|state| state.stalled(rtt))
                 || (has_confirmed && state.is_some_and(|state| !state.confirmed(rtt)))
             {
                 return None;
             }
             let current = Some(path.network_path()) == ctx.current();
-            Some((path, rtt, current))
-        }));
-        let mut selection = PathSelection::none();
-        if let Some(path) = choice {
-            selection.set(&path);
-        }
-        selection
+            let rank = order.and_then(|order| relay_rank(path.network_path(), order));
+            Some((path, rtt, current, rank))
+        })
+        .collect();
+    let choice = choose_with_relay_order(eligible);
+    let mut selection = PathSelection::none();
+    if let Some(path) = choice {
+        selection.set(&path);
     }
+    selection
+}
+
+fn choose_with_relay_order<T>(paths: Vec<(T, Duration, bool, Option<usize>)>) -> Option<T> {
+    let best_relay = paths.iter().filter_map(|(_, _, _, rank)| *rank).min();
+    choose(paths.into_iter().filter_map(|(path, rtt, current, rank)| {
+        (rank.is_none() || rank == best_relay).then_some((path, rtt, current))
+    }))
 }
 
 fn choose<T>(paths: impl Iterator<Item = (T, Duration, bool)>) -> Option<T> {
@@ -107,6 +162,41 @@ mod tests {
     enum Route {
         Direct,
         Relay,
+    }
+
+    #[test]
+    fn relay_order_retains_fast_direct_and_uses_first_healthy_reserve() {
+        let ms = Duration::from_millis;
+        assert_eq!(
+            choose_with_relay_order(vec![
+                ("direct", ms(70), true, None),
+                ("primary", ms(100), false, Some(0)),
+                ("secondary", ms(20), false, Some(1))
+            ]),
+            None
+        );
+        assert_eq!(
+            choose_with_relay_order(vec![
+                ("primary", ms(100), false, Some(0)),
+                ("secondary", ms(20), true, Some(1)),
+                ("last", ms(1), false, Some(2))
+            ]),
+            Some("primary")
+        );
+        assert_eq!(
+            choose_with_relay_order(vec![
+                ("secondary", ms(100), false, Some(1)),
+                ("last", ms(1), true, Some(2))
+            ]),
+            Some("secondary")
+        );
+        assert_eq!(
+            choose_with_relay_order(vec![
+                ("direct", ms(20), false, None),
+                ("primary", ms(70), true, Some(0))
+            ]),
+            Some("direct")
+        );
     }
 
     #[test]

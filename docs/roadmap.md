@@ -74,6 +74,10 @@ endpoint allowlists, X11/OpenH264 desktop skeleton, workspace structure.
 
 ## v0.4 — sync and resilience
 
+The explicit bounded persistent-Iroh registration increment advances multi-relay
+readiness. Isolated same-stream/idle fault evidence and installed three-node
+qualification are required before claiming the failover gate.
+
 - `rds-sync` transfer protocol on our streams: manifest exchange,
   `missing_chunks` delta, resume journal; `rds send/recv`.
 - Multi-relay map + failover, drain signalling, relay metrics surface.

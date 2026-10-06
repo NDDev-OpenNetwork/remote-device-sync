@@ -36,7 +36,8 @@ pub(crate) use self::ip::Config as IpConfig;
 #[cfg(not(wasm_browser))]
 use self::ip::{IpNetworkChangeSender, IpTransports, IpTransportsSender};
 pub(crate) use self::relay::{
-    HomeRelayWatch, RelayActorConfig, RelayConnectionFailure, RelayConnectionState, RelayTransport,
+    HomeRelayWatch, RegisteredRelays, RelayActorConfig, RelayConnectionFailure,
+    RelayConnectionState, RelayTransport,
 };
 
 /// How many times all transports may error on `poll_recv` before we give up.
@@ -65,10 +66,8 @@ type IpTransportsWatcher = n0_watcher::Join<SocketAddr, n0_watcher::Direct<Socke
 type CustomTransportsWatcher =
     n0_watcher::Join<Vec<CustomAddr>, n0_watcher::Direct<Vec<CustomAddr>>>;
 /// Combined watcher type for all relay transports
-type RelayTransportsWatcher = n0_watcher::Join<
-    Option<(RelayUrl, EndpointId)>,
-    n0_watcher::Map<n0_watcher::Direct<Option<RelayStatus>>, Option<(RelayUrl, EndpointId)>>,
->;
+type RelayTransportsWatcher =
+    n0_watcher::Join<Vec<(RelayUrl, EndpointId)>, relay::RelayAddrWatcher>;
 
 pub(super) type HomeRelayWatcher = n0_watcher::Map<
     n0_watcher::Join<Option<RelayStatus>, n0_watcher::Direct<Option<RelayStatus>>>,
@@ -505,6 +504,12 @@ pub(crate) struct NetworkChangeSender {
 }
 
 impl NetworkChangeSender {
+    pub(crate) fn relay_map_changed(&self) {
+        for relay in &self.relay {
+            relay.relay_map_changed();
+        }
+    }
+
     pub(crate) fn on_network_change(&self, report: &Report) {
         #[cfg(not(wasm_browser))]
         for ip in &self.ip {
