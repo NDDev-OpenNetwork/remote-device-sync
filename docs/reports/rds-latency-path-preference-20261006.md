@@ -22,3 +22,16 @@ refresh without topology changes and termination on endpoint close. Existing
 real UDP-proxy packetization tests now select latency with a strict single-path
 pin, ensuring that preference cannot escape an impairment route. Qualification
 is pending; no deployed device configuration changed from this source yet.
+
+The existing bounded desktop observer records initial selected transmit paths
+and actual selection changes at info level, with numeric connection-local path
+IDs, kind and sampled RTT. Routine RTT/counter changes do not emit these records.
+No address, ticket, input text or credential is logged. The observer retains its
+weak transport reference, one worker and newest-only queued sample; no extra
+metadata query is added to input/control readers. Tests distinguish initial,
+changed, disappeared and reordered selections from ordinary RTT updates.
+
+Before that observation follow-up, strict desktop/owned-backend Clippy and all
+170 network tests passed locally on both supported platforms. Optimized agent
+builds also passed. Supply-chain and native packaging CI passed; the full CI
+matrix and observation follow-up are still required at the final source head.

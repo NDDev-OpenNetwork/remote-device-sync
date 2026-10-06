@@ -111,6 +111,18 @@ impl ControlObservation {
         // diagnostic budget. Truncation must remain explicit.
         snapshot.paths.sort_by_key(|path| !path.selected);
         snapshot.paths.truncate(MAX_PATHS);
+        if selection_changed(&snapshot.paths, &self.previous) {
+            tracing::info!(target:"rds_desktop::control_timing", control_instance=self.instance,
+                heartbeat_seq=seq, coverage=?snapshot.coverage, observed_paths=observed,
+                paths_truncated=observed>MAX_PATHS,
+                "desktop selected transmit paths changed");
+            for path in snapshot.paths.iter().filter(|path| path.selected) {
+                tracing::info!(target:"rds_desktop::control_timing", control_instance=self.instance,
+                    heartbeat_seq=seq, path_id=path.path_id, via_relay=path.via_relay,
+                    path_rtt_ms=path.rtt.as_millis(),
+                    "desktop selected transmit path");
+            }
+        }
         if rtt >= SLOW_RESPONSE {
             tracing::warn!(target:"rds_desktop::control_timing", control_instance=self.instance,
                 heartbeat_seq=seq, rtt_ms=rtt.as_millis(),
@@ -138,6 +150,22 @@ impl ControlObservation {
         self.previous = snapshot.paths;
         self.sampled = Some(now);
     }
+}
+
+fn selection_changed(current: &[PathStats], previous: &[PathStats]) -> bool {
+    fn same(path: &PathStats, candidates: &[PathStats]) -> bool {
+        candidates.iter().any(|other| {
+            other.selected && path.path_id == other.path_id && path.via_relay == other.via_relay
+        })
+    }
+    current
+        .iter()
+        .filter(|path| path.selected)
+        .any(|path| !same(path, previous))
+        || previous
+            .iter()
+            .filter(|path| path.selected)
+            .any(|path| !same(path, current))
 }
 
 struct Deltas {
@@ -175,6 +203,31 @@ mod tests {
             via_relay: false,
             relay_slot: None,
         }
+    }
+
+    #[test]
+    fn selection_observation_tracks_route_changes_without_rtt_chatter() {
+        let direct = path(5, 0);
+        let mut relay = path(10, 0);
+        relay.path_id = 2;
+        relay.via_relay = true;
+        let mut newer_direct = path(20, 1);
+        newer_direct.rtt = Duration::from_millis(150);
+        assert!(selection_changed(std::slice::from_ref(&direct), &[]));
+        assert!(!selection_changed(
+            &[newer_direct],
+            std::slice::from_ref(&direct)
+        ));
+        assert!(selection_changed(
+            std::slice::from_ref(&relay),
+            std::slice::from_ref(&direct)
+        ));
+        assert!(selection_changed(&[], std::slice::from_ref(&direct)));
+        assert!(!selection_changed(&[], &[]));
+        assert!(!selection_changed(
+            &[direct.clone(), relay.clone()],
+            &[relay, direct]
+        ));
     }
 
     #[test]
