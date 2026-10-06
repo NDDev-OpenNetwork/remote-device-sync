@@ -60,6 +60,7 @@ fn reorder_wait(rtt_ms: u64) -> std::time::Duration {
 #[derive(Default)]
 struct HeartbeatProbes {
     pending: std::collections::VecDeque<(u64, u64, std::time::Instant)>,
+    last_echoed_sent: Option<std::time::Instant>,
 }
 
 impl HeartbeatProbes {
@@ -79,9 +80,33 @@ impl HeartbeatProbes {
             .pending
             .iter()
             .position(|(s, t, _)| (*s, *t) == (seq, ts_ms))?;
-        self.pending
-            .remove(index)
-            .map(|(_, _, sent)| sent.elapsed())
+        let (_, _, sent) = self.pending.remove(index)?;
+        self.last_echoed_sent = Some(self.last_echoed_sent.map_or(sent, |old| old.max(sent)));
+        Some(sent.elapsed())
+    }
+
+    fn observation(&self) -> crate::control_read::PendingReplies {
+        // A matched newer probe proves progress beyond an older missing echo.
+        // Retain ordinary correlation behavior, but do not diagnose healthy
+        // idle periods as stalled solely because that old entry remains.
+        let mut count = 0;
+        let mut oldest = None;
+        for (seq, _, sent) in &self.pending {
+            if self
+                .last_echoed_sent
+                .is_none_or(|confirmed| *sent > confirmed)
+            {
+                count += 1;
+                if oldest.is_none_or(|(_, at)| *sent < at) {
+                    oldest = Some((*seq, *sent));
+                }
+            }
+        }
+        crate::control_read::PendingReplies {
+            count,
+            oldest_seq: oldest.map(|(seq, _)| seq),
+            oldest_age: oldest.map(|(_, at)| at.elapsed()),
+        }
     }
 }
 
@@ -397,7 +422,7 @@ impl DesktopSession {
                 }
             }
         };
-        let (mut send, mut recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
+        let (mut send, recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
             let (send, mut recv) = conn.open_bi().await?;
             let mut send = ControlSend(send);
             rds_net::wire::prioritize_control(&send.0, &greeting)?;
@@ -503,9 +528,18 @@ impl DesktopSession {
         tasks.spawn(
             async move {
                 let observation = observation.spawn();
+                let progress = crate::control_read::ReadProgress::default();
+                let observing_probes = probes.clone();
+                let _reader_observer = progress.observe(control_instance, move || {
+                    observing_probes.try_lock().ok().map(|p|p.observation())
+                });
+                let mut recv = crate::control_read::ObservedRead::new(recv, progress.clone());
                 loop {
                     let read_started = std::time::Instant::now();
-                    match read_frame::<_, DesktopEvent>(&mut recv).await {
+                    progress.begin();
+                    let reply = read_frame::<_, DesktopEvent>(&mut recv).await;
+                    progress.end();
+                    match reply {
                         Ok(ev @ DesktopEvent::Heartbeat { seq, ts_ms }) => {
                             let rtt = probes.lock().await.echoed(seq, ts_ms);
                             tracing::trace!(target:"rds_desktop::control_timing", control_instance, heartbeat_seq=seq,
@@ -1114,6 +1148,21 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn stale_missing_probe_does_not_make_passive_read_observation_overdue() {
+        let mut probes = HeartbeatProbes::default();
+        probes.sent(1, 11);
+        probes.sent(2, 22);
+        assert_eq!(probes.observation().count, 2);
+        assert_eq!(probes.observation().oldest_seq, Some(1));
+        assert!(probes.echoed(2, 22).is_some());
+        assert_eq!(probes.observation().count, 0);
+        // Diagnostic freshness must not remove ordinary late-reply correlation.
+        assert!(probes.echoed(1, 11).is_some());
+        probes.sent(3, 33);
+        assert_eq!(probes.observation().oldest_seq, Some(3));
     }
 
     #[test]

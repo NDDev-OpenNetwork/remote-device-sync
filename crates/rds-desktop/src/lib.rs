@@ -25,6 +25,7 @@ pub mod client;
 pub mod clipboard;
 pub mod codec;
 mod control_observation;
+mod control_read;
 mod decode_work;
 mod delivery_rate;
 pub mod input;

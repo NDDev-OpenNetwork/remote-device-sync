@@ -687,6 +687,13 @@ viewer does not inspect markers. See [the measurement receipt](reports/rds-causa
 
 ### Client transmit observation after a delayed control response
 
+The [passive reply-read observer](reports/rds-passive-control-read-20261006.md)
+records framing progress during a control gap. Its independent task never polls
+the awaiting I/O future, queries transport locks or changes liveness; matched
+newer probes exclude older missing echoes from diagnostic freshness. Progress
+records contain lengths/counts and local time only. Qualified installed evidence
+remains separate from this observational boundary.
+
 `rds-net::WeakPathObserver` exposes backend-neutral live-path metadata without
 retaining the connection facade or transport I/O. Desktop control responses use
 a separate session-owned observation worker: one running blocking query and one
