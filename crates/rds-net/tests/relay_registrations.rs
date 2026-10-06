@@ -15,21 +15,6 @@ async fn relay() -> (iroh_relay::server::Server, String) {
     (server, url)
 }
 
-async fn addresses(endpoint: &rds_net::Endpoint, expected: usize) {
-    timeout(Duration::from_secs(10), async {
-        while endpoint.addr().addrs.len() != expected {
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "ready relay addresses were not reconciled: {:?}",
-            endpoint.addr()
-        )
-    });
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_idle_registrations_survive_two_relay_failures_on_the_same_stream() {
     let (first, first_url) = relay().await;
@@ -44,10 +29,19 @@ async fn three_idle_registrations_survive_two_relay_failures_on_the_same_stream(
             .with_relays([&first_url, &second_url, &third_url])
             .unwrap()
     };
-    let server = bind_endpoint(config()).await.unwrap();
-    let client = bind_endpoint(config()).await.unwrap();
-    addresses(&server, 3).await;
-    addresses(&client, 3).await;
+    let server = rds_net::backends::iroh::bind_endpoint(config())
+        .await
+        .unwrap();
+    let client = rds_net::backends::iroh::bind_endpoint(config())
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(10), async {
+        while server.addr().addrs.len() != 3 || client.addr().addrs.len() != 3 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("three ready registrations before idle");
     // Exceed the upstream 60-second inactive cleanup without peer traffic.
     sleep(Duration::from_secs(65)).await;
     assert_eq!(server.addr().addrs.len(), 3);
@@ -78,18 +72,39 @@ async fn three_idle_registrations_survive_two_relay_failures_on_the_same_stream(
         .unwrap()
         .unwrap();
     timeout(Duration::from_secs(10), async {
-        while outgoing.path_stats().len() < 3 || incoming.path_stats().len() < 3 {
+        while outgoing.paths().iter().count() < 3 || incoming.paths().iter().count() < 3 {
             sleep(Duration::from_millis(50)).await;
         }
     })
     .await
     .expect("three live relay paths must exist before fault injection");
 
-    for (value, failed) in [(1, first), (2, second)] {
+    for (value, failed, expected_url) in [(1, first, &first_url), (2, second, &second_url)] {
+        let expected: iroh::TransportAddr =
+            iroh::TransportAddr::Relay(expected_url.parse().unwrap());
+        timeout(Duration::from_secs(10), async {
+            while outgoing
+                .paths()
+                .iter()
+                .find(|path| path.is_selected())
+                .is_none_or(|path| path.remote_addr() != &expected)
+                || incoming
+                    .paths()
+                    .iter()
+                    .find(|path| path.is_selected())
+                    .is_none_or(|path| path.remote_addr() != &expected)
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fault injection requires the expected tier selected at both peers");
         let prior = outgoing
-            .current_path_stats()
-            .expect("selected path")
-            .path_id;
+            .paths()
+            .iter()
+            .find(|path| path.is_selected())
+            .unwrap()
+            .id();
         failed.shutdown().await.unwrap();
         let started = Instant::now();
         tx.write_all(&[value]).await.unwrap();
@@ -98,12 +113,14 @@ async fn three_idle_registrations_survive_two_relay_failures_on_the_same_stream(
             .expect("existing stream did not recover within five seconds")
             .unwrap();
         assert_eq!(byte, [value]);
-        assert!(outgoing.close_kind().is_none());
+        assert!(outgoing.close_reason().is_none());
         assert_ne!(
             outgoing
-                .current_path_stats()
+                .paths()
+                .iter()
+                .find(|path| path.is_selected())
                 .expect("recovered selected path")
-                .path_id,
+                .id(),
             prior,
             "fault must retire the selected tier, not merely an unused relay"
         );
@@ -112,8 +129,13 @@ async fn three_idle_registrations_survive_two_relay_failures_on_the_same_stream(
             started.elapsed().as_millis()
         );
     }
-    addresses(&server, 1).await;
-    addresses(&client, 1).await;
+    timeout(Duration::from_secs(10), async {
+        while server.addr().addrs.len() != 1 || client.addr().addrs.len() != 1 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("failed registrations withdrawn");
     outgoing.close(0u32.into(), b"fixture complete");
     incoming.close(0u32.into(), b"fixture complete");
     echo.await.unwrap();
