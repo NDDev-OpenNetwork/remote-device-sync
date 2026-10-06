@@ -67,7 +67,11 @@ pub(super) async fn run(
         }
     })
     .await
-    .map_err(|_| ErrorCode::Remote)?;
+    .map_err(|error| {
+        tracing::warn!(?session, transfer_id=?id, error=%error,
+            "managed sync greeting failed; no transfer replay");
+        ErrorCode::Remote
+    })?;
     let transfer = rds_sync::engine::Transfer::new_v2(id);
     let timeout = rds_sync::engine::TRANSFER_TIMEOUT;
     let stats = match operation {
@@ -97,7 +101,11 @@ pub(super) async fn run(
             .await
             .map(|(_, stats)| stats),
     }
-    .map_err(|_| ErrorCode::Transfer)?;
+    .map_err(|error| {
+        tracing::warn!(?session, transfer_id=?id, error=%error,
+            "managed sync transfer failed; no transfer replay");
+        ErrorCode::Transfer
+    })?;
     Ok(Reply::Synced {
         session,
         stats: SyncStats {

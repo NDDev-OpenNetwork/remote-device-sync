@@ -18,6 +18,13 @@ retire only with a recently confirmed established sibling. The existing reliable
 stream transfers to that sibling through Noq's ordinary path-abandon machinery;
 the last open path is never retired. See [the recovery evidence](reports/rds-path-ack-progress-20261006.md).
 
+Tagged sync completion now transfers the connection admission guard into the
+engine. Filesystem/control work and its reader close before that guard releases,
+and only then is the terminal server FIN exposed to the peer. This makes an
+immediate next transfer admissible without retrying application work. Dropping
+the owning future still releases the guard on cancellation. Failure logs retain
+the greeting/transfer stage and ID without changing the IPC error contract.
+
 Directory publication also isolates a full disk from established transport.
 Only ENOSPC/quota failures are retryable. The publisher retains its exclusive
 lock and accepts only the pre-commit state or its exact attempted successor;

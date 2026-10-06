@@ -440,6 +440,21 @@ impl Transfer {
         access: Access,
         timeout: Duration,
     ) -> anyhow::Result<()> {
+        self.serve_with_guard(conn, streams, dir, access, timeout, ())
+            .await
+    }
+
+    /// Own admission until filesystem/control work ends, then release it before
+    /// the peer can observe server FIN. Cancellation drops the owned guard.
+    pub async fn serve_with_guard<G: Send>(
+        self,
+        conn: Connection,
+        streams: (SendStream, RecvStream),
+        dir: PathBuf,
+        access: Access,
+        timeout: Duration,
+        completion_guard: G,
+    ) -> anyhow::Result<()> {
         let (mut send, mut recv) = streams;
         let stopped = send.stopped();
         // A reset must never follow a finished send: it would retract the
@@ -459,6 +474,8 @@ impl Transfer {
                 result = serve_inner(conn, &mut send, &mut frames, dir, access, self.0, wire) => result,
             };
             if let Err(error) = result {
+                frames.close().await;
+                drop(completion_guard);
                 // Preserve an explicitly written Refuse frame. A finish
                 // failure here must not mask the transfer error that
                 // brought us here — report it and keep the real cause.
@@ -468,7 +485,6 @@ impl Transfer {
                         tracing::warn!("sync control finish after error failed: {finish:#}")
                     }
                 }
-                frames.close().await;
                 return Err(error);
             }
             if self.0 != rds_core::UniHello::Sync {
@@ -478,6 +494,8 @@ impl Transfer {
                     .await
                     .context("sync caller completion stalled")??;
             }
+            frames.close().await;
+            drop(completion_guard);
             send.finish()?;
             finished = true;
             Ok(())

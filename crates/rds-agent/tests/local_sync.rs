@@ -114,8 +114,10 @@ async fn managed_transfers_pin_devices_and_reuse_the_agent_identity() {
         );
         assert!(!peers[1].1.join("payload.bin").exists());
         // Immediate sequential transfer uses a fresh route and resumes verified content.
-        let stats = client.send_file(first, &source).await.unwrap();
-        assert_eq!(stats.bytes, 0);
+        for _ in 0..8 {
+            let stats = client.send_file(first, &source).await.unwrap();
+            assert_eq!(stats.bytes, 0);
+        }
         let dest = root.0.join("download");
         client.recv_file(first, "payload.bin", &dest).await.unwrap();
         assert_eq!(std::fs::read(dest.join("payload.bin")).unwrap(), bytes);
