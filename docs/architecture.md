@@ -25,6 +25,23 @@ immediate next transfer admissible without retrying application work. Dropping
 the owning future still releases the guard on cancellation. Failure logs retain
 the greeting/transfer stage and ID without changing the IPC error contract.
 
+Latency preference maintains previously known standby paths after abandonment.
+Iroh's opt-in refresh restores known relay/custom candidates beside a live IP
+path; defaults and pinned selectors retain their opening policy. Noq reoffers
+only previously established original-ticket candidates, respecting transport
+health, relay drain/unavailability, family support and its bounded retry queue.
+Allocation is still not validation; selection/retirement needs established paths
+and recent positive acknowledgement evidence. No interface, peer or route is
+invented and application input is not replayed.
+
+Iroh selection retains one live IP sibling when a relay/custom path is selected.
+The event-updated path map cannot be counted unchanged while closing paths in a
+loop: that could close every IP sibling. The retained IP prefers the locally
+established selection, otherwise the lowest RTT, so a selected path still being
+validated on another connection cannot remove the last local IP alternative.
+Pending opening retries deduplicate four-tuples and stale closed handles do not
+prevent restoration. See [standby evidence](reports/rds-warm-standby-20261006.md).
+
 Directory publication also isolates a full disk from established transport.
 Only ENOSPC/quota failures are retryable. The publisher retains its exclusive
 lock and accepts only the pre-commit state or its exact attempted successor;
@@ -750,3 +767,23 @@ the RDS workspace; provenance and licenses are retained. Existing/default and
 explicitly pinned selectors keep their original callback behavior. Noq already
 owns periodic validated-path ranking and needs no policy rewrite for this mode.
 This remains a staged qualification increment, not a new default or native pass.
+
+
+### STREAM work and independent standby acknowledgement
+
+Latency retirement reads unacknowledged STREAM metadata from Noq's existing
+sent-packet state. Probe-only debt does not authorize path retirement. This
+works for a previously selected path after demotion without selection markers,
+payload parsing or application replay. The normal CCA adapter stays passive.
+Pending debt observes Noq's ACK-eliciting on_packet_sent callback, rather than
+on_sent batches which also include ACK-only transmits. Both delegate unchanged.
+When ACK proof grows stale, the existing bounded periodic selector probes again
+even if an earlier probe is still outstanding.
+
+Latency preference also enables default-false same-path ACK scheduling in
+the vendored published Noq-proto 1.3 source. A validated backup can return its
+ACK without depending on the selected data path. ACKs for abandoned/unvalidated
+paths can use another route; single-path/handshake scheduling is unchanged.
+No wire, crypto, congestion or reliable-retransmission algorithm changes.
+See [patch provenance](../vendor/noq-proto/RDS-PATCH.md) and
+[failure/qualification evidence](reports/rds-warm-standby-20261006.md).

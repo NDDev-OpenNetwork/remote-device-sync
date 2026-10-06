@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["vendor/iroh"]
+exclude = ["vendor/iroh", "vendor/noq-proto"]
 resolver = "3"
 members = [
     "crates/rds-agent",
@@ -109,3 +109,4 @@ codegen-units = 1
 # Exact published Iroh1.3 source plus opt-in periodic selector refresh.
 [patch.crates-io]
 iroh = { path = "vendor/iroh" }
+noq-proto = { path = "vendor/noq-proto" }

@@ -229,7 +229,13 @@ pub(super) async fn connection_driver_observed(
     let mut local_addrs = local_addrs;
 
     // Register without retaining a strong Connection across any await.
-    let Some(closed) = conn.upgrade().map(|owner| owner.on_closed()) else {
+    let Some((closed, maintain_standby)) = conn.upgrade().map(|owner| {
+        let tracked = owner
+            .congestion_state(noq::PathId::ZERO)
+            .and_then(crate::ack_progress::snapshot)
+            .is_some();
+        (owner.on_closed(), tracked)
+    }) else {
         return;
     };
     tokio::pin!(closed);
@@ -246,13 +252,42 @@ pub(super) async fn connection_driver_observed(
     // Paths opened to QNT-learned candidates — an Established event on
     // one of these is a QNT success.
     let mut qnt_paths: std::collections::HashSet<noq::PathId> = std::collections::HashSet::new();
-    let mut selected: Option<noq::PathId> = None;
+    // Preserve the handshake's active path before the first selection pass,
+    // including a path already stalled when this driver starts observing it.
+    let mut selected = paths
+        .iter()
+        .filter_map(|(id, weak)| {
+            weak.upgrade()
+                .filter(|path| path.status().ok() == Some(noq::PathStatus::Available))
+                .map(|_| *id)
+        })
+        .min();
 
     let mut pending = Pending::default();
     // `Transports::RelayOnly` endpoints admit only synthetic relay
     // candidates — direct addrs the peer advertises in-band can never
     // become paths, regardless of what the ticket or QNT carried.
     let admit = |address: SocketAddr| allow_direct || super::relay::is_synthetic(address);
+    let standby_candidates: Vec<_> = initial_candidates
+        .iter()
+        .copied()
+        .filter(|address| admit(*address) && supports_candidate(&local_addrs, *address))
+        .take(MAX_CANDIDATES)
+        .collect();
+    // Capacity retries may repeat, but a permanently rejected cold candidate
+    // must not be reoffered forever. Only previously established ticket paths
+    // are eligible for restoration; the set is bounded by the original ticket.
+    let mut established_standbys: Vec<_> = standby_candidates
+        .iter()
+        .copied()
+        .filter(|address| {
+            paths.values().any(|weak| {
+                weak.upgrade().is_some_and(|path| {
+                    path.status().is_ok() && path.remote_address().ok() == Some(*address)
+                })
+            })
+        })
+        .collect();
     for address in initial_candidates {
         if admit(address) && supports_candidate(&local_addrs, address) {
             pending.offer(address, Origin::Ticket, Instant::now());
@@ -308,6 +343,11 @@ pub(super) async fn connection_driver_observed(
                     if let Some(c) = conn.upgrade()
                         && let Some(path) = c.path(id)
                     {
+                        if let Ok(address) = path.remote_address()
+                            && standby_candidates.contains(&address)
+                            && !established_standbys.contains(&address) {
+                            established_standbys.push(address);
+                        }
                         paths.insert(id, path.weak_handle());
                     }
                 }
@@ -326,7 +366,12 @@ pub(super) async fn connection_driver_observed(
                 }
                 None => events_open = false,
             },
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                if maintain_standby {
+                    restore_standbys(&paths, &local_addrs, &established_standbys,
+                        relay_mask, transport.as_ref(), &mut pending);
+                }
+            }
             else => break,
         }
         if !qnt_open && !events_open {
@@ -439,6 +484,34 @@ fn reconcile_candidates(
     }
 }
 
+/// Reoffer original admitted candidates after abandonment. Pending owns bounded
+/// retries/deadlines; live paths and unavailable or draining transports are skipped.
+fn restore_standbys(
+    paths: &HashMap<noq::PathId, noq::WeakPathHandle>,
+    local_addrs: &[SocketAddr],
+    candidates: &[SocketAddr],
+    relay_mask: u64,
+    transport: Option<&super::socket::Health>,
+    pending: &mut Pending,
+) {
+    for address in candidates {
+        if !supports_candidate(local_addrs, *address)
+            || super::relay::synthetic_slot(*address).is_some_and(|slot| {
+                ((relay_mask & 0xff) | (relay_mask >> super::relay::DRAIN_SHIFT)) >> slot & 1 == 1
+            })
+            || transport.is_some_and(|health| !health.path_available(*address, None))
+            || paths.values().any(|weak| {
+                weak.upgrade().is_some_and(|path| {
+                    path.status().is_ok() && path.remote_address().ok() == Some(*address)
+                })
+            })
+        {
+            continue;
+        }
+        pending.offer(*address, Origin::Ticket, Instant::now());
+    }
+}
+
 /// Apply the biased-RTT selection: the lowest-RTT path becomes
 /// `Available`, all others `Backup`. The current selection is kept
 /// unless a candidate beats it by at least [`RTT_SWITCHING_MIN`].
@@ -507,10 +580,11 @@ fn reselect(
             }
             // A draining path stays eligible — it may be the only one —
             // but at maximum penalty so any live sibling wins selection.
+            let stats = path.stats();
             let rtt = if draining != 0 && on_masked_slot(&path, draining) {
                 Duration::MAX
             } else {
-                path.stats().rtt
+                stats.rtt
             };
             let progress = connection
                 .congestion_state(*id)
@@ -518,19 +592,28 @@ fn reselect(
             if progress.is_some_and(|state| state.needs_probe()) {
                 let _ = path.ping();
             }
-            Some((*id, rtt, progress))
+            tracing::debug!(target: "rds_net::path_policy", path_id=%id,
+                selected=*selected == Some(*id), stream_work=stats.unacknowledged_stream_frames,
+                path_rtt_ms=rtt.as_millis(),
+                pending_ack_age_ms=?progress.and_then(|s|s.pending_age()).map(|d|d.as_millis()),
+                confirmed_ack_age_ms=?progress.and_then(|s|s.confirmation_age()).map(|d|d.as_millis()),
+                "latency path progress observation");
+            Some((*id, rtt, progress, stats.unacknowledged_stream_frames))
         })
         .collect();
-    for (id, rtt, state) in &candidates {
+    for (id, rtt, state, stream_work) in &candidates {
+        if !stream_work {
+            continue;
+        }
         if !state.is_some_and(|state| state.stalled(*rtt)) {
             continue;
         }
-        let fallback = candidates.iter().find(|(other, other_rtt, state)| {
+        let fallback = candidates.iter().find(|(other, other_rtt, state, _)| {
             other != id
                 && state
                     .is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
         });
-        if let Some((other, other_rtt, fallback_state)) = fallback
+        if let Some((other, other_rtt, fallback_state, _)) = fallback
             && let Some(path) = connection.path(*other)
             && path.set_status(noq::PathStatus::Available).is_ok()
             && let Some(failed) = connection.path(*id)
@@ -543,12 +626,12 @@ fn reselect(
                 "unresponsive path retired with a confirmed sibling; reliable streams retained");
         }
     }
-    let has_confirmed = candidates.iter().any(|(_, rtt, state)| {
+    let has_confirmed = candidates.iter().any(|(_, rtt, state, _)| {
         state.is_some_and(|state| state.confirmed(*rtt) && !state.stalled(*rtt))
     });
     let rtts: Vec<_> = candidates
         .into_iter()
-        .filter_map(|(id, rtt, state)| {
+        .filter_map(|(id, rtt, state, _)| {
             if state.is_some_and(|state| state.stalled(rtt))
                 || (has_confirmed && state.is_some_and(|state| !state.confirmed(rtt)))
             {

@@ -67,10 +67,8 @@ impl Progress {
             .is_some_and(|at| now.saturating_duration_since(at) < budget)
     }
     pub(crate) fn needs_probe(self, now: Instant) -> bool {
-        self.pending_since.is_none()
-            && self
-                .confirmed_at
-                .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1))
+        self.confirmed_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1))
     }
     pub(crate) fn stalled(self, now: Instant, rtt: Duration) -> bool {
         let budget = rtt.saturating_mul(4).max(Duration::from_millis(500));
@@ -141,11 +139,14 @@ impl Controller for Tracked {
     fn on_sent(&mut self, now: Instant, bytes: u64, packet: u64) {
         self.prepare();
         self.inner.on_sent(now, bytes, packet);
-        self.progress.sent(now, bytes);
     }
     fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet: u64) {
         self.prepare();
         self.inner.on_packet_sent(now, bytes, packet);
+        // Noq invokes on_sent for every transmit, including ACK-only packets.
+        // on_packet_sent is invoked only for ACK-eliciting packets. Observing
+        // pure ACK transmission would create debt that has no required reply.
+        self.progress.sent(now, bytes.into());
     }
     fn on_cwnd_limited(&mut self) {
         self.prepare();
@@ -252,6 +253,7 @@ mod tests {
             Arc::new(move || epoch + Duration::from_millis(ticks.load(Ordering::Relaxed)));
         let mut controller =
             factory(crate::CongestionControl::Cubic.factory(), clock).build(epoch, 1200);
+        controller.on_packet_sent(epoch, 100, 0);
         controller.on_sent(epoch, 100, 0);
         elapsed.store(499, Ordering::Relaxed);
         assert!(
@@ -299,6 +301,41 @@ mod tests {
         assert!(progress.needs_probe(now + Duration::from_secs(1)));
         assert!(!progress.confirmed(now + Duration::from_secs(2), Duration::from_millis(70)));
         assert!(!progress.stalled(now + Duration::from_secs(30), Duration::from_millis(70)));
+    }
+
+    #[test]
+    fn unacknowledged_probe_does_not_suppress_future_liveness_checks() {
+        let now = Instant::now();
+        let mut progress = Progress::default();
+        progress.ack(now, 1200);
+        progress.sent(now + Duration::from_millis(900), 1200);
+        assert!(!progress.needs_probe(now + Duration::from_millis(999)));
+        assert!(progress.needs_probe(now + Duration::from_secs(1)));
+        assert!(progress.needs_probe(now + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn ack_only_transmission_never_creates_pending_ack_debt() {
+        let now = Instant::now();
+        let clock: Clock = Arc::new(move || now + Duration::from_secs(3));
+        let mut controller =
+            factory(crate::CongestionControl::Cubic.factory(), clock).build(now, 1200);
+        controller.on_sent(now, 1200, 1);
+        let proof = snapshot(controller.clone_box()).unwrap();
+        assert_eq!(proof.pending_age(), None);
+        assert!(!proof.stalled(Duration::from_millis(70)));
+        controller.on_packet_sent(now, 1200, 2);
+        assert!(
+            snapshot(controller.clone_box())
+                .unwrap()
+                .stalled(Duration::from_millis(70))
+        );
+        controller.on_end_acks(now, 0, true, Some(2));
+        controller.on_sent(now, 100, 3);
+        assert_eq!(
+            snapshot(controller.clone_box()).unwrap().pending_age(),
+            None
+        );
     }
     #[test]
     fn only_outstanding_ack_eliciting_work_can_stall_and_idle_resumption_gets_its_own_budget() {

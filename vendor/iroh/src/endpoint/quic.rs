@@ -440,6 +440,13 @@ impl QuicTransportConfigBuilder {
         self
     }
 
+    /// Prefer ACKs on the validated receiving path, including backup paths.
+    /// Defaults to false; handshake and single-path ACK scheduling are unchanged.
+    pub fn prefer_same_path_acks(mut self, enabled: bool) -> Self {
+        self.0.prefer_same_path_acks(enabled);
+        self
+    }
+
     /// Whether to send observed address reports to peers.
     ///
     /// This will aid peers in inferring their reachable address, which in most NATd networks
