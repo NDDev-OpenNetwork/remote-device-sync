@@ -17,7 +17,7 @@ Five publisher tests pass, including all five real atomic-file checkpoints,
 repeated capacity failure, competing-owner refusal, exact revision/retry after
 reopening, and rejection of unrelated signed history/corruption. Strict Mac
 all-target discovery/net/agent Clippy with desktop/owned transport passes.
-Expanded native discovery65/65and net101/101regressions and strict workspace
+Expanded native discovery64passed/1pre-existing ignored and net101/101regressions and strict workspace
 desktop/Noq Clippy also pass. Linux/CI and installed qualification remain
 pending. This increment is not deployed and does not identify the cause
 of every network jitter event.
