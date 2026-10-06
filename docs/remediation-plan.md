@@ -3,6 +3,9 @@
 Date: 2026-09-24. Baseline: `87e7aeabaad861b0d3c63f6641c91539be19a3e0`.
 Status: **in progress**. Current task results and remaining checks are in
 [remediation-progress.md](remediation-progress.md). No whole wave is closed yet.
+The [2026-10-07 continuation plan](continuation-plan.md) is the current execution
+order for installed interactive recovery, relay readiness and state convergence.
+Its source-verified findings supplement the original acceptance tables below.
 Evidence and finding IDs: [implementation/session audit](reports/rds-audit-20260924.md).
 This plan supplements the original WS0–WS8 plan and reopens acceptance where
 the audit found defects or missing evidence. Historical C0–C8 receipts remain

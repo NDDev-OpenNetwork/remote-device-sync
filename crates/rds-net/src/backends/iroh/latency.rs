@@ -91,7 +91,9 @@ fn select(ctx: &PathSelectionContext<'_>, order: Option<&[iroh::RelayUrl]>) -> P
             continue;
         }
         for (fallback, other_rtt, state, _) in &paths {
-            if state.is_some_and(|state| state.confirmed(*other_rtt) && !state.stalled(*other_rtt))
+            if (*progress)
+                .zip(*state)
+                .is_some_and(|(failed, sibling)| sibling.can_replace(failed, *other_rtt))
                 && failed.abandon_with_fallback(fallback)
             {
                 tracing::warn!(target:"rds_net::path_policy",

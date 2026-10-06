@@ -20,6 +20,18 @@ impl Observation {
     pub(crate) fn stalled(self, rtt: Duration) -> bool {
         self.progress.stalled(self.now, rtt)
     }
+    /// Retiring reliable work needs proof from the sibling during the failure,
+    /// not an idle ACK that happened before both routes could have stopped.
+    pub(crate) fn can_replace(self, failed: Self, rtt: Duration) -> bool {
+        let Some(pending_since) = failed.progress.pending_since else {
+            return false;
+        };
+        self.progress
+            .confirmed_at
+            .is_some_and(|confirmed_at| confirmed_at > pending_since)
+            && self.confirmed(rtt)
+            && !self.stalled(rtt)
+    }
     pub(crate) fn needs_probe(self) -> bool {
         self.progress.needs_probe(self.now)
     }
@@ -231,6 +243,70 @@ impl Controller for Tracked {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replacement_requires_progress_after_the_outstanding_work_interval_began() {
+        let epoch = Instant::now();
+        let now = epoch + Duration::from_millis(1600);
+        let rtt = Duration::from_millis(70);
+        let failed = Observation {
+            progress: Progress {
+                pending_since: Some(epoch + Duration::from_secs(1)),
+                confirmed_at: Some(epoch),
+            },
+            now,
+        };
+        assert!(failed.stalled(rtt));
+        let mut standby = Observation {
+            progress: Progress {
+                pending_since: None,
+                confirmed_at: Some(epoch),
+            },
+            now,
+        };
+        // Both paths can fail together while the idle standby still has a
+        // nominally fresh pre-failure ACK. It is not a proved escape route.
+        assert!(standby.confirmed(rtt));
+        assert!(!standby.stalled(rtt));
+        assert!(!standby.can_replace(failed, rtt));
+        standby.progress.confirmed_at = failed.progress.pending_since;
+        assert!(!standby.can_replace(failed, rtt));
+        standby.progress.confirmed_at = Some(epoch + Duration::from_millis(1500));
+        assert!(standby.can_replace(failed, rtt));
+        standby.progress.pending_since = Some(epoch + Duration::from_secs(1));
+        assert!(!standby.can_replace(failed, rtt));
+        standby.progress.pending_since = None;
+        standby.now += Duration::from_secs(2);
+        assert!(!standby.can_replace(failed, rtt));
+    }
+
+    #[test]
+    fn high_rtt_does_not_extend_a_pre_failure_confirmation_into_replacement_proof() {
+        let epoch = Instant::now();
+        let now = epoch + Duration::from_secs(20);
+        let standby = Observation {
+            progress: Progress {
+                pending_since: None,
+                confirmed_at: Some(epoch),
+            },
+            now,
+        };
+        let failed = Observation {
+            progress: Progress {
+                pending_since: Some(epoch + Duration::from_secs(19)),
+                confirmed_at: None,
+            },
+            now,
+        };
+        assert!(standby.confirmed(Duration::from_secs(3)));
+        assert!(!standby.can_replace(failed, Duration::from_secs(3)));
+        assert!(!standby.can_replace(
+            Observation {
+                progress: Progress::default(),
+                now
+            },
+            Duration::from_secs(3)
+        ));
+    }
     #[test]
     fn a_high_rtt_path_is_not_failed_before_its_own_round_trip_budget() {
         let now = Instant::now();
