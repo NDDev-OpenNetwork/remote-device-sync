@@ -329,6 +329,9 @@ impl RemoteStateActor {
                     self.check_connections();
                 }
                 _ = refresh_paths.tick(), if refresh_interval.is_some() && !self.connections.is_empty() => {
+                    if self.state.path_selector.maintain_standby_paths() {
+                        self.restore_standby_paths();
+                    }
                     self.select_path_with_force_apply(false);
                 }
                 _ = &mut idle_timeout => {
@@ -717,6 +720,19 @@ impl RemoteStateActor {
             self.state
                 .open_path_on_conn(*conn_id, conn_state, &conn, &selected);
 
+            // The map is updated by later path events, not by path.close().
+            // Counting it inside the loop can close every IP path when a
+            // relay/custom path is selected. Preserve one live IP sibling.
+            let ip_standby = conn_state.paths.iter()
+                .filter(|(_, addr)| addr.is_ip())
+                .filter_map(|(id, addr)| {
+                    let path = conn.path(*id)?;
+                    path.status().ok()?;
+                    Some((*id, addr != &selected, path.stats().rtt))
+                })
+                .min_by_key(|(id, other, rtt)| (*other, *rtt, *id))
+                .map(|(id, _, _)| id);
+
             for (path_id, path_fourtuple) in conn_state.paths.iter() {
                 let Some(path) = conn.path(*path_id) else {
                     continue;
@@ -730,7 +746,7 @@ impl RemoteStateActor {
                 if conn.side().is_client()
                     && path_fourtuple.is_ip()
                     && path_fourtuple != &selected
-                    && conn_state.paths.values().filter(|a| a.is_ip()).count() > 1
+                    && Some(*path_id) != ip_standby
                 {
                     trace!(?path_fourtuple, %conn_id, %path_id, "closing direct path");
                     match path.close() {
@@ -765,6 +781,25 @@ impl RemoteStateActor {
             };
             self.state
                 .open_path_on_conn(*conn_id, conn_state, &conn, open_addr);
+        }
+    }
+
+    /// An opt-in selector can keep known relay/custom standbys usable after
+    /// abandonment. Opening retains the usual client-only and validation gates;
+    /// no transport, peer address or strong connection owner is invented.
+    fn restore_standby_paths(&mut self) {
+        let standbys = self.state.paths.addrs()
+            .filter(|addr| !matches!(addr, transports::Addr::Ip(_)))
+            .map(|addr| transports::FourTuple::from_remote(addr.clone()))
+            .collect::<Vec<_>>();
+        for (conn_id, state) in &self.connections {
+            if !state.paths.values().any(|path| path.is_ip()) {
+                continue;
+            }
+            let Some(conn) = state.handle.upgrade() else { continue };
+            for standby in &standbys {
+                self.state.open_path_on_conn(*conn_id, state, &conn, standby);
+            }
         }
     }
 
@@ -1079,7 +1114,8 @@ impl State {
             return;
         }
         // Already open on this connection; nothing to do.
-        if conn_state.paths.values().any(|a| a == open_4tuple) {
+        if conn_state.paths.iter().any(|(id, addr)| addr == open_4tuple
+            && conn.path(*id).is_some_and(|path| path.status().is_ok())) {
             return;
         }
 
@@ -1098,7 +1134,9 @@ impl State {
                     | Some(Err(PathError::MaxPathIdReached)) => {
                         self.scheduled_open_path =
                             Some(Instant::now() + Duration::from_millis(333));
-                        self.pending_open_paths.push_back(open_4tuple.clone());
+                        if !self.pending_open_paths.contains(open_4tuple) {
+                            self.pending_open_paths.push_back(open_4tuple.clone());
+                        }
                         trace!(?open_4tuple, ?ret, "scheduling open_path");
                     }
                     _ => warn!(?ret, "Opening path failed"),
@@ -1510,6 +1548,11 @@ impl<'a> PathSelectionData<'a> {
 /// Most users do not need to provide their own selector.
 #[cfg_attr(not(feature = "unstable-custom-transports"), allow(unreachable_pub))]
 pub trait PathSelector: Send + Sync + std::fmt::Debug + 'static {
+    /// Periodically restore known non-IP standbys beside a live IP path.
+    /// Defaults/pinned selectors keep the upstream opening policy unchanged.
+    fn maintain_standby_paths(&self) -> bool {
+        false
+    }
     /// Optional RTT-driven reselection interval. Defaults to topology events only.
     /// Intervals are clamped to 250ms..60s; refresh does not reapply unchanged selection.
     fn refresh_interval(&self) -> Option<Duration> {

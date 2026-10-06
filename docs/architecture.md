@@ -25,6 +25,23 @@ immediate next transfer admissible without retrying application work. Dropping
 the owning future still releases the guard on cancellation. Failure logs retain
 the greeting/transfer stage and ID without changing the IPC error contract.
 
+Latency preference maintains previously known standby paths after abandonment.
+Iroh's opt-in refresh restores known relay/custom candidates beside a live IP
+path; defaults and pinned selectors retain their opening policy. Noq reoffers
+only previously established original-ticket candidates, respecting transport
+health, relay drain/unavailability, family support and its bounded retry queue.
+Allocation is still not validation; selection/retirement needs established paths
+and recent positive acknowledgement evidence. No interface, peer or route is
+invented and application input is not replayed.
+
+Iroh selection retains one live IP sibling when a relay/custom path is selected.
+The event-updated path map cannot be counted unchanged while closing paths in a
+loop: that could close every IP sibling. The retained IP prefers the locally
+established selection, otherwise the lowest RTT, so a selected path still being
+validated on another connection cannot remove the last local IP alternative.
+Pending opening retries deduplicate four-tuples and stale closed handles do not
+prevent restoration. See [standby evidence](reports/rds-warm-standby-20261006.md).
+
 Directory publication also isolates a full disk from established transport.
 Only ENOSPC/quota failures are retryable. The publisher retains its exclusive
 lock and accepts only the pre-commit state or its exact attempted successor;

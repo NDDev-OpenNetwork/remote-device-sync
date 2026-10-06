@@ -67,6 +67,7 @@ async fn endpoints() -> (
     SocketAddr,
     Arc<AtomicBool>,
     Arc<AtomicU64>,
+    Vec<SocketAddr>,
 ) {
     let runtime = Arc::new(noq::TokioRuntime);
     let bind = |addr| {
@@ -116,13 +117,20 @@ async fn endpoints() -> (
             ..Default::default()
         },
         Box::new(client_mux),
-        client_addrs,
+        client_addrs.clone(),
         runtime,
         Vec::new(),
     )
     .await
     .unwrap();
-    (client, server, secondary_addr, enabled, dropped)
+    (
+        client,
+        server,
+        secondary_addr,
+        enabled,
+        dropped,
+        client_addrs,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -135,9 +143,129 @@ async fn acknowledgement_starvation_policy_recovers_pending_bytes_without_reconn
     exercise(true).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn latency_driver_reopens_an_abandoned_ticket_standby_without_reconnecting() {
+    use tokio_stream::StreamExt;
+    tokio::time::timeout(Duration::from_secs(12), async {
+        let (client, server, secondary_addr, _, _, local_addrs) = endpoints().await;
+        let cfg = client.client_configs.get(rds_core::ALPN).unwrap().clone();
+        let name = tls::name::encode(server.id());
+        let (a, b) = tokio::join!(
+            client
+                .inner
+                .connect_with(cfg, server.local_addr(), &name)
+                .unwrap(),
+            async { server.inner.accept().await.unwrap().await }
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        let events = a.path_events();
+        let mut observed = a.path_events();
+        let qnt = a.nat_traversal_updates();
+        let (mut request, mut reply) = a.open_bi().await.unwrap();
+        request.write_all(b"warm").await.unwrap();
+        let (mut send, mut recv) = b.accept_bi().await.unwrap();
+        let mut warm = [0; 4];
+        recv.read_exact(&mut warm).await.unwrap();
+        send.write_all(b"ok").await.unwrap();
+        let mut ack = [0; 2];
+        reply.read_exact(&mut ack).await.unwrap();
+        let secondary = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match a.open_path_ensure(secondary_addr, PathStatus::Backup).await {
+                    Ok(path) => break path,
+                    Err(noq::PathError::RemoteCidsExhausted) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await
+                    }
+                    Err(error) => panic!("standby setup failed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("no standby CID credit");
+        let old_id = secondary.id();
+        // Both begin Available. The driver's first reselect makes one Backup
+        // only after it has consumed its initial candidate offer, so closure
+        // below exercises periodic restoration rather than delayed startup.
+        secondary.set_status(PathStatus::Available).unwrap();
+        a.path(noq::PathId::ZERO)
+            .unwrap()
+            .set_status(PathStatus::Available)
+            .unwrap();
+        let telemetry = super::telemetry::Telemetry::new(&a);
+        let mut validated = telemetry.paths();
+        validated.insert(old_id, secondary.weak_handle());
+        telemetry.publish(&validated, Some(noq::PathId::ZERO));
+        let (_mask, relay_dead) = tokio::sync::watch::channel(0u64);
+        let driver = tokio::spawn(super::policy::connection_driver_observed(
+            a.weak_handle(),
+            qnt,
+            super::policy::Observer {
+                events,
+                telemetry,
+                transport: None,
+            },
+            crate::metrics::Registry::default(),
+            local_addrs,
+            vec![secondary_addr],
+            relay_dead,
+            true,
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while secondary.status().ok() != Some(PathStatus::Backup)
+                && a.path(noq::PathId::ZERO).unwrap().status().ok() != Some(PathStatus::Backup)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("policy did not complete initial selection");
+        secondary.close().unwrap();
+        drop(secondary);
+        let restored = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(Ok(noq::PathEvent::Established { id, .. })) = observed.next().await
+                    && id != old_id
+                    && id != noq::PathId::ZERO
+                    && let Some(path) = a.path(id)
+                    && path.remote_address().ok() == Some(secondary_addr)
+                {
+                    break path;
+                }
+            }
+        })
+        .await
+        .expect("original ticket standby was never restored");
+        restored.ping().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !a
+                .congestion_state(restored.id())
+                .and_then(crate::ack_progress::snapshot)
+                .is_some_and(|state| state.confirmed(restored.stats().rtt))
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("restored standby could not acknowledge data");
+        request.write_all(b"more").await.unwrap();
+        recv.read_exact(&mut warm).await.unwrap();
+        assert_eq!(&warm, b"more");
+        send.write_all(b"ok").await.unwrap();
+        reply.read_exact(&mut ack).await.unwrap();
+        assert_eq!(&ack, b"ok");
+        tokio::join!(client.close(), server.close());
+        tokio::time::timeout(Duration::from_secs(1), driver)
+            .await
+            .unwrap()
+            .unwrap();
+    })
+    .await
+    .expect("standby fixture exceeded its bound");
+}
+
 async fn exercise(automatic: bool) {
     tokio::time::timeout(Duration::from_secs(12), async {
-        let (client, server, secondary_addr, enabled, dropped) = endpoints().await;
+        let (client, server, secondary_addr, enabled, dropped, _) = endpoints().await;
         // Raw connections deliberately bypass QNT advertisement and the policy
         // driver, so no extra route can hide the injected loss or manual switch.
         let cfg = client.client_configs.get(rds_core::ALPN).unwrap().clone();

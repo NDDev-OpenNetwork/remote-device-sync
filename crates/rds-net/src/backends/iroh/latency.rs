@@ -9,6 +9,9 @@ const SWITCH_GAIN: Duration = Duration::from_millis(5);
 pub(super) struct LatencySelector;
 
 impl PathSelector for LatencySelector {
+    fn maintain_standby_paths(&self) -> bool {
+        true
+    }
     fn refresh_interval(&self) -> Option<Duration> {
         Some(Duration::from_secs(1))
     }

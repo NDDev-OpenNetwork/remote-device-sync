@@ -229,7 +229,13 @@ pub(super) async fn connection_driver_observed(
     let mut local_addrs = local_addrs;
 
     // Register without retaining a strong Connection across any await.
-    let Some(closed) = conn.upgrade().map(|owner| owner.on_closed()) else {
+    let Some((closed, maintain_standby)) = conn.upgrade().map(|owner| {
+        let tracked = owner
+            .congestion_state(noq::PathId::ZERO)
+            .and_then(crate::ack_progress::snapshot)
+            .is_some();
+        (owner.on_closed(), tracked)
+    }) else {
         return;
     };
     tokio::pin!(closed);
@@ -253,6 +259,26 @@ pub(super) async fn connection_driver_observed(
     // candidates — direct addrs the peer advertises in-band can never
     // become paths, regardless of what the ticket or QNT carried.
     let admit = |address: SocketAddr| allow_direct || super::relay::is_synthetic(address);
+    let standby_candidates: Vec<_> = initial_candidates
+        .iter()
+        .copied()
+        .filter(|address| admit(*address) && supports_candidate(&local_addrs, *address))
+        .take(MAX_CANDIDATES)
+        .collect();
+    // Capacity retries may repeat, but a permanently rejected cold candidate
+    // must not be reoffered forever. Only previously established ticket paths
+    // are eligible for restoration; the set is bounded by the original ticket.
+    let mut established_standbys: Vec<_> = standby_candidates
+        .iter()
+        .copied()
+        .filter(|address| {
+            paths.values().any(|weak| {
+                weak.upgrade().is_some_and(|path| {
+                    path.status().is_ok() && path.remote_address().ok() == Some(*address)
+                })
+            })
+        })
+        .collect();
     for address in initial_candidates {
         if admit(address) && supports_candidate(&local_addrs, address) {
             pending.offer(address, Origin::Ticket, Instant::now());
@@ -308,6 +334,11 @@ pub(super) async fn connection_driver_observed(
                     if let Some(c) = conn.upgrade()
                         && let Some(path) = c.path(id)
                     {
+                        if let Ok(address) = path.remote_address()
+                            && standby_candidates.contains(&address)
+                            && !established_standbys.contains(&address) {
+                            established_standbys.push(address);
+                        }
                         paths.insert(id, path.weak_handle());
                     }
                 }
@@ -326,7 +357,12 @@ pub(super) async fn connection_driver_observed(
                 }
                 None => events_open = false,
             },
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                if maintain_standby {
+                    restore_standbys(&paths, &local_addrs, &established_standbys,
+                        relay_mask, transport.as_ref(), &mut pending);
+                }
+            }
             else => break,
         }
         if !qnt_open && !events_open {
@@ -436,6 +472,34 @@ fn reconcile_candidates(
             }),
             Instant::now(),
         );
+    }
+}
+
+/// Reoffer original admitted candidates after abandonment. Pending owns bounded
+/// retries/deadlines; live paths and unavailable or draining transports are skipped.
+fn restore_standbys(
+    paths: &HashMap<noq::PathId, noq::WeakPathHandle>,
+    local_addrs: &[SocketAddr],
+    candidates: &[SocketAddr],
+    relay_mask: u64,
+    transport: Option<&super::socket::Health>,
+    pending: &mut Pending,
+) {
+    for address in candidates {
+        if !supports_candidate(local_addrs, *address)
+            || super::relay::synthetic_slot(*address).is_some_and(|slot| {
+                ((relay_mask & 0xff) | (relay_mask >> super::relay::DRAIN_SHIFT)) >> slot & 1 == 1
+            })
+            || transport.is_some_and(|health| !health.path_available(*address, None))
+            || paths.values().any(|weak| {
+                weak.upgrade().is_some_and(|path| {
+                    path.status().is_ok() && path.remote_address().ok() == Some(*address)
+                })
+            })
+        {
+            continue;
+        }
+        pending.offer(*address, Origin::Ticket, Instant::now());
     }
 }
 
