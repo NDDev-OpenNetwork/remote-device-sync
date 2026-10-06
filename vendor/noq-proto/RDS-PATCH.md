@@ -27,3 +27,8 @@ the ACK carrier, probe/STREAM distinction and clearing after ACK. The real
 Iroh fixture restores a retired standby, transfers and drains IP work, then
 recovers existing stream bytes after a later custom-link blackhole.
 Upstream contribution/convergence and installed qualification remain work.
+
+The MTU constructor's debug assertion keeps its numeric invariant but uses a
+static message. CodeQL treated the formatted minimum-MTU value as configuration
+data derived from test certificate setup. Removing the interpolation avoids
+that diagnostic data flow without changing the MTU decision or disabling scans.

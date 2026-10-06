@@ -25,7 +25,7 @@ impl MtuDiscovery {
     ) -> Self {
         debug_assert!(
             initial_plpmtu >= min_mtu,
-            "initial_max_udp_payload_size must be at least {min_mtu}"
+            "initial_max_udp_payload_size must be at least the minimum MTU"
         );
 
         let mut mtud = Self::with_state(
