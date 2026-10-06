@@ -37,3 +37,10 @@ local stage/ID/error diagnostics without replay or a wire change. The final Mac 
 directional grants and eight immediate resumptions per backend); sync engine
 31/31 and strict workspace desktop/Noq Clippy also pass. Refreshed Linux/CI
 and installed qualification are pending for this added fix.
+
+The final guarded ownership tuple also contains the general data-lane permit.
+The IPC/QUIC regression runs with exactly one data lane and its reserved control
+lane, proving eight immediate resumptions cannot encounter stale exclusion or
+capacity after completion. This tightened three-test suite and strict workspace
+desktop/Noq Clippy pass on Mac. Earlier b019d15 failed CI and its artifacts remain
+recorded; those artifacts are not qualified for deployment of the final fix.

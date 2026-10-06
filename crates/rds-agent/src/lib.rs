@@ -1027,7 +1027,7 @@ async fn serve_stream(
                             dir,
                             access,
                             rds_sync::engine::TRANSFER_TIMEOUT,
-                            _sync_slot,
+                            (_sync_slot, _service_slot),
                         )
                         .await?;
                 } else {

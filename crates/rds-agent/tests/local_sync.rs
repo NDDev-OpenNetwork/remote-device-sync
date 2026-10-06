@@ -1,5 +1,5 @@
 //! Managed file transfers over real IPC and QUIC. Fixtures own all tasks.
-use rds_agent::{Agent, AgentPolicy};
+use rds_agent::{Agent, AgentLimits, AgentPolicy};
 use rds_client::local::{Client, Error, Prepared, Server};
 use rds_core::local::{Command, ErrorCode, Reply, SessionId, SyncOperation};
 use rds_net::{Backend, EndpointConfig, Ticket, bind_endpoint};
@@ -89,7 +89,12 @@ async fn managed_transfers_pin_devices_and_reuse_the_agent_identity() {
             let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 9));
             policy.allow.insert(local.id());
             policy.sync_dir = Some(dir.clone());
-            let agent = Agent::new(endpoint.clone(), policy);
+            // One data lane plus the reserved control lane: completing sync
+            // must release both its connection exclusion and service budget.
+            let agent = Agent::new(endpoint.clone(), policy).with_limits(AgentLimits::new(
+                std::num::NonZeroU16::new(32).unwrap(),
+                std::num::NonZeroU16::new(2).unwrap(),
+            ));
             tasks.spawn(async move {
                 agent.run().await.unwrap();
             });
