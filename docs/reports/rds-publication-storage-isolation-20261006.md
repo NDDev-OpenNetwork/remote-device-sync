@@ -44,3 +44,21 @@ lane, proving eight immediate resumptions cannot encounter stale exclusion or
 capacity after completion. This tightened three-test suite and strict workspace
 desktop/Noq Clippy pass on Mac. Earlier b019d15 failed CI and its artifacts remain
 recorded; those artifacts are not qualified for deployment of the final fix.
+
+## Full integration follow-up
+
+The first release-before-FIN refinement exposed a double-join during cleanup:
+`drained` consumed the control reader's JoinHandle, then `close` polled it again.
+Exact-head9a07f2b CI retained failures on both OSes in session_v2 and the real CLI
+manager test. This was introduced by the added explicit close and was not
+installed. The reader handle is now optional: a canceled wait retains ownership,
+and a completed join is consumed exactly once. Repeat drain/close is safe.
+Existing native control-reader tests now cancel an unfinished drain and close
+again after peer FIN, covering the actual lifecycle boundary.
+
+All78Mac sync unit/integration tests now pass, including v1 compatibility and
+negotiated v2 push; the real CLI local-manager1/1, one-data-lane managed-sync3/3,
+strict workspace desktop/Noq Clippy and fmt also pass. This is the final local
+refinement; refreshed final-source CI/Linux/build/runtime acceptance is pending.
+Old9a07f2b builds and the passing narrow suites do not supersede its failed full
+CI. None of the pending storage/sync refinements has been deployed.

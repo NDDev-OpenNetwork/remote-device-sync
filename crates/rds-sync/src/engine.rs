@@ -709,7 +709,7 @@ struct ControlFrames {
     cause: Arc<std::sync::Mutex<Option<String>>>,
     cause_notify: Arc<tokio::sync::Notify>,
     quit: tokio_util::sync::CancellationToken,
-    reader: tokio::task::JoinHandle<()>,
+    reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ControlFrames {
@@ -791,7 +791,7 @@ impl ControlFrames {
             cause,
             cause_notify,
             quit,
-            reader,
+            reader: Some(reader),
         }
     }
 
@@ -840,7 +840,14 @@ impl ControlFrames {
     /// Wait until the reader exits — the `read_to_end` equivalent for
     /// the peer-FIN completion barrier.
     async fn drained(&mut self) -> anyhow::Result<()> {
-        (&mut self.reader).await?;
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(());
+        };
+        // Keep the handle owned across a canceled wait, but consume its
+        // completion once: close after FIN must never repoll a JoinHandle.
+        let result = reader.await;
+        self.reader = None;
+        result?;
         Ok(())
     }
 
@@ -848,7 +855,7 @@ impl ControlFrames {
     /// `recv.stop(0)` epilogue.
     async fn close(&mut self) {
         self.quit.cancel();
-        let _ = (&mut self.reader).await;
+        let _ = self.drained().await;
     }
 }
 

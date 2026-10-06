@@ -490,10 +490,17 @@ async fn control_reader_preserves_order_and_reports_peer_fin() {
         other => panic!("expected Done, got {other:?}"),
     }
     assert!(!frames.stop_flag().load(Ordering::Acquire));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), frames.drained())
+            .await
+            .is_err()
+    );
     peer_send.finish().unwrap();
     frames.drained().await.unwrap();
     assert!(frames.stop_flag().load(Ordering::Acquire));
     assert!(frames.next(Duration::from_secs(10)).await.is_err());
+    frames.close().await;
+    frames.close().await;
 }
 
 /// `close` runs the `recv.stop` epilogue on the wire: the peer's send
@@ -503,6 +510,7 @@ async fn control_reader_close_stops_the_peer_send() {
     let id: [u8; 16] = rand::random();
     let (_send, recv, peer_send, _ca, _cb, _ea, _eb) = stream_pair().await;
     let mut frames = ControlFrames::open(Wire::v2(id, SessionLimits::LOCAL), recv);
+    frames.close().await;
     frames.close().await;
     tokio::time::timeout(Duration::from_secs(10), peer_send.stopped())
         .await
