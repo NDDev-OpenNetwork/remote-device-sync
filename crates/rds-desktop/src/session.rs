@@ -2025,9 +2025,10 @@ async fn send_frame_inner(
             return SendOutcome::Failed;
         }
     };
-    if matches!(outcome, SendOutcome::Sent | SendOutcome::Done)
-        && let (Some(receipts), Some(hasher)) = (&payload_receipts, payload_hasher)
-    {
+    // Superseded also means the current payload was fully written: its
+    // successor waits behind the current reference. Only Abandoned returned
+    // early above. Install every completed payload's proof before exposing FIN.
+    if let (Some(receipts), Some(hasher)) = (&payload_receipts, payload_hasher) {
         let digest = *hasher.finalize().as_bytes();
         if !receipts.set_digest(produced.header.seq, digest) {
             tracing::debug!(
@@ -2695,6 +2696,95 @@ mod tests {
             }
         }
         assert_eq!(decoded, [0, 1, 5, 6]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_supersession_installs_its_payload_receipt_digest() {
+        for backend in [rds_net::Backend::Iroh, rds_net::Backend::Noq] {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                let config = rds_net::EndpointConfig {
+                    backend,
+                    discovery: false,
+                    bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                    ..Default::default()
+                };
+                let client = rds_net::bind_endpoint(config.clone()).await.unwrap();
+                let server = rds_net::bind_endpoint(config).await.unwrap();
+                let (a, b) = tokio::join!(client.connect(server.addr(), rds_core::ALPN), async {
+                    server.accept().await.unwrap().await
+                });
+                let (a, b) = (a.unwrap(), b.unwrap());
+                let admission = Arc::new(AtomicU64::new(2));
+                let payload = Bytes::from(vec![7; 32 * 1024 * 1024]);
+                let expected = *blake3::hash(&payload).as_bytes();
+                let mut first = produced(0, true);
+                first.payload = payload;
+                let first = AdmittedFrame {
+                    produced: first,
+                    generation: 0,
+                    key: None,
+                    permit: CapturePermit(admission.clone()),
+                };
+                let (tx, mut rx) = mpsc::channel(1);
+                let mut acknowledgements = JoinSet::new();
+                let proofs = crate::receipts::Receipts::new();
+                let delivery = FrameDelivery {
+                    repair: crate::media_repair::MediaRepair::new().0,
+                    idr: Arc::new(AtomicBool::new(false)),
+                    feedback: Arc::new(DeliveryFeedback::default()),
+                    latest_key_seq: Arc::new(AtomicU64::new(u64::MAX)),
+                    payload_receipts: Some(proofs.clone()),
+                };
+                let (outcome, ()) = tokio::join!(
+                    send_frame_inner(
+                        &a,
+                        rds_core::UniHello::Desktop,
+                        first,
+                        &mut rx,
+                        &mut acknowledgements,
+                        delivery
+                    ),
+                    async {
+                        let mut stream = b.accept_uni().await.unwrap();
+                        let _: rds_core::UniHello = read_frame(&mut stream).await.unwrap();
+                        let header: FrameHeader = read_frame(&mut stream).await.unwrap();
+                        assert_eq!(header.seq, 0);
+                        // Keep the large original payload blocked until the
+                        // producer event has selected its completed-supersession
+                        // path. The receiver then drains it exactly once.
+                        tx.send(AdmittedFrame {
+                            produced: produced(1, false),
+                            generation: 0,
+                            key: None,
+                            permit: CapturePermit(admission.clone()),
+                        })
+                        .await
+                        .unwrap();
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        let bytes = stream.read_to_end(32 * 1024 * 1024).await.unwrap();
+                        assert_eq!(*blake3::hash(&bytes).as_bytes(), expected);
+                        assert!(
+                            proofs.confirm(0, &expected, false),
+                            "a completed superseded frame rejected its exact receipt"
+                        );
+                    }
+                );
+                let SendOutcome::Superseded(next) = outcome else {
+                    panic!("fixture did not take the completed-supersession path");
+                };
+                assert_eq!(next.produced.header.seq, 1);
+                drop(next);
+                assert!(matches!(
+                    acknowledgements.join_next().await.unwrap().unwrap(),
+                    (0, FrameReceipt::Delivered)
+                ));
+                assert_eq!(admission.load(Ordering::Acquire), 0);
+                a.close(0u32.into(), b"test done");
+                tokio::join!(client.close(), server.close());
+            })
+            .await
+            .expect("completed supersession hung");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
