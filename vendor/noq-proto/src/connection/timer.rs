@@ -68,10 +68,12 @@ pub(crate) enum PathTimer {
     MaxAckDelay = 6,
     /// When to clean up state for an abandoned path
     PathDrained = 7,
+    /// Deadline for establishing a newly allocated multipath path
+    InitialValidationFailed = 8,
 }
 
 impl PathTimer {
-    pub(super) const VALUES: [Self; 8] = [
+    pub(super) const VALUES: [Self; 9] = [
         Self::LossDetection,
         Self::PathIdle,
         Self::PathValidationFailed,
@@ -80,6 +82,7 @@ impl PathTimer {
         Self::Pacing,
         Self::MaxAckDelay,
         Self::PathDrained,
+        Self::InitialValidationFailed,
     ];
 }
 

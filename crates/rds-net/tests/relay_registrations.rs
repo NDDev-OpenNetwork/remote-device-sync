@@ -15,6 +15,146 @@ async fn relay() -> (iroh_relay::server::Server, String) {
     (server, url)
 }
 
+struct RelayGate {
+    url: String,
+    ready: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for RelayGate {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn relay_gate(destination: std::net::SocketAddr) -> RelayGate {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (ready, readiness) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move {
+        let mut clients = tokio::task::JoinSet::new();
+        let mut first_connection = true;
+        loop {
+            tokio::select! {
+                accepted = listener.accept(), if clients.len() < 16 => {
+                    let (mut downstream, _) = accepted.unwrap();
+                    let mut ready = readiness.clone();
+                    let already_registered_side = first_connection;
+                    first_connection = false;
+                    clients.spawn(async move {
+                        while !already_registered_side && !*ready.borrow() {
+                            if ready.changed().await.is_err() {
+                                return;
+                            }
+                        }
+                        if let Ok(mut upstream) = tokio::net::TcpStream::connect(destination).await {
+                            let _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await;
+                        }
+                    });
+                }
+                Some(_) = clients.join_next(), if !clients.is_empty() => {}
+            }
+        }
+    });
+    RelayGate { url, ready, task }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_relay_registration_validates_the_original_connection_without_replay() {
+    let (primary, primary_url) = relay().await;
+    let (standby, _) = relay().await;
+    let gate = relay_gate(standby.http_addr().unwrap()).await;
+    let config = || EndpointConfig {
+        keep_relays_connected: true,
+        prefer_relay_order: true,
+        transports: Transports::RelayOnly,
+        path_preference: PathPreference::Latency,
+        ..EndpointConfig::default()
+            .with_relays([&primary_url, &gate.url])
+            .unwrap()
+    };
+    let server = rds_net::backends::iroh::bind_endpoint(config())
+        .await
+        .unwrap();
+    // The receiver is already registered on both relays, as with a healthy
+    // server and a client whose external route is initially filtered.
+    timeout(Duration::from_secs(10), async {
+        while server.addr().addrs.len() != 2 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("receiver registrations must be ready before the client starts");
+    let client = rds_net::backends::iroh::bind_endpoint(config())
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(10), async {
+        while client.addr().addrs.len() != 1 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("one authenticated registration, despite accepted standby TCP sockets");
+    let mut ticket = server.addr();
+    ticket
+        .addrs
+        .insert(iroh::TransportAddr::Relay(gate.url.parse().unwrap()));
+    let (outgoing, incoming) = timeout(Duration::from_secs(5), async {
+        tokio::join!(client.connect(ticket, rds_core::ALPN), async {
+            server.accept().await.unwrap().await
+        })
+    })
+    .await
+    .unwrap();
+    let (outgoing, incoming) = (outgoing.unwrap(), incoming.unwrap());
+    let (mut tx, mut rx) = outgoing.open_bi().await.unwrap();
+    tx.write_all(b"before").await.unwrap();
+    let (mut reply, mut input) = incoming.accept_bi().await.unwrap();
+    let mut body = [0; 6];
+    input.read_exact(&mut body).await.unwrap();
+    assert_eq!(&body, b"before");
+    reply.write_all(b"ok").await.unwrap();
+    let mut ack = [0; 2];
+    rx.read_exact(&mut ack).await.unwrap();
+
+    // A successful local TCP connect is deliberately insufficient here: the
+    // WebSocket/authenticated relay protocol cannot complete yet.
+    sleep(Duration::from_secs(16)).await;
+    assert_eq!(client.addr().addrs.len(), 1);
+    assert_eq!(outgoing.paths().iter().count(), 1);
+    gate.ready.send(true).unwrap();
+    timeout(Duration::from_secs(15), async {
+        while server.addr().addrs.len() != 2 || client.addr().addrs.len() != 2 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("authenticated relay readiness did not recover");
+    let registered_at = Instant::now();
+    timeout(Duration::from_secs(5), async {
+        while outgoing.paths().iter().count() != 2 || incoming.paths().iter().count() != 2 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("late authenticated relay did not validate the existing connection's path");
+    eprintln!(
+        "late relay path validation after registration: {} ms",
+        registered_at.elapsed().as_millis()
+    );
+    tx.write_all(b"after!").await.unwrap();
+    input.read_exact(&mut body).await.unwrap();
+    assert_eq!(&body, b"after!");
+    reply.write_all(b"ok").await.unwrap();
+    rx.read_exact(&mut ack).await.unwrap();
+    assert_eq!(&ack, b"ok");
+    assert!(outgoing.close_reason().is_none());
+    assert!(incoming.close_reason().is_none());
+    tokio::join!(client.close(), server.close());
+    primary.shutdown().await.unwrap();
+    standby.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_idle_registrations_survive_two_relay_failures_on_the_same_stream() {
     let (first, first_url) = relay().await;

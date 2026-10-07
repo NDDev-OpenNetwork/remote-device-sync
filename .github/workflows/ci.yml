@@ -35,6 +35,7 @@ jobs:
       test_matrix_os: '["ubuntu-latest", "macos-latest"]'
       test_command: >-
         cargo test --locked --workspace --no-fail-fast
+        && cargo test --locked --target-dir target --manifest-path vendor/noq-proto/Cargo.toml --lib --no-fail-fast
         && cargo test --locked -p rds-net -p rds-agent -p rds-cli -p rds-relay -p rds-server --features rds-net/transport-noq,rds-agent/transport-noq,rds-cli/transport-noq,rds-relay/owned-relay,rds-server/owned-relay --no-fail-fast
         && cargo test --locked -p rds-net --features metrics --test metrics --no-fail-fast
         && cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --no-fail-fast

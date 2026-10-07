@@ -518,15 +518,78 @@ fn open_path_validation_fails_client_side() -> TestResult {
         Some(Event::Path(PathEvent::Abandoned { id, reason: PathAbandonReason::TimedOut  }))
             if id == path_id
     );
-    // Server would also fail to validate, but the client already abandoned.
+    // Each endpoint now has an independent validation deadline. Either its
+    // own timeout or the peer's explicit abandonment must retire this same ID.
     assert_matches!(
         pair.poll(Server),
         Some(Event::Path(PathEvent::Abandoned {
             id,
-            reason: PathAbandonReason::RemoteAbandoned { .. }
+            reason: PathAbandonReason::RemoteAbandoned { .. } | PathAbandonReason::TimedOut
         }))
         if id == path_id
     );
+    Ok(())
+}
+
+/// A failed initial standby must not occupy its path ID indefinitely when the
+/// application intentionally has no idle timeout for healthy paths.
+#[test]
+fn initial_path_validation_has_a_deadline_without_idle_timeout() -> TestResult {
+    let _guard = subscribe();
+    let client_two = "[::1:2]:1".parse()?;
+    let server_two = "[::2:2]:1".parse()?;
+    let mut pair = ConnPair::builder()
+        .enable_multipath()
+        .disable_mtud_discovery()
+        .with_routes(ManyToManyRouting::from_routes(
+            [(Pair::CLIENT_ADDR, 0), (client_two, 0)],
+            [(Pair::SERVER_ADDR, 0), (server_two, 1)],
+        ))
+        .connect();
+    let candidate = FourTuple {
+        remote: server_two,
+        local_ip: None,
+    };
+    let failed = pair.open_path(Client, candidate, PathStatus::Backup)?;
+    pair.drive_client();
+    pair.drive_server();
+    pair.time += Duration::from_secs(5);
+    pair.drive_client();
+    pair.drive_server();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Abandoned { id, reason: PathAbandonReason::TimedOut }))
+            if id == failed
+    );
+    assert!(
+        !pair.conn(Client).is_closed(),
+        "the established sibling must survive"
+    );
+    pair.routes = ManyToManyRouting::simple_symmetric(
+        [Pair::CLIENT_ADDR, client_two],
+        [Pair::SERVER_ADDR, server_two],
+    )
+    .into();
+    let (restored, existed) = pair.open_path_ensure(Client, candidate, PathStatus::Backup)?;
+    assert!(!existed);
+    assert_ne!(restored, failed, "abandoned IDs must not be reused");
+    pair.drive();
+    assert_matches!(pair.poll(Client), Some(Event::Path(PathEvent::Established { id })) if id == restored);
+    Ok(())
+}
+
+/// A validation deadline cannot retire the sole remaining path.
+#[test]
+fn initial_validation_deadline_preserves_last_path() -> TestResult {
+    let _guard = subscribe();
+    let candidate = FourTuple::from_remote("[::2:2]:1".parse()?);
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let last = pair.open_path(Client, candidate, PathStatus::Backup)?;
+    pair.close_path(Client, PathId::ZERO, 0u8.into())?;
+    pair.time += Duration::from_secs(5);
+    pair.drive_client();
+    assert!(!pair.conn(Client).is_closed());
+    assert_eq!(pair.conn(Client).path_status(last)?, PathStatus::Backup);
     Ok(())
 }
 

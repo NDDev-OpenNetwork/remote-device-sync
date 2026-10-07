@@ -32,6 +32,7 @@ older revisions independently; neither is silently assumed to equal main.
 | S6 | Optional platform/media modules remain real stubs. Directory sync, native serving on macOS/Wayland, audio and automatic GDS grant issuance are not implemented. | Backend probe files, audio crate, sync engine, GDS policy adapters | Explicit later implementation/qualification tasks; never mark these complete from X11 or loopback results |
 | S7 | Owned relay drain priority was reused as RTT, making progress budgets effectively infinite. | Noq path policy | Keep real RTT separate from ranking; negative deadline regression and positive engine/drain qualification |
 | S8 | A compiled architecture test retained an absolute source-checkout filename, making shared-cache verification depend on a removed checkout. | Core layering test; infrastructure fixture path resolution | Embed source-only assertions; resolve required live fixture files from the runtime checkout; preserve the original assertions |
+| S9 | Initial path validation without a finite path idle policy can retain a failed standby attempt and its long probe backoff. | Shared Noq-proto engine used by both backends | Independent validation deadline, explicit abandonment/fresh-ID recovery, last-path protection, full engine suite and real actor restoration |
 
 ## Wave A — interactive recovery correctness (W3.6, W6.8)
 
