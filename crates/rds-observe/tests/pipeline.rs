@@ -9,7 +9,7 @@ mod admin;
 
 use std::fs;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
