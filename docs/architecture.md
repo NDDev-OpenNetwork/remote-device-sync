@@ -524,6 +524,11 @@ opens a stream and never writes its tag cannot stall the routing of the
 streams queued behind it, and a claimed inbox whose consumer dropped is
 reclaimable by the next `uni_streams` call.
 
+The X11 producer synchronously borrows a completed MIT-SHM mapping through
+conversion/encode, avoiding an owned native-resolution BGRA staging copy.
+Owned capture consumers still receive independent snapshots; the next X11
+capture cannot reuse the segment until the synchronous callback returns.
+
 Desktop media: capture → BGRA→I420 → H.264 (OpenH264 baseline, no B-frames;
 hw encoders behind a trait) → per-frame uni stream with a `FrameHeader`
 `{seq, keyframe, capture_ts_ms, send_ts_ms}`. Freshness is enforced at
@@ -536,9 +541,9 @@ is still sending* is reset mid-write (MoQ-style) — a stale delta's tail
 only consumes path capacity the fresher frame needs. The reset breaks
 the client's delta chain, so the producer's IDR flag is re-armed and
 queued deltas are drained. The encoder's `keyframe` flag is read off the
-emitted NAL units (forced IDRs, periodic IDRs at the configured
-~8s `intra_frame_period`, and encoder rebuilds on a >15% bitrate change
-all mark real IDRs) — never assumed from a schedule. The receiver drops
+emitted NAL units — never assumed from a schedule. Periodic IDRs are disabled;
+new sessions, geometry changes and explicit reference recovery request an IDR.
+Native bitrate updates preserve references instead of rebuilding the encoder. The receiver drops
 anything below a "next expected seq" watermark, decodes with a
 session-local decoder (a shared one would cross-contaminate reference
 chains). A bounded completion-order queue preserves an unfinished reference

@@ -322,6 +322,11 @@ damage readiness wakes via the X socket rather than a fixed 25 ms poll delay.
 An idle wake starts capture immediately without counting skipped idle slots
 or sub-slot scheduling jitter as encoder starvation. This prevents an idle
 desktop from reducing its bitrate solely because it resumed after waiting.
+The X11 software producer borrows the completed MIT-SHM frame during synchronous
+conversion/encode, avoiding the native-size BGRA allocation and staging copy.
+Downscaling reads this view directly and allocates only the scaled output;
+owned capture consumers retain independent snapshots. See the
+[CPU measurement and qualification limits](reports/rds-desktop-cpu-20261008.md).
 The software producer treats `max_fps` as a ceiling and accounts for measured
 capture/conversion/codec work when scheduling its next frame. Fixed capture
 CPU cost cannot reduce network bitrate simply by exceeding a 60 FPS interval.
