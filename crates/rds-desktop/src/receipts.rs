@@ -30,7 +30,7 @@ pub(crate) async fn wait(
     }
 }
 
-type Pending = BTreeMap<u64, ([u8; 32], Option<oneshot::Sender<Evidence>>)>;
+type Pending = BTreeMap<u64, (Option<[u8; 32]>, Option<oneshot::Sender<Evidence>>)>;
 
 #[derive(Clone)]
 pub(crate) struct Receipts(Arc<Mutex<Pending>>);
@@ -39,18 +39,34 @@ impl Receipts {
     pub(crate) fn new() -> Self {
         Self(Arc::new(Mutex::new(BTreeMap::new())))
     }
-    pub(crate) fn register(&self, seq: u64, digest: [u8; 32]) -> Option<Ticket> {
+    /// Reserve one receipt slot before the payload is sent. The digest is
+    /// filled incrementally by the sender as bytes actually leave the
+    /// stream, avoiding a second full-payload hash pass.
+    pub(crate) fn register(&self, seq: u64) -> Option<Ticket> {
         let mut pending = self.0.lock().ok()?;
         if pending.len() >= crate::session::MAX_PENDING_FRAME_ACKS || pending.contains_key(&seq) {
             return None;
         }
         let (send, receive) = oneshot::channel();
-        pending.insert(seq, (digest, Some(send)));
+        pending.insert(seq, (None, Some(send)));
         Some(Ticket {
             owner: self.clone(),
             seq,
             receive,
         })
+    }
+    pub(crate) fn set_digest(&self, seq: u64, digest: [u8; 32]) -> bool {
+        let Ok(mut pending) = self.0.lock() else {
+            return false;
+        };
+        let Some((expected, _)) = pending.get_mut(&seq) else {
+            return false;
+        };
+        if expected.is_some() {
+            return false;
+        }
+        *expected = Some(digest);
+        true
     }
     pub(crate) fn confirm(&self, seq: u64, digest: &[u8; 32], obsolete: bool) -> bool {
         let Ok(mut pending) = self.0.lock() else {
@@ -59,7 +75,7 @@ impl Receipts {
         let Some((expected, send)) = pending.get_mut(&seq) else {
             return false;
         };
-        if expected != digest {
+        if expected.as_ref() != Some(digest) {
             return false;
         }
         send.take().is_some_and(|send| {
@@ -94,11 +110,18 @@ impl Drop for Ticket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registered(receipts: &Receipts, seq: u64, digest: [u8; 32]) -> Ticket {
+        let ticket = receipts.register(seq).unwrap();
+        assert!(receipts.set_digest(seq, digest));
+        ticket
+    }
+
     #[tokio::test]
     async fn only_an_exact_live_payload_proof_completes_once() {
         let receipts = Receipts::new();
         let digest = *blake3::hash(b"controlled payload").as_bytes();
-        let mut ticket = receipts.register(7, digest).unwrap();
+        let mut ticket = registered(&receipts, 7, digest);
         assert!(!receipts.confirm(6, &digest, false));
         assert!(!receipts.confirm(7, &[0; 32], false));
         assert!(
@@ -111,21 +134,32 @@ mod tests {
         ticket.received().await.unwrap();
         drop(ticket);
         assert!(!receipts.confirm(7, &digest, false));
-        assert!(receipts.register(7, digest).is_some());
+        assert!(receipts.register(7).is_some());
+    }
+
+    #[test]
+    fn payload_proof_stays_unconfirmable_until_sender_sets_digest() {
+        let receipts = Receipts::new();
+        let digest = *blake3::hash(b"payload").as_bytes();
+        let _ticket = receipts.register(7).unwrap();
+        assert!(!receipts.confirm(7, &digest, false));
+        assert!(receipts.set_digest(7, digest));
+        assert!(receipts.confirm(7, &digest, false));
+        assert!(!receipts.set_digest(7, digest));
     }
     #[test]
     fn pending_proofs_are_bounded_and_cancellation_frees_the_exact_slot() {
         let receipts = Receipts::new();
         let mut tickets: Vec<_> = (0..crate::session::MAX_PENDING_FRAME_ACKS)
-            .map(|seq| receipts.register(seq as u64, [seq as u8; 32]).unwrap())
+            .map(|seq| receipts.register(seq as u64).unwrap())
             .collect();
-        assert!(receipts.register(0, [9; 32]).is_none());
-        assert!(receipts.register(100, [9; 32]).is_none());
+        assert!(receipts.register(0).is_none());
+        assert!(receipts.register(100).is_none());
         let retired = tickets.pop().unwrap();
         let seq = retired.seq;
         drop(retired);
         assert!(!receipts.confirm(seq, &[seq as u8; 32], false));
-        assert!(receipts.register(100, [9; 32]).is_some());
+        assert!(receipts.register(100).is_some());
         drop(tickets);
         assert!(receipts.0.lock().unwrap().is_empty());
     }
@@ -133,7 +167,7 @@ mod tests {
     async fn a_delayed_transport_fin_cannot_hold_a_validated_payload_ticket() {
         let receipts = Receipts::new();
         let digest = *blake3::hash(b"already received frame").as_bytes();
-        let mut ticket = Some(receipts.register(1796, digest).unwrap());
+        let mut ticket = Some(registered(&receipts, 1796, digest));
         let transport = std::future::pending::<Result<Evidence, String>>();
         assert!(receipts.confirm(1796, &digest, false));
         assert_eq!(
@@ -152,7 +186,7 @@ mod tests {
     #[tokio::test]
     async fn transport_fin_alone_is_not_a_negotiated_payload_proof() {
         let receipts = Receipts::new();
-        let mut ticket = Some(receipts.register(1, [1; 32]).unwrap());
+        let mut ticket = Some(registered(&receipts, 1, [1; 32]));
         assert!(
             tokio::time::timeout(
                 std::time::Duration::ZERO,
@@ -180,7 +214,7 @@ mod tests {
     async fn obsolete_payload_proofs_and_session_retirement_do_not_confirm_fresh_work() {
         let old = Receipts::new();
         let digest = [9; 32];
-        let mut ticket = Some(old.register(0, digest).unwrap());
+        let mut ticket = Some(registered(&old, 0, digest));
         assert!(old.confirm(0, &digest, true));
         assert_eq!(
             wait(&mut ticket, std::future::pending()).await.unwrap(),
@@ -188,7 +222,7 @@ mod tests {
         );
         drop(ticket);
         let fresh = Receipts::new();
-        let mut ticket = fresh.register(0, digest).unwrap();
+        let mut ticket = registered(&fresh, 0, digest);
         assert!(!old.confirm(0, &digest, false));
         assert!(
             tokio::time::timeout(std::time::Duration::ZERO, ticket.received())
