@@ -18,8 +18,14 @@ callback with a controlled runtime clock. Three seconds of pending work on a
 It failed with the former conflated value and passes with separate values.
 All 111 Mac net/Noq library tests pass, including actual original-stream
 blackhole recovery, standby restoration and independent backup ACK routing.
-Strict all-target Noq Clippy and broader/platform qualification are being
-collected. No installed owned-backend improvement is asserted from these tests.
+Source `c1960a5` passed all 18 public CI checks (16 successful checks and two
+ordinary skips), covering both OS software lanes. Linux net/Noq integration,
+strict workspace desktop/Noq Clippy and X11 Clippy also pass. Mac net/Noq
+integration and runtime unit/integration tests pass; the initial Rustdoc
+compilation failed while another qualification reused the same target directory.
+The retained failure is followed by passing serialized Rustdoc compilation and
+strict workspace desktop/Noq Clippy. Shared-target qualification phases are now
+serialized. No installed owned-backend improvement is asserted from these tests.
 
 [RFC 9002 §5](https://www.rfc-editor.org/rfc/rfc9002.html#section-5) defines RTT
 estimation from transport timing. An administrative selection penalty is not

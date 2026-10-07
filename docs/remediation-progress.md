@@ -7,25 +7,25 @@ this file records implementation progress rather than rewriting that evidence.
 
 ## Current state
 
-All waves remain open. W1.1–W1.4 and W1.6–W1.8 passed the local Linux check
-matrix; other tasks remain planned unless listed below. No deployment or owned-backend
-promotion has occurred. Native macOS checks still require their platform lane.
+All product waves remain open. The task rows below distinguish landed increments
+from their remaining acceptance. Current software CI covers Linux x86_64 and
+macOS arm64, including default/Noq and desktop lanes; dated test counts in later
+sections describe their original increments, not the current inventory.
+The owned backend remains experimental.
 
-The historical readiness review at source `ec48d75` found an external SSH-client
-requirement; the later [native Rust SSH increment](ssh.md) removes that local
-requirement while retaining a configured remote SSH server. The repository is
-still not a completed remote access product. Frame presentation returns unavailable;
-ScreenCaptureKit, image-copy and PipeWire capture probes remain placeholders.
-The historical throughput scenario stopped timing at sender finish; the later
-[verified transfer increment](benchmark-transfer.md) adds a receiver byte/digest
-receipt and EOF barrier. Known-rate and phase calibration remain W0.2. The other
-implementation gaps remain in W5 and W6/W7 alongside the open plan tasks. That Linux
-receipt records 431 workspace, 238 expanded and 2 isolated iroh tests passing;
-those results do not establish missing functionality or native platform/network
-qualification. The O1 observability foundation recorded 444 workspace and 239 expanded
-tests plus the opt-in infrastructure pipeline. The subsequent authenticated
-admin/source-metrics increment is described below and in its own receipt.
-Neither increment closes these product gaps or any wave.
+The current [capability matrix](capability-matrix.md) and
+[continuation plan](continuation-plan.md) govern present capability claims.
+Native Rust SSH, the shared session manager, resumable single-file transfer,
+X11 capture/input and bounded native wgpu presentation are implemented.
+ScreenCaptureKit, image-copy/PipeWire serving, audio and recursive/two-way sync
+remain unavailable or stubs as listed in the matrix. Native input-to-visible,
+physical topology and release acceptance retain their own gates.
+
+The [verified transfer contract](benchmark-transfer.md) includes receiver
+byte/digest completion, EOF barriers and phase/known-rate calibration. Real
+topology/load qualification remains open. The observability/admin increments
+and their dated validation appear below. Installed identities, endpoint policy
+and rollout evidence belong to the private estate, independently of public CI.
 
 | Task | State | Evidence / remaining scope |
 |---|---|---|
@@ -37,7 +37,7 @@ Neither increment closes these product gaps or any wave.
 | W0.6 | Implemented; receipts cover reports + history backfilled | `docs/receipts/rds-receipts.jsonl` is append-only JSONL, one receipt per gate/report: full commit SHA, dirty flag, bench-binary and Cargo.lock digests, toolchain channel, features, OS/arch, topology class, repetitions/failures/skips, budgets and cited-report digests — no host identifiers. `prev_hash`/`hash` chaining rejects tampered, reordered or mid-deleted lines with the offending line number; `rds-bench receipt`/`validate-receipts` are the writer/reader and `write_checkpoint` now records every gate run. Gate receipts now digest-cite every bench artifact the gate produced (not just the checkpoint file); a `report-backfill` receipt anchors all 135 historical report files by content digest. Release-gate consumption remains open. |
 | W1.1 | Implemented; Linux checks passed | Denylist replacement retains its value without observers; atomic modification preserves concurrent revocations. Subscribe-before-check and initial watchdog snapshot check remove missed-update windows. Durable feed freshness remains W1.4. |
 | W1.2 | Implemented; Linux checks passed | One authorization state owns admission, replay reservation and watchdog. ACK failure/cancellation closes the connection and releases the grant. Service admission checks live validity/revocation. Connection future teardown runs RAII cleanup. |
-| W1.3 | Implemented; Linux checks passed | Client trust anchor, per-name domain-separated signatures, exact name/record binding, current validity and volatile anti-rollback. Native directory HTTPS/DNS added; durable revision linkage stays W1.4 and native macOS verification remains open. |
+| W1.3 | Implemented; software lanes | Client trust anchor, per-name domain-separated signatures, exact name/record binding and current validity. Directory HTTPS/DNS and configured durable name trust are implemented; W1.4 owns revision/rotation acceptance. Physical rollback/power-loss and external GDS anchoring remain separate qualification. |
 | W1.4 | Implemented; Linux checks passed | Shared durable policy acceptance, positive epochs/revisions, domain-separated signatures, bounded revocation leases, restart/boot rules, dual-signed rotation, atomic feed ownership and live closure. Name trust persists across CLI processes. Native macOS/power-loss qualification and external GDS rollback anchoring remain open. |
 | W1.5 | Partial | Transactional bounded disk store, tombstones, generation anchor, publisher revisions, exact retry, durable announce, leased expiry, retained floors, bounded collection, configured enrollment, fair write admission, strict HTTP framing and explicit format-2 offline migration are implemented. A 4096-identity Linux capacity/churn/reopen run passed. Legacy cutover, release-load/startup profiling, physical failure and native macOS qualification remain open; see validation below. |
 | W1.6 | Implemented; Linux checks passed | Reused bytes are verified and stored before `have`; edits, insertions, deletions, repeated chunks and destination removal/restart are tested. |
@@ -58,7 +58,7 @@ Neither increment closes these product gaps or any wave.
 | W4.4 | Partial; directional service boundaries | Real iroh/noq agents refuse writes with `SyncRead` and reads with `SyncWrite`, permit authorized transfers, and remain usable after refusal/cancellation. A view-only desktop never calls its input sink; failed injection never emits a success ACK. Linux/macOS account isolation, per-path policy, native seat/focus boundaries, consent and concurrent-role qualification remain open. See [receipt](reports/rds-service-scopes-20260926.md). |
 | W5.1/W5.3/W5.5 | Partial; native SSH client and standard PTY | `rds-ssh` uses russh 0.63.3 over pinned managed/direct streams. Explicit host pins, key/agent authentication, PTY/exec acknowledgements, terminal restoration, resize, cancellation and complete exit/output handling have Linux regression coverage and an OpenSSH interop fixture. SSH-specific fixed telemetry names are accepted by Vector; JSON uses a separate private file and terminal console logging pauses during SSH. GDS host/account provisioning, certificates/MFA, native macOS, broker/reattachment and mixed-load/network qualification remain open. See [contract](ssh.md). |
 | W6.1 | Partial; sender byte correctness and reference recovery | Pinned writes preserve progress; deltas finish before dependent successors and may be replaced by an independent keyframe. Queue loss requests IDR, and a sender sequence guard refuses broken delta chains after selection/pacing. Failure/cancellation resets streams under one deadline; serving owns child tasks. Failing-before byte/lifecycle regressions, native codec recovery and real iroh/noq RESET coverage pass. Real-codec network/overload qualification, wire session IDs and native presentation gates remain open; see [contract](desktop-frame-delivery.md). |
-| W6.2 | Partial; client receive ownership and limits | Four encoded frames per session/eight per process, two blocking decoder calls, owned task groups and cancellation, full handshake deadlines, dimension/sequence checks and rate-limited keyframe recovery are implemented. Real iroh/noq lifecycle and native codec regressions passed locally. Per-session wire IDs, global decoded/native memory accounting, renderer and native platform/network acceptance remain open; see [contract](desktop-client-lifecycle.md). |
+| W6.2 | Partial; client receive ownership, limits and native renderer | Four encoded frames per session/eight per process, two blocking decoder calls, owned task groups and cancellation, handshake deadlines, dimension/sequence checks, repair discipline and bounded newest-frame wgpu presentation are implemented. Iroh/Noq lifecycle and codec regressions pass. Per-session wire IDs, complete global decoded/native memory accounting and native platform/network acceptance remain open; see [client contract](desktop-client-lifecycle.md) and [viewer contract](native-viewer.md). |
 | W6.4 | Partial; ACK semantics and native X11 mapping | ACK follows successful backend acceptance. A bounded session-owned input worker reuses its sink. X11 maps evdev keys/buttons, bounds coordinates and fractional scroll, uses relative motion correctly, selects the explicit screen, checks native errors and releases owned holds on drop. Four failing-before native regressions and two-screen Xvfb checks cover the increment; the Linux CI lane requires actual native execution. Exclusive seat/controller ownership, focus races, custom layouts/IME, dynamic geometry and input-to-visible qualification remain open; see [contract](x11-input.md). |
 | W10.1/W10.2 | Partial; O1 foundation and O2 admin/source increment | Shared bounded Rust telemetry and Vector/OpenObserve pipeline; opt-in authenticated loopback metrics on agent/relay/server, aggregate source observations and old public metrics removal. Durable policy/catalog observations and effective agent revocation revision/lease are implemented. Finer queue/task and upstream adapter coverage, phase/reason correlation, support bundles, private rollout, independent liveness and overhead/platform qualification remain O2–O6; see [contract](observability.md). |
 

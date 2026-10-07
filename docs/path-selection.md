@@ -50,11 +50,12 @@ events preceding subscription lack a complete state-resynchronization API in the
 current noq surface. Candidate-address reconciliation is not path-validation
 reconciliation and does not establish complete tracking after lost path events.
 
-Logical path closure is not physical NIC/NAT failure. Native macOS, interface
-changes, relay failure isolation, global resource/churn bounds and service
-interruption budgets remain open. Facade metrics still require full path
-enumeration and correct selected/relay attribution. No remediation wave or
-owned-backend promotion is closed by these checks.
+Logical path closure is not physical NIC/NAT failure. Physical interface changes,
+native interactive acceptance, complete resource/churn bounds and service
+interruption budgets remain open. Facade snapshots report their coverage:
+Iroh's backend snapshot or Noq's policy-observed validated paths, with event-loss
+and driver-running state. Complete reconciliation after lost Noq events remains
+open. No remediation wave or owned-backend promotion is closed by these checks.
 
 ## Temporary path-credit exhaustion
 

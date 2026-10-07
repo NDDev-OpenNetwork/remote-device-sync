@@ -37,8 +37,8 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | service:audio | stub | no codec; wire shape reserved in v2 | `ServiceKind::Audio` variant only |
 | service:sync-read | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
 | service:sync-write | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
-| service:desktop-view | implemented | grant scope; usable capture backend | scope tests; headless path only |
-| service:desktop-control | experimental | desktop-view + control scope; X11 input sink | input contract tests; real-session injection unqualified |
+| service:desktop-view | implemented | grant scope; usable capture backend | view/control scope separation and desktop contract tests |
+| service:desktop-control | experimental | desktop-view + control scope; X11 input sink | native Xvfb input/lifecycle tests; installed causal pixels retain a separate gate |
 
 ## Transports
 
