@@ -67,11 +67,11 @@ record is published without durable revision allocation, and authorization
 expiry still applies independently. The announcer uses its bounded jittered
 retry policy without recreating the endpoint or replaying application input.
 
-Status: v0.1 foundation. This document records the protocol and stack
-research and the decisions that fall out of it. The deeper second-pass
-research — iroh 1.2/noq internals (multipath, path selectors, hooks),
-capture/codec/input crate matrix, GDS server composition, and the
-updated build order — lives in [research.md](research.md).
+Status: version 0.1.0, with implemented connectivity, managed SSH/single-file
+transfer and an experimental native X11 desktop path. Current capability states
+live in [capability-matrix.md](capability-matrix.md); remaining acceptance and
+execution order live in [continuation-plan.md](continuation-plan.md).
+[Research](research.md) separates the dated stack survey from current decisions.
 
 Agent local service starts after endpoint bind, independently of external relay
 availability. It does not await iroh's unbounded relay-only `online()` predicate.
@@ -412,11 +412,13 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
   watchers; service admission rechecks revocation and expiry directly.
   Renewal preserves the stable revocation ID and exact scope, atomically extends
   a wall/continuous-clock lease before response FIN, and keeps one watchdog.
-  One task slot is reserved from service bodies in grant mode. `SyncRead` and
+  One task slot is reserved from service bodies when the configured stream
+  budget permits; grant mode retains its renewal lane. `SyncRead` and
   `SyncWrite` are enforced before filesystem access; `DesktopView` needs the
   additional `DesktopControl` capability for input. Legacy `Sync`/`Desktop`
-  retain their broad permissions. Issuer automation, tenant/policy binding,
-  per-path and account scopes remain open; see [contract](grant-leases.md).
+  retain their broad permissions. Grant v3 enforces tenant/policy revision and
+  signed sync subtrees when configured. Automatic GDS issuance/renewal and
+  account/seat scope integration remain open; see [contract](grant-leases.md).
 - GDS names: `GET /v1/names/{name}` returns one `SignedNameBinding`, signed
   by the registry issuer over `rds/name-binding/v2\0` plus the postcard
   payload `{stamp, registry_digest, version, name, key, issued_at, expires_at}`.
@@ -611,7 +613,8 @@ the wire pipeline; completion is counted on the wire (the peer sends
 exactly the `Need` set), not on the sink's lagging counter. Every
 protocol read and chunk body is bounded by a 300s stall — a peer alive
 but silent aborts rather than parking the session. One sync session per
-connection. Explicit transfer IDs/negotiation remain W1.9/W2; physical power-loss,
+connection. Tagged transfers carry negotiated IDs and release admission before
+terminal FIN; legacy direct transfers retain their separate route. Physical power-loss,
 native macOS and large-file qualification remain W1.10/W8.
 
 The new direct `rustix` dependency is a thin safe OS API for `openat`, no-follow
@@ -625,19 +628,21 @@ changed with this filesystem adapter.
 
 - Relay-first connect (works on any egress-only network), in-band
   hole-punch upgrade — both handled by iroh. `--relay` is repeatable:
-  multiple custom relays give automatic client-side failover, which is
-  the iroh-recommended production topology (≥2 relays).
+  custom URL configuration alone does not prove persistent registration or
+  peer-known validated standbys. Explicit bounded registration/order settings
+  are described in [endpoint configuration](endpoint-configuration.md).
 - QUIC connection migration survives NAT rebinding/Wi-Fi↔LTE moves.
 - Agent reconnects to relay with backoff; CLI can pin `--relay`.
 - QUIC transport tuning on both backends: BBRv3 congestion control
-  (paced, bufferbloat-resistant — vs loss-based Cubic default),
+  by default, with an explicit Cubic qualification option,
   4 MiB stream receive window / 32 MiB connection send window so a
   large keyframe or sync chunk stream does not stall on high-BDP
   links (upstream defaults target ~100 Mbps × 100 ms). iroh's own
   multipath keep-alive and path idle-timeout defaults are preserved.
 - Serialized frame sends + collapse + mid-send stale reset bound
-  worst-case latency under loss: queues stay near-empty and the
-  residual tail is retransmit physics, not queueing.
+  media backlog. Network recovery, shared-carrier congestion, control stream
+  ordering and native scheduling can still introduce long latency tails;
+  bounded queues do not establish an end-to-end latency guarantee.
 - Every handshake and stream stage is stall-bounded: agent stream hello
   15s, desktop session ack / frame stream header+body 30s, relay
   register 15s, uni-stream tag 10s, CLI acks 15s and connect 30s,
@@ -697,28 +702,16 @@ measurement or regression-test scope; sampled counters do not prove complete
 wire accounting. Historical Noq path evidence predating the telemetry fix
 requires a new run for qualification.
 
-## Milestones
+## Product scope and milestones
 
-1. **v0.1 (this)**: workspace, rendezvous/relay, auth allowlist, `ping`,
-   `ssh`/TCP forward E2E, desktop pipeline traits + X11 capture/encode/
-   input behind the `desktop` feature, architecture doc.
-2. **v0.2**: GDS discovery + authz — `iroh-dns-server` on directory-host,
-   `EndpointHooks` allowlist, signed `device_id`↔`EndpointId` registry,
-   `rds ssh <device-name>`; damage-driven (VFR) capture replacing the
-   fixed-fps loop; wgpu client render.
-3. **v0.3**: hardware encode (`cros-codecs` VA-API/V4L2, `gpu-video`
-   Vulkan path), `wdotool-core`/portal-EIS input, audio (opus),
-   clipboard; `rds send/recv` via iroh-blobs, registry replication via
-   iroh-docs.
-4. **v0.4**: multi-relay failover + custom `PathSelector`, adaptive
-   bitrate from path congestion state, AV1 tier, RDP frontend via
-   `ironrdp-server`, browser client via WebRTC if needed.
-
-## Non-goals for v0.1
-
-- No SSH protocol implementation (TCP forward only).
-- No unattended access control model beyond the EndpointId allowlist.
-- No file transfer, audio, multi-monitor.
+[Roadmap](roadmap.md) owns the milestone definitions; the
+[continuation plan](continuation-plan.md) owns the current execution order.
+The code supplies a shared endpoint/session manager, signed discovery and
+grants, native russh client access through a scoped TCP adapter, durable
+resumable single-file transfer, and an experimental X11/OpenH264/native viewer.
+Audio, recursive/two-way synchronization and native macOS/Wayland serving
+remain unfinished. Hardware codecs, RDP/browser interop and Windows support
+retain their separate later requirements.
 
 ### Native viewer stability, video profile and text paste increment
 
