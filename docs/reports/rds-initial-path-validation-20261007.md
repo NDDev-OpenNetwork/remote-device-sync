@@ -54,3 +54,36 @@ The full engine suite now runs in both supported CI test lanes. Linux/X11,
 current-head CI, immutable release builds and installed qualification remain
 required before rollout. This report does not close W3/W6/W10 or claim physical
 interface, suspend, power-loss or causal input-to-pixel acceptance.
+
+## Measurement harness increment
+
+Current-source `rds-bench` measurements are retained in
+[rds-initial-validation-bench-20261007.json](rds-initial-validation-bench-20261007.json).
+Source: `378d636a93548e7a1b15c1b1c45bb1749619a9ea`, macOS arm64,
+`transport-noq`, unoptimized stripped development profile, one run per case.
+Synthetic same-host direct endpoints use temporary identities. No deployed host,
+private configuration or foreign desktop is part of these measurements.
+
+| Case | Samples or verified payload | Observed result |
+|---|---|---|
+| Iroh ping | 32 | p50 0.558ms; p95 0.765ms; p99/max 0.962ms |
+| Noq ping | 32 | p50 0.428ms; p95 1.669ms; p99/max 1.859ms |
+| Iroh receiver-verified transfer | 4MiB | 18.163MiB/s |
+| Noq receiver-verified transfer | 4MiB | 25.547MiB/s |
+| Noq controlled mid-transfer loss | 2MiB verified | 179 dropped datagrams; verified receipt; 1.770MiB/s |
+
+Transfer includes bounded streaming generation/hashing and a receiver byte-count
+plus BLAKE3 receipt. The recovery case imposes15% client-egress loss and50ms
+delay for a1.503s window; it verifies2MiB rather than the4MiB ordinary transfer.
+It proves completion under that controlled impairment, not standby validation,
+physical-network recovery or user-visible desktop latency. One run and32 ping
+samples cannot establish comparative superiority, reproducibility or broad
+release acceptance. No milestone/checkpoint gate is closed by this increment.
+
+The reproducible command family is
+`rds-bench run --scenario CASE --backend BACKEND --iterations 32 --transfer-mib 4 --timeout-s 30`;
+CASES are `ping`, `transfer` on both lanes and `recovery` on Noq. The versioned
+[measurement method](../benchmark-transfer.md) remains authoritative. The full
+corrected software CI passed both OS test lanes; the first Rust CodeQL attempt
+ended during SARIF upload and its failed attempt remains retained. Final scanner
+and installed acceptance are recorded independently in their deployment evidence.
