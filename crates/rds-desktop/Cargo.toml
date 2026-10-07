@@ -30,16 +30,16 @@ wgpu = { version = "30.0.1", default-features = false, features = ["std", "parki
 # Native window/input only; client-side Adwaita decorations unnecessarily pull
 # font parsers into the desktop client. Use the window system's decorations.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"], optional = true }
-pollster = { version = "0.4", optional = true }
+pollster = { version = "1.0", optional = true }
 serde.workspace = true
 rustix = { workspace = true, features = ["event", "time"], optional = true }
 
-# The same thin AppKit bindings already used by winit, for a Dock icon when
-# launched directly from the CLI as well as from a packaged application.
+# Thin AppKit bindings for the native viewer's window, clipboard and activity
+# lifetime. Explicit superclass features are required by the 0.3 bindings.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { version = "0.5.2", optional = true }
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSPasteboard", "NSView", "NSWindow"], optional = true }
-objc2-foundation = { version = "0.2.2", default-features = false, features = ["std", "NSData", "NSObject", "NSProcessInfo"], optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSAlert", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSView", "NSWindow"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSObject", "NSProcessInfo"], optional = true }
 
 [dev-dependencies]
 noq.workspace = true
