@@ -1771,6 +1771,11 @@ mod x11 {
             );
             let (width, height) = (raw.width, raw.height);
             let encoded = self.encoder.encode(&raw);
+            // The encoder has finished borrowing the capture. Return a
+            // native-sized frame buffer to MIT-SHM capture so the next
+            // frame reuses its allocation. Downscaled frames are naturally
+            // rejected by the capturer's size check.
+            self.capturer.recycle(raw.data);
             self.skipped = encoded.as_ref().is_ok_and(|frame| frame.data.is_empty());
             self.last_work = work_started.elapsed();
             match encoded {

@@ -54,6 +54,9 @@ pub struct X11Capturer {
     /// Sticky flag: the first `changed` call must be true (the screen
     /// existed before the damage object did).
     dirty: bool,
+    /// One owned frame buffer returned by the producer after encoding. The
+    /// next capture fills it in place, avoiding allocator churn at 60 fps.
+    recycled: Option<Bytes>,
 }
 
 impl X11Capturer {
@@ -122,6 +125,7 @@ impl X11Capturer {
             shm,
             damage,
             dirty: true,
+            recycled: None,
         })
     }
 
@@ -152,6 +156,15 @@ impl X11Capturer {
             len,
             _fd: fd,
         })
+    }
+
+    /// Return an encoded frame's owned storage for reuse on the next
+    /// capture. A scaled frame has a different size and is ignored.
+    pub(crate) fn recycle(&mut self, data: Bytes) {
+        let expected = usize::from(self.width) * usize::from(self.height) * 4;
+        if self.shm.is_some() && data.len() == expected {
+            self.recycled = Some(data);
+        }
     }
 
     /// DAMAGE (XFixes ≥ 4): one object on the root window reporting
@@ -196,7 +209,7 @@ impl Capturer for X11Capturer {
                         width: u32::from(self.width),
                         height: u32::from(self.height),
                         stride: u32::from(self.width) * 4,
-                        data: Bytes::copy_from_slice(&shm.map[..shm.len]),
+                        data: copy_capture(&mut self.recycled, &shm.map[..shm.len]),
                     });
                 }
                 Err(e) => {
@@ -268,6 +281,20 @@ impl Capturer for X11Capturer {
     }
 }
 
+/// The X11 segment is overwritten by the next request, so capture must
+/// copy into owned storage. Reuse only uniquely owned, correctly sized data;
+/// a retained snapshot must remain immutable.
+fn copy_capture(recycled: &mut Option<Bytes>, source: &[u8]) -> Bytes {
+    if let Some(bytes) = recycled.take()
+        && let Ok(mut buffer) = bytes.try_into_mut()
+        && buffer.len() == source.len()
+    {
+        buffer.copy_from_slice(source);
+        return buffer.freeze();
+    }
+    Bytes::copy_from_slice(source)
+}
+
 impl Drop for X11Capturer {
     fn drop(&mut self) {
         if let Some(dmg) = self.damage.take() {
@@ -293,6 +320,27 @@ pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_storage_reuses_unique_buffers_and_preserves_retained_snapshots() {
+        let first = Bytes::from(vec![1u8; 1024]);
+        let pointer = first.as_ptr();
+        let mut recycled = Some(first);
+        let next = copy_capture(&mut recycled, &[2u8; 1024]);
+        assert_eq!(next.as_ptr(), pointer, "unique buffer must be reused");
+        assert!(recycled.is_none());
+        assert_eq!(next.as_ref(), &[2u8; 1024]);
+
+        let retained = next.clone();
+        recycled = Some(next);
+        let changed = copy_capture(&mut recycled, &[3u8; 1024]);
+        assert_ne!(changed.as_ptr(), retained.as_ptr());
+        assert_eq!(retained.as_ref(), &[2u8; 1024]);
+        assert_eq!(changed.as_ref(), &[3u8; 1024]);
+
+        recycled = Some(changed);
+        assert_eq!(copy_capture(&mut recycled, &[4u8; 16]).as_ref(), &[4u8; 16]);
+    }
 
     /// Explicit native fixture: never silently succeeds without capture.
     #[test]
