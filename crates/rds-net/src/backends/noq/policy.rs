@@ -581,11 +581,7 @@ fn reselect(
             // A draining path stays eligible — it may be the only one —
             // but at maximum penalty so any live sibling wins selection.
             let stats = path.stats();
-            let rtt = if draining != 0 && on_masked_slot(&path, draining) {
-                Duration::MAX
-            } else {
-                stats.rtt
-            };
+            let rtt = PathRtt::new(stats.rtt, draining != 0 && on_masked_slot(&path, draining));
             let progress = connection
                 .congestion_state(*id)
                 .and_then(crate::ack_progress::snapshot);
@@ -594,7 +590,7 @@ fn reselect(
             }
             tracing::debug!(target: "rds_net::path_policy", path_id=%id,
                 selected=*selected == Some(*id), stream_work=stats.unacknowledged_stream_frames,
-                path_rtt_ms=rtt.as_millis(),
+                path_rtt_ms=rtt.measured.as_millis(),
                 pending_ack_age_ms=?progress.and_then(|s|s.pending_age()).map(|d|d.as_millis()),
                 confirmed_ack_age_ms=?progress.and_then(|s|s.confirmation_age()).map(|d|d.as_millis()),
                 "latency path progress observation");
@@ -605,14 +601,14 @@ fn reselect(
         if !stream_work {
             continue;
         }
-        if !state.is_some_and(|state| state.stalled(*rtt)) {
+        if !state.is_some_and(|state| state.stalled(rtt.measured)) {
             continue;
         }
         let fallback = candidates.iter().find(|(other, other_rtt, sibling, _)| {
             other != id
-                && (*state)
-                    .zip(*sibling)
-                    .is_some_and(|(failed, sibling)| sibling.can_replace(failed, *other_rtt))
+                && (*state).zip(*sibling).is_some_and(|(failed, sibling)| {
+                    sibling.can_replace(failed, other_rtt.measured)
+                })
         });
         if let Some((other, other_rtt, fallback_state, _)) = fallback
             && let Some(path) = connection.path(*other)
@@ -623,22 +619,22 @@ fn reselect(
             tracing::warn!(target:"rds_net::path_policy", path_id=%id, fallback_path_id=%other,
                 pending_ack_age_ms=?state.and_then(|state| state.pending_age()).map(|age| age.as_millis()),
                 fallback_ack_age_ms=?fallback_state.and_then(|state| state.confirmation_age()).map(|age| age.as_millis()),
-                path_rtt_ms=rtt.as_millis(), fallback_rtt_ms=other_rtt.as_millis(),
+                path_rtt_ms=rtt.measured.as_millis(), fallback_rtt_ms=other_rtt.measured.as_millis(),
                 "unresponsive path retired with a confirmed sibling; reliable streams retained");
         }
     }
     let has_confirmed = candidates.iter().any(|(_, rtt, state, _)| {
-        state.is_some_and(|state| state.confirmed(*rtt) && !state.stalled(*rtt))
+        state.is_some_and(|state| state.confirmed(rtt.measured) && !state.stalled(rtt.measured))
     });
     let rtts: Vec<_> = candidates
         .into_iter()
         .filter_map(|(id, rtt, state, _)| {
-            if state.is_some_and(|state| state.stalled(rtt))
-                || (has_confirmed && state.is_some_and(|state| !state.confirmed(rtt)))
+            if state.is_some_and(|state| state.stalled(rtt.measured))
+                || (has_confirmed && state.is_some_and(|state| !state.confirmed(rtt.measured)))
             {
                 None
             } else {
-                Some((id, rtt))
+                Some((id, rtt.rank))
             }
         })
         .collect();
@@ -679,10 +675,39 @@ fn reselect(
         .map(|_| choice);
 }
 
+#[derive(Clone, Copy)]
+struct PathRtt {
+    // Progress deadlines always use the measured transport RTT. Administrative
+    // drain priority must not turn those deadlines into an infinite budget.
+    measured: Duration,
+    rank: Duration,
+}
+impl PathRtt {
+    fn new(measured: Duration, draining: bool) -> Self {
+        let rank = if draining { Duration::MAX } else { measured };
+        Self { measured, rank }
+    }
+}
+
 #[cfg(test)]
 mod candidate_tests {
     use super::*;
     use std::net::{Ipv6Addr, SocketAddrV6};
+    #[test]
+    fn draining_priority_does_not_disable_the_measured_ack_progress_deadline() {
+        let start = std::time::Instant::now();
+        let clock: crate::ack_progress::Clock =
+            std::sync::Arc::new(move || start + Duration::from_secs(3));
+        let mut controller =
+            crate::ack_progress::factory(crate::CongestionControl::Cubic.factory(), clock)
+                .build(start, 1200);
+        controller.on_packet_sent(start, 100, 0);
+        controller.on_sent(start, 100, 0);
+        let proof = crate::ack_progress::snapshot(controller.clone_box()).unwrap();
+        let rtt = PathRtt::new(Duration::from_millis(70), true);
+        assert_eq!(rtt.rank, Duration::MAX);
+        assert!(proof.stalled(rtt.measured));
+    }
     fn target(addresses: impl IntoIterator<Item = SocketAddr>) -> EndpointAddr {
         EndpointAddr {
             id: crate::SecretKey::from_bytes(&[114; 32]).public(),

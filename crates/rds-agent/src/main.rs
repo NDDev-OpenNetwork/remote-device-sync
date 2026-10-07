@@ -26,8 +26,8 @@ struct Cli {
     /// Path to the endpoint secret key (created if missing).
     #[arg(long)]
     key_file: Option<std::path::PathBuf>,
-    /// Custom relay URL; default is the n0 public relays. Repeatable —
-    /// ≥2 relays give automatic client-side failover.
+    /// Custom relay URL; defaults to n0 public relays. Repeatable.
+    /// Fallback requires ready paths known to both peers.
     #[arg(long, conflicts_with_all = ["owned_relay", "no_relay"])]
     relay: Vec<String>,
     /// Transport backend: `iroh` (default) or `noq` (with the
