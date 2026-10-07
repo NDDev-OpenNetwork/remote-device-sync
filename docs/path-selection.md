@@ -1,5 +1,11 @@
 # Validated path eligibility in the owned backend
 
+Administrative drain gives a usable grace-period path a maximum selection
+penalty. Measured transport RTT remains separate: ACK freshness, outstanding
+work deadlines, replacement proof and RTT diagnostics use that measurement.
+A priority penalty cannot make progress deadlines infinite or keep old ACKs
+fresh. See [the regression receipt](reports/rds-drain-rtt-budget-20261007.md).
+
 The application policy initially seeds only PathId::ZERO from a completed,
 authenticated handshake. It subscribes to path/QNT events before its explicit
 advertisements, traversal request and additional-path opens. Pending PathIds
