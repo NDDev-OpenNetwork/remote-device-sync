@@ -8,8 +8,10 @@
 //! on the bi-directional control stream, which outranks every frame
 //! stream.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -1959,11 +1961,9 @@ async fn send_frame_inner(
         generation,
         mut key,
     } = produced;
-    let mut payload_ticket = match &delivery.payload_receipts {
-        Some(receipts) => match receipts.register(
-            produced.header.seq,
-            *blake3::hash(&produced.payload).as_bytes(),
-        ) {
+    let payload_receipts = delivery.payload_receipts.clone();
+    let mut payload_ticket = match &payload_receipts {
+        Some(receipts) => match receipts.register(produced.header.seq) {
             Some(ticket) => Some(ticket),
             None => {
                 tracing::warn!(
@@ -2008,7 +2008,8 @@ async fn send_frame_inner(
         tracing::debug!("frame header write failed: {e}");
         return SendOutcome::Failed;
     }
-    let outcome = match send_payload(stream, &produced, rx).await {
+    let mut payload_hasher = payload_receipts.as_ref().map(|_| blake3::Hasher::new());
+    let outcome = match send_payload(stream, &produced, rx, payload_hasher.as_mut()).await {
         Ok(PayloadOutcome::Abandoned(next)) => {
             return SendOutcome::Superseded(next);
         }
@@ -2023,6 +2024,17 @@ async fn send_frame_inner(
             return SendOutcome::Failed;
         }
     };
+    if matches!(outcome, SendOutcome::Sent | SendOutcome::Done)
+        && let (Some(receipts), Some(hasher)) = (&payload_receipts, payload_hasher)
+    {
+        let digest = *hasher.finalize().as_bytes();
+        if !receipts.set_digest(produced.header.seq, digest) {
+            tracing::debug!(
+                frame_seq = produced.header.seq,
+                "payload receipt digest was retired before send completed"
+            );
+        }
+    }
     if let Err(e) = stream.finish() {
         // finish() reports an erased ClosedStream. Only a ready, exact peer
         // disposition can classify it as obsolete; never wait on other errors.
@@ -2138,11 +2150,51 @@ enum PayloadOutcome<T> {
     Abandoned(T),
 }
 
+/// Hash payload bytes as the async writer actually accepts them. Receipt
+/// hashing used to scan the complete payload before the write and therefore
+/// paid a second Full HD memory pass on every frame.
+struct DigestingWriter<'a, W> {
+    inner: &'a mut W,
+    hasher: Option<&'a mut blake3::Hasher>,
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for DigestingWriter<'_, W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match Pin::new(&mut *this.inner).poll_write(cx, buf) {
+            Poll::Ready(Ok(written)) => {
+                if let Some(hasher) = this.hasher.as_deref_mut() {
+                    hasher.update(&buf[..written]);
+                }
+                Poll::Ready(Ok(written))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 async fn send_payload<W: AsyncWrite + Unpin, T: Borrow<Produced>>(
     stream: &mut W,
     produced: &Produced,
     rx: &mut mpsc::Receiver<T>,
+    hasher: Option<&mut blake3::Hasher>,
 ) -> std::io::Result<PayloadOutcome<T>> {
+    let mut stream = DigestingWriter {
+        inner: stream,
+        hasher,
+    };
     // write_all is not cancellation-safe: keep its progress alive across a
     // producer event. Starting another write_all would duplicate the prefix.
     let writing = stream.write_all(&produced.payload);
@@ -2449,7 +2501,7 @@ mod tests {
             let frame = produced(0, keyframe);
             let mut wire = vec![0; 17];
             {
-                let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx));
+                let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx, None));
                 // Poll until the tiny stream buffer is full, then consume only
                 // a prefix. The producer event must interrupt a partial write.
                 poll_fn(|cx| {
@@ -2513,7 +2565,7 @@ mod tests {
             let (mut writer, reader) = tokio::io::duplex(64);
             let (tx, mut rx) = mpsc::channel(1);
             let frame = produced(0, true);
-            let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx));
+            let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx, None));
             poll_fn(|cx| {
                 assert!(sending.as_mut().poll(cx).is_pending());
                 Poll::Ready(())
@@ -2548,7 +2600,7 @@ mod tests {
             let (mut writer, _reader) = tokio::io::duplex(64);
             let (tx, mut rx) = mpsc::channel(1);
             let frame = produced(0, false);
-            let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx));
+            let mut sending = Box::pin(send_payload(&mut writer, &frame, &mut rx, None));
             poll_fn(|cx| {
                 assert!(sending.as_mut().poll(cx).is_pending());
                 Poll::Ready(())

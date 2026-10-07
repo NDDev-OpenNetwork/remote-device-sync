@@ -1028,10 +1028,14 @@ async fn read_one_with_receipt(
         // discards its partial buffer on cancellation and hid whether even a
         // header or any media bytes arrived during observed freezes.
         let mut body = Vec::new();
+        let mut hasher = receipts.as_ref().map(|_| blake3::Hasher::new());
         let mut chunk = [0u8; 16 * 1024];
         while let Some(count) = stream.read(&mut chunk).await.ok()? {
             if count > MAX_FRAME_BYTES.saturating_sub(body.len()) {
                 return None;
+            }
+            if let Some(hasher) = hasher.as_mut() {
+                hasher.update(&chunk[..count]);
             }
             body.extend_from_slice(&chunk[..count]);
             body_bytes = body.len();
@@ -1040,7 +1044,8 @@ async fn read_one_with_receipt(
             if body.is_empty() {
                 return None;
             }
-            let digest = *blake3::hash(&body).as_bytes();
+            let hasher = hasher?;
+            let digest = *hasher.finalize().as_bytes();
             let obsolete = header.seq < next_seq.load(Ordering::Relaxed);
             // The proof belongs to the bounded wire reader, before ordered
             // decode or local IPC can backpressure completed payloads.
