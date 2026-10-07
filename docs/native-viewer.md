@@ -346,10 +346,11 @@ contains no endpoint identity; the normal private viewer configuration applies.
 
 ## Quality selection
 
-The macOS application presents a native quality chooser before opening its
-remote session. Full HD (1080p) is the default; HD (720p) and Original are also
-available. `--resolution full-hd|hd|native` skips the chooser for explicit CLI
-or automated launches. Output preserves aspect ratio and does not upscale a
+The macOS application presents a native quality chooser when no explicit
+profile is configured. Full HD (1080p) is the default; HD (720p) and Original are
+also available. `--resolution full-hd|hd|native` or a `resolution` value in
+`viewer.json` skips the chooser; the command-line value overrides the file.
+Headless runs never open the chooser. Output preserves aspect ratio and does not upscale a
 smaller source. This is encoded video geometry, not the local window's size.
 
 The additive `DesktopV3` greeting and `DesktopProfile` manager command carry the

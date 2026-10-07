@@ -65,6 +65,7 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
+    let mut configured_resolution = None;
     let key_path = rds_net::default_key_path();
     let directory = match cli.control_dir.take() {
         Some(directory) => directory,
@@ -130,18 +131,13 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                 if cli.grant_file.is_none() {
                     cli.grant_file = config.grant_file;
                 }
-                if let Some(resolution) = config.resolution
-                    && matches.value_source("resolution") != Some(ValueSource::CommandLine)
-                {
-                    cli.options.resolution = resolution;
-                }
+                configured_resolution = config.resolution;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
-    if !cli.options.headless && matches.value_source("resolution") != Some(ValueSource::CommandLine)
-    {
+    if configure_resolution(&mut cli.options, matches, configured_resolution) {
         let Some(height) = rds_desktop::render::choose_resolution() else {
             return Ok(());
         };
@@ -158,5 +154,61 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
     } else {
         let session = client.selected(None).await?;
         rds_cli::desktop::managed(&client, session, grant, cli.options).await
+    }
+}
+
+/// Apply explicit quality choices before deciding whether native selection is
+/// needed. Command-line values override the persisted profile.
+fn configure_resolution(
+    options: &mut rds_cli::desktop::Options,
+    matches: &clap::ArgMatches,
+    configured: Option<rds_cli::desktop::Resolution>,
+) -> bool {
+    let explicit_cli = matches.value_source("resolution") == Some(ValueSource::CommandLine);
+    if !explicit_cli && let Some(resolution) = configured {
+        options.resolution = resolution;
+    }
+    !options.headless && !explicit_cli && configured.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configured_cli(args: &[&str], configured: Option<&str>) -> (Cli, bool) {
+        let matches = Cli::command().try_get_matches_from(args).unwrap();
+        let mut cli = Cli::from_arg_matches(&matches).unwrap();
+        let config: Config = serde_json::from_str(configured.unwrap_or("{}")).unwrap();
+        let picker = configure_resolution(&mut cli.options, &matches, config.resolution);
+        (cli, picker)
+    }
+
+    #[test]
+    fn persisted_quality_is_applied_without_reopening_the_picker() {
+        for (profile, height) in [("hd", 720), ("full-hd", 1080), ("native", 0)] {
+            let json = format!(r#"{{"resolution":"{profile}"}}"#);
+            let (cli, picker) = configured_cli(&["rds-viewer"], Some(&json));
+            assert_eq!(cli.options.resolution.height(), height);
+            assert!(
+                !picker,
+                "a persisted profile must not be overwritten by a picker"
+            );
+        }
+    }
+
+    #[test]
+    fn command_line_quality_overrides_the_persisted_profile() {
+        let (cli, picker) = configured_cli(
+            &["rds-viewer", "--resolution", "native"],
+            Some(r#"{"resolution":"hd"}"#),
+        );
+        assert_eq!(cli.options.resolution.height(), 0);
+        assert!(!picker);
+    }
+
+    #[test]
+    fn only_unconfigured_native_launches_need_the_picker() {
+        assert!(configured_cli(&["rds-viewer"], None).1);
+        assert!(!configured_cli(&["rds-viewer", "--headless"], None).1);
     }
 }

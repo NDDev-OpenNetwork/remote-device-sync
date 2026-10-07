@@ -323,6 +323,27 @@ async fn client_refuses_ambiguous_framing_even_with_a_valid_record_body() {
 #[tokio::test]
 async fn fragmented_maximum_binary_body_is_preserved_in_both_directions() {
     use tokio::io::AsyncWriteExt;
+    // Fragment reads independently of transport capacity. A seven-byte
+    // channel made a maximum body require tens of thousands of writer/reader
+    // wakeups, accidentally turning this codec assertion into a scheduler
+    // benchmark on loaded CI runners.
+    struct Fragments<S>(S);
+    impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Fragments<S> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            output: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let mut bytes = [0; 7];
+            let limit = output.remaining().min(bytes.len());
+            let mut fragment = tokio::io::ReadBuf::new(&mut bytes[..limit]);
+            let result = std::pin::Pin::new(&mut self.0).poll_read(cx, &mut fragment);
+            if let std::task::Poll::Ready(Ok(())) = result {
+                output.put_slice(fragment.filled());
+            }
+            result
+        }
+    }
     let body: Vec<u8> = (0..MAX_BODY).map(|n| (n % 256) as u8).collect();
     for is_request in [true, false] {
         let mut wire = Vec::new();
@@ -341,8 +362,10 @@ async fn fragmented_maximum_binary_body_is_preserved_in_both_directions() {
             .await
             .unwrap();
         }
-        // Seven bytes forces splits inside header names, CRLF and binary data.
-        let (mut tx, mut rx) = tokio::io::duplex(7);
+        // Reads still split header names, CRLF and binary data at seven bytes.
+        // The bounded transport can queue one small 4 KiB block at a time.
+        let (mut tx, rx) = tokio::io::duplex(4096);
+        let mut rx = Fragments(rx);
         let ((), received) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             tokio::join!(
                 async {
