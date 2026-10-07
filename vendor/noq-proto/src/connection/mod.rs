@@ -712,7 +712,9 @@ impl Connection {
                 // These timers deal with sending and receiving PATH_CHALLENGE and
                 // PATH_RESPONSE, but now that the path is abandoned, we no longer care about
                 // these frames or their timing
-                PathTimer::PathValidationFailed | PathTimer::PathChallengeLost => false,
+                PathTimer::PathValidationFailed
+                | PathTimer::InitialValidationFailed
+                | PathTimer::PathChallengeLost => false,
                 // These timers deal with the lifetime of the path. Now that the path is abandoned,
                 // these are not relevant.
                 PathTimer::PathKeepAlive | PathTimer::PathIdle => false,
@@ -944,6 +946,16 @@ impl Connection {
         let valid_path = self.find_validated_path_on_network_path(network_path);
         let validated = valid_path.is_some();
         let initial_rtt = valid_path.map(|(_, path)| path.data.rtt.conservative());
+        // Initial validation has its own deadline even when healthy paths have
+        // no idle timeout. Use the larger initial/validated-path PTO so a new
+        // route is not judged using only an unrelated low-latency estimate.
+        let existing_pto = self
+            .paths
+            .iter()
+            .filter(|(id, path)| path.data.validated && !self.abandoned_paths.contains(id))
+            .map(|(id, _)| self.pto(SpaceKind::Data, *id))
+            .max()
+            .unwrap_or_default();
         let vacant_entry = match self.paths.entry(path_id) {
             btree_map::Entry::Vacant(vacant_entry) => vacant_entry,
             btree_map::Entry::Occupied(occupied_entry) => {
@@ -983,6 +995,14 @@ impl Connection {
             .address_discovery_role
             .should_report(&self.peer_params.address_discovery_role);
 
+        if !validated {
+            let pto = data.rtt.pto_base() + self.ack_frequency.max_ack_delay_for_pto();
+            self.timers.set(
+                Timer::PerPath(path_id, PathTimer::InitialValidationFailed),
+                now + 3 * cmp::max(pto, existing_pto),
+                self.qlog.with_time(now),
+            );
+        }
         let path = vacant_entry.insert(PathState { data, prev: None });
 
         let mut pn_space = spaces::PacketNumberSpace::new(now, SpaceId::Data, &mut self.rng);
@@ -2591,6 +2611,19 @@ impl Connection {
                                 error!("LossDetection fired for unknown path");
                             }
                         }
+                        PathTimer::InitialValidationFailed => {
+                            if self
+                                .paths
+                                .get(&path_id)
+                                .is_some_and(|path| !path.data.validated)
+                                && !self.abandoned_paths.contains(&path_id)
+                                && let Err(err) =
+                                    self.close_path_inner(now, path_id, PathAbandonReason::TimedOut)
+                            {
+                                warn!(?err, "failed closing unvalidated path");
+                            }
+                        }
+
                         PathTimer::PathValidationFailed => {
                             let Some(path) = self.paths.get_mut(&path_id) else {
                                 continue;
@@ -5680,6 +5713,10 @@ impl Connection {
                 let qlog = self.qlog.with_time(now);
                 self.timers.stop(
                     Timer::PerPath(path_id, PathTimer::PathValidationFailed),
+                    qlog.clone(),
+                );
+                self.timers.stop(
+                    Timer::PerPath(path_id, PathTimer::InitialValidationFailed),
                     qlog.clone(),
                 );
                 let next_challenge = path

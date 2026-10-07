@@ -452,6 +452,88 @@ async fn actual_iroh_actor_reopens_a_retired_standby_before_the_next_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_iroh_actor_establishes_a_standby_that_was_blocked_at_startup() {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        let fabric = Fabric::default();
+        let blocked = Arc::new(AtomicBool::new(true));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut endpoints = Vec::new();
+        for name in [b"a", b"b"] {
+            endpoints.push(
+                endpoint_with_selector(
+                    Link {
+                        addr: CustomAddr::from_parts(0x726473636f6c6431, name),
+                        fabric: fabric.clone(),
+                        drop_packets: blocked.clone(),
+                        dropped: dropped.clone(),
+                    },
+                    Arc::new(super::latency::LatencySelector),
+                )
+                .await,
+            );
+        }
+        let a = &endpoints[0];
+        let b = &endpoints[1];
+        // Include the configured standby even before its local watcher has
+        // published the first address snapshot, like a complete bootstrap ticket.
+        let mut target = b.addr();
+        target.addrs.insert(TransportAddr::Custom(CustomAddr::from_parts(
+            0x726473636f6c6431, b"b",
+        )));
+        let (client, server) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(a.connect(target, rds_core::ALPN), async {
+                b.accept().await.unwrap().await
+            })
+        })
+        .await
+        .expect("the blocked standby delayed the healthy initial route");
+        let (client, server) = (client.unwrap(), server.unwrap());
+        let (mut request, mut response) = client.open_bi().await.unwrap();
+        request.write_all(b"before").await.unwrap();
+        let (mut reply, mut input) = server.accept_bi().await.unwrap();
+        let mut body = [0; 6];
+        input.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"before");
+        reply.write_all(b"ok").await.unwrap();
+        let mut ack = [0; 2];
+        response.read_exact(&mut ack).await.unwrap();
+        assert_eq!(&ack, b"ok");
+
+        // Miss several initial validation probes while the live IP route keeps
+        // this same connection and stream usable.
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        assert!(dropped.load(Ordering::Relaxed) > 0);
+        assert!(client.paths().iter().all(|path| path.is_ip()));
+        blocked.store(false, Ordering::Release);
+        let restored_at = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !client.paths().iter().any(|path| !path.is_ip())
+                || !server.paths().iter().any(|path| !path.is_ip())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the restored initial standby did not validate within five seconds");
+        eprintln!(
+            "initial standby validation after restore: {} ms",
+            restored_at.elapsed().as_millis()
+        );
+        request.write_all(b"after!").await.unwrap();
+        input.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"after!");
+        reply.write_all(b"ok").await.unwrap();
+        response.read_exact(&mut ack).await.unwrap();
+        assert_eq!(&ack, b"ok");
+        assert!(client.close_reason().is_none());
+        assert!(server.close_reason().is_none());
+        tokio::join!(a.close(), b.close());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_iroh_actor_retires_blackholed_preferred_link_and_delivers_pending_stream_bytes() {
     tokio::time::timeout(Duration::from_secs(15),async {
         let fabric=Fabric::default();

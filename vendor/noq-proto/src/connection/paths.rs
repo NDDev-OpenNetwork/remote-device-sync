@@ -1107,14 +1107,14 @@ pub enum PathAbandonReason {
     },
     /// We didn't receive a path response in time after opening this path.
     ///
-    /// This event is no longer emitted, when validation fails a path is only abandoned once
-    /// there's a path timeout and the [`Self::TimedOut`] event will be emitted instead.
+    /// This event is no longer emitted. Initial validation and idle deadlines
+    /// both emit [`Self::TimedOut`] instead.
     #[deprecated(
         since = "1.1.0",
         note = "This event is no longer emitted, TimedOut will be emitted instead"
     )]
     ValidationFailed,
-    /// We didn't receive any data from the remote within the path's idle timeout.
+    /// The peer did not complete initial path validation or the path became idle.
     TimedOut,
     /// The path became unusable after a local network change.
     UnusableAfterNetworkChange,

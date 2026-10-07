@@ -32,3 +32,26 @@ The MTU constructor's debug assertion keeps its numeric invariant but uses a
 static message. CodeQL treated the formatted minimum-MTU value as configuration
 data derived from test certificate setup. Removing the interpolation avoids
 that diagnostic data flow without changing the MTU decision or disabling scans.
+
+## Initial multipath validation deadline
+
+A new unvalidated path now has a dedicated deadline independent of its idle
+policy. The budget is three times the larger initial PTO and PTO of the live
+validated paths. This conservative choice follows RFC 9000 §8.2.4 guidance;
+using all live validated estimates avoids judging an unknown route solely from
+an unrelated faster path. RFC 9000 migration retains its separate timer and
+previous-route fallback. Validation success cancels the initial timer. Failure
+closes the attempt with the existing TimedOut reason and PATH_ABANDON machinery;
+last-path protection, CID retirement, ID nonreuse and retransmission remain in
+the existing engine boundary. Qlog records the standard path-validation timer.
+
+No new wire frame, credential, congestion controller or application replay is
+introduced. Multipath draft-21 §3.1 requires explicitly closing a failed path
+initiation; §3.4 prohibits reusing an abandoned path ID. Deterministic engine
+regressions cover no-idle-policy timeout, fresh-ID recovery and last-path
+protection. The complete engine unit suite runs on both supported CI targets.
+A real Iroh actor fixture blocks an initially configured standby, restores it
+and continues the original bidirectional stream through the same connection.
+
+Sources: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.2.4
+and https://www.ietf.org/archive/id/draft-ietf-quic-multipath-21.html#section-3.1

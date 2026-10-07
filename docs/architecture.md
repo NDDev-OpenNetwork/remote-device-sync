@@ -34,6 +34,13 @@ idle ACK cannot prove replacement progress during a common outage. The existing 
 stream transfers to that sibling through Noq's ordinary path-abandon machinery;
 the last open path is never retired. See [the recovery evidence](reports/rds-path-ack-progress-20261006.md).
 
+Initial multipath validation has its own engine deadline, independent of idle
+policy for established paths. The budget uses three times the larger initial
+PTO and PTO of live validated paths. An unsuccessful attempt closes through
+existing PATH_ABANDON/CID handling; its ID is not reused. Validation success
+cancels this timer. RFC 9000 address migration keeps its separate timeout and
+previous-route fallback, and last-path protection remains in the engine.
+
 Tagged sync completion now transfers connection exclusion and the data-lane
 admission permit into the engine. Filesystem/control work and its reader close before that guard releases,
 and only then is the terminal server FIN exposed to the peer. This makes an
