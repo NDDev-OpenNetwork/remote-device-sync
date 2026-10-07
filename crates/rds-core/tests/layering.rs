@@ -23,8 +23,10 @@ const FORBIDDEN_DEPS: &[&str] = &[
 
 #[test]
 fn rds_core_manifest_has_no_runtime_or_backend_dependencies() {
-    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .expect("Cargo.toml readable");
+    // Cargo may reuse this test artifact after an isolated source checkout
+    // has been removed. Embed the manifest being compiled, rather than a
+    // runtime dependency on that checkout's absolute path.
+    let manifest = include_str!("../Cargo.toml");
 
     let deps = manifest
         .split("[dependencies]")
