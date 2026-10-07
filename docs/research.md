@@ -154,6 +154,13 @@ document separates verified facts (crate versions, APIs read in vendored
 sources, upstream docs) from measured folklore, and ends with concrete
 decisions and a build order.
 
+The original September 21 survey and build-order proposals in sections 1–8
+are historical research, not current implementation instructions. Section 9's
+ownership decisions and dated follow-ups supersede proposals for iroh-blobs/docs,
+biscuit tokens, default Cubic or external helper stacks. Implemented capabilities
+and unfinished gates are in [the current matrix](capability-matrix.md) and
+[continuation plan](continuation-plan.md).
+
 ## 0. Executive summary — what changed vs v0.1
 
 The October 2 [confirmed-goodput increment](reports/rds-confirmed-goodput-20261002.md)

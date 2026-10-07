@@ -5,6 +5,13 @@ must build green on every commit (CI matrix: `ubuntu-latest`,
 `macos-latest`). Windows joins later behind the same backend seams —
 nothing in the design blocks it.
 
+The capture/codec/input preference tables below include planned backends.
+Currently usable implementations are Linux X11 capture/XTEST input and the
+OpenH264 software codec. The native wgpu viewer is implemented for Linux and macOS;
+macOS capture/input, Wayland capture/input and hardware codecs remain stubs.
+Build support is distinct from serving capability and native acceptance; see
+[the capability matrix](capability-matrix.md).
+
 ## Selection model
 
 Every platform capability lives behind a trait in `rds-desktop`
@@ -50,8 +57,8 @@ negotiate only after both endpoints probe them.
   `winit` window (Metal on macOS, supported GPU backends on Linux), uploading
   software-decoded BGRA and presenting the newest pending image. Vulkan Video
   texture decode and Linux console DRM direct presentation remain planned.
-- Audio: PipeWire on Linux, `cpal`→CoreAudio on macOS; Opus (`opus`
-  crate) both sides.
+- Audio is currently a trait/wire scaffold. PipeWire on Linux, CoreAudio on
+  macOS and Opus are planned adapters, without a working audio service.
 
 ## cfg conventions
 
