@@ -2,7 +2,6 @@
 //! `SyncTransferV2` route — Hello/HelloAck limit exchange, transfer-ID
 //! bound frames, typed Cancel propagation, and version/tag refusal.
 
-use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -10,20 +9,12 @@ use rds_core::{HelloAck, StreamHello};
 use rds_net::{Endpoint, EndpointAddr, EndpointConfig, bind_endpoint, read_frame, write_frame};
 use rds_sync::engine::{Access, Transfer};
 
-/// Temp dir per test — unique per process + name.
-fn scratch(name: &str) -> PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "rds-v2-{name}-{}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&dir).unwrap();
-    dir
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
+
+fn scratch(name: &str) -> Scratch {
+    Scratch::new(&format!("rds-v2-{name}"))
 }
 
 fn random_bytes(len: usize, seed: u64) -> Vec<u8> {
@@ -42,7 +33,7 @@ fn random_bytes(len: usize, seed: u64) -> Vec<u8> {
 /// reports each serve outcome back to the test.
 fn spawn_server_v2(
     ep: Endpoint,
-    dir: PathBuf,
+    dir: Scratch,
     outcomes: mpsc::Sender<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -71,13 +62,14 @@ fn spawn_server_v2(
                                 .serve(
                                     conn,
                                     (send, recv),
-                                    dir,
+                                    dir.to_path_buf(),
                                     Access::READ_WRITE,
                                     Duration::from_secs(60),
                                 )
                                 .await
                         }
                         .await;
+                        drop(dir);
                         let _ = outcomes.send(match outcome {
                             Ok(()) => "ok".into(),
                             Err(e) => format!("err:{e:#}"),
@@ -92,7 +84,7 @@ fn spawn_server_v2(
 async fn pair() -> (
     Endpoint,
     EndpointAddr,
-    PathBuf,
+    Scratch,
     mpsc::Receiver<String>,
     tokio::task::JoinHandle<()>,
 ) {
