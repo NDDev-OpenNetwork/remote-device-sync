@@ -27,7 +27,7 @@ struct Cli {
     #[arg(long)]
     key_file: Option<std::path::PathBuf>,
     /// Custom relay URL; default is the n0 public relays. Repeatable —
-    /// ≥2 relays give automatic client-side failover.
+    /// Repeatable origins; fallback requires ready, peer-known paths.
     #[arg(long, conflicts_with_all = ["owned_relay", "no_relay"])]
     relay: Vec<String>,
     /// Transport backend: `iroh` (default) or `noq` (with the
