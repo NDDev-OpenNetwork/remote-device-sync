@@ -31,6 +31,7 @@ older revisions independently; neither is silently assumed to equal main.
 | S5 | Input ACK, payload receipt, decoded-frame submission and physical pixels prove different things. | Native diagnostics, visual probe, bench reports | Exact-build typing/Backspace count and causal submission evidence; loss and unanswered probes included |
 | S6 | Optional platform/media modules remain real stubs. Directory sync, native serving on macOS/Wayland, audio and automatic GDS grant issuance are not implemented. | Backend probe files, audio crate, sync engine, GDS policy adapters | Explicit later implementation/qualification tasks; never mark these complete from X11 or loopback results |
 | S7 | Owned relay drain priority was reused as RTT, making progress budgets effectively infinite. | Noq path policy | Keep real RTT separate from ranking; negative deadline regression and positive engine/drain qualification |
+| S8 | A compiled architecture test retained an absolute source-checkout filename, making shared-cache verification depend on a removed checkout. | Core layering test; infrastructure fixture path resolution | Embed source-only assertions; resolve required live fixture files from the runtime checkout; preserve the original assertions |
 
 ## Wave A — interactive recovery correctness (W3.6, W6.8)
 
@@ -98,6 +99,10 @@ both peers, with truthful measured recovery and no unrequested process restart.
 5. Confirm main OID, consumed gitlink, installed artifact digest, running process
    identity and effective endpoint/policy config independently on each device.
    A clean checkout alone is not complete synchronization.
+6. Verify reusable test artifacts independently of an old temporary checkout.
+   Embedded fixture data belongs to the compiled source; external fixture files
+   must resolve the actual running checkout. Serialize qualification processes
+   that share one Cargo target directory, including their test/doctest phases.
 
 Exit: published implementation, estate consumption, runtime receipts and current
 documentation agree; any remaining mismatch has its owning task and verifier.

@@ -56,7 +56,14 @@ impl Stack {
             .unwrap();
         Self {
             root,
-            config: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ops/observability"),
+            // This fixture reads current on-disk Compose files. Resolve the
+            // checkout Cargo is running now, not a deleted compilation path
+            // retained in a shared target directory.
+            config: PathBuf::from(
+                std::env::var_os("CARGO_MANIFEST_DIR")
+                    .expect("run the infrastructure fixture through cargo test"),
+            )
+            .join("../../ops/observability"),
             project: format!("rds-observe-{suffix}"),
             password,
         }
