@@ -58,6 +58,7 @@ pub struct RecordIssuer {
     disk: Option<AtomicFile>,
     failed: bool,
     observed_wall: u64,
+    storage_full_attempt: Option<State>,
 }
 impl RecordIssuer {
     /// Explicitly volatile issuer for isolated tests/embedded ephemeral devices.
@@ -74,6 +75,7 @@ impl RecordIssuer {
             disk: None,
             failed: false,
             observed_wall: 0,
+            storage_full_attempt: None,
         }
     }
     pub fn open(path: &Path, key: SigningKey, now: u64) -> Result<Self, DiscoveryError> {
@@ -170,9 +172,52 @@ impl RecordIssuer {
             {
                 return Err(invalid("publisher state changed during ownership"));
             }
-            disk.write(&bytes)?;
+            if let Err(error) = disk.write(&bytes) {
+                if matches!(error, DiscoveryError::StorageUnavailable(_)) {
+                    self.storage_full_attempt = Some(next);
+                }
+                return Err(error);
+            }
         }
         self.state = next;
+        self.failed = false;
+        Ok(())
+    }
+    /// Retry only a known disk-full commit while retaining the exclusive lock.
+    /// The owned file must be either the previous state or our exact attempted
+    /// successor. Recommit those verified bytes before clearing uncertainty;
+    /// unrelated history, corruption and clock rollback remain fatal.
+    pub fn recover_storage_full(&mut self, now: u64) -> Result<(), DiscoveryError> {
+        let attempted = self.storage_full_attempt.as_ref().ok_or_else(|| {
+            DiscoveryError::Store("publisher has no recoverable storage-full attempt".into())
+        })?;
+        if now < self.observed_wall {
+            return Err(invalid("publisher wall clock moved backwards"));
+        }
+        self.observed_wall = now;
+        let disk = self.disk.as_ref().ok_or_else(|| {
+            DiscoveryError::Store("volatile publisher has no durable recovery".into())
+        })?;
+        let bytes = disk
+            .read()?
+            .ok_or_else(|| invalid("publisher state disappeared"))?;
+        let envelope: Envelope =
+            serde_json::from_slice(&bytes).map_err(|e| invalid(&e.to_string()))?;
+        let stored = digest(&envelope.state)?;
+        if stored != envelope.digest
+            || (stored != digest(&self.state)? && stored != digest(attempted)?)
+            || now < envelope.state.wall_floor
+        {
+            return Err(invalid(
+                "publisher recovery found unrelated or invalid history",
+            ));
+        }
+        // The digest matches a state we already constructed and validated.
+        // This also completes an ambiguous rename/directory-sync boundary.
+        disk.write(&bytes)?;
+        self.state = envelope.state;
+        self.observed_wall = now;
+        self.storage_full_attempt = None;
         self.failed = false;
         Ok(())
     }

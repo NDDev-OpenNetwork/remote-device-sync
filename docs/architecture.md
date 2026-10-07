@@ -10,6 +10,63 @@ between any two enrolled devices, assisted by a GDS-operated server.
 Design goals, in order: **minimum interactive latency**, **maximum
 connection stability**, defense in depth, no inbound firewall changes.
 
+An explicit bounded Iroh registration option maintains up to three initially
+configured custom relays independently of peer activity. Completed registrations
+contribute advertised addresses; failures, map withdrawal and owned task exit
+remove readiness. The home-status API and default policy remain independent.
+Registration does not establish a QUIC path or assign directory authority.
+Private deployment owns host roles and ordered fallback policy. See
+[endpoint settings](endpoint-configuration.md#reachability-presets).
+
+Configured-order relay preference is a separate explicit setting. Only eligible
+confirmed relay tiers participate; faster direct paths still compete by RTT.
+The order is the existing URL list, with no second authority. Known standby
+restoration also works while the surviving carrier is itself a relay. Endpoint
+close seals readiness before returning, without shortening QUIC draining.
+
+Explicit latency path preference now observes acknowledgement progress as well
+as RTT. A passive adapter delegates the chosen congestion controller unchanged;
+each established path owns its pending-work proof and runtime clock. A path
+with outstanding ack-eliciting work and no progress for `max(4 RTT, 500ms)` may
+retire only with an established sibling whose still-fresh ACK follows the start
+of that outstanding-work interval and which is not itself stalled. An older
+idle ACK cannot prove replacement progress during a common outage. The existing reliable
+stream transfers to that sibling through Noq's ordinary path-abandon machinery;
+the last open path is never retired. See [the recovery evidence](reports/rds-path-ack-progress-20261006.md).
+
+Tagged sync completion now transfers connection exclusion and the data-lane
+admission permit into the engine. Filesystem/control work and its reader close before that guard releases,
+and only then is the terminal server FIN exposed to the peer. This makes an
+immediate next transfer admissible without retrying application work. Dropping
+the owning future still releases the guard on cancellation. Failure logs retain
+the greeting/transfer stage and ID without changing the IPC error contract.
+
+Latency preference maintains previously known standby paths after abandonment.
+Iroh's opt-in refresh restores known relay/custom candidates beside a live IP
+path; defaults and pinned selectors retain their opening policy. Noq reoffers
+only previously established original-ticket candidates, respecting transport
+health, relay drain/unavailability, family support and its bounded retry queue.
+Allocation is still not validation; selection/retirement needs established paths
+and recent positive acknowledgement evidence. No interface, peer or route is
+invented and application input is not replayed.
+
+Iroh selection retains one live IP sibling when a relay/custom path is selected.
+The event-updated path map cannot be counted unchanged while closing paths in a
+loop: that could close every IP sibling. The retained IP prefers the locally
+established selection, otherwise the lowest RTT, so a selected path still being
+validated on another connection cannot remove the last local IP alternative.
+Pending opening retries deduplicate four-tuples and stale closed handles do not
+prevent restoration. See [standby evidence](reports/rds-warm-standby-20261006.md).
+
+Directory publication also isolates a full disk from established transport.
+Only ENOSPC/quota failures are retryable. The publisher retains its exclusive
+lock and accepts only the pre-commit state or its exact attempted successor;
+it synchronizes those verified bytes before resuming signed publication. Clock
+rollback, changed history, unsafe files and unrelated I/O remain fatal. No
+record is published without durable revision allocation, and authorization
+expiry still applies independently. The announcer uses its bounded jittered
+retry policy without recreating the endpoint or replaying application input.
+
 Status: v0.1 foundation. This document records the protocol and stack
 research and the decisions that fall out of it. The deeper second-pass
 research — iroh 1.2/noq internals (multipath, path selectors, hooks),
@@ -104,6 +161,12 @@ single-claim, process-lifetime route. Video FIFO backpressure cannot block its
 input ACK/heartbeat observation. Both sockets share desktop termination, without
 closing the manager's unrelated peer streams. Existing combined APIs and remote
 wire formats remain; see [the native contract](native-viewer.md).
+
+Native control liveness is independent of decoded-frame progress. Exact bounded
+heartbeat confirmations advance per-session monotonic send-time evidence;
+late/duplicate replies cannot mask stalled control with a live picture. The
+viewer retains clipboard's absolute budget and ends only the owning desktop
+attempt, without replay or managed peer teardown. See [native control progress](native-viewer.md#independent-control-progress).
 
 Explicit video repair advances a session-local media epoch and interrupts only
 obsolete media work. An independent-picture lease holds admission until receipt;
@@ -678,3 +741,65 @@ level. Serving capture, pacing, media writers and receipts inherit their owning
 tracing span across task boundaries. Opt-in controlled visual response markers
 measure native input to submission of the matching response; the ordinary
 viewer does not inspect markers. See [the measurement receipt](reports/rds-causal-visual-probe-20261004.md).
+
+### Client transmit observation after a delayed control response
+
+The [passive reply-read observer](reports/rds-passive-control-read-20261006.md)
+records framing progress during a control gap. Its independent task never polls
+the awaiting I/O future, queries transport locks or changes liveness; matched
+newer probes exclude older missing echoes from diagnostic freshness. Progress
+records contain lengths/counts and local time only. Qualified installed evidence
+remains separate from this observational boundary.
+
+`rds-net::WeakPathObserver` exposes backend-neutral live-path metadata without
+retaining the connection facade or transport I/O. Desktop control responses use
+a separate session-owned observation worker: one running blocking query and one
+newest queued request. Input/receipt writes and event reads never await it. Drop
+requests task cancellation; an already-running synchronous backend query may
+finish. Diagnostic failure does not terminate the desktop session.
+
+The worker retains at most eight current path baselines, prioritizing selected
+paths and reporting truncation/coverage. Slow responses report local transmit
+loss/cwnd/bytes and interval deltas, with absent/reset baselines explicitly
+unknown. Reply-to-observation age, query work time and evictions qualify those
+snapshots. The counters describe this endpoint's TX, not the peer's TX or outer
+tunnel losses. Numeric process-local control-instance IDs join write/read/path
+metadata; no key, address, route cookie, clipboard or typed body is logged.
+
+The shared postcard frame writer now serializes the four-byte length prefix and
+body into one buffer before one `write_all` operation. The receiver's wire bytes,
+64 KiB bound, partial-write semantics and error kinds are unchanged. This avoids
+a separate prefix-only transport admission/wakeup; it does not guarantee one
+network packet, atomic delivery or cancellation-safe writes.
+
+### Optional latency path ranking
+
+EndpointSettings/EndpointConfig PathPreference is lowered in the owning backend.
+Iroh latency mode ranks existing candidate RTTs without transport tiers and uses
+5ms switching stickiness. A bounded1s optional actor refresh makes the decision
+respond to changing RTT while topology is unchanged. The exact published Iroh1.3
+source carries this narrow default-None hook under vendor/iroh, excluded from
+the RDS workspace; provenance and licenses are retained. Existing/default and
+explicitly pinned selectors keep their original callback behavior. Noq already
+owns periodic validated-path ranking and needs no policy rewrite for this mode.
+This remains a staged qualification increment, not a new default or native pass.
+
+
+### STREAM work and independent standby acknowledgement
+
+Latency retirement reads unacknowledged STREAM metadata from Noq's existing
+sent-packet state. Probe-only debt does not authorize path retirement. This
+works for a previously selected path after demotion without selection markers,
+payload parsing or application replay. The normal CCA adapter stays passive.
+Pending debt observes Noq's ACK-eliciting on_packet_sent callback, rather than
+on_sent batches which also include ACK-only transmits. Both delegate unchanged.
+When ACK proof grows stale, the existing bounded periodic selector probes again
+even if an earlier probe is still outstanding.
+
+Latency preference also enables default-false same-path ACK scheduling in
+the vendored published Noq-proto 1.3 source. A validated backup can return its
+ACK without depending on the selected data path. ACKs for abandoned/unvalidated
+paths can use another route; single-path/handshake scheduling is unchanged.
+No wire, crypto, congestion or reliable-retransmission algorithm changes.
+See [patch provenance](../vendor/noq-proto/RDS-PATCH.md) and
+[failure/qualification evidence](reports/rds-warm-standby-20261006.md).

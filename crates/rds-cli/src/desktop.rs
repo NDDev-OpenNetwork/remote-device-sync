@@ -59,6 +59,9 @@ pub struct Options {
     /// Controlled-marker descriptor for causal input-to-submit diagnostics.
     #[arg(long, conflicts_with = "headless")]
     pub diagnostic_visual_probe: Option<PathBuf>,
+    /// Internal, non-owning telemetry observation for the native flight recorder.
+    #[arg(skip)]
+    pub diagnostic_health: Option<rds_observe::HealthObserver>,
 }
 
 /// Shared bounded credential loading for CLI and native application clients.
@@ -91,7 +94,13 @@ pub async fn read_grant(
 mod control;
 
 #[cfg(feature = "desktop")]
+mod liveness;
+
+#[cfg(feature = "desktop")]
 mod diagnostics;
+
+#[cfg(feature = "desktop")]
+mod diagnostic_storage;
 
 #[cfg(feature = "desktop")]
 mod native {
@@ -101,7 +110,26 @@ mod native {
         client::{DesktopSession, RelayDecoder, RelayOutcome, SessionOpts},
         render::{InputReceiver, Viewer, ViewerHandle, ViewerInput},
     };
-    use std::time::Instant;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Instant,
+    };
+
+    struct Attempt {
+        started: Instant,
+        healthy: Arc<AtomicBool>,
+    }
+
+    fn retry_delay(failures: &mut u32, frames_advanced: bool, healthy: bool) -> Duration {
+        if frames_advanced && healthy {
+            *failures = 0;
+        }
+        *failures = failures.saturating_add(1);
+        Duration::from_millis((250u64 << (*failures).min(5)).min(8000))
+    }
     use tokio_util::sync::CancellationToken;
     use tracing::Instrument;
 
@@ -176,33 +204,31 @@ mod native {
         let diagnostic_stop = stop.clone();
         let diagnostic_view = handle.clone();
         let diagnostic_dir = options.diagnostics_dir.clone();
+        let diagnostic_health = options.diagnostic_health.clone();
         workers.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let path = diagnostic_dir.as_ref().map(|d| d.join(format!("state-{}.json",std::process::id())));
             let mut recorder = diagnostics::Recorder::default();
+            let mut storage = diagnostic_storage::Storage::new(diagnostic_dir);
             loop {
                 tokio::select! {
                     _ = diagnostic_stop.cancelled() => break,
                     _ = tick.tick() => {
                         diagnostic_view.heartbeat_ui();
                         let snapshot = diagnostic_view.snapshot();
-                        let incident = recorder.observe(&snapshot);
-                        if let Ok(json) = serde_json::to_string(&snapshot) {
+                        let health = diagnostic_health.as_ref().and_then(rds_observe::HealthObserver::snapshot);
+                        let (value, incident) = recorder.observe_with_health(&snapshot, health, &storage.health());
+                        let json = serde_json::to_string(&value).ok();
+                        if let Some(json) = &json {
                             tracing::info!(snapshot=%json, "viewer health");
-                            if let Some(path) = &path {
-                                let path = path.clone();
-                                let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-                                    crate::logging::viewer_snapshot(&path,json.as_bytes())
-                                }).await;
-                                if !matches!(result,Ok(Ok(()))) { tracing::warn!(error=?result,"viewer snapshot write failed"); }
-                            }
                         }
-                        persist_incident(diagnostic_dir.as_deref(), incident).await;
+                        storage.persist(json.map(String::into_bytes), incident, snapshot.elapsed_ms).await;
                     },
                 }
             }
-            persist_incident(diagnostic_dir.as_deref(), recorder.finish(true)).await;
+            storage.persist(None, recorder.finish(true), diagnostic_view.snapshot().elapsed_ms).await;
+            let remaining = storage.health().incident_queue_pending;
+            if remaining > 0 { tracing::warn!(remaining, "viewer shutdown retains unsaved incident windows in memory only"); }
             Ok(())
         });
         workers.spawn(async move {
@@ -276,6 +302,10 @@ mod native {
             let span = rds_observe::conn_span(rds_observe::next_session_id());
             view.begin_session(span.clone());
             let received = view.report().frames_received;
+            let attempt = Attempt {
+                started,
+                healthy: Arc::new(AtomicBool::new(false)),
+            };
             let result = tokio::select! {
                 _ = stop.cancelled() => return Ok(()),
                 result = async {
@@ -293,19 +323,20 @@ mod native {
                                 *peer = reconnect_target(peer,authenticated)?;
                                 *session = Some(id);
                             }
-                            managed_session(client,session.ok_or_else(|| anyhow::anyhow!("no managed session"))?,options,view,input,&stop,started).await
+                            managed_session(client,session.ok_or_else(|| anyhow::anyhow!("no managed session"))?,options,view,input,&stop,&attempt).await
                         },
-                        Source::Direct { endpoint,target,grant } => direct_session(endpoint,(target.clone(),grant.as_ref()),options,view,input,&stop,started).await,
+                        Source::Direct { endpoint,target,grant } => direct_session(endpoint,(target.clone(),grant.as_ref()),options,view,input,&stop,&attempt).await,
                     }
                 }.instrument(span) => result,
             };
             if stop.is_cancelled() || matches!(result, Ok(true)) {
                 return Ok(());
             }
-            if view.report().frames_received > received {
-                failures = 0;
-            }
-            failures = failures.saturating_add(1);
+            let wait = retry_delay(
+                &mut failures,
+                view.report().frames_received > received,
+                attempt.healthy.load(Ordering::Relaxed),
+            );
             let snapshot = view.snapshot();
             tracing::warn!(
                 error = ?result.as_ref().err(), attempt = failures,
@@ -323,7 +354,6 @@ mod native {
             );
             view.status("Reconnecting");
             view.stage("reconnecting");
-            let wait = Duration::from_millis((250u64 << failures.min(5)).min(8000));
             if !retry_pause(wait, &stop, input).await {
                 return Ok(());
             }
@@ -336,18 +366,23 @@ mod native {
         }
     }
 
-    async fn persist_incident(directory: Option<&std::path::Path>, bytes: Option<Vec<u8>>) {
-        let (Some(directory), Some(bytes)) = (directory, bytes) else {
-            return;
-        };
-        let directory = directory.to_owned();
-        let result = tokio::task::spawn_blocking(move || {
-            crate::logging::viewer_incident(&directory, &bytes)
-        })
-        .await;
-        if !matches!(result, Ok(Ok(()))) {
-            tracing::warn!(error=?result, "viewer incident write failed");
+    #[test]
+    fn repeated_unhealthy_attempts_back_off_even_when_video_arrives() {
+        let mut failures = 0;
+        for ms in [500, 1000, 2000, 4000, 8000, 8000] {
+            assert_eq!(
+                retry_delay(&mut failures, true, false),
+                Duration::from_millis(ms)
+            );
         }
+        assert_eq!(
+            retry_delay(&mut failures, false, true),
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            retry_delay(&mut failures, true, true),
+            Duration::from_millis(500)
+        );
     }
 
     fn reconnect_target(original: &str, authenticated: String) -> anyhow::Result<String> {
@@ -398,8 +433,9 @@ mod native {
         view: &ViewerHandle,
         input: &mut InputReceiver,
         stop: &CancellationToken,
-        started: Instant,
+        attempt: &Attempt,
     ) -> anyhow::Result<bool> {
+        let started = attempt.started;
         view.stage("opening desktop");
         let (mut channel, mut events) = if options.payload_receipts {
             client
@@ -427,6 +463,7 @@ mod native {
         view.status("Waiting for screen");
         let control = channel.control_handle();
         let (progress, last_frame) = tokio::sync::watch::channel(tokio::time::Instant::now());
+        let control_progress = liveness::ControlWatchdog::with_health(attempt.healthy.clone());
         // Keep the entire receive/decode future alive while controls progress.
         // Selecting individual recv calls and awaiting decode in their handler
         // prevents input, heartbeat and close from being polled during decode.
@@ -472,12 +509,17 @@ mod native {
         let event_observation = async {
             loop {
                 match events.recv().await.transpose()? {
-                    Some(rds_core::DesktopEvent::Heartbeat { ts_ms, .. }) => view
-                        .control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
+                    Some(rds_core::DesktopEvent::Heartbeat { seq, ts_ms }) => {
+                        if control_progress.echoed(seq, ts_ms) {
+                            view.control_rtt(
+                                (started.elapsed().as_millis() as u64).saturating_sub(ts_ms),
+                            );
+                        }
+                    }
                     Some(rds_core::DesktopEvent::InputAck { seq, .. }) => view.input_ack(seq),
-                    Some(rds_core::DesktopEvent::ClipboardReady { bytes, .. }) => {
-                        view.clipboard_ready(bytes);
-                        tracing::info!(bytes, "remote clipboard ready");
+                    Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {
+                        control_progress.clipboard_ready(id, bytes);
+                        view.clipboard_ack(id, bytes);
                     }
                     None => {
                         tracing::warn!("managed desktop event channel ended");
@@ -492,9 +534,16 @@ mod native {
                 result = media => result,
             }
         };
-        let controls = control::pump(input, &control, &last_frame, started, |message| {
-            view.input_sent(message);
-        });
+        let controls = control::pump_with_liveness(
+            input,
+            &control,
+            &last_frame,
+            &control_progress,
+            started,
+            |message| {
+                view.input_sent(message);
+            },
+        );
         let result = control::run(controls, incoming, stop).await;
         // A winning leg may cancel a partially written control on the other
         // leg. EOF closes the manager's desktop; never append Finished to a
@@ -510,8 +559,9 @@ mod native {
         view: &ViewerHandle,
         input: &mut InputReceiver,
         stop: &CancellationToken,
-        started: Instant,
+        attempt: &Attempt,
     ) -> anyhow::Result<bool> {
+        let started = attempt.started;
         let (target, grant) = target;
         let conn = match grant {
             Some(g) => rds_client::connect_authorized(endpoint, target, g).await?,
@@ -540,6 +590,7 @@ mod native {
         let ctrl = session.control_sender();
         let mut last_frame = tokio::time::Instant::now();
         let mut watchdog = control::VideoWatchdog::default();
+        let control_progress = liveness::ControlWatchdog::with_health(attempt.healthy.clone());
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = loop {
@@ -548,11 +599,13 @@ mod native {
                 message = input.recv() => match message {
                     Some(ViewerInput::Control(message)) => {
                         view.input_sent(&message);
+                        control_progress.sent(&message);
                         tokio::time::timeout(Duration::from_secs(2),ctrl.send(message)).await.map_err(|_|anyhow::anyhow!("direct desktop control stalled"))??;
                     },
                     Some(ViewerInput::Close)|None => break Ok(true),
                 },
                 _ = tick.tick() => {
+                    control_progress.check()?;
                     match watchdog.observe(last_frame) {
                         control::VideoAction::Reconnect => anyhow::bail!("remote video stopped making progress"),
                         control::VideoAction::Repair => {
@@ -561,12 +614,16 @@ mod native {
                         },
                         control::VideoAction::Healthy => {},
                     }
-                    tokio::time::timeout(Duration::from_secs(2),ctrl.send(rds_core::DesktopControl::Heartbeat { seq: 0,ts_ms: started.elapsed().as_millis() as u64 })).await.map_err(|_|anyhow::anyhow!("direct desktop heartbeat stalled"))??;
+                    let heartbeat = control_progress.heartbeat(started.elapsed().as_millis() as u64)?;
+                    control_progress.sent(&heartbeat);
+                    tokio::time::timeout(Duration::from_secs(2),ctrl.send(heartbeat)).await.map_err(|_|anyhow::anyhow!("direct desktop heartbeat stalled"))??;
                 },
                 event = session.events.recv() => match event {
-                    Some(rds_core::DesktopEvent::Heartbeat { ts_ms,.. }) => view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)),
+                    Some(rds_core::DesktopEvent::Heartbeat { seq, ts_ms }) => {
+                        if control_progress.echoed(seq, ts_ms) { view.control_rtt((started.elapsed().as_millis() as u64).saturating_sub(ts_ms)); }
+                    },
                     Some(rds_core::DesktopEvent::InputAck { seq,.. }) => view.input_ack(seq),
-                    Some(rds_core::DesktopEvent::ClipboardReady { bytes,.. }) => {view.clipboard_ready(bytes);tracing::info!(bytes,"remote clipboard ready");},
+                    Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {control_progress.clipboard_ready(id, bytes);view.clipboard_ack(id, bytes);},
                     None => break Ok(false),
                 },
                 frame = session.frames.recv() => match frame {

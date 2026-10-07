@@ -4,7 +4,8 @@
 //! refreshes it at `ttl/3`, and re-publishes promptly when the
 //! advertised address set changes (observed external addr, home relay,
 //! new socket). Publish failures are logged and retried on the next
-//! tick. Fatal local history or permanent protocol errors reach `Announce::wait`
+//! tick. Disk-full publication pauses retain the transport and retry only after
+//! reconciling the exact owned commit. Fatal history or protocol errors reach `Announce::wait`
 //! so the agent supervisor can close the endpoint and report failure.
 
 use std::time::Duration;
@@ -81,8 +82,8 @@ pub struct Announce {
 }
 
 impl Announce {
-    /// Observe fatal issuer/disk failures. Network outages keep retrying; local
-    /// history failures stop publication and must reach the process supervisor.
+    /// Observe fatal issuer/history failures. Network and disk-full outages
+    /// retry without replacing the endpoint; invalid history remains fatal.
     pub async fn wait(&mut self) -> Result<(), DiscoveryError> {
         (&mut self.task)
             .await
@@ -128,6 +129,8 @@ pub fn announce(endpoint: Endpoint, config: AnnounceConfig) -> Result<Announce, 
         let mut last: Option<EndpointRecord> = None;
         let mut renew = false;
         let mut failures = 0u32;
+        let mut storage_full = false;
+        let mut storage_pause_started: Option<tokio::time::Instant> = None;
         loop {
             let current = split_addrs(&endpoint.addr());
             let draft = RecordDraft {
@@ -140,6 +143,9 @@ pub fn announce(endpoint: Endpoint, config: AnnounceConfig) -> Result<Announce, 
             // local commit, but the canceled task cannot publish its result.
             let (returned, result) = tokio::task::spawn_blocking(move || {
                 let result = rds_discovery::now_unix().and_then(|now| {
+                    if storage_full {
+                        issuer.recover_storage_full(now)?;
+                    }
                     if renew {
                         issuer.renew_record(draft, now)
                     } else {
@@ -152,7 +158,34 @@ pub fn announce(endpoint: Endpoint, config: AnnounceConfig) -> Result<Announce, 
             .map_err(|e| DiscoveryError::Store(e.to_string()))?;
             issuer = returned;
             renew = false;
-            let record = result?;
+            let record = match result {
+                Err(DiscoveryError::StorageUnavailable(_)) => {
+                    storage_full = true;
+                    let started =
+                        storage_pause_started.get_or_insert_with(tokio::time::Instant::now);
+                    failures = failures.saturating_add(1);
+                    let delay = retry.delay(failures);
+                    tracing::warn!(
+                        failures,
+                        pause_ms = started.elapsed().as_millis(),
+                        retry_delay_ms = delay.as_millis(),
+                        "directory publication paused: durable storage is full; transport retained"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                other => {
+                    storage_full = false;
+                    let record = other?;
+                    if let Some(started) = storage_pause_started.take() {
+                        tracing::info!(
+                            pause_ms = started.elapsed().as_millis(),
+                            "publisher storage recovered; durable directory publication resumed"
+                        );
+                    }
+                    record
+                }
+            };
             if last.as_ref() != Some(&record) {
                 match directory.publish(&record).await {
                     Ok(()) => {

@@ -6,6 +6,10 @@ workers. Operational event filtering and export allowlists remain independent;
 retaining a span does not enable its filtered diagnostic messages.
 
 Scope: W10.1/W10.2, implemented incrementally alongside correctness work.
+The native [evidence-preservation increment](reports/rds-incident-evidence-20261005.md)
+adds non-owning log-health observation, bounded incident retry and atomic private
+publication. Its counters are local metadata; it does not assert collector or
+OpenObserve delivery.
 The native desktop follow-up separates an idle image from actual outstanding
 presentation work and records the managed input queue/control-write boundaries
 in private metadata diagnostics. See

@@ -2,6 +2,56 @@
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
 use winit::event_loop::EventLoop;
 
+/// Own-window diagnostics, read on the OS main thread. No title/content/geometry.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct NativeWindowState {
+    pub sampled_elapsed_ms: u64,
+    pub application_active: bool,
+    pub visible: bool,
+    pub key_window: bool,
+    pub on_active_space: bool,
+    pub miniaturized: bool,
+    pub occlusion_visible: bool,
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn window_state(
+    window: &winit::window::Window,
+    elapsed_ms: u64,
+) -> Option<NativeWindowState> {
+    use objc2_app_kit::{NSApplication, NSView, NSWindowOcclusionState};
+    use objc2_foundation::MainThreadMarker;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let main = MainThreadMarker::new()?;
+    let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    // SAFETY: winit supplies this live NSView for our strongly owned Window.
+    // The window and retained NSWindow outlive every read, and `main` verifies
+    // AppKit's main-thread requirement. We only inspect our own window flags.
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    let native = view.window()?;
+    Some(NativeWindowState {
+        sampled_elapsed_ms: elapsed_ms,
+        application_active: unsafe { NSApplication::sharedApplication(main).isActive() },
+        visible: native.isVisible(),
+        key_window: native.isKeyWindow(),
+        on_active_space: unsafe { native.isOnActiveSpace() },
+        miniaturized: native.isMiniaturized(),
+        occlusion_visible: native
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn window_state(
+    _window: &winit::window::Window,
+    _elapsed_ms: u64,
+) -> Option<NativeWindowState> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 pub(super) struct RemoteActivity(objc2::rc::Retained<objc2_foundation::NSObject>);
 

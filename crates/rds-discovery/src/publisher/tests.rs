@@ -59,6 +59,65 @@ fn failed_durable_allocation_never_returns_bytes_and_poison_requires_reopen() {
 }
 
 #[test]
+fn disk_full_recovery_keeps_ownership_and_reconciles_exact_commit_boundaries() {
+    for phase in PHASES {
+        let tmp = Temp::new();
+        let mut issuer = RecordIssuer::open(&tmp.0, key(), 1000).unwrap();
+        issuer.record(draft(4000), 1000).unwrap();
+        issuer.disk.as_mut().unwrap().storage_full = Some(phase);
+        assert!(matches!(
+            issuer.record(draft(4001), 1000),
+            Err(DiscoveryError::StorageUnavailable(_))
+        ));
+        assert!(issuer.record(draft(4001), 1001).is_err());
+        assert!(matches!(
+            RecordIssuer::open(&tmp.0, key(), 1001),
+            Err(DiscoveryError::Busy)
+        ));
+        assert!(matches!(
+            issuer.recover_storage_full(1001),
+            Err(DiscoveryError::StorageUnavailable(_))
+        ));
+        assert!(issuer.recover_storage_full(1000).is_err());
+        issuer.disk.as_mut().unwrap().storage_full = None;
+        issuer.recover_storage_full(1001).unwrap();
+        let record = issuer.record(draft(4001), 1001).unwrap();
+        assert_eq!(record.verify().unwrap().revision, 2, "{phase:?}");
+        assert_eq!(issuer.record(draft(4001), 1002).unwrap(), record);
+        drop(issuer);
+        let mut reopened = RecordIssuer::open(&tmp.0, key(), 1002).unwrap();
+        assert_eq!(reopened.record(draft(4001), 1002).unwrap(), record);
+    }
+}
+
+#[test]
+fn disk_full_recovery_never_accepts_unrelated_or_corrupt_local_history() {
+    let tmp = Temp::new();
+    let mut issuer = RecordIssuer::open(&tmp.0, key(), 1000).unwrap();
+    issuer.record(draft(4000), 1000).unwrap();
+    issuer.disk.as_mut().unwrap().storage_full = Some(Phase::BeforeWrite);
+    assert!(matches!(
+        issuer.record(draft(4001), 1000),
+        Err(DiscoveryError::StorageUnavailable(_))
+    ));
+    issuer.disk.as_mut().unwrap().storage_full = None;
+    let mut unrelated = RecordIssuer::memory(key());
+    unrelated.record(draft(5000), 1000).unwrap();
+    unrelated.record(draft(5001), 1000).unwrap();
+    issuer
+        .disk
+        .as_ref()
+        .unwrap()
+        .write(&encode(&unrelated.state).unwrap())
+        .unwrap();
+    assert!(issuer.recover_storage_full(1001).is_err());
+    assert!(issuer.record(draft(4001), 1001).is_err());
+    issuer.disk.as_ref().unwrap().write(b"corrupted").unwrap();
+    assert!(issuer.recover_storage_full(1002).is_err());
+    assert!(issuer.record(draft(4001), 1002).is_err());
+}
+
+#[test]
 fn crash_writer() {
     let Some(path) = std::env::var_os("RDS_TEST_PUBLISHER_CRASH_DIRECTORY") else {
         return;

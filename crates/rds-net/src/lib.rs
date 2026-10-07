@@ -42,10 +42,12 @@ pub mod backends {
     #[cfg(feature = "transport-noq")]
     pub mod noq;
 }
+mod ack_progress;
 pub mod deadline;
 mod identity;
 pub mod metrics;
 mod observation;
+pub use observation::WeakPathObserver;
 pub mod relay_control;
 mod uni;
 pub use uni::{UniRoutingStats, UniStreams};
@@ -123,6 +125,18 @@ pub enum Packetization {
     Conservative,
 }
 
+/// Preference among already permitted, established transport paths.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PathPreference {
+    /// Retain the backend's policy (Iroh prefers direct over relay).
+    #[default]
+    BackendDefault,
+    /// Prefer lower measured RTT regardless of direct/relay kind, with stickiness.
+    /// The owned Noq backend already uses this policy.
+    Latency,
+}
+
 /// Explicit congestion-controller selection for measured path qualification.
 /// This does not change stream priority, path eligibility or packetization.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -158,6 +172,12 @@ pub struct EndpointConfig {
     /// `relay_endpoints`. Empty uses the backend's preset (iroh public relays
     /// when discovery is enabled; otherwise direct only).
     pub relays: Vec<RelayUrl>,
+    /// Keep up to three configured Iroh relays registered and advertise ready
+    /// alternatives. Disabled by default; does not select the media path.
+    pub keep_relays_connected: bool,
+    /// Prefer configured relay order among healthy relay paths; faster direct
+    /// paths remain eligible. Requires persistent registrations and latency mode.
+    pub prefer_relay_order: bool,
     /// Publish/resolve addresses via the backend's lookup services
     /// (iroh: n0 DNS + pkarr). `false` binds the `Minimal` preset —
     /// dialing uses exactly the `EndpointAddr` given, which is what
@@ -191,6 +211,8 @@ pub struct EndpointConfig {
     pub transports: Transports,
     /// Packet-size/offload policy. Default `Adaptive`.
     pub packetization: Packetization,
+    /// Path ranking only; cannot expand permitted transport kinds or an explicit pin.
+    pub path_preference: PathPreference,
     /// Local controller factory; absent file settings retain BBRv3.
     pub congestion_control: CongestionControl,
     /// Owned-relay attachments (`noq` backend only): each entry is a
@@ -217,11 +239,14 @@ impl Default for EndpointConfig {
             secret_key: None,
             bind_addrs: Vec::new(),
             relays: Vec::new(),
+            keep_relays_connected: false,
+            prefer_relay_order: false,
             discovery: true,
             max_multipath_paths: None,
             observed_address_reports: true,
             transports: Transports::default(),
             packetization: Packetization::default(),
+            path_preference: PathPreference::default(),
             congestion_control: CongestionControl::default(),
             #[cfg(feature = "transport-noq")]
             relay_endpoints: Vec::new(),
@@ -638,6 +663,11 @@ impl Connection {
             #[cfg(feature = "transport-noq")]
             ConnectionInner::Noq(c) => c.path_stats_snapshot(),
         }
+    }
+
+    /// Read-only metadata handle that does not keep this connection's I/O alive.
+    pub fn path_observer(&self) -> WeakPathObserver {
+        WeakPathObserver::new(self)
     }
 
     /// Stats of the observed selected path, for media pacing. Returns None

@@ -124,14 +124,24 @@ pub struct EndpointSettings {
     pub bind_addrs: Vec<SocketAddr>,
     #[serde(default)]
     pub relay: RelaySettings,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_relays_connected: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prefer_relay_order: bool,
     #[serde(default)]
     pub max_multipath_paths: Option<u32>,
     #[serde(default, skip_serializing_if = "is_all_transports")]
     pub transports: crate::Transports,
     #[serde(default, skip_serializing_if = "is_adaptive_packetization")]
     pub packetization: crate::Packetization,
+    #[serde(default, skip_serializing_if = "is_backend_path_preference")]
+    pub path_preference: crate::PathPreference,
     #[serde(default, skip_serializing_if = "is_bbr3")]
     pub congestion_control: crate::CongestionControl,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_all_transports(value: &crate::Transports) -> bool {
@@ -143,6 +153,9 @@ fn is_adaptive_packetization(value: &crate::Packetization) -> bool {
 fn is_bbr3(value: &crate::CongestionControl) -> bool {
     *value == crate::CongestionControl::Bbr3
 }
+fn is_backend_path_preference(value: &crate::PathPreference) -> bool {
+    *value == crate::PathPreference::BackendDefault
+}
 
 impl Default for EndpointSettings {
     fn default() -> Self {
@@ -151,9 +164,12 @@ impl Default for EndpointSettings {
             backend: Backend::default(),
             bind_addrs: Vec::new(),
             relay: RelaySettings::default(),
+            keep_relays_connected: false,
+            prefer_relay_order: false,
             max_multipath_paths: None,
             transports: crate::Transports::default(),
             packetization: crate::Packetization::default(),
+            path_preference: crate::PathPreference::default(),
             congestion_control: crate::CongestionControl::default(),
         }
     }
@@ -252,10 +268,13 @@ impl EndpointSettings {
         }
         let mut config = EndpointConfig {
             backend: self.backend,
+            keep_relays_connected: self.keep_relays_connected,
+            prefer_relay_order: self.prefer_relay_order,
             bind_addrs: self.bind_addrs,
             max_multipath_paths: self.max_multipath_paths,
             transports: self.transports,
             packetization: self.packetization,
+            path_preference: self.path_preference,
             congestion_control: self.congestion_control,
             discovery: self.backend == Backend::Iroh,
             ..Default::default()
@@ -359,6 +378,22 @@ impl EndpointConfig {
         {
             return Err(ConfigError::Invalid(
                 "iroh relay origins must be distinct and at most 8",
+            ));
+        }
+        if self.prefer_relay_order
+            && (!self.keep_relays_connected
+                || self.path_preference != crate::PathPreference::Latency
+                || self.max_multipath_paths == Some(1))
+        {
+            return Err(ConfigError::Invalid(
+                "ordered relay fallback requires persistent registrations, latency preference and multiple paths",
+            ));
+        }
+        if self.keep_relays_connected
+            && (backend != Backend::Iroh || self.relays.is_empty() || self.relays.len() > 3)
+        {
+            return Err(ConfigError::Invalid(
+                "persistent relay registrations require 1..3 custom iroh origins",
             ));
         }
         match self.transports {

@@ -36,9 +36,12 @@ configuration (role/service/authority/timeout sections).
 | `backend` | `iroh` (default), or feature-enabled `noq` |
 | `bind_addrs` | Socket addresses; at most one on iroh, at most 16 entries on noq; fixed addresses are distinct, repeated port 0 requests allocate separate ephemeral sockets |
 | `relay` | One explicit reachability preset below |
+| `keep_relays_connected` | Optional bool, default false; keep 1–3 custom Iroh relays independently registered and advertise connected registrations |
+| `prefer_relay_order` | Optional bool, default false; prioritize relay URL order among eligible relay paths while retaining faster direct paths; requires persistent registrations, latency preference and multiple paths |
 | `max_multipath_paths` | Optional integer 1–32; absent preserves the backend default |
 | `transports` | `all` (default), `direct-only`, or `relay-only`; bounds usable path kinds |
 | `packetization` | `adaptive` (default), or `conservative`: 1200-byte primary QUIC UDP payloads, MTU discovery and GSO disabled |
+| `path_preference` | `backend-default` (legacy policy), or `latency`: lower measured RTT across allowed direct/relay paths; explicit single-path pins still win |
 | `congestion_control` | `bbr3` (default), or `cubic`; explicit local controller selection for measured qualification |
 
 Congestion selection is independent of stream priority, path kinds, packetization,
@@ -72,6 +75,26 @@ points validate the backend selected by their function name; injected transports
 must supply an attached relay handle consistent with their relay configuration.
 
 ## Reachability presets
+
+An explicit `keep_relays_connected: true` keeps the initially configured custom
+Iroh relay connections alive across peer inactivity. Registration completion,
+failure and task exit update advertised addresses; a configured URL alone is
+not readiness. Removing an origin withdraws it; dynamically adding another
+origin does not expand the initial persistent-registration budget. This option
+requires 1–3 custom origins and is refused for the owned backend or a public
+preset. Its default is omitted on serialization. Older strict binaries reject
+the explicit field and must be upgraded before deployment.
+
+Registration is distinct from a validated end-to-end QUIC path. The existing
+latency preference can maintain previously known standby paths and select a
+confirmed alternative; a direct path remains eligible. Configuring persistent
+registrations does not override path pins, controller choice, authorization,
+OS routes or directory authority. Private deployment assigns host roles. The
+optional `prefer_relay_order` uses the existing ordered URL list as its relay
+priority source. Healthy configured relay tiers outrank later relay tiers
+regardless of their RTT; direct paths still compete by RTT against that eligible
+tier. Failed or unconfirmed paths cannot outrank a positively confirmed
+alternative. Defaults and explicit pins retain their prior selection semantics.
 
 | `relay.mode` | Behavior |
 |---|---|
@@ -182,3 +205,21 @@ or dial; these service options do not extend the endpoint JSON schema. See
 
 `rds ssh` opens an [embedded SSH session](ssh.md) on one authorized TCP stream;
 its account/host-key/PTY options are independent of endpoint configuration.
+
+## Measured latency preference
+
+`path_preference: latency` removes Iroh's unconditional direct-primary/relay-
+backup ranking and requests a1s bounded reselection interval. A5ms minimum gain
+keeps the current path under small fluctuations. The owned Noq backend already
+periodically ranks validated live paths by RTT with the same stickiness.
+Transport bounds and max_multipath_paths1 remain authoritative; no OS/VPN route,
+identity, authority, congestion-controller or wire setting changes. Defaults
+retain backend policy, and old strict binaries reject the new explicit field.
+
+Published Iroh1.3 invokes its selector on topology changes only. The exact
+published source is temporarily retained under vendor/iroh with an opt-in
+refresh hook: default selectors remain topology-only; intervals are bounded to
+250ms..60s, and periodic refresh does not reapply an unchanged selection. See
+the patch/provenance notice. No transport engine or cryptographic behavior is
+changed. A low standby RTT does not prove bulk capacity; qualify native latency,
+quality and migration under actual mixed load before adoption.

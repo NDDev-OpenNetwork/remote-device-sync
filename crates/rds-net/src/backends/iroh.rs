@@ -10,6 +10,9 @@ use std::str::FromStr;
 use iroh::{Endpoint, RelayMap, RelayMode};
 
 use crate::{EndpointAddr, EndpointConfig, EndpointId, RelayUrl, TransportAddr};
+mod latency;
+#[cfg(all(test, feature = "transport-noq"))]
+mod latency_tests;
 
 /// Adapter conversions between the owned shared types and iroh-base.
 ///
@@ -101,6 +104,7 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
         // No relay, no lookup: Minimal binds a plain QUIC socket.
         (true, false) => Endpoint::builder(iroh::endpoint::presets::Minimal),
     };
+    builder = builder.keep_relays_connected(config.keep_relays_connected);
     if let Some(key) = config.secret_key {
         builder = builder.secret_key(convert::key(&key));
     }
@@ -115,6 +119,15 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
         crate::Transports::DirectOnly => builder.clear_relay_transports(),
         crate::Transports::RelayOnly => builder.clear_ip_transports(),
     };
+    if config.path_preference == crate::PathPreference::Latency {
+        builder = if config.prefer_relay_order {
+            builder.path_selector(std::sync::Arc::new(latency::OrderedRelaySelector {
+                order: config.relays.iter().map(convert::relay).collect(),
+            }))
+        } else {
+            builder.path_selector(std::sync::Arc::new(latency::LatencySelector))
+        };
+    }
     // Tuning on top of iroh's multipath-aware defaults:
     // - BBRv3 remains our default; explicit Cubic selection enables
     //   same-path qualification without changing priorities or windows.
@@ -122,8 +135,18 @@ pub async fn bind_endpoint(config: EndpointConfig) -> anyhow::Result<Endpoint> {
     //   100 ms; a larger per-stream window keeps a big keyframe or sync
     //   chunk stream from stalling on high-BDP links.
     // - 32 MiB connection send window keeps several bulk streams busy.
+    let controller = config.congestion_control.factory();
+    let controller = if config.path_preference == crate::PathPreference::Latency {
+        crate::ack_progress::factory(
+            controller,
+            std::sync::Arc::new(|| tokio::time::Instant::now().into_std()),
+        )
+    } else {
+        controller
+    };
     let mut transport = iroh::endpoint::QuicTransportConfig::builder()
-        .congestion_controller_factory(config.congestion_control.factory())
+        .congestion_controller_factory(controller)
+        .prefer_same_path_acks(config.path_preference == crate::PathPreference::Latency)
         .stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024))
         .send_window(32 * 1024 * 1024);
     if config.packetization == crate::Packetization::Conservative {

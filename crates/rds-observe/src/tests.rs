@@ -29,6 +29,33 @@ impl Capture {
 }
 
 #[test]
+fn health_observer_is_non_owning_and_reports_sink_failure() {
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("synthetic sink failure"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let (subscriber, telemetry) = subscriber(
+        Service::Cli,
+        Config::new(Format::Json, "off").unwrap(),
+        Broken,
+    )
+    .unwrap();
+    let observer = telemetry.health_observer();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || emit(Event::ProcessStarted));
+    let result = telemetry.shutdown();
+    assert!(result.drained);
+    assert_eq!(observer.snapshot().unwrap().telemetry_write_errors_total, 1);
+    drop(dispatch);
+    assert!(observer.snapshot().is_none());
+}
+
+#[test]
 fn json_is_allowlisted_without_invoking_private_formatters() {
     struct MustNotFormat;
     impl std::fmt::Debug for MustNotFormat {

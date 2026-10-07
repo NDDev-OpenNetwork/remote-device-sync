@@ -32,6 +32,9 @@ const PACING_INTERVAL: Duration = Duration::from_millis(250);
 /// Capture briefly after accepted input even when a compositor's root DAMAGE
 /// notification does not describe the redirected application repaint.
 const INPUT_REFRESH_BURST_MS: u64 = 250;
+// Control replies must not inherit a media stream's thirty-second budget.
+// After any partial-write failure the session drops SessionSend and resets it.
+const CONTROL_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Moderate random loss holds the offered rate; severe loss reduces it.
 const LOSS_HOLD: f64 = 0.02;
 const LOSS_STEP_DOWN: f64 = 0.10;
@@ -1228,6 +1231,7 @@ pub async fn serve_desktop_with(
         let mut assembly = crate::clipboard::Assembly::default();
         let mut clipboard = None;
         loop {
+            let read_started = Instant::now();
             match read_frame::<_, DesktopControl>(&mut recv).await {
                 Ok(DesktopControl::Input(ev)) => {
                     if config.view_only {
@@ -1293,14 +1297,7 @@ pub async fn serve_desktop_with(
                             seq,
                             handled_ts_ms: send_clock.now_ms(),
                         };
-                        if !matches!(
-                            tokio::time::timeout(
-                                FRAME_SEND_TIMEOUT,
-                                write_frame(&mut send.0, &ack)
-                            )
-                            .await,
-                            Ok(Ok(()))
-                        ) {
+                        if write_control_reply(&mut send.0, &ack).await.is_err() {
                             break;
                         }
                         tracing::trace!(target:"rds_desktop::input_timing", input_seq=seq,
@@ -1327,14 +1324,16 @@ pub async fn serve_desktop_with(
                     controls.requested.store(bps, Ordering::Relaxed);
                 }
                 Ok(DesktopControl::Heartbeat { seq, ts_ms }) => {
-                    if !matches!(
-                        tokio::time::timeout(
-                            FRAME_SEND_TIMEOUT,
-                            write_frame(&mut send.0, &DesktopEvent::Heartbeat { seq, ts_ms })
-                        )
-                        .await,
-                        Ok(Ok(()))
-                    ) {
+                    tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq,
+                        read_wait_us=read_started.elapsed().as_micros(), "desktop heartbeat control read");
+                    let reply_started = Instant::now();
+                    let written =
+                        write_control_reply(&mut send.0, &DesktopEvent::Heartbeat { seq, ts_ms })
+                            .await
+                            .is_ok();
+                    tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq, written,
+                        write_us=reply_started.elapsed().as_micros(), "desktop heartbeat reply write completed");
+                    if !written {
                         break;
                     }
                 }
@@ -1372,13 +1371,26 @@ pub async fn serve_desktop_with(
                         }
                     };
                     if let Some(text) = text {
+                        let publish_started = Instant::now();
+                        tracing::info!(
+                            transfer_id = id,
+                            bytes = total,
+                            "desktop clipboard publication started"
+                        );
                         let owner = clipboard
                             .get_or_insert_with(|| crate::clipboard::Worker::new(session_display));
                         match tokio::time::timeout(Duration::from_secs(2), owner.publish(text))
                             .await
                         {
                             Ok(Ok(())) => {
-                                if write_frame(
+                                tracing::info!(
+                                    transfer_id = id,
+                                    bytes = total,
+                                    publish_ms = publish_started.elapsed().as_millis(),
+                                    "desktop clipboard publication completed"
+                                );
+                                let reply_started = Instant::now();
+                                if write_control_reply(
                                     &mut send.0,
                                     &DesktopEvent::ClipboardReady { id, bytes: total },
                                 )
@@ -1387,6 +1399,12 @@ pub async fn serve_desktop_with(
                                 {
                                     break;
                                 }
+                                tracing::info!(
+                                    transfer_id = id,
+                                    bytes = total,
+                                    reply_ms = reply_started.elapsed().as_millis(),
+                                    "desktop clipboard ready reply written"
+                                );
                             }
                             result => {
                                 tracing::warn!(error=?result,"clipboard publication failed; ending control before paste input");
@@ -1397,6 +1415,8 @@ pub async fn serve_desktop_with(
                 }
                 Err(error) => {
                     tracing::debug!(%error,"desktop control ended");
+                    tracing::debug!(target:"rds_desktop::control_timing", error_kind=?error.kind(),
+                        read_wait_us=read_started.elapsed().as_micros(), "desktop control reader ended");
                     break;
                 }
             }
@@ -1415,6 +1435,30 @@ pub async fn serve_desktop_with(
     workers.shutdown().await;
     capture.abort_all();
     result
+}
+
+async fn write_control_reply<W: AsyncWrite + Unpin>(
+    send: &mut W,
+    event: &DesktopEvent,
+) -> std::io::Result<()> {
+    let reply_class = match event {
+        DesktopEvent::InputAck { .. } => "input_ack",
+        DesktopEvent::Heartbeat { .. } => "heartbeat",
+        DesktopEvent::ClipboardReady { .. } => "clipboard_ready",
+    };
+    match tokio::time::timeout(CONTROL_REPLY_TIMEOUT, write_frame(send, event)).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                reply_class,
+                "desktop control reply deadline exceeded; ending session"
+            );
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "desktop control reply deadline exceeded",
+            ))
+        }
+    }
 }
 
 /// A canceled control reply must not end with a partial, apparently clean FIN.
@@ -2125,6 +2169,61 @@ async fn send_payload<W: AsyncWrite + Unpin, T: Borrow<Produced>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_clipboard_reply_obeys_control_deadline_after_partial_header() {
+        let (mut send, mut receive) = tokio::io::duplex(2);
+        let started = tokio::time::Instant::now();
+        let result = write_control_reply(
+            &mut send,
+            &DesktopEvent::ClipboardReady { id: 7, bytes: 4096 },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(started.elapsed(), CONTROL_REPLY_TIMEOUT);
+        drop(send); // A real serving session resets SessionSend at this boundary.
+        use tokio::io::AsyncReadExt;
+        let mut partial = Vec::new();
+        receive.read_to_end(&mut partial).await.unwrap();
+        assert_eq!(partial.len(), 2, "the control frame was partially written");
+    }
+
+    #[tokio::test]
+    async fn timely_clipboard_reply_preserves_following_input_ack_and_heartbeat() {
+        let (mut send, mut receive) = tokio::io::duplex(256);
+        for event in [
+            DesktopEvent::ClipboardReady { id: 7, bytes: 4096 },
+            DesktopEvent::InputAck {
+                seq: 8,
+                handled_ts_ms: 9,
+            },
+            DesktopEvent::Heartbeat { seq: 10, ts_ms: 11 },
+        ] {
+            write_control_reply(&mut send, &event).await.unwrap();
+            let received: DesktopEvent = read_frame(&mut receive).await.unwrap();
+            match (received, event) {
+                (
+                    DesktopEvent::ClipboardReady { id: a, bytes: b },
+                    DesktopEvent::ClipboardReady { id: c, bytes: d },
+                ) => assert_eq!((a, b), (c, d)),
+                (
+                    DesktopEvent::InputAck {
+                        seq: a,
+                        handled_ts_ms: b,
+                    },
+                    DesktopEvent::InputAck {
+                        seq: c,
+                        handled_ts_ms: d,
+                    },
+                ) => assert_eq!((a, b), (c, d)),
+                (
+                    DesktopEvent::Heartbeat { seq: a, ts_ms: b },
+                    DesktopEvent::Heartbeat { seq: c, ts_ms: d },
+                ) => assert_eq!((a, b), (c, d)),
+                _ => panic!("control reply changed type or order"),
+            }
+        }
+    }
 
     #[test]
     fn accepted_input_wake_survives_capture_backpressure_then_expires() {

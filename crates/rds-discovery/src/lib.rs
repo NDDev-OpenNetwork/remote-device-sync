@@ -135,6 +135,8 @@ pub enum DiscoveryError {
     NotEnrolled,
     #[error("store error: {0}")]
     Store(String),
+    #[error("durable storage is full: {0}")]
+    StorageUnavailable(#[source] std::io::Error),
 }
 
 /// Current unix time in seconds.

@@ -20,7 +20,7 @@ use winit::{
 
 use super::{
     gpu::{DrawOutcome, Gpu},
-    input::{Viewport, evdev, modifier_changes},
+    input::{Viewport, evdev, key_transition, modifier_changes},
 };
 use crate::{DesktopError, RawFrame};
 
@@ -139,6 +139,12 @@ pub struct ViewerReport {
     pub managed_events_separated: bool,
     pub input_ack_p50_ms: Option<f64>,
     pub input_ack_p95_ms: Option<f64>,
+    pub keyboard_input_ack_p50_ms: Option<f64>,
+    pub keyboard_input_ack_p95_ms: Option<f64>,
+    pub keyboard_input_ack_max_ms: Option<f64>,
+    pub button_input_ack_p50_ms: Option<f64>,
+    pub button_input_ack_p95_ms: Option<f64>,
+    pub button_input_ack_max_ms: Option<f64>,
     pub input_queue_p95_ms: Option<f64>,
     pub input_pointer_coalesced: u64,
     pub input_events_dropped: u64,
@@ -147,6 +153,16 @@ pub struct ViewerReport {
     pub oldest_input_ack_age_ms: Option<u64>,
     pub clipboard_transfers: u64,
     pub last_clipboard_bytes: u32,
+    pub clipboard_transfer_p50_ms: Option<f64>,
+    pub clipboard_transfer_p95_ms: Option<f64>,
+    pub clipboard_transfer_max_ms: Option<f64>,
+    pub last_clipboard_transfer_ms: Option<f64>,
+    pub slow_clipboard_transfers: u64,
+    pub clipboard_pending_transfers: usize,
+    pub clipboard_oldest_pending_age_ms: Option<u64>,
+    pub clipboard_unmatched_replies: u64,
+    pub clipboard_tracking_evicted: u64,
+    pub clipboard_transfers_canceled: u64,
     pub reconnects: u64,
     pub video_repair_requests: u64,
     pub last_recovery_ms: Option<u64>,
@@ -174,6 +190,8 @@ pub struct ViewerSnapshot {
     pub unpresented_frame_age_ms: Option<u64>,
     pub pending_frame_bytes: usize,
     pub occluded: bool,
+    pub native_window: Option<super::NativeWindowState>,
+    pub native_window_sample_age_ms: Option<u64>,
     pub report: ViewerReport,
 }
 
@@ -203,29 +221,81 @@ impl SubmissionDebt {
 /// Local event-to-ack measurements never compare clocks on different hosts.
 /// Coalesced pointer events are tracked only after dequeue; the event's own
 /// local creation time still includes time spent waiting in the UI queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputClass {
+    Keyboard,
+    Button,
+    Other,
+}
+impl InputClass {
+    fn of(kind: &InputKind) -> Self {
+        match kind {
+            InputKind::KeyDown { .. } | InputKind::KeyUp { .. } => Self::Keyboard,
+            InputKind::PointerButton { .. } => Self::Button,
+            _ => Self::Other,
+        }
+    }
+}
+
 #[derive(Default)]
 struct InputLatency {
-    pending: VecDeque<(u64, u64)>,
+    pending: VecDeque<(u64, u64, InputClass)>,
     queued: Vec<f64>,
     acknowledged: Vec<f64>,
+    keyboard: Vec<f64>,
+    buttons: Vec<f64>,
     evicted: u64,
     last_slow_log_ms: Option<u64>,
 }
+
+#[derive(Default)]
+struct ClipboardLatency {
+    pending: VecDeque<(u64, u32, u64)>,
+    acknowledged: Vec<f64>,
+    evicted: u64,
+}
+impl ClipboardLatency {
+    fn sent(&mut self, id: u64, bytes: u32, now_ms: u64) {
+        if self.pending.len() == 8 {
+            self.pending.pop_front();
+            self.evicted += 1;
+        }
+        self.pending.push_back((id, bytes, now_ms));
+    }
+    fn ack(&mut self, id: u64, bytes: u32, now_ms: u64) -> Option<f64> {
+        let index = self
+            .pending
+            .iter()
+            .position(|(pending, size, _)| *pending == id && *size == bytes)?;
+        let (_, _, sent_ms) = self.pending.remove(index)?;
+        let latency = now_ms.saturating_sub(sent_ms) as f64;
+        sample(&mut self.acknowledged, latency);
+        Some(latency)
+    }
+}
 impl InputLatency {
-    fn sent(&mut self, seq: u64, created_ms: u64, now_ms: u64) {
+    fn sent(&mut self, seq: u64, created_ms: u64, now_ms: u64, class: InputClass) {
         if self.pending.len() == INPUT_QUEUE_CAPACITY {
             self.pending.pop_front();
             self.evicted += 1;
         }
-        self.pending.push_back((seq, created_ms));
+        self.pending.push_back((seq, created_ms, class));
         sample(&mut self.queued, now_ms.saturating_sub(created_ms) as f64);
     }
     fn ack(&mut self, seq: u64, now_ms: u64) -> Option<f64> {
-        if let Some(index) = self.pending.iter().position(|(pending, _)| *pending == seq)
-            && let Some((_, created_ms)) = self.pending.remove(index)
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|(pending, _, _)| *pending == seq)
+            && let Some((_, created_ms, class)) = self.pending.remove(index)
         {
             let latency = now_ms.saturating_sub(created_ms) as f64;
             sample(&mut self.acknowledged, latency);
+            match class {
+                InputClass::Keyboard => sample(&mut self.keyboard, latency),
+                InputClass::Button => sample(&mut self.buttons, latency),
+                InputClass::Other => {}
+            }
             return Some(latency);
         }
         None
@@ -243,6 +313,7 @@ struct State {
     encoding: Vec<f64>,
     sending: Vec<f64>,
     input_latency: InputLatency,
+    clipboard_latency: ClipboardLatency,
     close: bool,
     interrupted: Option<Instant>,
     network_stage: String,
@@ -250,6 +321,7 @@ struct State {
     last_ui_ms: u64,
     last_encoded_ms: Option<u64>,
     occluded: bool,
+    native_window: Option<super::NativeWindowState>,
     visual_probe: Option<super::visual_probe::VisualProbe>,
     session_span: tracing::Span,
 }
@@ -314,6 +386,10 @@ impl ViewerHandle {
             unpresented_frame_age_ms: state.submission_debt.age(elapsed),
             pending_frame_bytes: state.pending.as_ref().map_or(0, |p| p.raw.data.len()),
             occluded: state.occluded,
+            native_window: state.native_window,
+            native_window_sample_age_ms: state
+                .native_window
+                .map(|sample| elapsed.saturating_sub(sample.sampled_elapsed_ms)),
             report,
         }
     }
@@ -364,6 +440,9 @@ impl ViewerHandle {
         if state.status == "Reconnecting" {
             state.report.input_acks_canceled += state.input_latency.pending.len() as u64;
             state.input_latency.pending.clear();
+            state.report.clipboard_transfers_canceled +=
+                state.clipboard_latency.pending.len() as u64;
+            state.clipboard_latency.pending.clear();
             if let Some(probe) = &mut state.visual_probe {
                 probe.reset();
             }
@@ -407,9 +486,12 @@ impl ViewerHandle {
             {
                 let mut state = lock(&self.state);
                 state.report.inputs_dispatched += 1;
-                state
-                    .input_latency
-                    .sent(event.seq, event.event_ts_ms, sent_ms);
+                state.input_latency.sent(
+                    event.seq,
+                    event.event_ts_ms,
+                    sent_ms,
+                    InputClass::of(&event.kind),
+                );
             }
             let event_class = match event.kind {
                 InputKind::KeyDown { .. } => "key_down",
@@ -465,6 +547,24 @@ impl ViewerHandle {
         state.report.clipboard_transfers += 1;
         state.report.last_clipboard_bytes = bytes;
     }
+    /// Correlate explicit paste publication using only metadata and local clocks.
+    pub fn clipboard_ack(&self, id: u64, bytes: u32) {
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        let mut state = lock(&self.state);
+        let latency = state.clipboard_latency.ack(id, bytes, now_ms);
+        if latency.is_some() {
+            state.report.clipboard_transfers += 1;
+            state.report.last_clipboard_bytes = bytes;
+            state.report.last_clipboard_transfer_ms = latency;
+            if latency.is_some_and(|ms| ms >= 250.) {
+                state.report.slow_clipboard_transfers += 1;
+            }
+        } else {
+            state.report.clipboard_unmatched_replies += 1;
+        }
+        drop(state);
+        tracing::info!(transfer_id=id, bytes, transfer_ms=?latency, "native clipboard ready observed");
+    }
     /// Sender stage durations use only that sender's monotonic clock. They
     /// are separate from network transit and local receive-to-submit timing.
     pub fn media_timing(&self, header: &rds_core::FrameHeader) {
@@ -497,12 +597,49 @@ impl ViewerHandle {
         (report.encode_to_send_p50_ms, report.encode_to_send_p95_ms) = quantiles(&state.sending);
         (report.input_ack_p50_ms, report.input_ack_p95_ms) =
             quantiles(&state.input_latency.acknowledged);
+        (
+            report.keyboard_input_ack_p50_ms,
+            report.keyboard_input_ack_p95_ms,
+        ) = quantiles(&state.input_latency.keyboard);
+        report.keyboard_input_ack_max_ms = state
+            .input_latency
+            .keyboard
+            .iter()
+            .copied()
+            .reduce(f64::max);
+        (
+            report.button_input_ack_p50_ms,
+            report.button_input_ack_p95_ms,
+        ) = quantiles(&state.input_latency.buttons);
+        report.button_input_ack_max_ms =
+            state.input_latency.buttons.iter().copied().reduce(f64::max);
         report.input_queue_p95_ms = quantiles(&state.input_latency.queued).1;
+        (
+            report.clipboard_transfer_p50_ms,
+            report.clipboard_transfer_p95_ms,
+        ) = quantiles(&state.clipboard_latency.acknowledged);
+        report.clipboard_transfer_max_ms = state
+            .clipboard_latency
+            .acknowledged
+            .iter()
+            .copied()
+            .reduce(f64::max);
+        report.clipboard_pending_transfers = state.clipboard_latency.pending.len();
+        report.clipboard_oldest_pending_age_ms =
+            state
+                .clipboard_latency
+                .pending
+                .front()
+                .map(|(_, _, since)| {
+                    (self.started.elapsed().as_millis() as u64).saturating_sub(*since)
+                });
+        report.clipboard_tracking_evicted = state.clipboard_latency.evicted;
         report.input_ack_tracking_evicted = state.input_latency.evicted;
         report.pending_input_acks = state.input_latency.pending.len();
-        report.oldest_input_ack_age_ms = state.input_latency.pending.front().map(|(_, created)| {
-            (self.started.elapsed().as_millis() as u64).saturating_sub(*created)
-        });
+        report.oldest_input_ack_age_ms =
+            state.input_latency.pending.front().map(|(_, created, _)| {
+                (self.started.elapsed().as_millis() as u64).saturating_sub(*created)
+            });
         report.input_pointer_coalesced = self.input_state.pointer_coalesced.load(Ordering::Relaxed);
         report.input_events_dropped = self.input_state.input_dropped.load(Ordering::Relaxed);
         report.input_queue_max_depth = self.input_state.max_depth.load(Ordering::Relaxed);
@@ -550,6 +687,7 @@ impl Viewer {
                 encoding: Vec::new(),
                 sending: Vec::new(),
                 input_latency: InputLatency::default(),
+                clipboard_latency: ClipboardLatency::default(),
                 close: false,
                 interrupted: None,
                 network_stage: "starting".into(),
@@ -557,6 +695,7 @@ impl Viewer {
                 last_ui_ms: 0,
                 last_encoded_ms: None,
                 occluded: false,
+                native_window: None,
                 visual_probe: None,
                 session_span: tracing::Span::none(),
             })),
@@ -577,6 +716,7 @@ impl Viewer {
             pointer: false,
             pointer_point: None,
             error: None,
+            last_window_status: None,
         };
         Ok((Self { event_loop, app }, handle, receiver))
     }
@@ -605,8 +745,16 @@ struct App {
     pointer: bool,
     pointer_point: Option<(f64, f64)>,
     error: Option<DesktopError>,
+    last_window_status: Option<String>,
 }
 impl App {
+    fn sample_window(&self) {
+        if let Some(window) = &self.window {
+            let elapsed = self.handle.started.elapsed().as_millis() as u64;
+            let sample = super::platform::window_state(window, elapsed);
+            lock(&self.handle.state).native_window = sample;
+        }
+    }
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: DesktopError) {
         self.error = Some(error);
         let _ = self.input.send(ViewerInput::Close);
@@ -614,10 +762,8 @@ impl App {
     }
     fn sync_modifiers(&mut self, event_loop: &ActiveEventLoop) {
         for (code, pressed) in modifier_changes(&self.keys, self.modifiers) {
-            if pressed {
-                self.keys.insert(code);
-            } else {
-                self.keys.remove(&code);
+            if !key_transition(&mut self.keys, code, pressed) {
+                continue;
             }
             self.input(
                 event_loop,
@@ -660,6 +806,42 @@ impl App {
             } else {
                 probe.modified_click(point);
             }
+        }
+        if matches!(&message, DesktopControl::Input(InputEvent {
+            kind: InputKind::PointerButton { button, pressed: true }, ..
+        }) if *button != 0x110)
+            && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+        {
+            probe.keyboard_focus_lost();
+        }
+        if let DesktopControl::Input(InputEvent {
+            kind: InputKind::KeyDown { code },
+            ..
+        }) = &message
+            && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+        {
+            probe.key(
+                *code,
+                self.modifiers.state().is_empty(),
+                self.seq,
+                Instant::now(),
+            );
+        }
+        if let DesktopControl::Input(InputEvent {
+            kind: InputKind::KeyDown { code } | InputKind::KeyUp { code },
+            ..
+        }) = &message
+            && matches!(code, 29 | 42 | 54 | 56 | 97 | 100 | 125 | 126)
+        {
+            let pressed = matches!(
+                &message,
+                DesktopControl::Input(InputEvent {
+                    kind: InputKind::KeyDown { .. },
+                    ..
+                })
+            );
+            tracing::trace!(target: "rds_desktop::input_timing", input_seq=self.seq, modifier_code=*code, pressed,
+                "native modifier transition queued");
         }
         self.seq = next;
         if self.input.send(ViewerInput::Control(message)).is_err() {
@@ -796,6 +978,7 @@ impl ApplicationHandler<()> for App {
         }
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        self.sample_window();
         let mut state = lock(&self.handle.state);
         state.wake_pending = false;
         let close = state.close;
@@ -803,7 +986,12 @@ impl ApplicationHandler<()> for App {
         let status = state.status.clone();
         drop(state);
         if let Some(window) = &self.window {
-            window.set_title(&format!("RDS — {status}"));
+            // Media wakeups do not change status. Avoid repeated AppKit title
+            // allocations/notifications on the latency-sensitive UI thread.
+            if self.last_window_status.as_deref() != Some(status.as_str()) {
+                window.set_title(&format!("RDS — {status}"));
+                self.last_window_status = Some(status);
+            }
             window.request_redraw();
         }
         if close {
@@ -817,6 +1005,7 @@ impl ApplicationHandler<()> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        self.sample_window();
         lock(&self.handle.state).last_ui_ms = self.handle.started.elapsed().as_millis() as u64;
         match event {
             WindowEvent::CloseRequested => {
@@ -833,7 +1022,12 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
-            WindowEvent::Focused(false) => self.release(event_loop),
+            WindowEvent::Focused(false) => {
+                if let Some(probe) = &mut lock(&self.handle.state).visual_probe {
+                    probe.keyboard_focus_lost();
+                }
+                self.release(event_loop);
+            }
             WindowEvent::Occluded(hidden) => {
                 let mut state = lock(&self.handle.state);
                 state.occluded = hidden;
@@ -883,6 +1077,9 @@ impl ApplicationHandler<()> for App {
                         self.sync_modifiers(event_loop);
                     }
                     if event.state == ElementState::Pressed {
+                        if self.keys.contains(&code) {
+                            return;
+                        }
                         let command_paste = cfg!(target_os = "macos")
                             && code == 47
                             && (self.keys.contains(&125) || self.keys.contains(&126));
@@ -893,7 +1090,13 @@ impl ApplicationHandler<()> for App {
                                 Ok(Some(text)) => {
                                     let id = rand::random();
                                     let total = text.len() as u32;
+                                    lock(&self.handle.state).clipboard_latency.sent(
+                                        id,
+                                        total,
+                                        self.handle.started.elapsed().as_millis() as u64,
+                                    );
                                     tracing::info!(
+                                        transfer_id = id,
                                         bytes = total,
                                         command_paste,
                                         "explicit local clipboard text queued"
@@ -966,9 +1169,10 @@ impl ApplicationHandler<()> for App {
                             // and OS repeats must not replay paste effects.
                             return;
                         }
-                        self.keys.insert(code);
-                        self.input(event_loop, InputKind::KeyDown { code });
-                    } else if self.keys.remove(&code) {
+                        if key_transition(&mut self.keys, code, true) {
+                            self.input(event_loop, InputKind::KeyDown { code });
+                        }
+                    } else if key_transition(&mut self.keys, code, false) {
                         self.input(event_loop, InputKind::KeyUp { code });
                     }
                 }
@@ -1030,6 +1234,25 @@ impl ApplicationHandler<()> for App {
 mod tests {
     use super::*;
     #[test]
+    fn clipboard_measurements_match_size_and_id_without_replaying_duplicates() {
+        let mut latency = ClipboardLatency::default();
+        latency.sent(7, 4096, 100);
+        assert_eq!(latency.ack(8, 4096, 180), None);
+        assert_eq!(latency.ack(7, 4095, 190), None);
+        assert_eq!(latency.pending.len(), 1);
+        assert_eq!(latency.ack(7, 4096, 200), Some(100.));
+        assert_eq!(latency.ack(7, 4096, 250), None);
+        assert_eq!(latency.acknowledged, vec![100.]);
+        for id in 10..30 {
+            latency.sent(id, 4096, 300);
+        }
+        assert_eq!(latency.pending.len(), 8);
+        assert_eq!(latency.evicted, 12);
+        assert_eq!(latency.ack(10, 4096, 400), None);
+        latency.pending.clear(); // An old epoch cannot complete a fresh paste.
+        assert_eq!(latency.ack(29, 4096, 500), None);
+    }
+    #[test]
     fn submission_debt_distinguishes_idle_replacement_and_concurrent_arrival() {
         let mut debt = SubmissionDebt::default();
         assert_eq!(debt.age(90_000), None); // A still screen is not a renderer stall.
@@ -1059,21 +1282,46 @@ mod tests {
     #[test]
     fn input_latency_matches_sequences_and_keeps_bounded_local_clock_history() {
         let mut latency = InputLatency::default();
-        latency.sent(7, 100, 120);
-        latency.sent(8, 110, 125);
+        latency.sent(7, 100, 120, InputClass::Keyboard);
+        latency.sent(8, 110, 125, InputClass::Button);
         assert_eq!(latency.ack(8, 310), Some(200.));
         assert_eq!(latency.ack(8, 410), None); // duplicate is not another sample
         assert_eq!(latency.ack(999, 510), None); // unrelated ACK cannot correlate
         assert_eq!(latency.acknowledged, vec![200.]);
         assert_eq!(latency.queued, vec![20., 15.]);
-        assert_eq!(latency.pending.front(), Some(&(7, 100)));
+        assert_eq!(
+            latency.pending.front(),
+            Some(&(7, 100, InputClass::Keyboard))
+        );
         for seq in 100..1500 {
-            latency.sent(seq, seq, seq + 3);
+            latency.sent(seq, seq, seq + 3, InputClass::Other);
         }
         assert_eq!(latency.pending.len(), INPUT_QUEUE_CAPACITY);
         assert_eq!(latency.queued.len(), 1024);
-        assert_eq!(latency.pending.front(), Some(&(476, 476)));
+        assert_eq!(
+            latency.pending.front(),
+            Some(&(476, 476, InputClass::Other))
+        );
         assert_eq!(latency.evicted, 377);
+    }
+
+    #[test]
+    fn fast_pointer_acknowledgements_do_not_hide_slow_keyboard_and_buttons() {
+        let mut latency = InputLatency::default();
+        latency.sent(1, 0, 0, InputClass::Keyboard);
+        assert_eq!(latency.ack(1, 900), Some(900.));
+        latency.sent(2, 0, 0, InputClass::Button);
+        assert_eq!(latency.ack(2, 700), Some(700.));
+        for seq in 3..2000 {
+            latency.sent(seq, 1000, 1000, InputClass::Other);
+            latency.ack(seq, 1060);
+        }
+        assert_eq!(quantiles(&latency.acknowledged).1, Some(60.));
+        assert_eq!(quantiles(&latency.keyboard).1, Some(900.));
+        assert_eq!(quantiles(&latency.buttons).1, Some(700.));
+        assert_eq!(latency.ack(1, 2000), None);
+        assert_eq!(latency.keyboard.len(), 1);
+        assert_eq!(latency.buttons.len(), 1);
     }
 
     #[tokio::test]
@@ -1186,7 +1434,7 @@ mod tests {
     fn semantic_burst_acknowledgements_remain_correlated_when_replies_wait() {
         let mut latency = InputLatency::default();
         for seq in 0..800 {
-            latency.sent(seq, seq, 800);
+            latency.sent(seq, seq, 800, InputClass::Button);
         }
         assert_eq!(latency.pending.len(), 800);
         assert_eq!(latency.evicted, 0);

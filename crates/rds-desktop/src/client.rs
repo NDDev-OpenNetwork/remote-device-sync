@@ -60,6 +60,7 @@ fn reorder_wait(rtt_ms: u64) -> std::time::Duration {
 #[derive(Default)]
 struct HeartbeatProbes {
     pending: std::collections::VecDeque<(u64, u64, std::time::Instant)>,
+    last_echoed_sent: Option<std::time::Instant>,
 }
 
 impl HeartbeatProbes {
@@ -79,9 +80,33 @@ impl HeartbeatProbes {
             .pending
             .iter()
             .position(|(s, t, _)| (*s, *t) == (seq, ts_ms))?;
-        self.pending
-            .remove(index)
-            .map(|(_, _, sent)| sent.elapsed())
+        let (_, _, sent) = self.pending.remove(index)?;
+        self.last_echoed_sent = Some(self.last_echoed_sent.map_or(sent, |old| old.max(sent)));
+        Some(sent.elapsed())
+    }
+
+    fn observation(&self) -> crate::control_read::PendingReplies {
+        // A matched newer probe proves progress beyond an older missing echo.
+        // Retain ordinary correlation behavior, but do not diagnose healthy
+        // idle periods as stalled solely because that old entry remains.
+        let mut count = 0;
+        let mut oldest = None;
+        for (seq, _, sent) in &self.pending {
+            if self
+                .last_echoed_sent
+                .is_none_or(|confirmed| *sent > confirmed)
+            {
+                count += 1;
+                if oldest.is_none_or(|(_, at)| *sent < at) {
+                    oldest = Some((*seq, *sent));
+                }
+            }
+        }
+        crate::control_read::PendingReplies {
+            count,
+            oldest_seq: oldest.map(|(seq, _)| seq),
+            oldest_age: oldest.map(|(_, at)| at.elapsed()),
+        }
     }
 }
 
@@ -346,6 +371,9 @@ impl DesktopSession {
         opts: SessionOpts,
     ) -> Result<Self, DesktopError> {
         let display = hello.display;
+        let observation =
+            crate::control_observation::ControlObservation::new(conn.path_observer())?;
+        let control_instance = observation.instance;
         let clock = opts.clock.unwrap_or_default();
         let route = opts
             .session
@@ -394,7 +422,7 @@ impl DesktopSession {
                 }
             }
         };
-        let (mut send, mut recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
+        let (mut send, recv, caps) = tokio::time::timeout(FRAME_STREAM_TIMEOUT, async {
             let (send, mut recv) = conn.open_bi().await?;
             let mut send = ControlSend(send);
             rds_net::wire::prioritize_control(&send.0, &greeting)?;
@@ -455,27 +483,40 @@ impl DesktopSession {
                     let Some(msg) = msg else {
                         break;
                     };
-                    if let DesktopControl::Heartbeat { seq, ts_ms } = &msg {
+                    let heartbeat_seq = if let DesktopControl::Heartbeat { seq, ts_ms } = &msg {
                         sending_probes.lock().await.sent(*seq, *ts_ms);
-                    }
+                        Some(*seq)
+                    } else {
+                        None
+                    };
                     let input_seq = match &msg {
                         DesktopControl::Input(event) => Some(event.seq),
                         _ => None,
                     };
                     let started = std::time::Instant::now();
                     if let Some(input_seq) = input_seq {
-                        tracing::trace!(target:"rds_desktop::input_timing", input_seq,
+                        tracing::trace!(target:"rds_desktop::input_timing", control_instance, input_seq,
                             "desktop input control write started");
+                    }
+                    if let Some(heartbeat_seq) = heartbeat_seq {
+                        tracing::trace!(target:"rds_desktop::control_timing", control_instance, heartbeat_seq,
+                            "desktop heartbeat control write started");
                     }
                     let written = matches!(
                         tokio::time::timeout(FRAME_STREAM_TIMEOUT, write_frame(&mut send.0, &msg)).await,
                         Ok(Ok(()))
                     );
+                    if let Some(heartbeat_seq) = heartbeat_seq {
+                        tracing::trace!(target:"rds_desktop::control_timing", control_instance, heartbeat_seq, written,
+                            write_us=started.elapsed().as_micros(), "desktop heartbeat control write completed");
+                    }
                     if let Some(input_seq) = input_seq {
-                        tracing::trace!(target:"rds_desktop::input_timing", input_seq, written,
+                        tracing::trace!(target:"rds_desktop::input_timing", control_instance, input_seq, written,
                             write_us=started.elapsed().as_micros(), "desktop input control write completed");
                     }
                     if !written {
+                        tracing::warn!(target:"rds_desktop::control_timing", control_instance, input_seq, heartbeat_seq,
+                            "desktop control writer ended after incomplete write");
                         break;
                     }
                 }
@@ -486,10 +527,26 @@ impl DesktopSession {
         let rtt_marker = control_rtt_ms.clone();
         tasks.spawn(
             async move {
+                let observation = observation.spawn();
+                let progress = crate::control_read::ReadProgress::default();
+                let observing_probes = probes.clone();
+                let _reader_observer = progress.observe(control_instance, move || {
+                    observing_probes.try_lock().ok().map(|p|p.observation())
+                });
+                let mut recv = crate::control_read::ObservedRead::new(recv, progress.clone());
                 loop {
-                    match read_frame::<_, DesktopEvent>(&mut recv).await {
+                    let read_started = std::time::Instant::now();
+                    progress.begin();
+                    let reply = read_frame::<_, DesktopEvent>(&mut recv).await;
+                    progress.end();
+                    match reply {
                         Ok(ev @ DesktopEvent::Heartbeat { seq, ts_ms }) => {
-                            if let Some(rtt) = probes.lock().await.echoed(seq, ts_ms) {
+                            let rtt = probes.lock().await.echoed(seq, ts_ms);
+                            tracing::trace!(target:"rds_desktop::control_timing", control_instance, heartbeat_seq=seq,
+                                matched=rtt.is_some(), read_wait_us=read_started.elapsed().as_micros(),
+                                rtt_ms=rtt.map(|rtt| rtt.as_millis()), "desktop heartbeat reply read");
+                            if let Some(rtt) = rtt {
+                                observation.heartbeat(seq, rtt);
                                 rtt_marker.store(rtt.as_millis() as u64, Ordering::Relaxed);
                             }
                             events_tx.send(ev);
@@ -497,7 +554,11 @@ impl DesktopSession {
                         Ok(ev) => {
                             events_tx.send(ev);
                         }
-                        Err(_) => break,
+                        Err(error) => {
+                            tracing::debug!(target:"rds_desktop::control_timing", control_instance, error_kind=?error.kind(),
+                                read_wait_us=read_started.elapsed().as_micros(), "desktop event reader ended");
+                            break;
+                        }
                     }
                 }
             }
@@ -1087,6 +1148,21 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn stale_missing_probe_does_not_make_passive_read_observation_overdue() {
+        let mut probes = HeartbeatProbes::default();
+        probes.sent(1, 11);
+        probes.sent(2, 22);
+        assert_eq!(probes.observation().count, 2);
+        assert_eq!(probes.observation().oldest_seq, Some(1));
+        assert!(probes.echoed(2, 22).is_some());
+        assert_eq!(probes.observation().count, 0);
+        // Diagnostic freshness must not remove ordinary late-reply correlation.
+        assert!(probes.echoed(1, 11).is_some());
+        probes.sent(3, 33);
+        assert_eq!(probes.observation().oldest_seq, Some(3));
     }
 
     #[test]

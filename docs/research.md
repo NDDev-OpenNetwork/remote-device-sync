@@ -1,5 +1,138 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+## 2026-10-07 contemporaneous replacement proof
+
+[RFC 9000 §8.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-8.2) defines
+path validation, while [§9.4](https://www.rfc-editor.org/rfc/rfc9000.html#section-9.4)
+keeps loss and congestion state specific to a path. Validation and an old RTT
+do not establish current progress during a later outage. RDS's optional
+retirement policy now requires a still-fresh sibling ACK after the failed path's
+outstanding-work interval began. This is an RDS policy refinement, not an RFC
+threshold. Negative pre-failure/high-RTT tests supplement actual engine recovery;
+see [the scoped receipt](reports/rds-contemporaneous-fallback-20261007.md).
+
+## 2026-10-07 independently registered relay reserves
+
+[Upstream issue 4319](https://github.com/n0-computer/iroh/issues/4319) reports a
+roughly thirty-second home-relay failure gap on Iroh 1.0.0-rc.0. It is evidence
+for that reported version, not proof of the same timing on the pinned 1.3 source.
+The pinned actor still gives only its home relay persistent registration and
+closes idle non-home actors after sixty seconds. Address publication contains
+only home. A configured relay list therefore does not by itself establish
+independent, warm inbound reachability.
+
+The explicit bounded increment keeps at most three initial custom registrations
+on their existing actor/retry/task ownership. Only completed registrations are
+advertised; transport loss, map removal and task exit withdraw readiness. No
+synthetic application traffic or extra identity is needed to hold a registration.
+Readiness does not assert QUIC validation, a preferred route, or WAN recovery
+latency. Isolated real-relay idle, same-stream faults, default preservation and
+administrative withdrawal are tested separately from installed-device acceptance.
+
+## 2026-10-06 durable publication and transport isolation
+
+A metadata publisher must not terminate authenticated transport merely because
+its next durable advertisement cannot allocate storage. QUIC's separate streams
+([RFC9000 section2](https://www.rfc-editor.org/rfc/rfc9000.html#section-2)) do not
+protect a connection from its process supervisor closing the whole endpoint.
+Publication availability and transport authorization are independent boundaries.
+
+[Rust OS error codes](https://doc.rust-lang.org/std/io/struct.Error.html#method.raw_os_error)
+permit exact ENOSPC/quota classification rather than matching error strings.
+RDS retries only those capacity failures. The durable issuer retains its lock,
+accepts only the verified previous state or its exact attempted successor, and
+synchronizes verified bytes before resuming publication. Both file data and
+namespace synchronization matter after rename; the
+[Linux filesystem proceedings](https://www.kernel.org/doc/mirror/ols2009.pdf)
+describe that durability boundary. Corrupt/unrelated state, unsafe files,
+clock rollback and other errors retain their failure behavior. Transport inputs
+are never replayed, and authorization/feed expiry is unchanged.
+
+Native injected faults cover all five existing write/sync/rename checkpoints,
+including repeated full-storage recovery, exclusive ownership, exact signed
+retry bytes, successor revision and reopening. These tests deliberately do not
+fill a user's disk or claim installed two-device acceptance. Separately,
+[Iroh's multipath API](https://www.iroh.computer/blog/iroh-0-96-0-the-quic-multipaths-to-1-0)
+requires per-path observations; cached RTT alone is not evidence of current
+application progress. Keep source/code tests distinct from physical latency.
+
+## 2026-10-05 independent control liveness
+
+QUIC delivers bytes in order within a stream; progress on another stream does
+not establish progress of an earlier control record ([RFC9000§2.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2)).
+The [Noq write/cancellation contract](https://docs.rs/noq/1.3.0/noq/struct.SendStream.html)
+and its `stopped` documentation distinguish writable/transport state from
+application processing. RDS's short write deadline therefore cannot substitute
+for an application heartbeat confirmation.
+
+The native viewer now tracks at most16outstanding exact `(seq,timestamp)` probes
+per desktop session. Monotonic send time establishes acknowledged progress;
+very late, duplicate, unmatched or retired replies cannot make old control
+look current. Fresh video never rearms control progress. The ordinary budget is
+8seconds, observed at the next one-second control tick; writes retain their
+separate2-second bound. Scheduling and reopening are not hard real-time promises.
+Clipboard keeps its existing30-second absolute transfer budget with one bounded
+metadata entry. Only exact ID/size confirmation after the final chunk advances
+that entry; repeated starts cannot extend the first unconfirmed grace forever.
+
+Both native managed/direct paths apply the policy. Managed failure drops only
+the desktop's two IPC legs and retains the manager's peer/unrelated streams.
+Direct mode keeps its existing owned-connection cleanup. No input/paste replay,
+remote wire change, endpoint replacement, bitrate/path default or server restart
+is added. This improves a proved missing-control-watchdog boundary, not proof of
+the root cause of every installed network outage.
+
+[Upstream Iroh4424](https://github.com/n0-computer/iroh/issues/4424) describes
+periodic direct-path loss attributed by its reporter to absolute CGNAT mapping
+expiry despite heartbeats. It is a useful analogous report on different versions
+and networks, not evidence identifying this installation's provider or cause.
+Do not blindly shorten transport idle policy or change VPN/routing from it.
+
+## 2026-10-05 relay loss and evidence preservation
+
+[Iroh1.2 documentation](https://docs.rs/iroh/1.2.0/iroh/#relay-servers)
+confirms its relay carrier uses TCP, while validated direct connectivity uses
+QUIC. [Upstream issue4319](https://github.com/n0-computer/iroh/issues/4319)
+reports an approximately30-second reachability gap after home-relay loss,
+including existing connections despite multiple configured relay hints.
+This is a reported analogous failure, not proof of the same defect/version or
+a reason to assume a second relay is already a warm failover path. Real route,
+network-change and relay actor evidence are required for installed diagnosis.
+Allowing direct paths preserves the relay as fallback; it does not authorize
+an OS routing or VPN change or guarantee physical-network availability.
+
+The [Noq stopped contract](https://docs.rs/noq/1.3.0/noq/struct.SendStream.html#method.stopped)
+still distinguishes transport receipt from application processing. RDS retains
+its existing exact payload receipts and input semantics. [Tokio's bounded-channel
+contract](https://docs.rs/tokio/latest/tokio/sync/mpsc/) supports bounded observation
+outside the interactive path; retries cannot grow an unbounded diagnostics queue.
+
+The flight recorder now retains later reasons in the same window, captures
+control silence and repair transitions, and exposes log/storage loss counters.
+A non-owning health observer avoids waiting on a failed log sink to discover
+its failures. Four pending incident windows survive retryable storage failures;
+overflow is explicit. Complete private JSON publication prevents a partial
+write from masquerading as a completed incident. These boundaries do not provide
+lossless audit or power-loss durability. See
+[the increment receipt](reports/rds-incident-evidence-20261005.md).
+
+## 2026-10-05 bounded paste/control observation
+
+QUIC [stream flow control](https://www.rfc-editor.org/rfc/rfc9000.html#section-4)
+can block an application writer independently of average RTT. A higher stream
+priority does not remove that wait. [Tokio timeout](https://docs.rs/tokio/latest/tokio/time/fn.timeout.html)
+limits the awaited write but cancellation can leave a partial framed record.
+RDS therefore resets its owning desktop control stream after a reply failure,
+using a separate two-second control budget for ACK, heartbeat and clipboard
+metadata; it does not resume or replay that write. Media budgets are unchanged.
+
+Keyboard/button samples are separate from pointer motion, and clipboard
+publication is correlated by ID, size and the viewer's local clock. This
+closes an unbounded clipboard-ready write and an observability gap, not a
+claim that those defects explain every native freeze. The synthetic blocked
+writer and tracking tests remain distinct from installed GUI and network
+qualification.
+
 ## 2026-10-05 explicit media receipt boundary
 
 The pinned [Noq stopped contract](https://docs.rs/noq/1.3.0/noq/struct.SendStream.html#method.stopped)
@@ -778,3 +911,42 @@ application-limited traffic and transport congestion in
 RDS heuristic, not an RFC recommendation. Loss and actual delivery/producer
 pressure remain independent signals. See the causal diagnostic receipt for the
 negative regression and recovered-delivery CI failure.
+
+## 2026-10-06 repeat controls without keymap invalidation
+
+X11's core ChangeKeyboardControl path calls XkbDisableComputedAutoRepeats,
+which marks the affected key's repeat setting explicit and emits a map
+notification. See the primary [X server implementation](https://github.com/mirror/xserver/blob/master/xkb/xkbUtils.c).
+This can happen even when the requested bit already has that value. GNOME46
+[Mutter's X11 backend](https://github.com/GNOME/mutter/blob/46.0/src/backends/x11/meta-backend-x11.c)
+invalidates its cached map and emits keymap-changed for MapNotify. A keyboard
+hold must not require rebuilding the whole desktop keymap on both edges.
+
+RDS now uses XKB SetControls with only PerKeyRepeat selected, changing one bit
+in the current repeat array and skipping an unchanged bit. Its process-wide
+hold mutex serializes RDS controllers; fresh reads preserve unrelated bits and
+controls. It does not serialize independent external XKB settings writers.
+Real holds, client repeats, shared ownership and restoration remain required.
+The dedicated Xvfb regression observes map notifications alongside delayed
+release, repeats, modifiers and Backspace. Native composited-desktop timing
+must still establish how much this defect contributed to a reported stall.
+
+## Transport responsiveness baseline — 2026-10-06
+
+The Iroh adapter now requires the 1.3 release line, with the lockfile binding
+Iroh/base/relay1.3.0. Noq remains1.3.0; transport settings and protocol surfaces
+are unchanged. [Iroh1.3 release](https://github.com/n0-computer/iroh/releases/tag/v1.3.0)
+includes [upstream4512](https://github.com/n0-computer/iroh/pull/4512): a full relay
+send queue previously retained the remote actor while it awaited a datagram
+send. The replacement owns at most16pending sends per peer, sends selected
+paths concurrently, bounds each send to3seconds and disposes pending work when
+the actor exits. The actor can continue handling route and connection events.
+This repairs a known establishment/recovery risk; it is not proof that every
+steady-state desktop input pause had this cause.
+
+[QUIC9000](https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2) guarantees ordered
+delivery within a stream and isolates ordering between different streams; it
+does not remove congestion/flow-control or application-reader delays. Existing
+RDS desktop control priority, isolated media streams, bounded input queues and
+validated payload receipts remain. A fast write means local admission, not
+remote receipt. Installed burst/idle and network-change acceptance remains open.

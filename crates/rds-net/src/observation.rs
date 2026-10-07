@@ -3,6 +3,27 @@ use std::{future::Future, pin::Pin};
 
 use crate::{Connection, ConnectionInner, PathStats, PathStatsCoverage, PathStatsSnapshot};
 
+/// Read-only path metadata, without retaining a connection facade or transport I/O.
+///
+/// Counters describe the observing endpoint's transmitted packets, not the peer's
+/// transmitted packets. Snapshot coverage and retired-path limitations remain.
+pub struct WeakPathObserver {
+    inner: Observer,
+}
+
+impl WeakPathObserver {
+    pub(crate) fn new(connection: &Connection) -> Self {
+        Self {
+            inner: Observer::new(connection),
+        }
+    }
+
+    /// Current live-path counters with their backend observation coverage.
+    pub fn snapshot(&self) -> PathStatsSnapshot {
+        self.inner.snapshot()
+    }
+}
+
 pub(crate) enum Observer {
     Iroh(iroh::endpoint::WeakConnectionHandle),
     #[cfg(feature = "transport-noq")]

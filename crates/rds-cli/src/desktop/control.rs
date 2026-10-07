@@ -79,10 +79,44 @@ async fn send_control(
     Ok(())
 }
 
-pub(super) async fn pump(
+#[cfg(test)]
+async fn pump(
     input: &mut impl Input,
     sender: &impl Sender,
     progress: &watch::Receiver<tokio::time::Instant>,
+    started: Instant,
+    sent: impl Fn(&DesktopControl),
+) -> anyhow::Result<bool> {
+    pump_inner(input, sender, progress, None, started, sent).await
+}
+
+pub(super) async fn pump_with_liveness(
+    input: &mut impl Input,
+    sender: &impl Sender,
+    progress: &watch::Receiver<tokio::time::Instant>,
+    control_progress: &super::liveness::ControlWatchdog,
+    started: Instant,
+    sent: impl Fn(&DesktopControl),
+) -> anyhow::Result<bool> {
+    pump_inner(
+        input,
+        sender,
+        progress,
+        Some(control_progress),
+        started,
+        |message| {
+            control_progress.sent(message);
+            sent(message);
+        },
+    )
+    .await
+}
+
+async fn pump_inner(
+    input: &mut impl Input,
+    sender: &impl Sender,
+    progress: &watch::Receiver<tokio::time::Instant>,
+    control_progress: Option<&super::liveness::ControlWatchdog>,
     started: Instant,
     sent: impl Fn(&DesktopControl),
 ) -> anyhow::Result<bool> {
@@ -93,6 +127,7 @@ pub(super) async fn pump(
         let message = tokio::select! {
             biased;
             _ = tick.tick() => {
+                if let Some(monitor) = control_progress { monitor.check()?; }
                 let progress = *progress.borrow();
                 match watchdog.observe(progress) {
                     VideoAction::Reconnect => {
@@ -107,8 +142,10 @@ pub(super) async fn pump(
                     },
                     VideoAction::Healthy => {},
                 }
-                DesktopControl::Heartbeat {
-                    seq: 0, ts_ms: started.elapsed().as_millis() as u64,
+                let ts_ms = started.elapsed().as_millis() as u64;
+                match control_progress {
+                    Some(monitor) => monitor.heartbeat(ts_ms)?,
+                    None => DesktopControl::Heartbeat { seq:0, ts_ms },
                 }
             },
             message = input.recv() => match message {
@@ -167,6 +204,113 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fresh_video_cannot_mask_unacknowledged_control_and_cancellation_drops_media() {
+        let (wire, mut remote) = tokio::io::duplex(256);
+        let (tx, mut input) = mpsc::channel(8);
+        let (progress, last_frame) = watch::channel(tokio::time::Instant::now());
+        let stop = CancellationToken::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let held = dropped.clone();
+        let mut task = tokio::spawn(async move {
+            let monitor = super::super::liveness::ControlWatchdog::default();
+            let media = async {
+                let _drop = Dropped(held);
+                std::future::pending().await
+            };
+            run(
+                pump_with_liveness(
+                    &mut input,
+                    &Wire(Mutex::new(wire)),
+                    &last_frame,
+                    &monitor,
+                    Instant::now(),
+                    |_| {},
+                ),
+                media,
+                &stop,
+            )
+            .await
+        });
+        tx.send(ViewerInput::Control(DesktopControl::Input(InputEvent {
+            seq: 37,
+            event_ts_ms: 0,
+            display_id: 0,
+            kind: InputKind::KeyDown { code: 56 },
+        })))
+        .await
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        let mut inputs = 0;
+        let error = loop {
+            tokio::select! {
+                result = &mut task => break result.unwrap().unwrap_err(),
+                message = rds_net::read_frame::<_,DesktopUp>(&mut remote) => {
+                    let message = match message {
+                        Ok(DesktopUp::Control(message)) => message,
+                        Err(error) => {
+                            assert_eq!(error.kind(),std::io::ErrorKind::UnexpectedEof);
+                            break (&mut task).await.unwrap().unwrap_err();
+                        },
+                        _ => panic!("unexpected framing"),
+                    };
+                    match message {
+                        DesktopControl::Heartbeat {..} => { progress.send_replace(tokio::time::Instant::now()); },
+                        DesktopControl::Input(event) => { assert_eq!(event.seq,37);inputs+=1; },
+                        DesktopControl::RequestIdr => panic!("fresh video does not need repair"),
+                        _ => panic!("unexpected control"),
+                    }
+                }
+            }
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("control stopped making progress")
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(8));
+        assert_eq!(inputs, 1, "no input replay while stalled");
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn matched_control_echoes_preserve_the_healthy_session_during_continuous_media() {
+        let (wire, mut remote) = tokio::io::duplex(256);
+        let (tx, mut input) = mpsc::channel(8);
+        let (progress, last_frame) = watch::channel(tokio::time::Instant::now());
+        let monitor = super::super::liveness::ControlWatchdog::default();
+        let sending = monitor.clone();
+        let task = tokio::spawn(async move {
+            pump_with_liveness(
+                &mut input,
+                &Wire(Mutex::new(wire)),
+                &last_frame,
+                &sending,
+                Instant::now(),
+                |_| {},
+            )
+            .await
+        });
+        let started = tokio::time::Instant::now();
+        let mut previous = None;
+        while started.elapsed() < Duration::from_secs(60) {
+            let DesktopUp::Control(DesktopControl::Heartbeat { seq, ts_ms }) =
+                rds_net::read_frame(&mut remote).await.unwrap()
+            else {
+                panic!("unexpected heartbeat framing");
+            };
+            if let Some(n) = previous {
+                assert_eq!(seq, n + 1);
+            }
+            previous = Some(seq);
+            assert!(monitor.echoed(seq, ts_ms));
+            progress.send_replace(tokio::time::Instant::now());
+            assert!(!task.is_finished());
+        }
+        tx.send(ViewerInput::Close).await.unwrap();
+        assert!(task.await.unwrap().unwrap());
     }
 
     #[tokio::test(start_paused = true)]

@@ -2,7 +2,7 @@
 use crate::DesktopError;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use x11rb::protocol::xproto::{AutoRepeatMode, ChangeKeyboardControlAux, ConnectionExt as _};
+use x11rb::protocol::xkb::{ConnectionExt as _, Control, ID};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
@@ -23,19 +23,65 @@ pub(super) struct Hold {
 fn error() -> DesktopError {
     DesktopError::Input("X11 keyboard repeat state failed".into())
 }
-fn mode(conn: &RustConnection, key: u8, on: bool) -> Result<(), DesktopError> {
-    conn.change_keyboard_control(
-        &ChangeKeyboardControlAux::new()
-            .key(u32::from(key))
-            .auto_repeat_mode(if on {
-                AutoRepeatMode::ON
-            } else {
-                AutoRepeatMode::OFF
-            }),
+// Core ChangeKeyboardControl marks the key's repeat setting explicit and emits
+// XkbMapNotify even for a no-op. Compositors may rebuild the whole keymap for
+// every press/release. XKB per-key controls change repeat without map changes.
+// Callers hold HOLDS while reading/modifying the array, so our controllers cannot
+// overwrite each other's suppression. All other controls/array bits are retained.
+fn mode(conn: &RustConnection, key: u8, on: bool) -> Result<bool, DesktopError> {
+    let keyboard = conn
+        .xkb_get_controls(ID::USE_CORE_KBD.into())
+        .map_err(|_| error())?
+        .reply()
+        .map_err(|_| error())?;
+    let mut repeats = keyboard.per_key_repeat;
+    let byte = usize::from(key) / 8;
+    let mask = 1 << (key % 8);
+    let previous = repeats[byte] & mask != 0;
+    if previous == on {
+        return Ok(previous);
+    }
+    if on {
+        repeats[byte] |= mask;
+    } else {
+        repeats[byte] &= !mask;
+    }
+    conn.xkb_set_controls(
+        ID::USE_CORE_KBD.into(),
+        0u16.into(),
+        0u16.into(),
+        0u16.into(),
+        0u16.into(),
+        0u16.into(),
+        0u16.into(),
+        0u16.into(),
+        0u16.into(),
+        keyboard.mouse_keys_dflt_btn,
+        keyboard.groups_wrap,
+        keyboard.access_x_option,
+        0u32.into(),
+        0u32.into(),
+        Control::PER_KEY_REPEAT,
+        keyboard.repeat_delay,
+        keyboard.repeat_interval,
+        keyboard.slow_keys_delay,
+        keyboard.debounce_delay,
+        keyboard.mouse_keys_delay,
+        keyboard.mouse_keys_interval,
+        keyboard.mouse_keys_time_to_max,
+        keyboard.mouse_keys_max_speed,
+        keyboard.mouse_keys_curve,
+        keyboard.access_x_timeout,
+        keyboard.access_x_timeout_mask,
+        keyboard.access_x_timeout_values,
+        keyboard.access_x_timeout_options_mask,
+        keyboard.access_x_timeout_options_values,
+        &repeats,
     )
     .map_err(|_| error())?
     .check()
-    .map_err(|_| error())
+    .map_err(|_| error())?;
+    Ok(previous)
 }
 fn fake(conn: &RustConnection, root: u32, key: u8, press: bool) -> Result<(), DesktopError> {
     conn.xtest_fake_input(if press { 2 } else { 3 }, key, 0, root, 0, 0, 0)
@@ -62,13 +108,7 @@ impl Hold {
             }
             state.owners = next;
         } else {
-            let keyboard = conn
-                .get_keyboard_control()
-                .map_err(|_| error())?
-                .reply()
-                .map_err(|_| error())?;
-            let repeat = keyboard.auto_repeats[usize::from(key) / 8] & (1 << (key % 8)) != 0;
-            mode(&conn, key, false)?;
+            let repeat = mode(&conn, key, false)?;
             if let Err(e) = fake(&conn, root, key, true) {
                 let _ = mode(&conn, key, repeat);
                 return Err(e);
@@ -114,7 +154,7 @@ impl Hold {
         let restore = mode(&self.conn, self.key, state.repeat);
         holds.remove(&id);
         self.released = true;
-        release.and(restore)
+        release.and(restore.map(|_| ()))
     }
 }
 impl Drop for Hold {

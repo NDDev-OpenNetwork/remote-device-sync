@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor/iroh", "vendor/noq-proto"]
 resolver = "3"
 members = [
     "crates/rds-agent",
@@ -50,8 +51,8 @@ fastcdc = "5"
 # selector API so `max_multipath_paths = 1` can actually pin an iroh
 # connection to its handshake path (iroh floors the transport-config cap
 # at 14 and QNT cannot be disabled through it either).
-iroh = { version = "1", features = ["unstable-custom-transports"] }
-iroh-relay = "1"
+iroh = { version = "1.3", features = ["unstable-custom-transports"] }
+iroh-relay = "1.3"
 noq = "1"
 noq-proto = "1"
 postcard = "1"
@@ -104,3 +105,8 @@ rust_2018_idioms = "warn"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Exact published Iroh1.3 source plus opt-in periodic selector refresh.
+[patch.crates-io]
+iroh = { path = "vendor/iroh" }
+noq-proto = { path = "vendor/noq-proto" }

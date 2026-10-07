@@ -22,6 +22,8 @@ mod candidates;
 mod dial;
 mod drivers;
 mod hmac;
+#[cfg(test)]
+mod path_blackhole_tests;
 pub mod policy;
 pub mod relay;
 pub mod socket;
@@ -62,6 +64,8 @@ fn transport_config(
     max_multipath_paths: Option<u32>,
     packetization: crate::Packetization,
     congestion_control: crate::CongestionControl,
+    path_preference: crate::PathPreference,
+    clock: crate::ack_progress::Clock,
 ) -> Arc<noq::TransportConfig> {
     let mut cfg = noq::TransportConfig::default();
     cfg.keep_alive_interval(Some(HEARTBEAT_INTERVAL));
@@ -75,7 +79,14 @@ fn transport_config(
     // Same controller selection as the iroh backend (default BBRv3),
     // and windows above the 100Mbps x 100ms
     // defaults so bulk streams do not stall on high-BDP links.
-    cfg.congestion_controller_factory(congestion_control.factory());
+    let controller = congestion_control.factory();
+    let controller = if path_preference == crate::PathPreference::Latency {
+        crate::ack_progress::factory(controller, clock)
+    } else {
+        controller
+    };
+    cfg.congestion_controller_factory(controller);
+    cfg.prefer_same_path_acks(path_preference == crate::PathPreference::Latency);
     cfg.stream_receive_window(noq_proto::VarInt::from_u32(4 * 1024 * 1024));
     cfg.send_window(32 * 1024 * 1024);
     if packetization == crate::Packetization::Conservative {
@@ -219,10 +230,14 @@ async fn bind_socket(
     let endpoint_config =
         noq::EndpointConfig::new(Arc::new(hmac::Blake3HmacKey::new(&mut rand::rng())));
 
+    let progress_runtime = runtime.clone();
+    let progress_clock: crate::ack_progress::Clock = Arc::new(move || progress_runtime.now());
     let transport = transport_config(
         config.max_multipath_paths,
         config.packetization,
         config.congestion_control,
+        config.path_preference,
+        progress_clock,
     );
     let mut server_config = noq::ServerConfig::with_crypto(Arc::new(server_crypto));
     server_config.transport = transport.clone();

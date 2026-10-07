@@ -15,6 +15,18 @@ window, alongside independent rate-limited warnings.
 `session_epoch`, `input_queue_depth`, `input_acks_canceled`, `slow_input_acks`
 and `last_input_ack_ms` complement the existing bounded latency percentiles.
 Percentiles summarize the retained sample buffer, not a timed rolling interval.
+Keyboard and button ACK p50/p95/max are retained independently of motion, so
+fast pointer traffic cannot hide a delayed key or click. Each series retains
+at most 1024 samples. These remain injection acknowledgements, not application
+response or optical display measurements.
+
+Explicit paste gestures track at most eight transfer IDs and byte counts on
+the viewer's local clock. Clipboard-ready replies must match both values;
+duplicates, unknown IDs and wrong sizes do not create successful samples.
+Reconnection cancels outstanding tracking. Evictions, unmatched replies,
+pending age, last/p50/p95/max transfer duration and completed transfers over
+250 ms are reported. Pending and completed clipboard delays trigger the same
+bounded incident recorder; no clipboard content is retained.
 
 ## Validated payload delivery receipts
 
@@ -80,6 +92,32 @@ These failures are acceptance failures, excluded from latency percentiles rather
 than treated as proof that a later counter increment belongs to the older press.
 The five-second limit bounds this diagnostic's causal assumption; it changes no
 desktop input, transport, repair or session deadline.
+
+A descriptor may additionally opt in with `keyboard_codes`, at most16distinct
+physical evdev codes. Empty/absent preserves click-only diagnostics. Modifier and
+lock/toggle codes are refused. The controlled field increments the same marker
+once per target click and once per listed unmodified KeyDown, after its native
+insertion/deletion handler. KeyUp does not advance it. Keyboard measurement arms
+only after a target click's response reaches native GPU presentation. Keys
+ordered behind that pending focus click are retained provisionally in the same
+counter sequence, so typing before its first visible response cannot shift
+later measurements onto earlier characters. They complete only in a presented
+frame that also confirms the click. Merely visible markers do not prove focus.
+Native focus loss, outside clicks, other
+pointer-button presses, unavailable/missing markers and reset disarm/cancel it.
+Modified tracked keys or a counter ahead of queued inputs fail the attempt;
+subsequent frames cannot restore lost correlation. The original timeout and
+shared128-pending bound remain. Keyboard latency has a separate1024-sample
+series and count/min/p50/p95/max fields, with no character/keycode logging.
+
+All marker qualification still assumes one actor and a controlled application
+that advances once per delivered tracked event. Require matching application
+counts, no correlation-loss/timeout/eviction, and actual native presentation;
+never treat a partial/invalid attempt as a passed latency gate. This extends the
+software input-to-submission boundary, not optical scanout measurement. The
+native version-1 viewer config may select `diagnostic_visual_probe` as a path;
+an explicit CLI flag wins. Existing regular-file/size/strict descriptor checks
+apply. Remove the opt-in config field after a controlled run.
 
 Managed delivery attaches the exact encoded frame sequence to its pending raw
 frame. Visual response and submission traces carry it alongside the local
@@ -330,11 +368,20 @@ owns the CLIPBOARD selection and serves UTF8_STRING/TARGETS/TIMESTAMP and ICCCM
 INCR for larger data, without a clipboard helper process. This is real clipboard
 publication, not typing text through keyboard-layout substitutions.
 
-One transfer is bounded to 1 MiB of UTF-8, with 32 KiB control chunks, exact
-ordered offsets and a five-second assembly deadline. There are at most four
+One transfer is bounded to 1 MiB of UTF-8, with at most 32 KiB control chunks
+(the native sender uses 16 KiB), exact ordered offsets, a five-second idle
+deadline and a thirty-second total assembly deadline. There are at most four
 active native selection workers and eight outstanding INCR requests per worker.
 View-only sessions refuse publication. Publication failure ends the control
 session before subsequent paste input can consume an unrelated old clipboard.
+Clipboard publication has its own two-second native deadline. All serving
+control replies (input ACK, heartbeat and clipboard-ready) share a two-second
+write deadline rather than the thirty-second media budget. A stalled or partial
+reply ends and resets that desktop control stream; it is never resumed as a
+clean frame and no input or paste is replayed automatically. The transport
+connection and unrelated service streams remain outside that session shutdown.
+Publication start/completion and reply completion record transfer ID, byte
+count and stage duration only.
 Contents are neither logged nor written to disk. There is no background scan or
 automatic export of every local clipboard change. Images, files, rich formats,
 reverse clipboard remain outside this text path. Cmd+V becomes a bounded remote
@@ -357,6 +404,17 @@ that visible-screen diagnosis and clears its waiting interval. A retained image
 starts a fresh interval when it becomes eligible again; time hidden by the OS
 is not counted as a newly resumed window's visible stall. The surface's own
 occluded outcome also suppresses diagnosis if the window event has not arrived.
+
+On macOS, `native_window` records only the viewer's own AppKit flags:
+application activation, visibility, key-window status, active Space, minimization
+and native occlusion. The sample is read on the main thread before UI event
+handling, outside the viewer state lock. `native_window_sample_age_ms` exposes
+stale observations if that thread stops servicing events; unsupported platforms
+report absence. These flags are diagnostic evidence, not a renderer eligibility
+or foreground policy. An occluded snapshot taken after switching to another app
+cannot establish that a preceding typing stall happened while visible. The title
+is updated only when connection status changes, avoiding identical title writes
+on frame wakeups. See [the observation receipt](reports/rds-native-window-observation-20261006.md).
 
 Private `rds_desktop::input_timing=trace` records add the managed IPC receipt,
 bounded control-queue admission and network control-write start/completion.
@@ -656,3 +714,75 @@ holds, pulses an intentional client repeat and restores the original setting
 when its last controller releases. This prevents a late KeyUp from manufacturing
 letters. Update both native viewer and serving agent together. See the
 [regression receipt](reports/rds-interactive-repair-20261004.md) for scope limits.
+
+
+### Diagnostic evidence health
+
+Native live snapshots and incident windows append a `diagnostics` object.
+`telemetry` reports dropped, oversized and output-write-error counters through
+a weak observer independent of the log sink; unavailable observation is `null`,
+not a fabricated zero. `storage` reports snapshot/incident write success/error,
+last success time, four-window retry backlog, eviction and oversize counters.
+Counters in a snapshot describe completed persistence work before that snapshot.
+The native application wires this observation automatically; embedded/ordinary
+CLI desktop callers without the internal observer retain `null` telemetry.
+
+The recorder merges reasons found during its ten-second post-trigger window.
+Control-echo silence of at least3seconds, media repair, logging loss and storage
+failure supplement existing input/video reasons. New recovery/evidence-loss
+transitions bypass ordinary age-symptom cooldown. Four incident payloads of at
+most256KiB are retained for retry, with one write attempt per diagnostic tick;
+a new window evicts the oldest only at that explicit capacity. An in-flight
+attempt may copy one further payload. Final shutdown is best effort: unsaved
+memory is not durable, and a permanently full filesystem cannot store evidence.
+
+Snapshot replacement is atomic; new incident publication is complete and
+no-replace. Failed publication removes only its temporary inode. Neither
+boundary claims fsync/power-loss durability. Bounded file retention and the
+log queue can still lose records; health counts make that uncertainty visible.
+Content, key identity, clipboard payload and typed characters are not added.
+
+
+### Independent control progress
+
+A picture or successful local control write does not prove current remote input
+handling. Managed and direct native sessions now require an exact outstanding
+heartbeat confirmation independent of decoded video. Probes have distinct,
+checked per-session sequence numbers and opaque timestamp matching;16entries
+bound tracking. Confirmation advances to the matched probe's monotonic send
+time, not the time a stale response arrived. Older responses cannot rewind it.
+
+The native control tick observes an8-second ordinary progress budget with its
+own initial grace. A live clipboard transfer keeps the existing30-second
+absolute allowance until exact completed ID/size confirmation; repeated starts
+do not extend that unconfirmed allowance. Write/decode/media deadlines remain
+separate. A control expiry ends the owning desktop attempt without replaying
+input or paste; managed sessions retain the authenticated peer and unrelated
+streams. This does not guarantee8-second recovery when networking is unavailable
+or revoke already applied input. The existing no-replay/canceled-ACK diagnostics
+remain essential to interpreting uncertain delivery.
+
+The [interactive retry and modifier follow-up](reports/rds-control-retry-modifiers-20261005.md) requires stable control confirmation before resetting retry backoff and deduplicates physical/flags key transitions.
+
+## Private heartbeat stage observation
+
+`rds_desktop::control_timing=trace` records heartbeat write start/completion at
+the client, framed control read/reply completion at the server, and matched reply
+read at the client. Sequence numbers, match outcomes and local durations only;
+no control bodies, credentials or addresses. Reader termination records its
+I/O error kind and elapsed pending read; incomplete writes have an explicit
+warning. A pending-read duration includes ordinary idle time, transport wait
+and scheduling. It is not network one-way latency. Successful writes establish
+local transport admission, not packet transmission or remote handling. Use exact
+owning connection/attempt context and qualified clocks before cross-host joins;
+sequence numbers alone are not globally unique. Existing bounded log output
+and all control deadlines/probe matching/cleanup rules remain unchanged.
+
+Slow control responses now include viewer-endpoint transmit-path observations
+on `rds_desktop::control_timing`. A bounded background query keeps backend locks
+outside input admission and the event reader. `control_instance` is local to one
+process attempt, not a wire/session credential. TX loss belongs to the endpoint
+producing the record; a server TX counter does not establish viewer TX loss.
+Snapshot age, evictions, coverage and truncation remain explicit. These are
+transport observations, not exact packet-to-input attribution, capacity or
+optical response measurements.

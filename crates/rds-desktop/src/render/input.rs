@@ -101,6 +101,20 @@ impl Viewport {
     }
 }
 
+/// A modifier may be reported both as physical input and as a flags update.
+/// Apply one transition only; native repeats are handled explicitly upstream.
+pub(super) fn key_transition(
+    held: &mut std::collections::BTreeSet<u32>,
+    code: u32,
+    pressed: bool,
+) -> bool {
+    if pressed {
+        held.insert(code)
+    } else {
+        held.remove(&code)
+    }
+}
+
 /// Reconcile native modifier flags when a press happened before focus, or
 /// the OS reports flags without a separate physical modifier key event.
 /// Unknown sides retain a known held side; otherwise use the left key.
@@ -278,6 +292,37 @@ pub(super) fn evdev(code: KeyCode) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn physical_and_flags_notifications_preserve_one_alt_shift_chord() {
+        for physical_first in [false, true] {
+            let mut held = std::collections::BTreeSet::new();
+            let mut output = Vec::new();
+            let mut flags = winit::keyboard::ModifiersState::empty();
+            for (code, flag, pressed) in [
+                (56, winit::keyboard::ModifiersState::ALT, true),
+                (42, winit::keyboard::ModifiersState::SHIFT, true),
+                (42, winit::keyboard::ModifiersState::SHIFT, false),
+                (56, winit::keyboard::ModifiersState::ALT, false),
+            ] {
+                flags.set(flag, pressed);
+                for physical in [physical_first, !physical_first] {
+                    let changes = if physical {
+                        vec![(code, pressed)]
+                    } else {
+                        modifier_changes(&held, flags.into())
+                    };
+                    for (code, pressed) in changes {
+                        if key_transition(&mut held, code, pressed) {
+                            output.push((code, pressed));
+                        }
+                    }
+                }
+            }
+            assert_eq!(output, [(56, true), (42, true), (42, false), (56, false)]);
+            assert!(held.is_empty());
+        }
+    }
+
     #[test]
     fn option_flags_without_a_key_event_supply_alt_and_release_it() {
         let held = std::collections::BTreeSet::new();
