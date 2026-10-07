@@ -3,7 +3,7 @@
 //! journals, corrupt parts, traversal rejection, and an impaired-link
 //! lane that proves the resume overhead stays small.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,20 +12,12 @@ use rds_sync::engine::{recv_file, send_file, serve};
 use rds_sync::proto::{check_manifest, check_rel_path};
 use rds_sync::{Manifest, manifest_of};
 
-/// Temp dir per test — unique per process + name.
-fn scratch(name: &str) -> PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "rds-sync-{name}-{}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&dir).unwrap();
-    dir
+#[path = "support/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
+
+fn scratch(name: &str) -> Scratch {
+    Scratch::new(&format!("rds-sync-{name}"))
 }
 
 /// Deterministic pseudo-random content — reproducible per size/seed.
@@ -43,7 +35,7 @@ fn random_bytes(len: usize, seed: u64) -> Vec<u8> {
 
 /// Server half: accept one conn, run `serve` on each accepted bi
 /// stream — mirrors the agent's per-stream dispatch.
-fn spawn_server(ep: Endpoint, dir: PathBuf) -> tokio::task::JoinHandle<()> {
+fn spawn_server(ep: Endpoint, dir: Scratch) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(incoming) = ep.accept().await {
             let conn = match incoming.await {
@@ -56,7 +48,8 @@ fn spawn_server(ep: Endpoint, dir: PathBuf) -> tokio::task::JoinHandle<()> {
                     let conn = conn.clone();
                     let dir = dir.clone();
                     tokio::spawn(async move {
-                        let _ = serve(conn, send, recv, dir).await;
+                        let _ = serve(conn, send, recv, dir.to_path_buf()).await;
+                        drop(dir);
                     });
                 }
             });
@@ -69,7 +62,7 @@ async fn pair() -> (
     Endpoint,
     EndpointAddr,
     tokio::task::JoinHandle<()>,
-    PathBuf,
+    Scratch,
 ) {
     let config = EndpointConfig {
         discovery: false,
