@@ -4,7 +4,7 @@
 //!
 //! MIT-SHM removes the dominant capture cost: the pixmap is written
 //! into a shared segment the client mmaps, so a 1080p frame costs one
-//! completion event plus a memcpy instead of ~8 MiB serialized through
+//! reply and a synchronous borrowed view instead of ~8 MiB serialized through
 //! the X socket. `CreateSegment` (SHM ≥ 1.2 fd passing) is preferred —
 //! the server allocates and owns nothing persists on the client side.
 //! `ext-image-copy-capture` and the DRM/KMS tap remain scheduled behind
@@ -15,6 +15,7 @@
 //! module (workspace convention: FFI paths allow `unsafe_code` locally).
 #![allow(unsafe_code)]
 
+use std::borrow::Cow;
 use std::os::fd::OwnedFd;
 
 use bytes::Bytes;
@@ -27,7 +28,7 @@ use x11rb::protocol::shm::{self, ConnectionExt as _, Seg};
 use x11rb::protocol::xproto::{ConnectionExt, GetImageReply, ImageFormat};
 use x11rb::rust_connection::RustConnection;
 
-use crate::{Capturer, DesktopError, RawFrame};
+use crate::{BgraFrame, Capturer, DesktopError, RawFrame};
 
 /// MIT-SHM segment the server fills in place — the reply is a
 /// completion event, not a serialized pixmap.
@@ -54,9 +55,6 @@ pub struct X11Capturer {
     /// Sticky flag: the first `changed` call must be true (the screen
     /// existed before the damage object did).
     dirty: bool,
-    /// One owned frame buffer returned by the producer after encoding. The
-    /// next capture fills it in place, avoiding allocator churn at 60 fps.
-    recycled: Option<Bytes>,
 }
 
 impl X11Capturer {
@@ -125,7 +123,6 @@ impl X11Capturer {
             shm,
             damage,
             dirty: true,
-            recycled: None,
         })
     }
 
@@ -158,15 +155,6 @@ impl X11Capturer {
         })
     }
 
-    /// Return an encoded frame's owned storage for reuse on the next
-    /// capture. A scaled frame has a different size and is ignored.
-    pub(crate) fn recycle(&mut self, data: Bytes) {
-        let expected = usize::from(self.width) * usize::from(self.height) * 4;
-        if self.shm.is_some() && data.len() == expected {
-            self.recycled = Some(data);
-        }
-    }
-
     /// DAMAGE (XFixes ≥ 4): one object on the root window reporting
     /// `NON_EMPTY` transitions — enough for a changed/not-changed bit.
     /// `None` where the extension is absent.
@@ -183,11 +171,29 @@ impl X11Capturer {
     }
 }
 
-impl Capturer for X11Capturer {
-    fn capture(&mut self) -> Result<RawFrame, DesktopError> {
+impl X11Capturer {
+    /// The synchronous callback is the lifetime boundary: the next capture
+    /// cannot overwrite the mapping until conversion/encode returns. Owned
+    /// capture consumers retain the separate snapshot-producing trait method.
+    pub(crate) fn capture_with<T>(
+        &mut self,
+        process: impl FnOnce(BgraFrame<'_>) -> T,
+    ) -> Result<T, DesktopError> {
+        let (width, height) = (u32::from(self.width), u32::from(self.height));
+        let pixels = self.capture_pixels()?;
+        Ok(process(BgraFrame {
+            width,
+            height,
+            stride: width * 4,
+            data: pixels.as_ref(),
+        }))
+    }
+
+    fn capture_pixels(&mut self) -> Result<Cow<'_, [u8]>, DesktopError> {
         if let Some(shm) = &self.shm {
-            // `reply()` waits for the ShmCompletion event the server
-            // sends after filling the segment.
+            // The GetImage reply arrives after the server has finished
+            // writing the segment. No new request can reuse it while the
+            // callback holds the capturer's exclusive borrow.
             let filled = self
                 .conn
                 .shm_get_image(
@@ -205,12 +211,11 @@ impl Capturer for X11Capturer {
                 .and_then(|c| c.reply().map_err(|e| DesktopError::Capture(e.to_string())));
             match filled {
                 Ok(_) => {
-                    return Ok(RawFrame {
-                        width: u32::from(self.width),
-                        height: u32::from(self.height),
-                        stride: u32::from(self.width) * 4,
-                        data: copy_capture(&mut self.recycled, &shm.map[..shm.len]),
-                    });
+                    let shm = self
+                        .shm
+                        .as_ref()
+                        .expect("successful capture retains its segment");
+                    return Ok(Cow::Borrowed(&shm.map[..shm.len]));
                 }
                 Err(e) => {
                     tracing::warn!("MIT-SHM capture failed ({e}); falling back to GetImage");
@@ -243,11 +248,19 @@ impl Capturer for X11Capturer {
                 self.height
             )));
         }
+        Ok(Cow::Owned(reply.data))
+    }
+}
+
+impl Capturer for X11Capturer {
+    fn capture(&mut self) -> Result<RawFrame, DesktopError> {
+        let (width, height) = (u32::from(self.width), u32::from(self.height));
+        let pixels = self.capture_pixels()?;
         Ok(RawFrame {
-            width: u32::from(self.width),
-            height: u32::from(self.height),
-            stride: u32::from(self.width) * 4,
-            data: Bytes::from(reply.data),
+            width,
+            height,
+            stride: width * 4,
+            data: Bytes::from(pixels.into_owned()),
         })
     }
 
@@ -281,20 +294,6 @@ impl Capturer for X11Capturer {
     }
 }
 
-/// The X11 segment is overwritten by the next request, so capture must
-/// copy into owned storage. Reuse only uniquely owned, correctly sized data;
-/// a retained snapshot must remain immutable.
-fn copy_capture(recycled: &mut Option<Bytes>, source: &[u8]) -> Bytes {
-    if let Some(bytes) = recycled.take()
-        && let Ok(mut buffer) = bytes.try_into_mut()
-        && buffer.len() == source.len()
-    {
-        buffer.copy_from_slice(source);
-        return buffer.freeze();
-    }
-    Bytes::copy_from_slice(source)
-}
-
 impl Drop for X11Capturer {
     fn drop(&mut self) {
         if let Some(dmg) = self.damage.take() {
@@ -320,27 +319,6 @@ pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn capture_storage_reuses_unique_buffers_and_preserves_retained_snapshots() {
-        let first = Bytes::from(vec![1u8; 1024]);
-        let pointer = first.as_ptr();
-        let mut recycled = Some(first);
-        let next = copy_capture(&mut recycled, &[2u8; 1024]);
-        assert_eq!(next.as_ptr(), pointer, "unique buffer must be reused");
-        assert!(recycled.is_none());
-        assert_eq!(next.as_ref(), &[2u8; 1024]);
-
-        let retained = next.clone();
-        recycled = Some(next);
-        let changed = copy_capture(&mut recycled, &[3u8; 1024]);
-        assert_ne!(changed.as_ptr(), retained.as_ptr());
-        assert_eq!(retained.as_ref(), &[2u8; 1024]);
-        assert_eq!(changed.as_ref(), &[3u8; 1024]);
-
-        recycled = Some(changed);
-        assert_eq!(copy_capture(&mut recycled, &[4u8; 16]).as_ref(), &[4u8; 16]);
-    }
 
     /// Explicit native fixture: never silently succeeds without capture.
     #[test]
@@ -394,6 +372,55 @@ mod tests {
             &frame.data[pixel..pixel + 3],
             &[0x56, 0x34, 0x12],
             "captured pixel did not match the native paint"
+        );
+        // The producer borrows the completed mapping directly; the owned
+        // snapshot above must survive another capture and a different paint.
+        let mapped = cap.shm.as_ref().unwrap().map.as_ptr();
+        cap.conn
+            .change_gc(
+                gc,
+                &x11rb::protocol::xproto::ChangeGCAux::new().foreground(0xAB_CD_EF),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        cap.conn
+            .poly_fill_rectangle(
+                cap.root,
+                gc,
+                &[Rectangle {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                }],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        cap.capture_with(|borrowed| {
+            assert_eq!(
+                borrowed.data.as_ptr(),
+                mapped,
+                "borrowed capture copied pixels"
+            );
+            assert_eq!(&borrowed.data[pixel..pixel + 3], &[0xEF, 0xCD, 0xAB]);
+        })
+        .unwrap();
+        assert_eq!(&frame.data[pixel..pixel + 3], &[0x56, 0x34, 0x12]);
+
+        // A server without usable SHM still provides the same borrowed input
+        // contract from its owned GetImage reply; no extra staging copy.
+        let shm = cap.shm.take().unwrap();
+        cap.conn.shm_detach(shm.seg).unwrap().check().unwrap();
+        drop(shm);
+        cap.capture_with(|borrowed| {
+            assert_eq!(&borrowed.data[pixel..pixel + 3], &[0xEF, 0xCD, 0xAB]);
+        })
+        .unwrap();
+        assert_eq!(
+            &cap.capture().unwrap().data[pixel..pixel + 3],
+            &[0xEF, 0xCD, 0xAB]
         );
         cap.conn.free_gc(gc).unwrap().check().unwrap();
     }

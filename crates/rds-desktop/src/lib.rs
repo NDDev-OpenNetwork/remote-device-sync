@@ -58,6 +58,29 @@ pub struct RawFrame {
     pub data: Bytes,
 }
 
+/// Borrowed BGRA input for synchronous capture/conversion/encode work. A
+/// native mapping can supply pixels without first allocating an owned frame.
+#[cfg(any(feature = "x11", test))]
+#[derive(Clone, Copy)]
+pub(crate) struct BgraFrame<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub data: &'a [u8],
+}
+
+#[cfg(any(feature = "x11", test))]
+impl<'a> From<&'a RawFrame> for BgraFrame<'a> {
+    fn from(frame: &'a RawFrame) -> Self {
+        Self {
+            width: frame.width,
+            height: frame.height,
+            stride: frame.stride,
+            data: &frame.data,
+        }
+    }
+}
+
 /// Local software receive limit: up to 8K pixels, no side above 8192.
 /// Check before allocating BGRA output; native codec internal memory is separate.
 pub(crate) fn frame_bytes(width: usize, height: usize) -> Option<usize> {

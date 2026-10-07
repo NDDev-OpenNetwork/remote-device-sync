@@ -1746,20 +1746,6 @@ mod x11 {
             let capture_ts_ms = clock.now_ms();
             self.skipped = false;
             let work_started = Instant::now();
-            let raw = match self.capturer.capture() {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("capture failed: {e}");
-                    return None;
-                }
-            };
-            let raw = match crate::scaling::downscale(raw, self.output_height) {
-                Ok(raw) => raw,
-                Err(error) => {
-                    tracing::warn!(%error,"capture scaling failed");
-                    return None;
-                }
-            };
             if controls.idr.swap(false, Ordering::Relaxed) {
                 self.encoder.request_idr();
             }
@@ -1769,13 +1755,23 @@ mod x11 {
                     .load(Ordering::Relaxed)
                     .min(u64::from(u32::MAX)) as u32,
             );
-            let (width, height) = (raw.width, raw.height);
-            let encoded = self.encoder.encode(&raw);
-            // The encoder has finished borrowing the capture. Return a
-            // native-sized frame buffer to MIT-SHM capture so the next
-            // frame reuses its allocation. Downscaled frames are naturally
-            // rejected by the capturer's size check.
-            self.capturer.recycle(raw.data);
+            let encoder = &mut self.encoder;
+            let output_height = self.output_height;
+            let captured = self.capturer.capture_with(|raw| {
+                let scaled = output_height
+                    .filter(|height| *height < raw.height)
+                    .map(|height| crate::scaling::downscale(raw, height))
+                    .transpose()?;
+                let raw = scaled.as_ref().map(crate::BgraFrame::from).unwrap_or(raw);
+                Ok::<_, DesktopError>((raw.width, raw.height, encoder.encode_bgra(raw)))
+            });
+            let (width, height, encoded) = match captured {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(error)) | Err(error) => {
+                    tracing::warn!(%error, "capture or scaling failed");
+                    return None;
+                }
+            };
             self.skipped = encoded.as_ref().is_ok_and(|frame| frame.data.is_empty());
             self.last_work = work_started.elapsed();
             match encoded {
