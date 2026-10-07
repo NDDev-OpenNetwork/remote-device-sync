@@ -51,6 +51,21 @@ also ineffective: OpenH264's screen-content `ParamValidation` forces it back on.
 and the exact openh264-sys2 0.9.8 source confirm that behavior. Medium codec
 complexity remains; lowering it would be a separate quality/bitrate decision.
 
+## Completed payload receipt regression
+
+The incremental hashing change exposed a missing completion case: when the
+producer supplied a successor during a blocked write, `send_payload` finished
+the original reference and returned `Superseded(next)`. The sender finalized
+receipt digests only for `Sent` and `Done`, so a fully read superseded frame
+rejected its exact proof and held sender admission until timeout.
+
+Every completed write now installs its digest before FIN. An abandoned delta
+returns earlier and retains its reset behavior. A real loopback regression
+blocks a 32 MiB keyframe, admits a successor, drains the original byte-exact,
+confirms its proof and requires delivery plus release of both admission slots.
+The original code failed the exact-receipt assertion on Iroh; corrected code
+passes on both Iroh and Noq. No additional payload scan or wire field is added.
+
 ## Qualification boundary
 
 The macOS x11 feature lane checks the codec and scaling code; native X11 work
