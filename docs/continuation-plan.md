@@ -8,14 +8,11 @@ RTT does not establish installed interactive stability.
 
 ## Audit boundary
 
-The ten-day session census was collected from the installed Codex, Claude Code,
-Devin, Cursor and Grok stores. Recent project work was found in Codex and Devin;
-the other three stores supplied no recent local project sessions. This does not
-establish absence of cloud, deleted or other-device sessions. Raw transcripts,
-host identities, paths and runtime receipts remain in private device/estate
-storage. The old Codex thread is still indexed, but its original JSONL is absent;
-its SQLite projection contains 1,072 user/assistant messages through the last
-available projected message. The index's newer activity time is not a transcript.
+Review available session evidence from the requested harnesses and compare each
+claim with source and retained verification. A local store, index timestamp or
+partial transcript does not establish complete cloud/deleted/other-device
+history. Private census results, activity counts, transcripts, host identities,
+paths and runtime receipts stay in the private estate/device storage.
 
 The audit compares merged source, open branches/PRs, installed executable
 digests, endpoint settings, policy, running processes and retained diagnostics.
@@ -29,10 +26,11 @@ older revisions independently; neither is silently assumed to equal main.
 |---|---|---|---|
 | S1 | A sibling ACK can predate the outstanding-work stall that triggers path retirement. General ACK freshness is insufficient evidence of progress during that failure. | `rds-net/src/ack_progress.rs`, both Iroh latency and owned Noq policies | Deterministic pre-stall/post-stall proof tests, both real blackhole/recovery suites, installed comparison |
 | S2 | Persistent relay registration is implemented and qualified, but registration, peer address publication, validated paths and installed use are distinct states. | `rds-net/tests/relay_registrations.rs`, endpoint settings, private rollout | Confirm complete addresses at both endpoints, >60 s idle readiness, ordered selected-route failures without application replay |
-| S3 | Pending publication work includes public/private branches and an older native-viewer PR; the private runtime PR conflicts with current estate main. | Git branches, PRs, immutable estate gitlink | Preserve unpublished commits; reconcile against actual merged code; signed atomic commits and reviewed PR merges |
+| S3 | Published source, consumer pins and installed artifacts can diverge; stale branches/PRs may duplicate a newer implementation. | Git branches, PRs, immutable estate gitlink | Preserve unpublished commits; reconcile against actual merged code; signed atomic commits and reviewed PR merges |
 | S4 | Current docs still contain obsolete present-tense claims about TCP-only SSH, missing transfer, core runtime dependencies, grants and relay failover. | Architecture, capability matrix, platform docs, progress ledger | Replace current claims from code; retain dated evidence and unsupported capability labels |
 | S5 | Input ACK, payload receipt, decoded-frame submission and physical pixels prove different things. | Native diagnostics, visual probe, bench reports | Exact-build typing/Backspace count and causal submission evidence; loss and unanswered probes included |
 | S6 | Optional platform/media modules remain real stubs. Directory sync, native serving on macOS/Wayland, audio and automatic GDS grant issuance are not implemented. | Backend probe files, audio crate, sync engine, GDS policy adapters | Explicit later implementation/qualification tasks; never mark these complete from X11 or loopback results |
+| S7 | Owned relay drain priority was reused as RTT, making progress budgets effectively infinite. | Noq path policy | Keep real RTT separate from ranking; negative deadline regression and positive engine/drain qualification |
 
 ## Wave A — interactive recovery correctness (W3.6, W6.8)
 
