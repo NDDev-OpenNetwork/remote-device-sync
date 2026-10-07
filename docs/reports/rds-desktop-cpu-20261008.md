@@ -73,3 +73,21 @@ must pass on Linux under a dedicated Xvfb display. Required PR checks cover
 both supported OSes and Linux native fixtures. Installed runtime receipts and
 private identities belong to the estate. This increment does not close the
 broader hardware-codec, geometry, quality or glass-to-glass gates.
+
+## CI recovery-fixture precondition
+
+The first final macOS CI run failed the existing Noq ACK-starvation fixture at
+its two-second reliable-byte recovery deadline. Its warm standby proof preceded
+the pending-work interval; retirement requires sibling acknowledgement during
+that interval. Initial idle probes and the one-second selection tick could race
+the same two-second deadline. A local original-code repeat passed, retaining the
+CI failure as scheduling-sensitive evidence rather than a deterministic product
+regression.
+
+The fixture now sends a real standby PING after the failed STREAM transmission
+and waits for `can_replace` evidence before starting its policy/stream recovery
+measurement. The two-second recovery limit and production policy are unchanged;
+precondition setup has its own two-second failure bound. This tests recovery
+from a contemporaneously proved sibling; it does not measure the combined delay
+for initially idle probing plus recovery. Whole installed failover qualification
+remains separate.
