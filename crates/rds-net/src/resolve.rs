@@ -11,8 +11,9 @@
 //! resolved `EndpointAddr` is authenticated by the record signature,
 //! and the QUIC handshake re-authenticates the key anyway. A hostile
 //! directory cannot substitute a different key for a verified name. Name
-//! freshness is lifetime-bounded with a volatile client anti-rollback cache;
-//! durable revisions and authority rotation remain remediation W1.4.
+//! freshness is lifetime-bounded. Configured durable name trust shares revision
+//! and authenticated rotation acceptance across client processes; the explicit
+//! in-memory trust constructor has only process-lifetime anti-rollback state.
 
 use anyhow::{Context, bail};
 
