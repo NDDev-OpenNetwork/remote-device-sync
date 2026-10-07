@@ -477,9 +477,12 @@ async fn actual_iroh_actor_establishes_a_standby_that_was_blocked_at_startup() {
         // Include the configured standby even before its local watcher has
         // published the first address snapshot, like a complete bootstrap ticket.
         let mut target = b.addr();
-        target.addrs.insert(TransportAddr::Custom(CustomAddr::from_parts(
-            0x726473636f6c6431, b"b",
-        )));
+        target
+            .addrs
+            .insert(TransportAddr::Custom(CustomAddr::from_parts(
+                0x726473636f6c6431,
+                b"b",
+            )));
         let (client, server) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(a.connect(target, rds_core::ALPN), async {
                 b.accept().await.unwrap().await
