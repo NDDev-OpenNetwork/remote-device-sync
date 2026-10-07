@@ -33,10 +33,10 @@ pub(super) fn window_state(
     let native = view.window()?;
     Some(NativeWindowState {
         sampled_elapsed_ms: elapsed_ms,
-        application_active: unsafe { NSApplication::sharedApplication(main).isActive() },
+        application_active: NSApplication::sharedApplication(main).isActive(),
         visible: native.isVisible(),
         key_window: native.isKeyWindow(),
-        on_active_space: unsafe { native.isOnActiveSpace() },
+        on_active_space: native.isOnActiveSpace(),
         miniaturized: native.isMiniaturized(),
         occlusion_visible: native
             .occlusionState()
@@ -53,7 +53,9 @@ pub(super) fn window_state(
 }
 
 #[cfg(target_os = "macos")]
-pub(super) struct RemoteActivity(objc2::rc::Retained<objc2_foundation::NSObject>);
+pub(super) struct RemoteActivity(
+    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>,
+);
 
 #[cfg(target_os = "macos")]
 impl Drop for RemoteActivity {
@@ -67,27 +69,25 @@ impl Drop for RemoteActivity {
 #[cfg(target_os = "macos")]
 fn activity_options() -> objc2_foundation::NSActivityOptions {
     use objc2_foundation::NSActivityOptions;
-    NSActivityOptions::NSActivityUserInitiated
-        | NSActivityOptions::NSActivityLatencyCritical
-        | NSActivityOptions::NSActivityAutomaticTerminationDisabled
-        | NSActivityOptions::NSActivitySuddenTerminationDisabled
+    NSActivityOptions::UserInitiated
+        | NSActivityOptions::LatencyCritical
+        | NSActivityOptions::AutomaticTerminationDisabled
+        | NSActivityOptions::SuddenTerminationDisabled
 }
 
 #[cfg(target_os = "macos")]
 pub(super) fn remote_activity() -> RemoteActivity {
     use objc2_foundation::{NSProcessInfo, NSString};
-    // SAFETY: Foundation owns the retained activity token; the RAII guard
+    // Foundation owns the retained activity token; the RAII guard
     // pairs its begin/end. This user-requested stream must remain responsive
     // while covered and inactive. A session-scoped activity prevents idle
     // system sleep (network I/O cannot progress in suspend) and requests
     // latency-critical timer/I/O precision. Display sleep, screen locking,
     // explicit user sleep and lid-close policy remain under OS control.
-    let token = unsafe {
-        NSProcessInfo::processInfo().beginActivityWithOptions_reason(
-            activity_options(),
-            &NSString::from_str("Remote desktop session"),
-        )
-    };
+    let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        activity_options(),
+        &NSString::from_str("Remote desktop session"),
+    );
     RemoteActivity(token)
 }
 
@@ -131,9 +131,9 @@ pub fn choose_resolution() -> Option<u32> {
     use objc2_foundation::{MainThreadMarker, NSString};
     let main = MainThreadMarker::new()?;
     let app = NSApplication::sharedApplication(main);
-    // SAFETY: all AppKit operations run on its verified main thread, with
+    // All AppKit operations run on its verified main thread, with
     // retained strings/buttons for the modal lifetime; no user data is parsed.
-    let response = unsafe {
+    let response = {
         let alert = NSAlert::new(main);
         app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
         alert.setMessageText(&NSString::from_str("RDS — Video quality"));
@@ -159,7 +159,7 @@ pub fn choose_resolution() -> Option<u32> {
 
 #[cfg(target_os = "macos")]
 pub(super) fn event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
-    use objc2::ClassType;
+    use objc2::AnyThread;
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::{MainThreadMarker, NSData};
     use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
@@ -227,8 +227,8 @@ mod tests {
     fn session_prevents_idle_system_sleep_without_holding_the_display() {
         use objc2_foundation::NSActivityOptions;
         let options = super::activity_options();
-        assert!(options.contains(NSActivityOptions::NSActivityIdleSystemSleepDisabled));
-        assert!(!options.contains(NSActivityOptions::NSActivityIdleDisplaySleepDisabled));
-        assert!(options.contains(NSActivityOptions::NSActivityLatencyCritical));
+        assert!(options.contains(NSActivityOptions::IdleSystemSleepDisabled));
+        assert!(!options.contains(NSActivityOptions::IdleDisplaySleepDisabled));
+        assert!(options.contains(NSActivityOptions::LatencyCritical));
     }
 }
