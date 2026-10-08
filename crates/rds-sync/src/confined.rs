@@ -11,7 +11,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
+use rustix::fs::{
+    AtFlags, FileType, Mode, OFlags, mkdirat, openat, readlinkat_raw, renameat, statat, unlinkat,
+};
 
 use crate::fault::{Point, hit};
 
@@ -141,6 +143,39 @@ impl Directory {
             }
         }
         Ok(out)
+    }
+
+    /// Inspect one direct child without following a symlink. The scanner uses
+    /// this only to choose the safe handle operation; it still opens regular
+    /// files and directories with `NOFOLLOW` before reading them.
+    pub(crate) fn entry_stat(&self, name: &OsStr) -> io::Result<rustix::fs::Stat> {
+        component(name)?;
+        statat(&*self.0, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)
+    }
+
+    /// Read a symlink target through the held parent directory descriptor.
+    /// A fixed buffer makes the target bound explicit and avoids unbounded
+    /// allocation for a hostile filesystem object.
+    pub(crate) fn read_link_target(&self, name: &OsStr, limit: usize) -> io::Result<Vec<u8>> {
+        component(name)?;
+        let mut buffer = vec![0u8; limit.saturating_add(1)];
+        let length = readlinkat_raw(&*self.0, name, &mut buffer)?;
+        if length > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "symlink target exceeds the configured limit",
+            ));
+        }
+        buffer.truncate(length);
+        Ok(buffer)
+    }
+
+    pub(crate) fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.0.metadata()
+    }
+
+    pub(crate) fn file_type(stat: &rustix::fs::Stat) -> FileType {
+        FileType::from_raw_mode(stat.st_mode)
     }
 
     pub(crate) fn same_inode(&self, other: &Self) -> io::Result<bool> {

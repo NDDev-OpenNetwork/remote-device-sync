@@ -1,7 +1,7 @@
 # System completion plan — 2026-10-08
 
 This plan is the executable follow-up to `continuation-plan.md`. It was
-rechecked against the current `main` tree (`9bd1840e`) and the capability matrix
+rechecked against the current `main` tree (`03410ee`) and the capability matrix
 before implementation. A capability changes state only after its code,
 wire/authz path, platform probe, tests, and installed qualification all pass.
 
@@ -10,8 +10,8 @@ wire/authz path, platform probe, tests, and installed qualification all pass.
 - Connectivity, signed discovery, grants v2/v3, managed local sessions,
   single-file resumable sync, Linux X11 desktop, and the default Iroh lane are
   implemented or experimental as recorded in `capability-matrix.md`.
-- Audio is wire-shaped but has no source, codec, jitter, sink, agent admission,
-  or viewer path. It remains `stub`.
+- Audio now has a bounded libopus packet/jitter core, but no source, sink,
+  agent admission or viewer path. The service capability remains `stub`.
 - Linux Wayland image-copy/KMS/portal capture and macOS ScreenCaptureKit,
   VideoToolbox and CGEvent are explicit stubs. X11 is the only capture/input
   backend that moves pixels on a supported device.
@@ -50,8 +50,9 @@ session. Only then change `service:audio` from `stub`.
 
 1. Add a directory manifest format with typed file/dir/symlink metadata,
    normalized relative paths, deterministic ordering and explicit unsupported
-   attribute states. Never follow symlinks while scanning. **Model landed in
-   `rds-directory-model-20261008`; the no-follow scanner is still open.**
+   attribute states. Never follow symlinks while scanning. **Model and the
+   bounded no-follow scanner landed in `rds-directory-scanner-20261008`; the
+   recursive wire/reconcile layer is still open.**
 2. Add snapshot/reconcile operations on top of the existing journal, with
    tombstones, rename detection by stable content identity, bounded entries and
    cancellation checkpoints.
