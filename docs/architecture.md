@@ -600,6 +600,13 @@ capability continues to name the same inode after rename; this is not a sandbox
 against a local process moving already-open directories out of the tree.
 `Journal::assemble` consumes its journal and takes no new destination root.
 
+The recursive-sync foundation is currently model-only: `rds-sync::directory`
+defines bounded canonical file/dir/symlink entries, snapshot roots and
+identity-based diff/rename candidates without walking or following a
+filesystem. A future scanner must feed that model through the same opened
+directory handles before recursive wire or journal behavior is added; the
+single-file protocol remains the only advertised sync capability.
+
 Each root has one persistent `receive.lock` inode, locked nonblockingly across
 processes for a receive's lifetime. A nested destination also holds its parent's
 private receive lock, so differently configured overlapping roots cannot write

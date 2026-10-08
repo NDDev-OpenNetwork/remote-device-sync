@@ -12,6 +12,7 @@
 //! transfer protocol — `proto` frames, `journal` resumable state, and
 //! `engine` driving send/receive/serve over `rds-net` streams.
 
+pub mod directory;
 pub mod engine;
 pub mod journal;
 pub mod proto;
