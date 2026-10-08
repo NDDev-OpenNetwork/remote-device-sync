@@ -6,6 +6,12 @@ Current execution order and reopened gates are in the
 The milestones below preserve the original direction; historical checkpoint
 completion does not establish that the audited defects or product gaps are closed.
 
+The 2026-10-08 completion wave first landed the bounded `rds-audio` packet,
+libopus and jitter core. Device capture/playback, agent admission and viewer
+playout remain separate until their platform and authorization gates pass; see
+the [completion workstreams](completion-plan-20261008.md) and the
+[scoped report](reports/rds-audio-core-20261008.md).
+
 The [native viewer](native-viewer.md) now implements W6.3 window/input and
 newest-frame GPU presentation, with bounded reconnect and media-gap recovery.
 The X11 serving increment removes fixed idle polling and supports explicit

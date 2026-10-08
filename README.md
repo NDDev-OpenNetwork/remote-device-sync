@@ -36,7 +36,7 @@ crates/
 ├── rds-observe    bounded process logs and privacy-preserving telemetry
 ├── rds-bench      development measurement/qualification harness
 ├── rds-desktop    capture/codec/input/render traits + platform backends
-├── rds-audio      Opus audio pipeline (scaffold)
+├── rds-audio      bounded libopus packet/jitter core (service adapters open)
 └── rds-sync       FastCDC+BLAKE3 content-addressed sync
 ```
 
