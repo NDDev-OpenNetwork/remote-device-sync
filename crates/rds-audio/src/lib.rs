@@ -11,10 +11,43 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use thiserror::Error;
 
-/// Opus packets are limited by RFC 6716's maximum representable size.
-pub const MAX_OPUS_PACKET_BYTES: usize = 1275;
+/// Maximum encoded size of one Opus frame in the current one-frame packet
+/// contract. RFC 6716 permits multi-frame packets whose total size can be
+/// larger; this crate intentionally does not expose those yet.
+pub const MAX_OPUS_FRAME_BYTES: usize = 1275;
+/// Maximum payload accepted for the current one-frame-per-packet contract.
+pub const MAX_OPUS_PACKET_BYTES: usize = MAX_OPUS_FRAME_BYTES;
 /// The default interactive frame duration.
 pub const DEFAULT_FRAME_DURATION_MS: u32 = 20;
+/// The standards-defined Opus frame durations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDuration {
+    Ms2_5,
+    Ms5,
+    Ms10,
+    Ms20,
+    Ms40,
+    Ms60,
+}
+
+impl FrameDuration {
+    pub const DEFAULT: Self = Self::Ms20;
+
+    pub const fn duration_micros(self) -> u32 {
+        match self {
+            Self::Ms2_5 => 2_500,
+            Self::Ms5 => 5_000,
+            Self::Ms10 => 10_000,
+            Self::Ms20 => 20_000,
+            Self::Ms40 => 40_000,
+            Self::Ms60 => 60_000,
+        }
+    }
+
+    pub const fn samples(self, sample_rate: u32) -> usize {
+        ((sample_rate as u64 * self.duration_micros() as u64) / 1_000_000) as usize
+    }
+}
 /// Maximum number of packets retained by one jitter buffer.
 pub const MAX_JITTER_PACKETS: usize = 64;
 
@@ -43,14 +76,28 @@ impl AudioFormat {
         Ok(())
     }
 
+    /// Return samples for a whole-millisecond duration kept for source
+    /// compatibility with the initial bounded API. Use [`Self::frame_samples_for`]
+    /// when the standards-defined 2.5 ms duration is needed.
     pub fn frame_samples(self, duration_ms: u32) -> Result<usize, AudioError> {
+        let duration = match duration_ms {
+            5 => FrameDuration::Ms5,
+            10 => FrameDuration::Ms10,
+            20 => FrameDuration::Ms20,
+            40 => FrameDuration::Ms40,
+            60 => FrameDuration::Ms60,
+            _ => {
+                return Err(AudioError::InvalidFrame(
+                    "frame duration must be 2.5, 5, 10, 20, 40 or 60 ms",
+                ));
+            }
+        };
+        self.frame_samples_for(duration)
+    }
+
+    pub fn frame_samples_for(self, duration: FrameDuration) -> Result<usize, AudioError> {
         self.validate()?;
-        if !matches!(duration_ms, 2 | 5 | 10 | 20 | 40 | 60) {
-            return Err(AudioError::InvalidFrame(
-                "frame duration must be 2, 5, 10, 20, 40 or 60 ms",
-            ));
-        }
-        Ok((self.sample_rate as usize * duration_ms as usize) / 1000)
+        Ok(duration.samples(self.sample_rate))
     }
 }
 
@@ -93,6 +140,9 @@ impl AudioPacket {
         })
     }
 
+    /// Convert to the current core wire record. The core wire timestamp is in
+    /// whole milliseconds, so a sub-millisecond source remainder is truncated
+    /// at this boundary; sequence and sample counts remain exact.
     pub fn to_wire(&self) -> rds_core::AudioFrame {
         rds_core::AudioFrame {
             seq: self.seq,
@@ -125,7 +175,7 @@ pub struct OpusEncoder {
 
 impl OpusEncoder {
     pub fn new(format: AudioFormat) -> Result<Self, AudioError> {
-        let frame_samples = format.frame_samples(DEFAULT_FRAME_DURATION_MS)?;
+        let frame_samples = format.frame_samples_for(FrameDuration::DEFAULT)?;
         let channels = match format.channels {
             1 => opus::Channels::Mono,
             2 => opus::Channels::Stereo,
@@ -181,7 +231,7 @@ pub struct OpusDecoder {
 
 impl OpusDecoder {
     pub fn new(format: AudioFormat) -> Result<Self, AudioError> {
-        let frame_samples = format.frame_samples(DEFAULT_FRAME_DURATION_MS)?;
+        let frame_samples = format.frame_samples_for(FrameDuration::DEFAULT)?;
         let channels = match format.channels {
             1 => opus::Channels::Mono,
             2 => opus::Channels::Stereo,
@@ -269,7 +319,7 @@ impl JitterBuffer {
         capacity: usize,
         target_delay: usize,
     ) -> Result<Self, AudioError> {
-        let frame_samples = format.frame_samples(DEFAULT_FRAME_DURATION_MS)?;
+        let frame_samples = format.frame_samples_for(FrameDuration::DEFAULT)?;
         if capacity == 0 || capacity > MAX_JITTER_PACKETS || target_delay >= capacity {
             return Err(AudioError::InvalidFrame("invalid jitter-buffer bounds"));
         }
@@ -383,6 +433,18 @@ mod tests {
     fn format_bounds_are_explicit() {
         assert!(AudioFormat::MONO_48_KHZ.validate().is_ok());
         assert_eq!(AudioFormat::MONO_48_KHZ.frame_samples(20).unwrap(), 960);
+        assert_eq!(
+            AudioFormat::MONO_48_KHZ
+                .frame_samples_for(FrameDuration::Ms2_5)
+                .unwrap(),
+            120
+        );
+        assert_eq!(
+            AudioFormat::MONO_48_KHZ
+                .frame_samples_for(FrameDuration::Ms60)
+                .unwrap(),
+            2_880
+        );
         assert!(
             AudioFormat {
                 sample_rate: 44_100,
@@ -391,7 +453,34 @@ mod tests {
             .validate()
             .is_err()
         );
+        assert!(AudioFormat::MONO_48_KHZ.frame_samples(2).is_err());
         assert!(AudioFormat::MONO_48_KHZ.frame_samples(15).is_err());
+    }
+
+    #[test]
+    fn frame_duration_samples_cover_all_supported_rates() {
+        for (sample_rate, expected) in [
+            (8_000, [20, 40, 80, 160, 320, 480]),
+            (12_000, [30, 60, 120, 240, 480, 720]),
+            (16_000, [40, 80, 160, 320, 640, 960]),
+            (24_000, [60, 120, 240, 480, 960, 1_440]),
+            (48_000, [120, 240, 480, 960, 1_920, 2_880]),
+        ] {
+            let format = AudioFormat {
+                sample_rate,
+                channels: 2,
+            };
+            for (duration, samples) in [
+                (FrameDuration::Ms2_5, expected[0]),
+                (FrameDuration::Ms5, expected[1]),
+                (FrameDuration::Ms10, expected[2]),
+                (FrameDuration::Ms20, expected[3]),
+                (FrameDuration::Ms40, expected[4]),
+                (FrameDuration::Ms60, expected[5]),
+            ] {
+                assert_eq!(format.frame_samples_for(duration).unwrap(), samples);
+            }
+        }
     }
 
     #[test]
@@ -473,6 +562,17 @@ mod tests {
         assert_eq!(jitter.overflow, 1);
         assert!(jitter.pop().is_some());
         assert_eq!(jitter.push(packet(0)).unwrap(), PushOutcome::Late);
+    }
+
+    #[test]
+    fn wire_conversion_documents_millisecond_timestamp_quantization() {
+        let packet = AudioPacket {
+            seq: 7,
+            timestamp_us: 12_345,
+            samples: 960,
+            data: Bytes::from_static(&[1]),
+        };
+        assert_eq!(packet.to_wire().capture_ts_ms, 12);
     }
 
     #[test]
