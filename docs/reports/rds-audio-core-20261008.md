@@ -6,9 +6,9 @@ playout is advertised yet.
 
 Implemented in `rds-audio`:
 
-- validated Opus sample rates, channel counts and standard frame durations;
-- libopus encode/decode with a 1275-byte packet ceiling and 20 ms
-  default frames;
+- validated Opus sample rates, channel counts and all standard frame durations, including 2.5 ms;
+- libopus encode/decode with a 1275-byte per-frame ceiling and 20 ms
+  default frames; multi-frame packetization is intentionally not exposed;
 - deterministic sequence/timestamp/sample-count conversion to
   `rds_core::AudioFrame`;
 - malformed-packet rejection;
@@ -29,3 +29,14 @@ PipeWire adapters, playback, permission lifecycle, audio grants, an audio
 uni-stream, A/V clock synchronization or installed-device audio acceptance.
 Those are the next completion-plan workstream and keep `service:audio` in the
 `stub` state until their end-to-end gate passes.
+
+
+## Contract correction — 2026-10-09
+
+The initial core accepted `2` as if it were a valid two-millisecond frame.
+Opus defines `2.5`, `5`, `10`, `20`, `40` and `60` ms durations; the corrected
+API exposes these through `FrameDuration`, computes samples from microseconds,
+and keeps the original whole-millisecond helper source-compatible while
+rejecting the invalid `2` value. Tests cover every supported sample rate and
+duration. The core wire record still stores capture time in whole milliseconds,
+so conversion documents the intentional sub-millisecond truncation.
