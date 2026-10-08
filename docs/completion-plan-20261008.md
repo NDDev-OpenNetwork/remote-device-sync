@@ -50,7 +50,8 @@ session. Only then change `service:audio` from `stub`.
 
 1. Add a directory manifest format with typed file/dir/symlink metadata,
    normalized relative paths, deterministic ordering and explicit unsupported
-   attribute states. Never follow symlinks while scanning.
+   attribute states. Never follow symlinks while scanning. **Model landed in
+   `rds-directory-model-20261008`; the no-follow scanner is still open.**
 2. Add snapshot/reconcile operations on top of the existing journal, with
    tombstones, rename detection by stable content identity, bounded entries and
    cancellation checkpoints.
