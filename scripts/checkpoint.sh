@@ -36,11 +36,13 @@ green_bars() {
 
 write_checkpoint() {
     local gate="$1" verdict="$2" extra="$3"; shift 3
+    local gate_upper
+    gate_upper=$(printf '%s' "$gate" | tr '[:lower:]' '[:upper:]')
     # Remaining args are report artifacts the gate produced; each is
     # digest-cited in the receipt so the checkpoint cannot be appended
     # without its evidence.
     cat > "$REPORTS/checkpoint-${gate}.md" <<EOF
-# Checkpoint ${gate^^} — ${TS}
+# Checkpoint ${gate_upper} — ${TS}
 
 Verdict: **${verdict}**
 
@@ -71,6 +73,28 @@ EOF
 }
 
 case "$GATE" in
+w8-directory-foundation)
+    note "gate w8-directory-foundation — scan, wire and planning contracts only"
+    green_bars
+
+    note "directory contract regression matrix"
+    cargo test -p rds-sync --test directory_foundation || fail "directory contracts"
+
+    note "release snapshot partification benchmark"
+    cargo run --release -q -p rds-bench --example directory_foundation -- \
+        --json "$REPORTS/bench-w8-directory-foundation.json" \
+        --md "$REPORTS/bench-w8-directory-foundation.md" \
+        || fail "directory benchmark"
+
+    write_checkpoint "$GATE" "foundation checks passed; recursive service not qualified" \
+        "- fmt/workspace clippy/workspace tests: PASS
+- directory contracts: PASS
+- release benchmark: bench-w8-directory-foundation.{json,md}; every sample verifies exact wire bytes
+- topology: synthetic in-process; no remote recursive service or installed CPU claim
+- NOT RUN: recursive apply/crash recovery, cross-platform metadata, two-way service; these remain open gates" \
+        "$REPORTS/bench-w8-directory-foundation.json" \
+        "$REPORTS/bench-w8-directory-foundation.md"
+    ;;
 c0)
     note "gate c0 — measurement harness baseline"
     green_bars

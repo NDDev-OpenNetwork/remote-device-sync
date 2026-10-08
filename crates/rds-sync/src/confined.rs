@@ -132,14 +132,14 @@ impl Directory {
     /// resolved, opened or followed. The caller decides which names are
     /// attributable; `.`/`..` are never reported.
     pub(crate) fn children(&self) -> io::Result<Vec<OsString>> {
-        self.children_checked(|_| Ok(()))
+        self.children_checked(|_| Ok(true))
     }
 
     /// Inspect every name before retaining it. Scanners enforce cancellation
     /// and enumeration budgets here, before a wide directory is allocated.
     pub(crate) fn children_checked(
         &self,
-        mut check: impl FnMut(&OsStr) -> io::Result<()>,
+        mut check: impl FnMut(&OsStr) -> io::Result<bool>,
     ) -> io::Result<Vec<OsString>> {
         use std::os::unix::ffi::OsStrExt;
         let mut dir = rustix::fs::Dir::read_from(&*self.0)?;
@@ -147,8 +147,7 @@ impl Directory {
         while let Some(entry) = dir.read() {
             let entry = entry?;
             let name = OsStr::from_bytes(entry.file_name().to_bytes());
-            if name != "." && name != ".." {
-                check(name)?;
+            if name != "." && name != ".." && check(name)? {
                 out.push(name.to_os_string());
             }
         }

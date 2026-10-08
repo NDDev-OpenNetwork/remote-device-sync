@@ -1,8 +1,9 @@
 # System completion plan — 2026-10-08
 
 This plan is the executable follow-up to `continuation-plan.md`. It was
-rechecked against the current `main` tree (`cc7cc8cc`) and the capability matrix
-before implementation. A capability changes state only after its code,
+initially audited against `9bd1840e`; directory foundation contracts were then
+reviewed after `cc7cc8cc`. Current behavior is described in
+[`directory-sync.md`](directory-sync.md). A capability changes state only after its code,
 wire/authz path, platform probe, tests, and installed qualification all pass.
 
 ## Current truth
@@ -55,8 +56,9 @@ session. Only then change `service:audio` from `stub`.
    attribute states. Never follow symlinks while scanning. **Model and the
    bounded no-follow scanner landed in `rds-directory-scanner-20261008`; the
    bounded snapshot header/part assembler landed in
-   `rds-directory-wire-20261008`; the recursive service/reconcile layer is
-   still open.**
+   `rds-directory-wire-20261008`. Global scan budgets, nested journal exclusion,
+   borrowed partification and operation preconditions are covered by
+   `w8-directory-foundation`; recursive service/journal apply remains open.**
 2. Add snapshot/reconcile operations on top of the existing journal, with
    tombstones, rename detection by stable content identity, bounded entries and
    cancellation checkpoints. **The deterministic one-way plan, opaque revision

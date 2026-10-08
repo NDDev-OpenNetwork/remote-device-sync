@@ -606,17 +606,20 @@ snapshot roots and identity-based diff/rename candidates, while its scanner
 walks only held directory handles. The scanner sorts names by raw bytes,
 opens directories and regular files with no-follow flags, records symlink
 targets without traversing them, rejects special files, bounds depth/entries/
-metadata and fails when a directory or file changes during the snapshot.
+metadata and rejects mutations observed during reading. This is not an atomic
+snapshot of concurrent writers; private journal namespaces are excluded at
+every depth and destructive apply requires independent preconditions.
 Scanning is blocking and cancellable; callers must place it on a blocking
 executor. The directory wire layer splits a verified snapshot into ordered,
-frame-sized parts and rechecks version, order, count, metadata budget and root
+frame-sized borrowed parts and rechecks version, order, count, metadata budget and root
 before acceptance. It is an additive data model only: no stream route or
 service advertises it yet. The directory reconcile model emits a deterministic
 one-way plan with an opaque destination revision precondition, explicit delete
 policy, durable tombstone records and conflict previews that never choose a
 winner. It still does not mutate the filesystem or journal. Recursive transfer,
 metadata policy, watch/reconcile and journal GC remain separate gates, so the
-single-file protocol is still the only advertised sync capability.
+single-file protocol is still the only advertised sync capability. The exact
+scan, wire and planning limitations live in [directory-sync.md](directory-sync.md).
 
 Each root has one persistent `receive.lock` inode, locked nonblockingly across
 processes for a receive's lifetime. A nested destination also holds its parent's
