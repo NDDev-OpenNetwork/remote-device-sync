@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{DirectoryEntry, DirectoryManifest, EntryKind, MAX_DIRECTORY_ENTRIES};
+use super::{
+    DirectoryEntry, DirectoryManifest, EntryKind, MAX_DIRECTORY_DATA_BYTES, MAX_DIRECTORY_ENTRIES,
+};
 use crate::{ChunkHash, SyncError};
 
 /// Opaque snapshot revision. Callers must persist and compare it verbatim;
@@ -19,7 +21,7 @@ impl Revision {
     }
 }
 
-/// Whether source-only paths are removed from the destination.
+/// Whether destination-only paths are retained or removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeletePolicy {
     Keep,
@@ -69,7 +71,18 @@ impl ReconcileOperation {
             Self::Put { entry } => entry.validate(),
             Self::Replace { before, after } => {
                 before.validate()?;
-                after.validate()
+                after.validate()?;
+                if before.path != after.path || before.identity() == after.identity() {
+                    return Err(SyncError::Manifest(
+                        "invalid replacement precondition".into(),
+                    ));
+                }
+                if before.kind == EntryKind::Directory || after.kind == EntryKind::Directory {
+                    return Err(SyncError::Manifest(
+                        "directory type replacement requires subtree conflict resolution".into(),
+                    ));
+                }
+                Ok(())
             }
             Self::Move { from, to } => {
                 from.validate()?;
@@ -79,7 +92,7 @@ impl ReconcileOperation {
                         "directory moves require an explicit subtree identity".into(),
                     ));
                 }
-                if from.identity() != to.identity() {
+                if from.path == to.path || from.identity() != to.identity() {
                     return Err(SyncError::Manifest(
                         "move operation changes entry identity".into(),
                     ));
@@ -122,23 +135,27 @@ impl ReconcilePlan {
         let diff = destination.diff(source)?;
         let mut operations = Vec::new();
         for rename in diff.renamed {
-            operations.push(ReconcileOperation::Move {
-                from: rename.from,
-                to: rename.to,
-            });
+            if delete_policy == DeletePolicy::Keep {
+                // Moving would delete a destination-only path under Keep.
+                operations.push(ReconcileOperation::Put { entry: rename.to });
+            } else {
+                operations.push(ReconcileOperation::Move {
+                    from: rename.from,
+                    to: rename.to,
+                });
+            }
         }
         for entry in diff.added {
             operations.push(ReconcileOperation::Put { entry });
         }
         for entry in diff.modified {
-            let before = destination
+            let index = destination
                 .entries
-                .iter()
-                .find(|candidate| candidate.path == entry.path)
-                .ok_or_else(|| {
+                .binary_search_by(|candidate| candidate.path.cmp(&entry.path))
+                .map_err(|_| {
                     SyncError::Manifest("modified destination entry disappeared".into())
-                })?
-                .clone();
+                })?;
+            let before = destination.entries[index].clone();
             operations.push(ReconcileOperation::Replace {
                 before,
                 after: entry,
@@ -169,13 +186,54 @@ impl ReconcilePlan {
             return Err(SyncError::Manifest("reconcile plan is too large".into()));
         }
         let mut paths = BTreeSet::new();
+        let mut move_sources = BTreeSet::new();
+        let mut data_bytes = 0usize;
         for operation in &self.operations {
             operation.validate()?;
-            if !paths.insert(operation.path().to_owned()) {
+            if !paths.insert(operation.path()) {
                 return Err(SyncError::Manifest(
                     "reconcile plan contains duplicate target paths".into(),
                 ));
             }
+            let entries: &[&DirectoryEntry] = match operation {
+                ReconcileOperation::Put { entry } => &[entry],
+                ReconcileOperation::Replace { before, after } => &[before, after],
+                ReconcileOperation::Move { from, to } => {
+                    if self.delete_policy != DeletePolicy::Delete
+                        || !move_sources.insert(from.path.as_str())
+                    {
+                        return Err(SyncError::Manifest(
+                            "invalid move policy or duplicate source".into(),
+                        ));
+                    }
+                    &[from, to]
+                }
+                ReconcileOperation::Delete { tombstone } => {
+                    if self.delete_policy != DeletePolicy::Delete
+                        || tombstone.source_revision != self.source_revision
+                    {
+                        return Err(SyncError::Manifest(
+                            "invalid tombstone policy or revision".into(),
+                        ));
+                    }
+                    &[&tombstone.previous]
+                }
+            };
+            for entry in entries {
+                data_bytes = data_bytes
+                    .saturating_add(entry.path.len())
+                    .saturating_add(entry.symlink_target.as_ref().map_or(0, Vec::len));
+                if data_bytes > 2 * MAX_DIRECTORY_DATA_BYTES {
+                    return Err(SyncError::Manifest(
+                        "reconcile metadata budget exceeded".into(),
+                    ));
+                }
+            }
+        }
+        if !paths.is_disjoint(&move_sources) {
+            return Err(SyncError::Manifest(
+                "move source overlaps a plan target".into(),
+            ));
         }
         if self
             .operations
@@ -191,12 +249,27 @@ impl ReconcilePlan {
 
     pub fn digest(&self) -> Result<ChunkHash, SyncError> {
         self.verify()?;
-        let bytes = postcard::to_stdvec(self)
-            .map_err(|_| SyncError::Manifest("reconcile plan cannot be encoded".into()))?;
-        Ok(*blake3::hash(&bytes).as_bytes())
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"rds-reconcile-plan-v1\0");
+        let header = postcard::to_stdvec(&(
+            self.source_revision,
+            self.expected_destination_revision,
+            self.delete_policy,
+            self.operations.len(),
+        ))
+        .map_err(|_| SyncError::Manifest("reconcile plan cannot be encoded".into()))?;
+        hasher.update(&header);
+        for operation in &self.operations {
+            let bytes = postcard::to_stdvec(operation)
+                .map_err(|_| SyncError::Manifest("reconcile operation cannot be encoded".into()))?;
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+        }
+        Ok(*hasher.finalize().as_bytes())
     }
 
     pub fn check_destination(&self, current: &DirectoryManifest) -> Result<(), SyncError> {
+        self.verify()?;
         let current_revision = Revision::from_manifest(current)?;
         if current_revision != self.expected_destination_revision {
             return Err(SyncError::Manifest(
@@ -267,10 +340,10 @@ fn identity(entry: Option<&DirectoryEntry>) -> Option<super::EntryIdentity> {
     entry.map(DirectoryEntry::identity)
 }
 
-fn operation_sort_key(operation: &ReconcileOperation) -> (u8, &[u8]) {
+fn operation_sort_key(operation: &ReconcileOperation) -> (u8, std::cmp::Reverse<usize>, &[u8]) {
     let rank = match operation {
-        ReconcileOperation::Move { .. } => 0,
-        ReconcileOperation::Put { entry } if entry.kind == EntryKind::Directory => 1,
+        ReconcileOperation::Put { entry } if entry.kind == EntryKind::Directory => 0,
+        ReconcileOperation::Move { .. } => 1,
         ReconcileOperation::Put { .. } => 2,
         ReconcileOperation::Replace { .. } => 3,
         ReconcileOperation::Delete { tombstone }
@@ -280,7 +353,16 @@ fn operation_sort_key(operation: &ReconcileOperation) -> (u8, &[u8]) {
         }
         ReconcileOperation::Delete { .. } => 5,
     };
-    (rank, operation.path().as_bytes())
+    let delete_depth = if rank >= 4 {
+        operation.path().split('/').count()
+    } else {
+        0
+    };
+    (
+        rank,
+        std::cmp::Reverse(delete_depth),
+        operation.path().as_bytes(),
+    )
 }
 
 #[cfg(test)]

@@ -23,6 +23,12 @@ The model provides:
 - three-way conflict preview that reports paths changed differently on both
   sides and never picks an automatic winner.
 
+The planner refuses directory subtree replacements, directory moves without a
+subtree identity, duplicate targets, destructive operations under `Keep`,
+stale tombstone revisions, duplicate move sources and metadata above the
+bounded plan budget. Exact-identity renames become moves only under `Delete`,
+because `Keep` must preserve the old destination name.
+
 The next gate must bind this plan to held destination handles, the existing
 receive locks and crash-safe journal commit boundaries. Recursive service
 admission, watch/reconcile, metadata policy and two-way apply remain open.
