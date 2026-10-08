@@ -1,7 +1,7 @@
 # System completion plan — 2026-10-08
 
 This plan is the executable follow-up to `continuation-plan.md`. It was
-rechecked against the current `main` tree (`03410ee`) and the capability matrix
+rechecked against the current `main` tree (`cc7cc8cc`) and the capability matrix
 before implementation. A capability changes state only after its code,
 wire/authz path, platform probe, tests, and installed qualification all pass.
 
