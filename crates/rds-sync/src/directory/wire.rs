@@ -142,7 +142,9 @@ impl DirectoryManifest {
         for entry in &self.entries {
             let mut candidate = current.clone();
             candidate.push(entry.clone());
-            let candidate_part = DirectorySnapshotPart::new(candidate.clone())?;
+            let candidate_part = DirectorySnapshotPart {
+                entries: candidate.clone(),
+            };
             if candidate.len() > MAX_DIRECTORY_PART_ENTRIES
                 || candidate_part.encoded_len()? > MAX_DIRECTORY_PART_BYTES
             {
@@ -153,7 +155,9 @@ impl DirectoryManifest {
                 }
                 parts.push(DirectorySnapshotPart::new(std::mem::take(&mut current))?);
                 current.push(entry.clone());
-                let single = DirectorySnapshotPart::new(current.clone())?;
+                let single = DirectorySnapshotPart {
+                    entries: current.clone(),
+                };
                 if single.encoded_len()? > MAX_DIRECTORY_PART_BYTES {
                     return Err(SyncError::Manifest(
                         "directory snapshot entry exceeds part bounds".into(),
@@ -236,6 +240,28 @@ mod tests {
         let header = DirectorySnapshotHeader::from_manifest(&manifest).unwrap();
         let parts = manifest.snapshot_parts().unwrap();
         let mut assembler = DirectorySnapshotAssembler::new(header).unwrap();
+        for part in parts {
+            assembler.push_part(part).unwrap();
+        }
+        assert_eq!(assembler.finish().unwrap(), manifest);
+    }
+
+    #[test]
+    fn large_manifests_split_into_multiple_bounded_parts() {
+        let entries = (0..70)
+            .map(|index| file(&format!("file-{index:03}"), index as u8))
+            .collect();
+        let manifest = DirectoryManifest::from_entries(entries).unwrap();
+        let parts = manifest.snapshot_parts().unwrap();
+        assert!(parts.len() >= 3);
+        assert!(parts.iter().all(|part| {
+            part.entries.len() <= MAX_DIRECTORY_PART_ENTRIES
+                && part.encoded_len().unwrap() <= MAX_DIRECTORY_PART_BYTES
+        }));
+        let mut assembler = DirectorySnapshotAssembler::new(
+            DirectorySnapshotHeader::from_manifest(&manifest).unwrap(),
+        )
+        .unwrap();
         for part in parts {
             assembler.push_part(part).unwrap();
         }

@@ -132,6 +132,15 @@ impl Directory {
     /// resolved, opened or followed. The caller decides which names are
     /// attributable; `.`/`..` are never reported.
     pub(crate) fn children(&self) -> io::Result<Vec<OsString>> {
+        self.children_checked(|_| Ok(()))
+    }
+
+    /// Inspect every name before retaining it. Scanners enforce cancellation
+    /// and enumeration budgets here, before a wide directory is allocated.
+    pub(crate) fn children_checked(
+        &self,
+        mut check: impl FnMut(&OsStr) -> io::Result<()>,
+    ) -> io::Result<Vec<OsString>> {
         use std::os::unix::ffi::OsStrExt;
         let mut dir = rustix::fs::Dir::read_from(&*self.0)?;
         let mut out = Vec::new();
@@ -139,6 +148,7 @@ impl Directory {
             let entry = entry?;
             let name = OsStr::from_bytes(entry.file_name().to_bytes());
             if name != "." && name != ".." {
+                check(name)?;
                 out.push(name.to_os_string());
             }
         }
@@ -174,8 +184,23 @@ impl Directory {
         self.0.metadata()
     }
 
+    pub(crate) fn raw_stat(&self) -> io::Result<rustix::fs::Stat> {
+        rustix::fs::fstat(&*self.0).map_err(io::Error::from)
+    }
+
     pub(crate) fn file_type(stat: &rustix::fs::Stat) -> FileType {
         FileType::from_raw_mode(stat.st_mode)
+    }
+
+    pub(crate) fn same_entry(a: &rustix::fs::Stat, b: &rustix::fs::Stat) -> bool {
+        a.st_dev == b.st_dev
+            && a.st_ino == b.st_ino
+            && a.st_mode == b.st_mode
+            && a.st_size == b.st_size
+            && a.st_mtime == b.st_mtime
+            && a.st_mtime_nsec == b.st_mtime_nsec
+            && a.st_ctime == b.st_ctime
+            && a.st_ctime_nsec == b.st_ctime_nsec
     }
 
     pub(crate) fn same_inode(&self, other: &Self) -> io::Result<bool> {
