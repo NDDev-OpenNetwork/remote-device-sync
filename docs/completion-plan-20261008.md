@@ -52,7 +52,9 @@ session. Only then change `service:audio` from `stub`.
    normalized relative paths, deterministic ordering and explicit unsupported
    attribute states. Never follow symlinks while scanning. **Model and the
    bounded no-follow scanner landed in `rds-directory-scanner-20261008`; the
-   recursive wire/reconcile layer is still open.**
+   bounded snapshot header/part assembler landed in
+   `rds-directory-wire-20261008`; the recursive service/reconcile layer is
+   still open.**
 2. Add snapshot/reconcile operations on top of the existing journal, with
    tombstones, rename detection by stable content identity, bounded entries and
    cancellation checkpoints.

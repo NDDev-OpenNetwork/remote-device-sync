@@ -600,7 +600,7 @@ capability continues to name the same inode after rename; this is not a sandbox
 against a local process moving already-open directories out of the tree.
 `Journal::assemble` consumes its journal and takes no new destination root.
 
-The recursive-sync foundation now has two deliberately separate layers:
+The recursive-sync foundation now has three deliberately separate layers:
 `rds-sync::directory` defines bounded canonical file/dir/symlink entries,
 snapshot roots and identity-based diff/rename candidates, while its scanner
 walks only held directory handles. The scanner sorts names by raw bytes,
@@ -608,9 +608,12 @@ opens directories and regular files with no-follow flags, records symlink
 targets without traversing them, rejects special files, bounds depth/entries/
 metadata and fails when a directory or file changes during the snapshot.
 Scanning is blocking and cancellable; callers must place it on a blocking
-executor. Recursive wire operations, tombstones, conflicts, metadata policy,
-watch/reconcile and journal GC remain separate gates, so the single-file
-protocol is still the only advertised sync capability.
+executor. The directory wire layer splits a verified snapshot into ordered,
+frame-sized parts and rechecks version, order, count, metadata budget and root
+before acceptance. It is an additive data model only: no stream route or
+service advertises it yet. Recursive transfer, tombstones, conflicts,
+metadata policy, watch/reconcile and journal GC remain separate gates, so the
+single-file protocol is still the only advertised sync capability.
 
 Each root has one persistent `receive.lock` inode, locked nonblockingly across
 processes for a receive's lifetime. A nested destination also holds its parent's

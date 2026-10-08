@@ -4,7 +4,12 @@
 //! independently for wire manifests, dry-run previews and conflict planning.
 
 mod scanner;
+mod wire;
 pub use scanner::{scan_path, scan_path_cancellable};
+pub use wire::{
+    DIRECTORY_SNAPSHOT_VERSION, DirectorySnapshotAssembler, DirectorySnapshotHeader,
+    DirectorySnapshotPart, MAX_DIRECTORY_PART_BYTES, MAX_DIRECTORY_PART_ENTRIES,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 
