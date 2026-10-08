@@ -600,7 +600,7 @@ capability continues to name the same inode after rename; this is not a sandbox
 against a local process moving already-open directories out of the tree.
 `Journal::assemble` consumes its journal and takes no new destination root.
 
-The recursive-sync foundation now has three deliberately separate layers:
+The recursive-sync foundation now has four deliberately separate layers:
 `rds-sync::directory` defines bounded canonical file/dir/symlink entries,
 snapshot roots and identity-based diff/rename candidates, while its scanner
 walks only held directory handles. The scanner sorts names by raw bytes,
@@ -611,7 +611,10 @@ Scanning is blocking and cancellable; callers must place it on a blocking
 executor. The directory wire layer splits a verified snapshot into ordered,
 frame-sized parts and rechecks version, order, count, metadata budget and root
 before acceptance. It is an additive data model only: no stream route or
-service advertises it yet. Recursive transfer, tombstones, conflicts,
+service advertises it yet. The directory reconcile model emits a deterministic
+one-way plan with an opaque destination revision precondition, explicit delete
+policy, durable tombstone records and conflict previews that never choose a
+winner. It still does not mutate the filesystem or journal. Recursive transfer,
 metadata policy, watch/reconcile and journal GC remain separate gates, so the
 single-file protocol is still the only advertised sync capability.
 
