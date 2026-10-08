@@ -57,7 +57,19 @@ impl Scanner<'_> {
             ));
         }
         let before = metadata_stamp(&dir.metadata()?);
-        let mut children = dir.children()?;
+        let mut names_seen = 0usize;
+        let mut children = dir
+            .children_checked(|_| {
+                if (self.stop)() {
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                }
+                names_seen = names_seen.saturating_add(1);
+                if names_seen > MAX_DIRECTORY_ENTRIES {
+                    return Err(std::io::Error::other("directory entry limit exceeded"));
+                }
+                Ok(())
+            })
+            .map_err(SyncError::Io)?;
         children.sort_by(|a, b| os_bytes(a).cmp(os_bytes(b)));
         for name in children {
             self.check_stop()?;
@@ -78,13 +90,14 @@ impl Scanner<'_> {
             let path = join_path(prefix, &name)?;
             let stat = dir.entry_stat(&name)?;
             match Directory::file_type(&stat) {
-                rustix::fs::FileType::RegularFile => self.scan_file(dir, &name, path)?,
+                rustix::fs::FileType::RegularFile => self.scan_file(dir, &name, path, &stat)?,
                 rustix::fs::FileType::Directory => {
-                    self.scan_directory(dir, &name, path, depth + 1)?
+                    self.scan_directory(dir, &name, path, depth + 1, &stat)?
                 }
                 rustix::fs::FileType::Symlink => {
                     let target = dir.read_link_target(&name, MAX_SYMLINK_TARGET_BYTES)?;
                     self.push(DirectoryEntry::symlink(path, target))?;
+                    ensure_entry_unchanged(dir, &name, &stat)?;
                 }
                 _ => {
                     return Err(SyncError::Manifest(format!(
@@ -106,16 +119,18 @@ impl Scanner<'_> {
         parent: &Directory,
         name: &OsStr,
         path: String,
+        entry_before: &rustix::fs::Stat,
     ) -> Result<(), SyncError> {
         let file = parent.read_file(name)?;
-        let before = metadata_stamp(&file.metadata()?);
+        let file_before = metadata_stamp(&file.metadata()?);
         let manifest = crate::manifest_of_reader_cancellable(&file, self.stop)?;
         let after = metadata_stamp(&file.metadata()?);
-        if before != after {
+        if file_before != after {
             return Err(SyncError::Manifest(format!(
                 "file changed while it was being scanned: {path:?}"
             )));
         }
+        ensure_entry_unchanged(parent, name, entry_before)?;
         self.push(DirectoryEntry::file(path, manifest.size, manifest.root))
     }
 
@@ -125,8 +140,15 @@ impl Scanner<'_> {
         name: &OsStr,
         path: String,
         depth: usize,
+        entry_before: &rustix::fs::Stat,
     ) -> Result<(), SyncError> {
         let child = parent.child(name, false)?;
+        let child_stat = child.raw_stat()?;
+        if !Directory::same_entry(entry_before, &child_stat) {
+            return Err(SyncError::Manifest(format!(
+                "directory changed while it was being opened: {path:?}"
+            )));
+        }
         let stamp = metadata_stamp(&child.metadata()?);
         if !self.visited.insert((stamp.0, stamp.1)) {
             return Err(SyncError::Manifest(
@@ -134,7 +156,8 @@ impl Scanner<'_> {
             ));
         }
         self.push(DirectoryEntry::directory(path.clone()))?;
-        self.scan_dir(&child, &path, depth)
+        self.scan_dir(&child, &path, depth)?;
+        ensure_entry_unchanged(parent, name, entry_before)
     }
 
     fn push(&mut self, entry: DirectoryEntry) -> Result<(), SyncError> {
@@ -160,6 +183,20 @@ impl Scanner<'_> {
         }
         Ok(())
     }
+}
+
+fn ensure_entry_unchanged(
+    parent: &Directory,
+    name: &OsStr,
+    before: &rustix::fs::Stat,
+) -> Result<(), SyncError> {
+    let after = parent.entry_stat(name)?;
+    if !Directory::same_entry(before, &after) {
+        return Err(SyncError::Manifest(
+            "directory entry changed while it was being scanned".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn join_path(prefix: &str, name: &OsStr) -> Result<String, SyncError> {
@@ -283,5 +320,15 @@ mod tests {
         assert_eq!(manifest.entries.len(), 1);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn scanner_rejects_reserved_namespace_below_the_root() {
+        let root = scratch("nested-reserved");
+        fs::create_dir(root.join("dir")).unwrap();
+        fs::create_dir(root.join("dir").join(STATE_DIR)).unwrap();
+        let error = scan_path(&root).unwrap_err();
+        assert!(matches!(error, SyncError::Manifest(message) if message.contains("reserved")));
+        fs::remove_dir_all(root).unwrap();
     }
 }
