@@ -1,10 +1,10 @@
 //! Deterministic directory snapshot model.
 //!
-//! This module intentionally does not walk the filesystem. A future scanner
-//! must provide entries through the confined directory-handle layer so a
-//! rename or symlink race cannot turn a convenient `Path` walk into a
-//! confinement bypass. The model is useful independently for wire manifests,
-//! dry-run previews and conflict planning.
+//! The scanner uses held, no-follow directory handles. The model is usable
+//! independently for wire manifests, dry-run previews and conflict planning.
+
+mod scanner;
+pub use scanner::{scan_path, scan_path_cancellable};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,6 +16,12 @@ use crate::{ChunkHash, SyncError, proto::check_rel_path};
 pub const MAX_DIRECTORY_ENTRIES: usize = 1 << 20;
 /// Maximum symlink target bytes retained in a snapshot.
 pub const MAX_SYMLINK_TARGET_BYTES: usize = 4096;
+/// Maximum UTF-8 bytes in one canonical relative path.
+pub const MAX_DIRECTORY_PATH_BYTES: usize = crate::proto::MAX_REL_PATH;
+/// Aggregate path and symlink target byte budget for a snapshot.
+pub const MAX_DIRECTORY_DATA_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum directory nesting; bounds open descriptors and call stack depth.
+pub const MAX_DIRECTORY_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EntryKind {
@@ -72,6 +78,11 @@ impl DirectoryEntry {
     }
 
     fn validate(&self) -> Result<(), SyncError> {
+        if self.path.is_empty() || self.path.len() > MAX_DIRECTORY_PATH_BYTES {
+            return Err(SyncError::Manifest(
+                "directory entry path exceeds the configured limit".into(),
+            ));
+        }
         let normalized = check_rel_path(&self.path)?;
         if normalized.to_string_lossy() != self.path || self.path.contains('\\') {
             return Err(SyncError::Manifest(format!(
@@ -91,7 +102,8 @@ impl DirectoryEntry {
                 ))
             }
             EntryKind::Symlink
-                if self.content.is_some()
+                if self.size != 0
+                    || self.content.is_some()
                     || self.symlink_target.as_ref().is_none_or(|target| {
                         target.is_empty() || target.len() > MAX_SYMLINK_TARGET_BYTES
                     }) =>
@@ -122,15 +134,6 @@ struct EntryIdentity {
     symlink_target: Option<Vec<u8>>,
 }
 
-impl Serialize for EntryIdentity {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        (&self.kind, self.size, self.content, &self.symlink_target).serialize(serializer)
-    }
-}
-
 /// A canonical, bounded directory snapshot. `root` covers the sorted entries
 /// and is independent of the order in which a scanner observed them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,26 +147,31 @@ impl DirectoryManifest {
         if entries.len() > MAX_DIRECTORY_ENTRIES {
             return Err(SyncError::Manifest("directory manifest too large".into()));
         }
-        for entry in &entries {
-            entry.validate()?;
-        }
+        validate_entries(&entries)?;
         entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
         if entries.windows(2).any(|pair| pair[0].path == pair[1].path) {
             return Err(SyncError::Manifest(
                 "directory manifest contains duplicate paths".into(),
             ));
         }
+        validate_hierarchy(&entries)?;
         let root = digest_entries(&entries)?;
         Ok(Self { root, entries })
     }
 
     pub fn verify(&self) -> Result<(), SyncError> {
-        let canonical = Self::from_entries(self.entries.clone())?;
-        if canonical.root != self.root || canonical.entries != self.entries {
+        validate_entries(&self.entries)?;
+        if self
+            .entries
+            .windows(2)
+            .any(|pair| pair[0].path >= pair[1].path)
+            || digest_entries(&self.entries)? != self.root
+        {
             return Err(SyncError::Manifest(
                 "directory manifest is not canonical".into(),
             ));
         }
+        validate_hierarchy(&self.entries)?;
         Ok(())
     }
 
@@ -209,6 +217,46 @@ impl DirectoryManifest {
     }
 }
 
+fn validate_entries(entries: &[DirectoryEntry]) -> Result<(), SyncError> {
+    if entries.len() > MAX_DIRECTORY_ENTRIES {
+        return Err(SyncError::Manifest("directory manifest too large".into()));
+    }
+    let mut bytes = 0usize;
+    for entry in entries {
+        entry.validate()?;
+        bytes = bytes
+            .saturating_add(entry.path.len())
+            .saturating_add(entry.symlink_target.as_ref().map_or(0, Vec::len));
+        if bytes > MAX_DIRECTORY_DATA_BYTES {
+            return Err(SyncError::Manifest(
+                "directory metadata byte budget exceeded".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_hierarchy(entries: &[DirectoryEntry]) -> Result<(), SyncError> {
+    for entry in entries {
+        if let Some((parent, _)) = entry.path.rsplit_once('/') {
+            let index = entries
+                .binary_search_by(|candidate| candidate.path.as_str().cmp(parent))
+                .map_err(|_| SyncError::Manifest("directory entry parent is absent".into()))?;
+            if entries[index].kind != EntryKind::Directory {
+                return Err(SyncError::Manifest(
+                    "directory entry parent is not a directory".into(),
+                ));
+            }
+        }
+        if entry.path.split('/').count() > MAX_DIRECTORY_DEPTH {
+            return Err(SyncError::Manifest(
+                "directory nesting limit exceeded".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn digest_entries(entries: &[DirectoryEntry]) -> Result<ChunkHash, SyncError> {
     let mut hasher = blake3::Hasher::new();
     for entry in entries {
@@ -241,6 +289,10 @@ fn rename_candidates(
 ) -> Vec<Rename> {
     let mut by_identity: BTreeMap<EntryIdentity, Vec<usize>> = BTreeMap::new();
     for (index, entry) in removed.iter().enumerate() {
+        // Empty metadata does not establish a directory's subtree identity.
+        if entry.kind == EntryKind::Directory {
+            continue;
+        }
         by_identity.entry(entry.identity()).or_default().push(index);
     }
     let mut used = BTreeSet::new();
@@ -256,12 +308,11 @@ fn rename_candidates(
             to: entry.clone(),
         });
     }
-    let mut next_added = Vec::new();
-    std::mem::swap(added, &mut next_added);
-    *added = next_added
-        .into_iter()
-        .filter(|entry| !renamed.iter().any(|rename| rename.to.path == entry.path))
+    let renamed_paths: BTreeSet<String> = renamed
+        .iter()
+        .map(|rename| rename.to.path.clone())
         .collect();
+    added.retain(|entry| !renamed_paths.contains(&entry.path));
     let old_removed = std::mem::take(removed);
     *removed = old_removed
         .into_iter()
