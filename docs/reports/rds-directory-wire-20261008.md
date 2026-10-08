@@ -11,6 +11,8 @@ change the existing single-file route and does not advertise recursive sync.
 - receiver-side assembly that requires strictly increasing canonical paths,
   exact count and metadata totals, and a matching final BLAKE3 root;
 - sender-side partification after canonical manifest verification;
+- scanner-side preallocation and entry identity checks close wide-directory
+  memory spikes and rename/replacement races before accepting a snapshot;
 - rejection of unsupported versions, empty/oversized parts, reordered paths,
   truncated snapshots and forged roots.
 
@@ -25,5 +27,6 @@ Validation on the development host:
 ```text
 cargo fmt --check                         PASS
 cargo clippy -p rds-sync --all-targets -- -D warnings  PASS
-cargo test -p rds-sync directory::wire    PASS (3 wire tests)
+cargo test -p rds-sync directory::         PASS (12 directory model/scanner/wire tests)
+cargo test -p rds-sync                     PASS (43 unit + 49 integration tests)
 ```
