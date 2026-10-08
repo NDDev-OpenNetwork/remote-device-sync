@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "scenario": "directory snapshot partification and encoding",
+  "reference_source": "cc7cc8cc directory/wire.rs clone-and-serialize algorithm",
+  "source_commit": "f1a79c77688572d08c04d95a8e2fafeed9c50c90",
+  "worktree_clean": true,
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
+  "os": "macos",
+  "architecture": "aarch64",
+  "rows": [
+    {
+      "entries": 1024,
+      "samples": 10,
+      "parts": 32,
+      "serialized_bytes": 262491,
+      "payload_digest": "d136651a93f8bea1dcb682b86f941a76f702276478830b3e38f68568f119cc22",
+      "reference_median_ns": 6315333,
+      "borrowed_median_ns": 1240375
+    },
+    {
+      "entries": 8192,
+      "samples": 10,
+      "parts": 256,
+      "serialized_bytes": 2076385,
+      "payload_digest": "f0c34a2535e13a94e026705227351c2aacb7517a263050d49007fa3098ca04e0",
+      "reference_median_ns": 44264167,
+      "borrowed_median_ns": 9013667
+    },
+    {
+      "entries": 32768,
+      "samples": 10,
+      "parts": 1024,
+      "serialized_bytes": 8317403,
+      "payload_digest": "d1bd2f25b703168d55627da6a8ca0d2f49152922adccfb07f02354b701e5b02f",
+      "reference_median_ns": 171551417,
+      "borrowed_median_ns": 34573625
+    }
+  ],
+  "limitations": "Synthetic in-process release-build wall time; does not measure installed CPU, filesystem throughput, network, or remote recursive service acceptance. Reference is preserved algorithm code, not a second deployed binary. No hardware-independent speed threshold."
+}
