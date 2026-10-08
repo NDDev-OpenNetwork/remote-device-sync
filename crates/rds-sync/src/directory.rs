@@ -3,8 +3,12 @@
 //! The scanner uses held, no-follow directory handles. The model is usable
 //! independently for wire manifests, dry-run previews and conflict planning.
 
+mod reconcile;
 mod scanner;
 mod wire;
+pub use reconcile::{
+    ConflictRecord, DeletePolicy, ReconcileOperation, ReconcilePlan, Revision, Tombstone, conflicts,
+};
 pub use scanner::{scan_path, scan_path_cancellable};
 pub use wire::{
     DIRECTORY_SNAPSHOT_VERSION, DirectorySnapshotAssembler, DirectorySnapshotHeader,

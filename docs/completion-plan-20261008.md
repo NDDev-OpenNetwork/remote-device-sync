@@ -15,9 +15,11 @@ wire/authz path, platform probe, tests, and installed qualification all pass.
 - Linux Wayland image-copy/KMS/portal capture and macOS ScreenCaptureKit,
   VideoToolbox and CGEvent are explicit stubs. X11 is the only capture/input
   backend that moves pixels on a supported device.
-- Sync is intentionally single-file. Its journal and confinement are the
-  safety foundation; recursive/two-way manifests, tombstones, conflict policy,
-  watch/reconcile and journal GC are not implemented.
+- Sync service is intentionally single-file. Its journal and confinement are
+  the safety foundation; recursive scanner, snapshot wire assembly and a
+  filesystem-free one-way/conflict planning model now exist. Journal-backed
+  recursive apply, persisted tombstone lifecycle, watch/reconcile, metadata
+  policy, two-way service behavior and journal GC are not implemented.
 - Noq and owned relay have strong in-process evidence but remain experimental
   until the topology, interface-change, UDP-blocked and parity matrix is run on
   real supported devices.
@@ -57,7 +59,10 @@ session. Only then change `service:audio` from `stub`.
    still open.**
 2. Add snapshot/reconcile operations on top of the existing journal, with
    tombstones, rename detection by stable content identity, bounded entries and
-   cancellation checkpoints.
+   cancellation checkpoints. **The deterministic one-way plan, opaque revision
+   precondition, tombstone model and conflict preview landed in
+   `rds-directory-reconcile-model-20261008`; journal-backed apply remains
+   open.**
 3. Define one-way mirror first (dry-run/change preview, delete policy and
    resumable operation IDs), then two-way conflict records and metadata policy.
 4. Add journal quotas/GC with inode ownership proofs; cleanup may remove only
