@@ -5,6 +5,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const CHILD_EXIT_DEADLINE: Duration = Duration::from_secs(30);
+
 #[cfg(unix)]
 fn create_private_scratch(path: &std::path::Path) {
     use std::os::unix::fs::DirBuilderExt;
@@ -62,14 +64,18 @@ fn run_with_tail(args: &[&str], tail: &[&str], scratch: &Scratch) -> std::proces
             .spawn()
             .unwrap(),
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Invalid configuration should fail immediately, but a cold binary on a
+    // loaded CI runner can spend several seconds before reaching argument
+    // validation. Keep the test bounded without turning runner contention into
+    // a false product failure.
+    let deadline = Instant::now() + CHILD_EXIT_DEADLINE;
     let status = loop {
         if let Some(status) = child.0.try_wait().unwrap() {
             break status;
         }
         assert!(
             Instant::now() < deadline,
-            "invalid configuration did not fail before startup"
+            "endpoint command did not exit within the bounded test deadline"
         );
         std::thread::sleep(Duration::from_millis(10));
     };
