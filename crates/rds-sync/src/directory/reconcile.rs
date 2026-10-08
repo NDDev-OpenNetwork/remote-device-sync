@@ -269,6 +269,16 @@ impl ReconcilePlan {
     }
 
     pub fn check_destination(&self, current: &DirectoryManifest) -> Result<(), SyncError> {
+        self.project_destination(current).map(|_| ())
+    }
+
+    /// Validate every operation against the destination's actual entries and
+    /// return the predicted result without filesystem I/O. Structural `verify`
+    /// alone cannot establish the truth of peer-supplied preconditions.
+    pub fn project_destination(
+        &self,
+        current: &DirectoryManifest,
+    ) -> Result<DirectoryManifest, SyncError> {
         self.verify()?;
         let current_revision = Revision::from_manifest(current)?;
         if current_revision != self.expected_destination_revision {
@@ -276,6 +286,58 @@ impl ReconcilePlan {
                 "destination changed after reconcile planning".into(),
             ));
         }
+        let mut entries: BTreeMap<String, DirectoryEntry> = current
+            .entries
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.clone()))
+            .collect();
+        for operation in &self.operations {
+            match operation {
+                ReconcileOperation::Put { entry } => {
+                    if entries.contains_key(&entry.path) {
+                        return Err(SyncError::Manifest("Put destination already exists".into()));
+                    }
+                    entries.insert(entry.path.clone(), entry.clone());
+                }
+                ReconcileOperation::Replace { before, after } => {
+                    require_previous(&entries, before)?;
+                    entries.insert(after.path.clone(), after.clone());
+                }
+                ReconcileOperation::Move { from, to } => {
+                    require_previous(&entries, from)?;
+                    if entries.contains_key(&to.path) {
+                        return Err(SyncError::Manifest(
+                            "Move destination already exists".into(),
+                        ));
+                    }
+                    entries.remove(&from.path);
+                    entries.insert(to.path.clone(), to.clone());
+                }
+                ReconcileOperation::Delete { tombstone } => {
+                    require_previous(&entries, &tombstone.previous)?;
+                    entries.remove(&tombstone.path);
+                }
+            }
+        }
+        DirectoryManifest::from_entries(entries.into_values().collect())
+    }
+
+    /// Require this plan to be exactly the deterministic plan derived from
+    /// both validated inputs. A root digest is content identity, not authority
+    /// to submit arbitrary filesystem operations.
+    pub fn check_inputs(
+        &self,
+        source: &DirectoryManifest,
+        destination: &DirectoryManifest,
+    ) -> Result<(), SyncError> {
+        self.verify()?;
+        let expected = Self::one_way(source, destination, self.delete_policy)?;
+        if self != &expected {
+            return Err(SyncError::Manifest(
+                "reconcile plan does not match its inputs".into(),
+            ));
+        }
+        self.project_destination(destination)?;
         Ok(())
     }
 
@@ -285,6 +347,18 @@ impl ReconcilePlan {
         self.verify()?;
         Ok(self)
     }
+}
+
+fn require_previous(
+    entries: &BTreeMap<String, DirectoryEntry>,
+    previous: &DirectoryEntry,
+) -> Result<(), SyncError> {
+    if entries.get(&previous.path) != Some(previous) {
+        return Err(SyncError::Manifest(
+            "reconcile entry precondition does not match destination".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A conflict is reported when both sides changed the same path from a common
@@ -307,25 +381,53 @@ pub fn conflicts(
     remote.verify()?;
     let maps = [entry_map(base), entry_map(local), entry_map(remote)];
     let paths: BTreeSet<&str> = maps.iter().flat_map(|map| map.keys().copied()).collect();
-    let mut result = Vec::new();
-    for path in paths {
+    let mut conflict_paths = BTreeSet::new();
+    for path in &paths {
+        let path = *path;
         let values = [
             maps[0].get(path).copied(),
             maps[1].get(path).copied(),
             maps[2].get(path).copied(),
         ];
-        let local_changed = identity(values[0]) != identity(values[1]);
-        let remote_changed = identity(values[0]) != identity(values[2]);
-        if local_changed && remote_changed && identity(values[1]) != identity(values[2]) {
-            result.push(ConflictRecord {
-                path: path.to_owned(),
-                base: values[0].cloned(),
-                local: values[1].cloned(),
-                remote: values[2].cloned(),
-            });
+        let local_changed = values[0] != values[1];
+        let remote_changed = values[0] != values[2];
+        if local_changed && remote_changed && values[1] != values[2] {
+            conflict_paths.insert(path);
+        }
+        // Removing/replacing a directory conflicts with changes below it,
+        // including a newly added descendant that was absent in the base.
+        for (side, changed) in [(1, local_changed), (2, remote_changed)] {
+            if !changed {
+                continue;
+            }
+            let other = 3 - side;
+            let mut ancestor = path;
+            while let Some((parent, _)) = ancestor.rsplit_once('/') {
+                let base_dir = maps[0]
+                    .get(parent)
+                    .is_some_and(|entry| entry.kind == EntryKind::Directory);
+                let side_dir = maps[side]
+                    .get(parent)
+                    .is_some_and(|entry| entry.kind == EntryKind::Directory);
+                let other_dir = maps[other]
+                    .get(parent)
+                    .is_some_and(|entry| entry.kind == EntryKind::Directory);
+                if base_dir && side_dir && !other_dir {
+                    conflict_paths.insert(parent);
+                }
+                ancestor = parent;
+            }
         }
     }
-    Ok(result)
+    Ok(conflict_paths
+        .into_iter()
+        .map(|path| ConflictRecord {
+            path: path.to_owned(),
+            base: maps[0].get(path).copied().cloned(),
+            local: maps[1].get(path).copied().cloned(),
+            remote: maps[2].get(path).copied().cloned(),
+        })
+        .collect())
 }
 
 fn entry_map(manifest: &DirectoryManifest) -> BTreeMap<&str, &DirectoryEntry> {
@@ -334,10 +436,6 @@ fn entry_map(manifest: &DirectoryManifest) -> BTreeMap<&str, &DirectoryEntry> {
         .iter()
         .map(|entry| (entry.path.as_str(), entry))
         .collect()
-}
-
-fn identity(entry: Option<&DirectoryEntry>) -> Option<super::EntryIdentity> {
-    entry.map(DirectoryEntry::identity)
 }
 
 fn operation_sort_key(operation: &ReconcileOperation) -> (u8, std::cmp::Reverse<usize>, &[u8]) {

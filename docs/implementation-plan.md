@@ -1,5 +1,10 @@
 # Implementation plan — owned connectivity core (v0.2) and beyond
 
+The registered `w8-directory-foundation` checkpoint covers directory scan,
+snapshot wire and dry-run planning contracts plus a reproducible synthetic
+release benchmark. Its scope and open destructive-service acceptance gates are
+defined in [directory-sync.md](directory-sync.md); it does not close W8.
+
 Follow-up execution: [remediation plan](remediation-plan.md), based on the
 [2026-09-24 audit](reports/rds-audit-20260924.md). It identifies reopened
 acceptance criteria and remaining product work. This original WS0–WS8 plan

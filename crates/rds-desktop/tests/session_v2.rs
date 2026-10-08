@@ -1023,13 +1023,25 @@ async fn stale_and_foreign_frame_routes_never_reach_the_session_inbox() {
             // could leave them: one tagged with a session ID this
             // connection never served, one on the legacy shared route.
             // Neither can reach the live session's claimed inbox.
-            for tag in [
+            for (index, tag) in [
                 rds_core::UniHello::DesktopFrames { id: [0xEE; 16] },
                 rds_core::UniHello::Desktop,
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let mut forged = conn.open_uni().await.unwrap();
                 rds_net::write_frame(&mut forged, &tag).await.unwrap();
-                rds_net::write_frame(
+                if index == 0 {
+                    // Make the early-refusal order deterministic as well as
+                    // exercising the immediate-write race on the legacy tag.
+                    let code = tokio::time::timeout(Duration::from_secs(2), forged.stopped())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(code, Some(rds_net::VarInt::from_u32(0)));
+                }
+                let payload = rds_net::write_frame(
                     &mut forged,
                     &rds_core::FrameHeader {
                         seq: u64::MAX,
@@ -1042,9 +1054,22 @@ async fn stale_and_foreign_frame_routes_never_reach_the_session_inbox() {
                         height: 1,
                     },
                 )
-                .await
-                .unwrap();
-                forged.finish().unwrap();
+                .await;
+                if let Err(error) = payload {
+                    // The demux correctly rejects an unclaimed route after
+                    // reading its tag. STOP_SENDING can beat payload writes;
+                    // it must not panic the fixture before real serving starts.
+                    assert!(
+                        matches!(
+                            error.get_ref().and_then(|error| error.downcast_ref::<rds_net::WriteError>()),
+                            Some(rds_net::WriteError::Stopped(code)) if *code == rds_net::VarInt::from_u32(0)
+                        ),
+                        "unexpected forged-stream error: {error}"
+                    );
+                }
+                // Drop finishes or resets this disposable stream. The live
+                // session below still proves that the connection survives.
+                drop(forged);
             }
             serve_desktop_with(
                 conn,

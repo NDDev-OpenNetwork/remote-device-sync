@@ -52,8 +52,7 @@ impl DirectorySnapshotPart {
     }
 
     pub fn encoded_len(&self) -> Result<usize, SyncError> {
-        postcard::to_stdvec(self)
-            .map(|bytes| bytes.len())
+        postcard::experimental::serialized_size(self)
             .map_err(|_| SyncError::Manifest("directory snapshot part cannot be encoded".into()))
     }
 }
@@ -105,12 +104,13 @@ impl DirectorySnapshotAssembler {
             ));
         }
         let part_bytes = manifest_metadata_bytes(&part.entries)?;
-        self.metadata_bytes = self.metadata_bytes.saturating_add(part_bytes);
-        if self.metadata_bytes > usize::try_from(self.header.metadata_bytes).unwrap_or(usize::MAX) {
+        let metadata_bytes = self.metadata_bytes.saturating_add(part_bytes);
+        if metadata_bytes > usize::try_from(self.header.metadata_bytes).unwrap_or(usize::MAX) {
             return Err(SyncError::Manifest(
                 "directory snapshot exceeds announced metadata bytes".into(),
             ));
         }
+        self.metadata_bytes = metadata_bytes;
         self.entries.extend(part.entries);
         Ok(())
     }
@@ -123,54 +123,94 @@ impl DirectorySnapshotAssembler {
                 "directory snapshot is incomplete".into(),
             ));
         }
-        let manifest = DirectoryManifest::from_entries(self.entries)?;
-        if manifest.root != self.header.root {
-            return Err(SyncError::Manifest(
-                "directory snapshot root does not match header".into(),
-            ));
-        }
+        let manifest = DirectoryManifest {
+            root: self.header.root,
+            entries: self.entries,
+        };
+        manifest.verify()?;
         Ok(manifest)
     }
 }
 
-impl DirectoryManifest {
-    /// Split a verified manifest into deterministic, frame-sized parts.
-    pub fn snapshot_parts(&self) -> Result<Vec<DirectorySnapshotPart>, SyncError> {
-        self.verify()?;
-        let mut parts = Vec::new();
-        let mut current = Vec::new();
-        for entry in &self.entries {
-            let mut candidate = current.clone();
-            candidate.push(entry.clone());
-            let candidate_part = DirectorySnapshotPart {
-                entries: candidate.clone(),
+/// A bounded borrowed part, with the same postcard layout as an owned part.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DirectorySnapshotPartRef<'a> {
+    pub entries: &'a [DirectoryEntry],
+}
+
+impl DirectorySnapshotPartRef<'_> {
+    pub fn encoded_len(&self) -> Result<usize, SyncError> {
+        postcard::experimental::serialized_size(self)
+            .map_err(|_| SyncError::Manifest("directory snapshot part cannot be encoded".into()))
+    }
+
+    pub fn to_owned(&self) -> DirectorySnapshotPart {
+        DirectorySnapshotPart {
+            entries: self.entries.to_vec(),
+        }
+    }
+}
+
+/// Streaming part iterator: no manifest clone or serialized payload allocation.
+#[derive(Debug)]
+pub struct DirectorySnapshotParts<'a> {
+    remaining: &'a [DirectoryEntry],
+}
+
+impl<'a> Iterator for DirectorySnapshotParts<'a> {
+    type Item = Result<DirectorySnapshotPartRef<'a>, SyncError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+        let mut count = 0;
+        // At most 32 entries: postcard's sequence length always uses one byte.
+        let mut bytes = 1usize;
+        for entry in self.remaining.iter().take(MAX_DIRECTORY_PART_ENTRIES) {
+            let length = match postcard::experimental::serialized_size(entry) {
+                Ok(length) => length,
+                Err(_) => {
+                    self.remaining = &[];
+                    return Some(Err(SyncError::Manifest(
+                        "directory entry cannot be encoded".into(),
+                    )));
+                }
             };
-            if candidate.len() > MAX_DIRECTORY_PART_ENTRIES
-                || candidate_part.encoded_len()? > MAX_DIRECTORY_PART_BYTES
-            {
-                if current.is_empty() {
-                    return Err(SyncError::Manifest(
-                        "directory snapshot entry exceeds part bounds".into(),
-                    ));
-                }
-                parts.push(DirectorySnapshotPart::new(std::mem::take(&mut current))?);
-                current.push(entry.clone());
-                let single = DirectorySnapshotPart {
-                    entries: current.clone(),
-                };
-                if single.encoded_len()? > MAX_DIRECTORY_PART_BYTES {
-                    return Err(SyncError::Manifest(
-                        "directory snapshot entry exceeds part bounds".into(),
-                    ));
-                }
-            } else {
-                current = candidate;
+            if bytes.saturating_add(length) > MAX_DIRECTORY_PART_BYTES {
+                break;
             }
+            bytes += length;
+            count += 1;
         }
-        if !current.is_empty() {
-            parts.push(DirectorySnapshotPart::new(current)?);
+        if count == 0 {
+            self.remaining = &[];
+            return Some(Err(SyncError::Manifest(
+                "directory entry exceeds part bounds".into(),
+            )));
         }
-        Ok(parts)
+        let (entries, rest) = self.remaining.split_at(count);
+        self.remaining = rest;
+        Some(Ok(DirectorySnapshotPartRef { entries }))
+    }
+}
+
+impl DirectoryManifest {
+    /// Stream bounded borrowed parts of a verified manifest. Each entry is
+    /// measured once; no entry or encoded payload is copied by this iterator.
+    pub fn snapshot_part_iter(&self) -> Result<DirectorySnapshotParts<'_>, SyncError> {
+        self.verify()?;
+        Ok(DirectorySnapshotParts {
+            remaining: &self.entries,
+        })
+    }
+
+    /// Collect owned parts for callers that need to retain them. Streaming
+    /// senders should use `snapshot_part_iter` to avoid cloning the manifest.
+    pub fn snapshot_parts(&self) -> Result<Vec<DirectorySnapshotPart>, SyncError> {
+        self.snapshot_part_iter()?
+            .map(|part| part.map(|part| part.to_owned()))
+            .collect()
     }
 }
 
@@ -181,12 +221,6 @@ fn validate_part(
     if part.entries.is_empty() || part.entries.len() > MAX_DIRECTORY_PART_ENTRIES {
         return Err(SyncError::Manifest(
             "directory snapshot part entry count is outside bounds".into(),
-        ));
-    }
-    let encoded_len = part.encoded_len()?;
-    if encoded_len > MAX_DIRECTORY_PART_BYTES {
-        return Err(SyncError::Manifest(
-            "directory snapshot part exceeds frame budget".into(),
         ));
     }
     let mut prior = previous;
@@ -200,6 +234,11 @@ fn validate_part(
             ));
         }
         prior = Some(entry);
+    }
+    if part.encoded_len()? > MAX_DIRECTORY_PART_BYTES {
+        return Err(SyncError::Manifest(
+            "directory snapshot part exceeds frame budget".into(),
+        ));
     }
     Ok(())
 }

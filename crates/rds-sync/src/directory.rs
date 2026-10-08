@@ -9,10 +9,11 @@ mod wire;
 pub use reconcile::{
     ConflictRecord, DeletePolicy, ReconcileOperation, ReconcilePlan, Revision, Tombstone, conflicts,
 };
-pub use scanner::{scan_path, scan_path_cancellable};
+pub use scanner::{ScanLimits, scan_path, scan_path_cancellable, scan_path_with_limits};
 pub use wire::{
     DIRECTORY_SNAPSHOT_VERSION, DirectorySnapshotAssembler, DirectorySnapshotHeader,
-    DirectorySnapshotPart, MAX_DIRECTORY_PART_BYTES, MAX_DIRECTORY_PART_ENTRIES,
+    DirectorySnapshotPart, DirectorySnapshotPartRef, DirectorySnapshotParts,
+    MAX_DIRECTORY_PART_BYTES, MAX_DIRECTORY_PART_ENTRIES,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
