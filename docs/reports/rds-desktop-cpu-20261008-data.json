@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "scope": "isolated full-HD capture copy plus BGRA-to-I420 conversion; excludes X11 request, encoder, transport, decoder and viewer",
+  "environment": {
+    "os": "Linux x86_64",
+    "rust": "1.98.1",
+    "bytes": "1.12.1",
+    "openh264": "0.9.8",
+    "profile": "rustc -C opt-level=3; release dependency artifacts"
+  },
+  "width": 1920,
+  "height": 1080,
+  "stride": 7680,
+  "source_pattern": "byte index modulo 251",
+  "alternating_order": true,
+  "samples": [
+    {
+      "pair": 0,
+      "copied": true,
+      "rounds": 600,
+      "elapsed_ns": 2454133391
+    },
+    {
+      "pair": 0,
+      "copied": false,
+      "rounds": 600,
+      "elapsed_ns": 1108534954
+    },
+    {
+      "pair": 1,
+      "copied": false,
+      "rounds": 600,
+      "elapsed_ns": 1049389560
+    },
+    {
+      "pair": 1,
+      "copied": true,
+      "rounds": 600,
+      "elapsed_ns": 1989168959
+    },
+    {
+      "pair": 2,
+      "copied": true,
+      "rounds": 600,
+      "elapsed_ns": 2055466733
+    },
+    {
+      "pair": 2,
+      "copied": false,
+      "rounds": 600,
+      "elapsed_ns": 1080034741
+    },
+    {
+      "pair": 3,
+      "copied": false,
+      "rounds": 600,
+      "elapsed_ns": 1126424350
+    },
+    {
+      "pair": 3,
+      "copied": true,
+      "rounds": 600,
+      "elapsed_ns": 2092071067
+    },
+    {
+      "pair": 4,
+      "copied": true,
+      "rounds": 600,
+      "elapsed_ns": 2181969117
+    },
+    {
+      "pair": 4,
+      "copied": false,
+      "rounds": 600,
+      "elapsed_ns": 1134398298
+    }
+  ],
+  "copied_median_ms": 3.486785111666667,
+  "borrowed_median_ms": 1.8475582566666666,
+  "stage_reduction_percent": 47.01255748497955
+}

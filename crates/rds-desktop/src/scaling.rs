@@ -1,12 +1,9 @@
 //! Owned low-latency BGRA downscaling for a configured serving profile. The
 //! display capabilities keep original coordinates; only video dimensions change.
-use crate::{DesktopError, RawFrame};
+use crate::{BgraFrame, DesktopError, RawFrame};
 use bytes::Bytes;
 
-pub(crate) fn downscale(frame: RawFrame, height: Option<u32>) -> Result<RawFrame, DesktopError> {
-    let Some(height) = height.filter(|height| *height < frame.height) else {
-        return Ok(frame);
-    };
+pub(crate) fn downscale(frame: BgraFrame<'_>, height: u32) -> Result<RawFrame, DesktopError> {
     let height = height & !1;
     let width =
         ((u64::from(frame.width) * u64::from(height) / u64::from(frame.height)) as u32) & !1;
@@ -57,7 +54,7 @@ mod tests {
             stride: 72,
             data: Bytes::from(bytes),
         };
-        let resized = downscale(frame, Some(4)).unwrap();
+        let resized = downscale((&frame).into(), 4).unwrap();
         assert_eq!((resized.width, resized.height, resized.stride), (8, 4, 32));
         assert_eq!(&resized.data[..], &vec![12; 128]);
     }

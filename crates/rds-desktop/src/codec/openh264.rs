@@ -13,7 +13,7 @@ use openh264::formats::{BGRA8Source, RGB8Source, RGBSource, YUVBuffer, YUVSource
 use openh264::{Error as OhError, OpenH264API};
 use rds_core::Codec;
 
-use crate::{Decoder, DesktopError, EncodedFrame, Encoder, RawFrame};
+use crate::{BgraFrame, Decoder, DesktopError, EncodedFrame, Encoder, RawFrame};
 
 // A large recovery picture can leave timestamp rate control in debt for
 // seconds at its low-rate floor. Preserve occasional delta progress while
@@ -84,7 +84,7 @@ impl H264Encoder {
 
 impl Encoder for H264Encoder {
     fn encode(&mut self, frame: &RawFrame) -> Result<EncodedFrame, DesktopError> {
-        self.encode_timed(frame, self.started.elapsed().as_millis() as u64)
+        self.encode_bgra(frame.into())
     }
     fn request_idr(&mut self) {
         self.want_idr = true;
@@ -99,9 +99,25 @@ impl Encoder for H264Encoder {
 }
 
 impl H264Encoder {
+    #[cfg(test)]
     fn encode_timed(
         &mut self,
         frame: &RawFrame,
+        now_ms: u64,
+    ) -> Result<EncodedFrame, DesktopError> {
+        self.encode_bgra_timed(frame.into(), now_ms)
+    }
+
+    pub(crate) fn encode_bgra(
+        &mut self,
+        frame: BgraFrame<'_>,
+    ) -> Result<EncodedFrame, DesktopError> {
+        self.encode_bgra_timed(frame, self.started.elapsed().as_millis() as u64)
+    }
+
+    fn encode_bgra_timed(
+        &mut self,
+        frame: BgraFrame<'_>,
         now_ms: u64,
     ) -> Result<EncodedFrame, DesktopError> {
         let dimensions = (frame.width, frame.height);
@@ -340,14 +356,14 @@ impl Decoder for H264Decoder {
 pub fn bgra_to_i420(frame: &RawFrame) -> YUVBuffer {
     let stride = frame.stride as usize;
     if stride.is_multiple_of(4) && frame.data.len() >= stride * frame.height as usize {
-        return YUVBuffer::from_bgra8_source(StridedBgra(frame));
+        return YUVBuffer::from_bgra8_source(StridedBgra(frame.into()));
     }
-    bgra_to_i420_scalar(frame)
+    bgra_to_i420_scalar(frame.into())
 }
 
 /// `RawFrame` as an `openh264` BGRA source, carrying its real stride so
 /// padded capture buffers need no intermediate copy.
-struct StridedBgra<'a>(&'a RawFrame);
+struct StridedBgra<'a>(BgraFrame<'a>);
 
 impl RGBSource for StridedBgra<'_> {
     fn dimensions(&self) -> (usize, usize) {
@@ -367,7 +383,7 @@ impl RGB8Source for StridedBgra<'_> {
     }
 
     fn rgb8_data(&self) -> &[u8] {
-        &self.0.data
+        self.0.data
     }
 
     fn pixel_stride(&self) -> usize {
@@ -383,7 +399,7 @@ impl BGRA8Source for StridedBgra<'_> {}
 
 /// Scalar fallback for strides that are not whole pixels — also the
 /// test reference for the SIMD path's output.
-fn bgra_to_i420_scalar(frame: &RawFrame) -> YUVBuffer {
+fn bgra_to_i420_scalar(frame: BgraFrame<'_>) -> YUVBuffer {
     let (w, h) = (frame.width as usize, frame.height as usize);
     let stride = frame.stride as usize;
     let mut yuv = vec![0u8; w * h * 3 / 2];
@@ -421,6 +437,34 @@ mod tests {
             height: h,
             stride: w * 4,
             data: Bytes::from(vec![0x5Au8; (w * h * 4) as usize]),
+        }
+    }
+
+    #[test]
+    fn borrowed_input_preserves_owned_bitstream_and_recovery() {
+        let mut owned = H264Encoder::new(1_000_000, 30.0).unwrap();
+        let mut borrowed = H264Encoder::new(1_000_000, 30.0).unwrap();
+        let mut decoder = H264Decoder::new().unwrap();
+        for sequence in 0..8 {
+            let mut raw = frame();
+            raw.data = Bytes::from(vec![sequence as u8 * 20; raw.data.len()]);
+            if sequence == 4 {
+                owned.request_idr();
+                borrowed.request_idr();
+            }
+            let a = owned.encode_timed(&raw, sequence * 34).unwrap();
+            let b = borrowed
+                .encode_bgra_timed((&raw).into(), sequence * 34)
+                .unwrap();
+            assert_eq!(
+                a.data, b.data,
+                "borrowed frame changed bitstream at {sequence}"
+            );
+            assert_eq!(a.keyframe, b.keyframe);
+            if sequence == 0 || sequence == 4 {
+                assert!(a.keyframe, "explicit recovery did not emit IDR");
+            }
+            assert!(decoder.decode(&b).unwrap().is_some());
         }
     }
 
@@ -633,7 +677,7 @@ mod tests {
             data: Bytes::from(data),
         };
         let fast = bgra_to_i420(&raw);
-        let slow = bgra_to_i420_scalar(&raw);
+        let slow = bgra_to_i420_scalar((&raw).into());
         assert_eq!(fast.dimensions(), slow.dimensions());
         for (a, b) in fast.y().iter().zip(slow.y()) {
             assert!((i32::from(*a) - i32::from(*b)).abs() <= 2, "Y diverges");

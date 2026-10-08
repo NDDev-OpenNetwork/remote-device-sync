@@ -474,6 +474,32 @@ async fn exercise(automatic: bool) {
                 .await
                 .is_err()
         );
+        if automatic {
+            // Warm validation proves the standby before the failure. Retirement
+            // additionally requires an ACK during the pending work interval.
+            // Fence that real protocol precondition before measuring the two-
+            // second policy/stream recovery gate; otherwise a one-second probe
+            // plus the next selection tick races the same two-second deadline.
+            remote_secondary.ping().unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let failed = b
+                        .congestion_state(noq::PathId::ZERO)
+                        .and_then(crate::ack_progress::snapshot);
+                    let sibling = b
+                        .congestion_state(remote_secondary.id())
+                        .and_then(crate::ack_progress::snapshot);
+                    if failed.zip(sibling).is_some_and(|(failed, sibling)| {
+                        sibling.can_replace(failed, remote_secondary.stats().rtt)
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("standby did not acknowledge during the failed work interval");
+        }
         let (_relay_sender, relay_dead) = tokio::sync::watch::channel(0u64);
         let driver = if automatic {
             let telemetry = super::telemetry::Telemetry::new(&b);
