@@ -68,6 +68,12 @@ initial observer-registration race, not a reason to raise its timeout.
 Integrate and qualify the combined source before advancing installed artifacts;
 the native acceptance rows below remain open.
 
+The later main-branch CI run37999738254 retained a separate control RTT p95
+failure: 445 ms across 601 probes versus the unchanged 400 ms limit. The earlier
+cohort enlargement did not repair runtime latency. Diagnose this tail with the
+actual application/transport timing before declaring the combined native rollout
+qualified; keep the failing result even when other runs pass.
+
 1. Re-read current public/estate heads, open PRs and operation receipts. An
    expired plan or an earlier successful pin is not authorization to replay a
    stale transaction. Preserve other worktrees and unpublished commits.
@@ -97,6 +103,10 @@ the full desktop or transport milestone.
 
 Current increment: make journal preparation observe peer/caller/async-drop
 cancellation, stream catalog names and bound opportunistic cleanup work.
+The follow-up [destination-binding audit](reports/rds-journal-destination-scope-20261010.md)
+confirmed that content-only journal selection could reuse another destination's
+cached bytes. Bind new state to the normalized destination, retain only verified
+same-destination legacy resume, and qualify both formats before native rollout.
 Quota admission, fair background reclamation and destination overwrite policy
 remain separate unfinished changes. This does not close native Wave 2 acceptance.
 

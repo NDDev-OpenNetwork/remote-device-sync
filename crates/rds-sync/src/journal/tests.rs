@@ -42,6 +42,151 @@ impl Drop for Scratch {
 }
 
 #[test]
+fn equal_content_does_not_share_parts_across_destinations() {
+    let root = Scratch::new();
+    let manifest = crate::manifest_of(NEW);
+    let mut a = Journal::open(&root.0, "scope-a/file.bin", &manifest).unwrap();
+    a.store(0, NEW).unwrap();
+    drop(a);
+    let b = Journal::open(&root.0, "scope-b/file.bin", &manifest).unwrap();
+    assert_eq!(
+        b.need(),
+        [0],
+        "another destination's bytes are not reusable"
+    );
+    assert!(b.assemble().is_err());
+    assert!(!root.0.join("scope-b/file.bin").exists());
+    let a = Journal::open(&root.0, "scope-a/file.bin", &manifest).unwrap();
+    assert!(
+        a.complete(),
+        "the original destination must remain resumable"
+    );
+    a.assemble().unwrap();
+    assert_eq!(std::fs::read(root.0.join("scope-a/file.bin")).unwrap(), NEW);
+}
+
+#[test]
+fn verified_legacy_journal_resumes_only_its_bound_destination() {
+    let root = Scratch::new();
+    let manifest = crate::manifest_of(NEW);
+    let state = root.0.join(STATE_DIR);
+    plant_journal(
+        &state,
+        "data.bin",
+        manifest.root,
+        &[(&manifest.chunks[0].hash, NEW)],
+    );
+    let legacy = state.join(hex(&manifest.root));
+    let original_meta = std::fs::read(legacy.join("meta")).unwrap();
+    let b = Journal::open(&root.0, "other.bin", &manifest).unwrap();
+    assert_eq!(b.need(), [0]);
+    drop(b);
+    assert_eq!(std::fs::read(legacy.join("meta")).unwrap(), original_meta);
+    let a = Journal::open(&root.0, "./data.bin", &manifest).unwrap();
+    assert!(a.complete());
+    a.assemble().unwrap();
+    assert!(
+        !legacy.exists(),
+        "cleanup must remove the selected legacy name"
+    );
+    assert_eq!(std::fs::read(root.0.join("data.bin")).unwrap(), NEW);
+}
+
+#[test]
+fn unattributable_legacy_state_is_preserved_without_reuse() {
+    for variant in [
+        "missing",
+        "torn",
+        "wrong-path",
+        "wrong-size",
+        "wrong-root",
+        "symlink",
+    ] {
+        let root = Scratch::new();
+        let manifest = crate::manifest_of(NEW);
+        let state = root.0.join(STATE_DIR);
+        plant_journal(
+            &state,
+            "data.bin",
+            manifest.root,
+            &[(&manifest.chunks[0].hash, NEW)],
+        );
+        let legacy = state.join(hex(&manifest.root));
+        match variant {
+            "missing" => std::fs::remove_file(legacy.join("meta")).unwrap(),
+            "torn" => std::fs::write(legacy.join("meta"), b"torn!").unwrap(),
+            "symlink" => {
+                std::fs::remove_file(legacy.join("meta")).unwrap();
+                std::os::unix::fs::symlink(root.0.join("data.bin"), legacy.join("meta")).unwrap();
+            }
+            _ => {
+                let dir = Directory::open_root(&legacy, false).unwrap();
+                let mut meta = read_meta(&dir).unwrap().unwrap();
+                match variant {
+                    "wrong-path" => meta.rel_path = "other.bin".into(),
+                    "wrong-size" => meta.size += 1,
+                    "wrong-root" => meta.root[0] ^= 1,
+                    _ => unreachable!(),
+                }
+                write_meta(&dir, &meta).unwrap();
+            }
+        }
+        let opened = Journal::open(&root.0, "data.bin", &manifest).unwrap();
+        assert_eq!(opened.need(), [0], "{variant}");
+        assert!(
+            legacy
+                .join("parts")
+                .join(hex(&manifest.chunks[0].hash))
+                .exists(),
+            "{variant}"
+        );
+    }
+}
+
+#[test]
+fn scoped_state_recovers_torn_metadata_without_rebinding_to_another_path() {
+    let root = Scratch::new();
+    let manifest = crate::manifest_of(NEW);
+    let mut a = Journal::open(&root.0, "data.bin", &manifest).unwrap();
+    a.store(0, NEW).unwrap();
+    drop(a);
+    let own = root
+        .0
+        .join(STATE_DIR)
+        .join(scoped_id(Path::new("data.bin"), &manifest.root));
+    std::fs::write(own.join("meta"), b"torn!").unwrap();
+    let b = Journal::open(&root.0, "other.bin", &manifest).unwrap();
+    assert_eq!(b.need(), [0]);
+    drop(b);
+    assert_eq!(std::fs::read(own.join("meta")).unwrap(), b"torn!");
+    let a = Journal::open(&root.0, "data.bin", &manifest).unwrap();
+    assert!(a.complete());
+    a.assemble().unwrap();
+    assert!(!own.exists());
+}
+
+#[test]
+fn scoped_collection_removes_only_the_same_destination() {
+    let root = Scratch::new();
+    let manifest = crate::manifest_of(NEW);
+    for rel in ["data.bin", "other.bin"] {
+        let mut journal = Journal::open(&root.0, rel, &manifest).unwrap();
+        journal.store(0, NEW).unwrap();
+    }
+    let state = root.0.join(STATE_DIR);
+    let own = state.join(scoped_id(Path::new("data.bin"), &manifest.root));
+    let other = state.join(scoped_id(Path::new("other.bin"), &manifest.root));
+    drop(Journal::open(&root.0, "data.bin", &crate::manifest_of(b"next")).unwrap());
+    assert!(!own.exists());
+    assert!(other.exists());
+    assert!(
+        Journal::open(&root.0, "other.bin", &manifest)
+            .unwrap()
+            .complete()
+    );
+}
+
+#[test]
 fn canceled_journal_open_does_not_create_state_or_destination_parents() {
     let root = Scratch::new();
     let dest = root.0.join("not-created");
@@ -233,7 +378,7 @@ fn destination_reuse_stops_after_one_verified_chunk_and_resumes() {
     let parts = root
         .0
         .join(STATE_DIR)
-        .join(hex(&manifest.root))
+        .join(scoped_id(Path::new("data.bin"), &manifest.root))
         .join("parts");
     let result = journal
         .seed_from_destination(File::open(root.0.join("data.bin")).unwrap(), &|| {
@@ -295,7 +440,7 @@ fn verify_and_resume(root: &Path, operation: &str, point: Point) {
     let mut journal = Journal::open(root, "data.bin", &manifest).unwrap();
     let state = root.join(STATE_DIR);
     assert!(!state.join(ASSEMBLY).exists());
-    let content = state.join(hex(&manifest.root));
+    let content = state.join(scoped_id(Path::new("data.bin"), &manifest.root));
     assert!(!content.join(PENDING).exists());
     assert!(!content.join("parts").join(PENDING).exists());
     if operation == "part" && matches!(point, Point::Renamed | Point::DestinationSynced) {
@@ -401,7 +546,7 @@ fn recovery_removes_only_reserved_regular_single_link_temporary_files() {
             let manifest = crate::manifest_of(NEW);
             drop(Journal::open(&dir.0, "data.bin", &manifest).unwrap());
             let state = dir.0.join(STATE_DIR);
-            let content = state.join(hex(&manifest.root));
+            let content = state.join(scoped_id(Path::new("data.bin"), &manifest.root));
             let temp = if name == ASSEMBLY {
                 state.join(name)
             } else {
@@ -538,7 +683,12 @@ fn superseded_journals_are_collected_and_foreign_entries_survive() {
     let mb = crate::manifest_of(NEXT);
     drop(Journal::open(&dir.0, "data.bin", &mb).unwrap());
 
-    assert!(state.join(hex(&mb.root)).exists(), "own journal must open");
+    assert!(
+        state
+            .join(scoped_id(Path::new("data.bin"), &mb.root))
+            .exists(),
+        "own journal must open"
+    );
     assert!(!state_a2.exists(), "clean superseded journal collected");
     // Foreign residue keeps the directory; proven-owned names still go.
     assert!(!state_a.join("parts").join(hex(&ma.chunks[0].hash)).exists());

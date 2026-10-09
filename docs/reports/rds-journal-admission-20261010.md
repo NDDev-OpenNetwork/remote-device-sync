@@ -50,7 +50,8 @@ The original ten-receipt W8 fork is preserved independently under
 The current [release benchmark](bench-w8-journal-admission.md) and
 [raw source/digest-bound JSON](bench-w8-journal-admission.json) contain 100 samples
 per case on macOS arm64 at the combined source. A verified 4 MiB/16-chunk resume
-measured p95 27.820 ms; admission beside 8,192 retained foreign entries measured p95 25.011 ms;
+measured p95 27.820 ms; admission beside 8,192 retained foreign entries measured
+p95 25.011 ms;
 pre-canceled admission measured p95 2 µs and created no directory. Setup is
 excluded and the cache is warm. These are local observations, not a speedup,
 network result or hardware-independent latency guarantee.
@@ -76,7 +77,7 @@ their own qualification and reconciliation.
 Two separate follow-ups prevent treating this increment as full stability:
 [PR149](https://github.com/NDDev-OpenNetwork/remote-device-sync/pull/149)
 binds cached journal state to the destination, and
-[main CI run37999738254](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/37999738254)
-retained a control RTT p95 of445ms across601 probes against the400ms budget.
+[main CI run 37999738254](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/37999738254)
+retained a control RTT p95 of 445 ms across 601 probes against the 400 ms budget.
 That latency failure shows the earlier cohort correction was not a runtime fix.
 Neither concern is hidden by this successful bounded-admission checkpoint.

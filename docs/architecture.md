@@ -571,7 +571,9 @@ disk-bound work (manifest scan, journal open/verify, assembly) runs on
 the blocking pool, never an async worker. The control stream carries
 `Offer`/`Request` then the manifest in ≤512-entry `ManifestPart`
 batches (a 1 GiB manifest exceeds the 64 KiB frame cap). The receiver
-opens a journal under `<dest>/.rds-sync/<root>/`, re-verifies every
+opens a destination-bound journal under
+`<dest>/.rds-sync/v2-<root>-<destination-hash>/` (verified legacy metadata is
+required to resume an older content-only journal), re-verifies every
 surviving part by content hash, copies matching chunks from an already-present
 destination into verified parts before advertising `have` (identical resend
 costs zero wire chunks), and answers

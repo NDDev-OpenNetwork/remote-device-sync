@@ -105,6 +105,18 @@ fn main() -> anyhow::Result<()> {
         ensure!(Journal::open(&root.0, "data.bin", &manifest)?.complete());
         Ok(())
     })?];
+    rows.push(measure(
+        "equal-content-other-destination",
+        args.samples,
+        || {
+            let journal = Journal::open(&root.0, "other.bin", &manifest)?;
+            ensure!(journal.have_set().is_empty());
+            ensure!(journal.need().len() == manifest.chunks.len());
+            Ok(())
+        },
+    )?);
+    ensure!(Journal::open(&root.0, "data.bin", &manifest)?.complete());
+    ensure!(!root.0.join("other.bin").exists());
     let absent = root.0.join("never-created");
     rows.push(measure("pre-canceled-admission", args.samples, || {
         let result = Journal::open_cancellable(&absent, "data.bin", &manifest, &|| true);

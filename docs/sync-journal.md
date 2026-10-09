@@ -22,8 +22,13 @@ continue to refer to their inodes if a local actor renames them.
 
 ## Transaction sequence
 
-Verified parts remain at `<root>/.rds-sync/<content-root>/parts/<chunk-hash>`.
-Existing journal layout and verified chunk reuse are preserved. Metadata and
+New verified parts live at
+`<root>/.rds-sync/v2-<content-root>-<destination-hash>/parts/<chunk-hash>`.
+The destination hash is BLAKE3 of the normalized relative path's UTF-8 bytes.
+Different destinations never share cached parts merely because their offered
+content roots match. Legacy `<content-root>` journals resume only when verified
+metadata matches the exact destination, root and size; malformed or unbound
+legacy state stays untouched beside the new journal. Metadata and
 part writes use the reserved name `pending` inside their private directory:
 exclusive create, write, file sync, rename to the committed name, parent sync.
 Only after that sequence does a stored chunk count as present.
@@ -71,8 +76,10 @@ remote cleanup. See the [queued-store receipt](reports/rds-sync-cancel-20260925.
 Opening a receive under its locks discards known `assembly` and `pending`
 temporary names. Only regular, single-link files qualify; symlinks, hard links,
 directories and special files fail closed. Committed parts are independently
-bounded and hash-verified, so torn metadata does not invent progress. Recovery
-does not require trusting the advisory metadata or a partial assembly.
+bounded and hash-verified, so torn metadata does not invent progress. The new
+directory name binds the destination even when its advisory metadata is torn;
+legacy names require verified metadata for attribution. A partial assembly is
+never accepted as a committed destination.
 
 After durable publication, cleanup removes only the manifest's known parts,
 metadata and empty owned directories, syncing each directory level. A cleanup
@@ -82,7 +89,8 @@ bytes. Unknown entries are preserved; recursive deletion is never attempted.
 
 Recovery of the offered journal verifies its requested manifest and known
 temporary names. Opening also attempts to collect verified superseded journals
-for the same destination. This uses a streaming directory visitor and a shared
+with a different content root for the same destination. Both legacy and new
+names must agree with verified attribution metadata. This uses a streaming directory visitor and a shared
 4096-entry budget across catalog siblings and their parts; unknown names also
 consume that budget. Exhausting it defers cleanup and allows the new receive to
 proceed. Partial cleanup retains attribution metadata until known parts and
@@ -100,8 +108,11 @@ general garbage collector or a disk-usage cap.
 
 Upgrading agents that share overlapping roots requires quiescing old receives:
 older versions did not take the destination-parent lock and cannot enforce the
-new overlap contract. Older clients requesting nested `.rds-sync` paths are now
-refused before receive state is created; valid file-transfer layouts are unchanged.
+new overlap contract. Do not run an old receiver against state governed by a
+new receiver: it still uses the unscoped legacy layout. A downgrade cannot safely
+resume a new journal and restores the older selection behavior. Older clients
+requesting nested `.rds-sync` paths are refused before receive state is created;
+ordinary client wire formats remain unchanged.
 
 ## Evidence
 

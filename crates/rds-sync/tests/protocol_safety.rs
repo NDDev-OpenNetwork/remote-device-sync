@@ -57,6 +57,73 @@ async fn offered(send: &mut rds_net::SendStream, path: &str, m: &Manifest) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_offer_cannot_reuse_another_destinations_cached_payload() {
+    for backend in [Backend::Iroh, Backend::Noq] {
+        let tmp = Temp::new();
+        let bytes = b"synthetic content retained for a different path";
+        let manifest = manifest_of(bytes);
+        let mut saved =
+            rds_sync::journal::Journal::open(&tmp.0, "private/file", &manifest).unwrap();
+        saved.store(0, bytes).unwrap();
+        drop(saved);
+        let (a, b, client, server) = pair(backend).await;
+        let path = tmp.0.clone();
+        let access = engine::Access {
+            read: true,
+            write: true,
+            paths: Some(std::sync::Arc::from([PathBuf::from("shared")])),
+        };
+        assert!(!access.permits_path(std::path::Path::new("private/file")));
+        let peer = tokio::spawn(async move {
+            let (send, recv) = server.accept_bi().await.unwrap();
+            engine::serve_with_access(server, send, recv, path, access, Duration::from_secs(5))
+                .await
+        });
+        let (mut send, mut recv) = client.open_bi().await.unwrap();
+        offered(&mut send, "shared/file", &manifest).await;
+        let need =
+            tokio::time::timeout(Duration::from_secs(5), read_frame::<_, SyncMsg>(&mut recv))
+                .await
+                .unwrap()
+                .unwrap();
+        let requested = match need {
+            SyncMsg::Need { bits } => {
+                rds_sync::proto::bits_to_indices(&bits, manifest.chunks.len()).unwrap()
+            }
+            other => panic!("expected Need, got {other:?}"),
+        };
+        // Cancel without ever sending a chunk. The limited peer must upload
+        // its own payload; possession of the manifest cannot import private state.
+        write_frame(
+            &mut send,
+            &SyncMsg::Cancel {
+                reason: "probe complete".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        a.close().await;
+        b.close().await;
+        assert_eq!(
+            requested,
+            [0],
+            "{backend:?} crossed the path scope through cached state"
+        );
+        assert!(result.is_err());
+        assert!(!tmp.0.join("shared/file").exists());
+        assert!(
+            rds_sync::journal::Journal::open(&tmp.0, "private/file", &manifest)
+                .unwrap()
+                .complete()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pull_refuses_a_different_safe_path_before_any_destination_write() {
     for backend in [Backend::Iroh, Backend::Noq] {
         let tmp = Temp::new();

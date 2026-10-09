@@ -159,10 +159,12 @@ fn failed_assembly_keeps_destination_and_cleans_own_staging_file() {
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 2);
 }
 
-fn journal_path(dir: &Scratch, manifest: &Manifest) -> PathBuf {
-    dir.0
-        .join(".rds-sync")
-        .join(blake3::Hash::from(manifest.root).to_hex().as_str())
+fn journal_path(dir: &Scratch, rel: &str, manifest: &Manifest) -> PathBuf {
+    dir.0.join(".rds-sync").join(format!(
+        "v2-{}-{}",
+        blake3::Hash::from(manifest.root).to_hex(),
+        blake3::hash(rel.as_bytes()).to_hex()
+    ))
 }
 
 #[test]
@@ -173,11 +175,13 @@ fn missing_part_cleans_staging_and_preserves_old_destination() {
     let manifest = manifest_of(b"new destination");
     let mut journal = Journal::open(&dir.0, "data.bin", &manifest).unwrap();
     fetch_missing(&mut journal, &manifest, b"new destination");
-    let part = journal_path(&dir, &manifest).join("parts").join(
-        blake3::Hash::from(manifest.chunks[0].hash)
-            .to_hex()
-            .as_str(),
-    );
+    let part = journal_path(&dir, "data.bin", &manifest)
+        .join("parts")
+        .join(
+            blake3::Hash::from(manifest.chunks[0].hash)
+                .to_hex()
+                .as_str(),
+        );
     std::fs::remove_file(part).unwrap();
     assert!(journal.assemble().is_err());
     assert_eq!(std::fs::read(dest).unwrap(), b"old destination");
@@ -195,7 +199,7 @@ fn planted_journal_directory_and_part_links_are_refused() {
         let outside = Scratch::new("outside");
         let sentinel = outside.0.join("sentinel");
         std::fs::write(&sentinel, bytes).unwrap();
-        let journal = journal_path(&dir, &manifest);
+        let journal = journal_path(&dir, "data.bin", &manifest);
         match variant {
             "state" => symlink(&outside.0, dir.0.join(".rds-sync")).unwrap(),
             "content" => {
@@ -239,7 +243,7 @@ fn metadata_and_legacy_temp_links_never_write_their_targets() {
     let sentinel = outside.0.join("sentinel");
     std::fs::write(&sentinel, b"do not overwrite").unwrap();
     let manifest = manifest_of(b"new bytes");
-    let journal_dir = journal_path(&dir, &manifest);
+    let journal_dir = journal_path(&dir, "data.bin", &manifest);
     std::fs::create_dir_all(journal_dir.join("parts")).unwrap();
     symlink(&sentinel, journal_dir.join("meta")).unwrap();
     symlink(&sentinel, journal_dir.join("meta.tmp")).unwrap();
@@ -264,7 +268,7 @@ fn directory_substitution_after_open_keeps_io_on_pinned_handles() {
     let outside = Scratch::new("substitution-outside");
     let manifest = manifest_of(b"new bytes");
     let mut journal = Journal::open(&dir.0, "nested/data.bin", &manifest).unwrap();
-    let state = journal_path(&dir, &manifest);
+    let state = journal_path(&dir, "nested/data.bin", &manifest);
     std::fs::rename(state.join("parts"), state.join("parts-held")).unwrap();
     symlink(&outside.0, state.join("parts")).unwrap();
     std::fs::rename(dir.0.join("nested"), dir.0.join("nested-held")).unwrap();
