@@ -708,8 +708,8 @@ async fn view_only_and_failed_injection_never_ack_but_keep_control_alive() {
 }
 
 /// C5 impairment + G5 latency gate: 5% loss + 30 ms jitter on a 50 ms
-/// base — queue stays bounded and control RTT is unaffected by the video
-/// backlog. Header-arrival tail bounds below include retransmission; this is
+/// base — queue stays bounded and control RTT meets its budget during video.
+/// Observed-frame tail bounds below include retransmission; this is
 /// not the clean-link 150 ms gate or an input-to-visible measurement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn impaired_link_latency_gate() {
@@ -723,21 +723,32 @@ async fn impaired_link_latency_gate() {
     let mut queue_ms = Vec::new();
     let mut wire_ms = Vec::new();
     let mut last_seq: Option<u64> = None;
+    let mut outstanding = std::collections::BTreeSet::new();
+    let mut offered = 0usize;
     let mut probes = tokio::time::interval(Duration::from_millis(100));
     probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let end = Instant::now() + Duration::from_secs(15);
+    // Keep the workload and latency budgets unchanged, but measure a full
+    // control cohort. Fifteen seconds supplied only ~150 probes: p95 depended
+    // on eight samples, often siblings of the same reliable-stream loss.
+    // Sixty seconds retains startup and those bursts with ~600 probes.
+    let end = Instant::now() + Duration::from_secs(60);
     while Instant::now() < end {
         tokio::select! {
             _ = probes.tick() => {
-                h.session.heartbeat().await.expect("control writer ended under impairment");
+                let seq = h.session.heartbeat().await.expect("control writer ended under impairment");
+                assert!(outstanding.insert(seq));
+                offered += 1;
             }
             event = h.session.events.recv() => {
                 let event = event.expect("control reader ended under impairment");
-                if let DesktopEvent::Heartbeat { ts_ms, .. } = event {
+                if let DesktopEvent::Heartbeat { seq, ts_ms } = event {
                     // Every completed probe contributes one sample. Repeatedly
                     // sampling a cached RTT per media frame is biased and an
                     // unread reliable event queue backpressures its reader.
-                    rtts.push(h.clock.now_ms().saturating_sub(ts_ms));
+                    assert!(outstanding.remove(&seq), "unsolicited or duplicate heartbeat");
+                    let now = h.clock.now_ms();
+                    assert!(ts_ms <= now, "heartbeat timestamp is ahead of the shared clock");
+                    rtts.push(now - ts_ms);
                 }
             }
             hd = h.session.frame_headers.recv() => {
@@ -759,18 +770,46 @@ async fn impaired_link_latency_gate() {
         }
     }
 
+    // Keep the media workload running while finishing every issued probe.
+    // A delayed final echo must count, and missing responses must fail instead
+    // of silently disappearing at the measurement-window boundary.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !outstanding.is_empty() {
+            tokio::select! {
+                event = h.session.events.recv() => {
+                    let event = event.expect("control reader ended while draining probes");
+                    if let DesktopEvent::Heartbeat { seq, ts_ms } = event {
+                        assert!(outstanding.remove(&seq), "unsolicited or duplicate heartbeat");
+                        let now = h.clock.now_ms();
+                        assert!(ts_ms <= now, "heartbeat timestamp is ahead of the shared clock");
+                        rtts.push(now - ts_ms);
+                    }
+                }
+                header = h.session.frame_headers.recv() => {
+                    assert!(header.is_some(), "media ended while draining probes");
+                }
+            }
+        }
+    })
+    .await
+    .expect("issued control probes remained unanswered");
+    assert_eq!(rtts.len(), offered);
+
     let (s_stats, c_stats) = h.impair.as_ref().unwrap();
     let (s, c) = (s_stats.get(), c_stats.get());
     let lat_p95 = p95(latencies.clone());
     let rtt_p95 = p95(rtts.clone());
     eprintln!(
-        "impaired: frames={} lat_p95={}ms lat_p99={}ms queue_p95={}ms wire_p95={}ms rtt_p95={}ms server_out={:?} client_out={:?}",
+        "impaired: frames={} lat_p95={}ms lat_p99={}ms queue_p95={}ms wire_p95={}ms control_samples={} rtt_p50={}ms rtt_p95={}ms rtt_p99={}ms server_out={:?} client_out={:?}",
         latencies.len(),
         lat_p95,
         p99(latencies.clone()),
         p95(queue_ms.clone()),
         p95(wire_ms),
+        rtts.len(),
+        p50(rtts.clone()),
         rtt_p95,
+        p99(rtts.clone()),
         s,
         c
     );
@@ -788,7 +827,7 @@ async fn impaired_link_latency_gate() {
         latencies.len()
     );
     assert!(
-        rtts.len() >= 50,
+        rtts.len() >= 500,
         "too few completed control probes: {}",
         rtts.len()
     );
@@ -808,17 +847,16 @@ async fn impaired_link_latency_gate() {
         lat_p50 <= 500,
         "latency p50 {lat_p50}ms — median frame not at path speed"
     );
-    // Tail is retransmit physics: on 5% loss + 30 ms jitter a dropped
-    // datagram repays ~1 PTO (~1 s). p95/p99 bounded proves the tail
-    // is loss-driven, not an unbounded queue (which would run to 10s+).
+    // Loss recovery and runtime scheduling can both lengthen this tail.
+    // These bounds constrain observed latency; they do not identify its cause.
     assert!(
         lat_p95 <= 2000 && p99(latencies) <= 3000,
         "latency tail unbounded under impairment"
     );
-    // Control unaffected by video backlog: heartbeat RTT ≈ path RTT.
+    // Retain the declared control budget over the complete measured cohort.
     assert!(
         rtt_p95 <= 400,
-        "control rtt p95 {rtt_p95}ms — backlog leaked"
+        "control rtt p95 {rtt_p95}ms exceeds 400ms across {offered} probes"
     );
     h.server_task.abort();
 }
