@@ -753,7 +753,10 @@ carry a per-session video-height choice while keeping prior tags and formats.
 See [the native contract](native-viewer.md) for default Full HD, bounds and
 coordinated agent migration. Text paste uses bounded, ordered control chunks and
 an X11 session-owned CLIPBOARD service with INCR; clipboard contents never enter
-observability. Native macOS paste access occurs only on the explicit paste gesture.
+observability. `DesktopV5` adds an offer/request/chunk reverse path; the viewer
+publishes a fully reassembled value through its native clipboard. Native macOS
+access runs on the AppKit main thread and the reverse path is explicitly
+negotiated.
 
 Managed desktop IPC has one bounded read worker independent of canceled caller
 waits. The renderer acquires a usable surface before queuing GPU writes. Private

@@ -80,6 +80,11 @@ endpoint allowlists, X11/OpenH264 desktop skeleton, workspace structure.
 - wgpu renderer (newest-frame-only), Vulkan Video H.264 encode/decode
   behind probe; OpenH264 stays the floor.
 - Input: portal EIS (`reis`) on Wayland; `CGEvent` on macOS.
+- Text clipboard now has a bounded negotiated reverse path on X11/AppKit;
+  RandR-backed X11 monitor selection and per-session concurrent viewers are
+  implemented behind their platform qualification gates. Wayland portal
+  clipboard, stable hotplug identities and rich/file formats remain later
+  capabilities.
 - **Gates**: glass-to-glass ≤20 ms LAN / ≤80 ms WAN at 1080p60
   measured end-to-end; input-to-visible-pixel budget tracked.
 

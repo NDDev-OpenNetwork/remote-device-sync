@@ -4,6 +4,12 @@ use winit::keyboard::KeyCode;
 /// Translate a local Command paste while restoring every physically held key.
 /// Control brackets Super release/restore so Super is never released alone.
 pub(super) fn command_paste_chord(held: &std::collections::BTreeSet<u32>) -> Vec<InputKind> {
+    command_chord(held, 47)
+}
+
+/// Copy/cut/paste use the remote desktop's Control shortcuts on macOS,
+/// preserving Shift for terminal Ctrl+Shift+C/V without replaying Super.
+pub(super) fn command_chord(held: &std::collections::BTreeSet<u32>, key: u32) -> Vec<InputKind> {
     let add_control = !held.contains(&29) && !held.contains(&97);
     let mut chord = Vec::with_capacity(8);
     if add_control {
@@ -14,8 +20,8 @@ pub(super) fn command_paste_chord(held: &std::collections::BTreeSet<u32>) -> Vec
             chord.push(InputKind::KeyUp { code });
         }
     }
-    chord.push(InputKind::KeyDown { code: 47 });
-    chord.push(InputKind::KeyUp { code: 47 });
+    chord.push(InputKind::KeyDown { code: key });
+    chord.push(InputKind::KeyUp { code: key });
     for code in [125, 126] {
         if held.contains(&code) {
             chord.push(InputKind::KeyDown { code });

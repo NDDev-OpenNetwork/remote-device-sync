@@ -1015,10 +1015,14 @@ mod tests {
                 vec![rds_net::Backend::Iroh]
             }
         };
-        for (backend, payload_receipts) in backends
-            .into_iter()
-            .flat_map(|backend| [(backend, false), (backend, true)])
-        {
+        for (backend, payload_receipts, clipboard) in backends.into_iter().flat_map(|backend| {
+            [
+                (backend, false, false),
+                (backend, true, false),
+                (backend, false, true),
+                (backend, true, true),
+            ]
+        }) {
             let config = || rds_net::EndpointConfig {
                 backend,
                 bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
@@ -1040,7 +1044,7 @@ mod tests {
                                 let conn = conn.clone();
                                 workers.spawn(async move {
                                     let greeting = read_frame::<_, StreamHello>(&mut recv).await.unwrap();
-                                    let negotiated = matches!(&greeting,StreamHello::DesktopV4 { .. });
+                                    let negotiated = matches!(&greeting,StreamHello::DesktopV4 { .. } | StreamHello::DesktopV5 { payload_receipts: true, .. });
                                     match greeting {
                                         StreamHello::Ping { nonce } => {
                                             write_frame(&mut send, &HelloAck::Ok).await.unwrap();
@@ -1055,6 +1059,21 @@ mod tests {
                                             rds_desktop::serve_desktop_with(conn, send, recv, hello, rds_desktop::SessionConfig {
                                                 frame_route: Some(UniHello::DesktopFrames { id: session }),
                                                 payload_receipts: negotiated,
+                                                input_sink: Some(Box::new(NoopInput)),
+                                                producer: Some(Box::new(rds_desktop::SyntheticProducer::new(30, 640, 480, 1024))),
+                                                ..Default::default()
+                                            }).await.unwrap();
+                                        }
+                                        StreamHello::DesktopV5 { session, hello, output_height, payload_receipts: v5_receipts, clipboard } => {
+                                            assert!(clipboard);
+                                            assert_eq!(v5_receipts, payload_receipts);
+                                            assert_eq!(output_height, 1080);
+                                            let caps=DesktopCaps { displays: vec![], codecs: vec![rds_core::Codec::H264] };
+                                            write_frame(&mut send, &HelloAck::DesktopV5(caps)).await.unwrap();
+                                            rds_desktop::serve_desktop_with(conn, send, recv, hello, rds_desktop::SessionConfig {
+                                                frame_route: Some(UniHello::DesktopFrames { id: session }),
+                                                reverse_clipboard: true,
+                                                payload_receipts: v5_receipts,
                                                 input_sink: Some(Box::new(NoopInput)),
                                                 producer: Some(Box::new(rds_desktop::SyntheticProducer::new(30, 640, 480, 1024))),
                                                 ..Default::default()
@@ -1103,7 +1122,12 @@ mod tests {
                 codec: rds_core::Codec::H264,
                 input_acks: true,
             };
-            let (mut desktop, mut events) = if payload_receipts {
+            let (mut desktop, mut events) = if clipboard {
+                client
+                    .desktop_features(Some(id), hello, 1080, payload_receipts, true)
+                    .await
+                    .unwrap()
+            } else if payload_receipts {
                 client
                     .desktop_profile_separated_receipts(Some(id), hello, 1080)
                     .await

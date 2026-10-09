@@ -2,13 +2,15 @@
 //! window/input handling stays on the OS main thread and networking stays async.
 
 #[cfg(feature = "viewer")]
+mod clipboard;
+#[cfg(feature = "viewer")]
 mod gpu;
 #[cfg(feature = "viewer")]
 mod input;
 #[cfg(feature = "viewer")]
 mod platform;
 #[cfg(feature = "viewer")]
-pub use platform::{NativeWindowState, choose_resolution};
+pub use platform::{NativeWindowState, choose_resolution, native_clipboard_probe};
 #[cfg(feature = "viewer")]
 mod viewer;
 #[cfg(feature = "viewer")]

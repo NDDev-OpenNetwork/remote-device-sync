@@ -6,6 +6,13 @@ pub const SEND_CHUNK_BYTES: usize = 16 * 1024;
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// A native clipboard value observed after the remote owner changed.  The
+/// value is delivered to the session loop only after the same 1 MiB bound
+/// used for incoming paste data has been enforced by the backend.
+pub(crate) struct ClipboardChange {
+    pub(crate) text: String,
+}
+
 struct Partial {
     id: u64,
     total: usize,
@@ -15,11 +22,11 @@ struct Partial {
 }
 
 #[derive(Default)]
-pub(crate) struct Assembly {
+pub struct Assembly {
     partial: Option<Partial>,
 }
 impl Assembly {
-    pub(crate) fn push(
+    pub fn push(
         &mut self,
         id: u64,
         offset: u32,
@@ -80,6 +87,69 @@ impl Assembly {
     }
 }
 
+/// Session-scoped outbound clipboard state. Owns at most one offered value
+/// and one requested transfer; a stale request never consumes the fresh offer.
+#[derive(Default)]
+pub(crate) struct ReverseSender {
+    offer: Option<(u64, String, std::time::Instant)>,
+    outgoing: Option<(u64, Vec<u8>, usize)>,
+}
+impl ReverseSender {
+    pub(crate) fn offer(&mut self, text: String) -> Option<rds_core::DesktopEvent> {
+        if text.len() > MAX_TEXT_BYTES {
+            return None;
+        }
+        let id = rand::random();
+        let bytes = text.len() as u32;
+        self.offer = Some((id, text, std::time::Instant::now()));
+        Some(rds_core::DesktopEvent::ClipboardOffer {
+            id,
+            format: rds_core::ClipboardFormat::TextUtf8,
+            bytes,
+        })
+    }
+    pub(crate) fn request(&mut self, id: u64) -> Result<(), rds_core::ClipboardErrorCode> {
+        let Some((offered_id, _, at)) = &self.offer else {
+            return Err(rds_core::ClipboardErrorCode::Expired);
+        };
+        if *offered_id != id {
+            return Err(rds_core::ClipboardErrorCode::InvalidRequest);
+        }
+        if at.elapsed() >= TRANSFER_TIMEOUT {
+            self.offer = None;
+            return Err(rds_core::ClipboardErrorCode::Expired);
+        }
+        if self.outgoing.is_some() {
+            return Err(rds_core::ClipboardErrorCode::Unavailable);
+        }
+        if let Some((id, text, _)) = self.offer.take() {
+            self.outgoing = Some((id, text.into_bytes(), 0));
+        }
+        Ok(())
+    }
+    pub(crate) fn sending(&self) -> bool {
+        self.outgoing.is_some()
+    }
+    pub(crate) fn invalidate_offer(&mut self) {
+        self.offer = None;
+    }
+    pub(crate) fn next_chunk(&mut self) -> Option<rds_core::DesktopEvent> {
+        let (id, bytes, offset) = self.outgoing.as_mut()?;
+        let end = (*offset + SEND_CHUNK_BYTES).min(bytes.len());
+        let chunk = rds_core::DesktopEvent::ClipboardChunk {
+            id: *id,
+            offset: *offset as u32,
+            total: bytes.len() as u32,
+            data: bytes[*offset..end].to_vec(),
+        };
+        *offset = end;
+        if end == bytes.len() {
+            self.outgoing = None;
+        }
+        Some(chunk)
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "x11"))]
 mod x11;
 #[cfg(all(target_os = "linux", feature = "x11"))]
@@ -92,14 +162,67 @@ impl Worker {
     pub(crate) fn new(_: u32) -> Self {
         Self
     }
+    pub(crate) fn watch(display: u32) -> Self {
+        Self::new(display)
+    }
     pub(crate) async fn publish(&mut self, _: String) -> Result<(), DesktopError> {
         Err(DesktopError::Input("clipboard backend unavailable".into()))
+    }
+    pub(crate) async fn next_change(&mut self) -> Option<ClipboardChange> {
+        std::future::pending().await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reverse_requests_are_consumed_once_and_stale_ids_preserve_the_latest_offer() {
+        use rds_core::{ClipboardErrorCode, DesktopEvent};
+        let mut sender = ReverseSender::default();
+        let DesktopEvent::ClipboardOffer { id, .. } =
+            sender.offer("a".repeat(SEND_CHUNK_BYTES + 3)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            sender.request(id.wrapping_add(1)),
+            Err(ClipboardErrorCode::InvalidRequest)
+        );
+        sender.request(id).unwrap();
+        assert_eq!(sender.request(id), Err(ClipboardErrorCode::Expired));
+        let DesktopEvent::ClipboardChunk {
+            offset,
+            total,
+            data,
+            ..
+        } = sender.next_chunk().unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(offset, 0);
+        assert_eq!(total as usize, SEND_CHUNK_BYTES + 3);
+        assert_eq!(data.len(), SEND_CHUNK_BYTES);
+        let DesktopEvent::ClipboardChunk { offset, data, .. } = sender.next_chunk().unwrap() else {
+            panic!()
+        };
+        assert_eq!(offset as usize, SEND_CHUNK_BYTES);
+        assert_eq!(data, b"aaa");
+        assert!(!sender.sending());
+        let DesktopEvent::ClipboardOffer { id, .. } = sender.offer(String::new()).unwrap() else {
+            panic!()
+        };
+        sender.request(id).unwrap();
+        assert!(
+            matches!(sender.next_chunk(), Some(DesktopEvent::ClipboardChunk { total: 0, offset: 0, data, .. }) if data.is_empty())
+        );
+        assert!(sender.offer("a".repeat(MAX_TEXT_BYTES + 1)).is_none());
+        let DesktopEvent::ClipboardOffer { id, .. } = sender.offer("new".into()).unwrap() else {
+            panic!()
+        };
+        sender.offer.as_mut().unwrap().2 -= std::time::Duration::from_secs(31);
+        assert_eq!(sender.request(id), Err(ClipboardErrorCode::Expired));
+    }
     #[test]
     fn progressing_transfer_survives_original_deadline_but_idle_and_total_are_bounded() {
         let mut assembly = Assembly::default();

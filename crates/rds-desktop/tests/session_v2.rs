@@ -1238,6 +1238,7 @@ async fn relay_mode_publishes_encoded_frames_and_viewer_decodes() {
             relay_encoded: true,
             output_height: None,
             payload_receipts: false,
+            reverse_clipboard: false,
         },
     )
     .await

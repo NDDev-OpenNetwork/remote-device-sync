@@ -28,7 +28,7 @@ reason so "silently on the slow path" is impossible.
 | 1. `ext-image-copy-capture-v1` — privileged compositor protocol, dmabuf + damage, no consent dialog | 1. `ScreenCaptureKit` — display streams, IOSurface → VideoToolbox |
 | 2. DRM/KMS scanout (`drm`+`gbm`) — unattended, headless, login screen; needs CAP_SYS_ADMIN or DRM master | |
 | 3. XDG portal + PipeWire — consented sessions, dmabuf-first, persist tokens for re-use | |
-| 4. X11 `GetImage` — compatibility baseline (implemented) | |
+| 4. X11 RandR + `GetImage`/MIT-SHM — compatibility baseline (implemented) | |
 
 ## Codec order
 
@@ -57,8 +57,9 @@ negotiate only after both endpoints probe them.
   `winit` window (Metal on macOS, supported GPU backends on Linux), uploading
   software-decoded BGRA and presenting the newest pending image. Vulkan Video
   texture decode and Linux console DRM direct presentation remain planned.
-- Audio is currently a trait/wire scaffold. PipeWire on Linux, CoreAudio on
-  macOS and Opus are planned adapters, without a working audio service.
+- Audio has a bounded libopus packet/codec and jitter core. PipeWire/CoreAudio
+  device I/O and agent/viewer playout remain unwritten; no audio service is
+  advertised from that library alone.
 
 ## cfg conventions
 

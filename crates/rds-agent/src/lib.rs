@@ -663,7 +663,7 @@ async fn serve_stream(
             }
         };
     rds_net::wire::prioritize_control(&send, &hello)?;
-    if matches!(&hello,StreamHello::DesktopV3 { output_height,.. } | StreamHello::DesktopV4 { output_height,.. } if *output_height!=0 && !(16..=4320).contains(output_height))
+    if matches!(&hello,StreamHello::DesktopV3 { output_height,.. } | StreamHello::DesktopV4 { output_height,.. } | StreamHello::DesktopV5 { output_height,.. } if *output_height!=0 && !(16..=4320).contains(output_height))
     {
         write_frame(
             &mut send,
@@ -801,7 +801,8 @@ async fn serve_stream(
     let desktop_frame_route = match &hello {
         StreamHello::DesktopV2 { session, .. }
         | StreamHello::DesktopV3 { session, .. }
-        | StreamHello::DesktopV4 { session, .. } => {
+        | StreamHello::DesktopV4 { session, .. }
+        | StreamHello::DesktopV5 { session, .. } => {
             rds_core::UniHello::DesktopFrames { id: *session }
         }
         _ => rds_core::UniHello::Desktop,
@@ -809,11 +810,29 @@ async fn serve_stream(
     #[cfg(feature = "desktop")]
     let output_height = match &hello {
         StreamHello::DesktopV3 { output_height, .. }
-        | StreamHello::DesktopV4 { output_height, .. } => Some(*output_height),
+        | StreamHello::DesktopV4 { output_height, .. }
+        | StreamHello::DesktopV5 { output_height, .. } => Some(*output_height),
         _ => None,
     };
     #[cfg(feature = "desktop")]
-    let payload_receipts = matches!(&hello, StreamHello::DesktopV4 { .. });
+    let payload_receipts = matches!(
+        &hello,
+        StreamHello::DesktopV4 { .. }
+            | StreamHello::DesktopV5 {
+                payload_receipts: true,
+                ..
+            }
+    );
+    #[cfg(feature = "desktop")]
+    let reverse_clipboard = matches!(
+        &hello,
+        StreamHello::DesktopV5 {
+            clipboard: true,
+            ..
+        }
+    );
+    #[cfg(feature = "desktop")]
+    let desktop_v5 = matches!(&hello, StreamHello::DesktopV5 { .. });
     async move {
         match hello {
             StreamHello::Ping { nonce } => {
@@ -839,7 +858,7 @@ async fn serve_stream(
                         .filter(|k| enabled.contains(k) && (*k != ServiceKind::Desktop || desktop))
                         .collect()
                     },
-                    desktop: desktop_caps(desktop),
+                    desktop: desktop_caps(desktop).await,
                 };
                 write_frame(&mut send, &HelloAck::Info(info)).await?;
                 send.finish()?;
@@ -893,20 +912,49 @@ async fn serve_stream(
             StreamHello::Desktop(hello)
             | StreamHello::DesktopV2 { hello, .. }
             | StreamHello::DesktopV3 { hello, .. }
-            | StreamHello::DesktopV4 { hello, .. } => {
+            | StreamHello::DesktopV4 { hello, .. }
+            | StreamHello::DesktopV5 { hello, .. } => {
                 if desktop {
                     #[cfg(feature = "desktop")]
-                    match rds_desktop::capabilities() {
+                    match rds_desktop::capabilities_bounded().await {
                         Ok(caps) => {
-                            write_frame(
-                                &mut send,
-                                &if payload_receipts {
-                                    HelloAck::DesktopV4(caps)
-                                } else {
-                                    HelloAck::Desktop(caps)
-                                },
+                            if !caps
+                                .displays
+                                .iter()
+                                .any(|display| display.index == hello.display)
+                            {
+                                tokio::time::timeout(
+                                    policy.timeouts.hello,
+                                    write_frame(
+                                        &mut send,
+                                        &HelloAck::Error {
+                                            message: "requested display unavailable".into(),
+                                        },
+                                    ),
+                                )
+                                .await??;
+                                send.finish()?;
+                                anyhow::bail!("requested desktop display unavailable");
+                            }
+                            let source_extent = caps
+                                .displays
+                                .iter()
+                                .find(|display| display.index == hello.display)
+                                .map(|display| (display.width, display.height));
+                            tokio::time::timeout(
+                                policy.timeouts.hello,
+                                write_frame(
+                                    &mut send,
+                                    &if desktop_v5 {
+                                        HelloAck::DesktopV5(caps)
+                                    } else if payload_receipts {
+                                        HelloAck::DesktopV4(caps)
+                                    } else {
+                                        HelloAck::Desktop(caps)
+                                    },
+                                ),
                             )
-                            .await?;
+                            .await??;
                             let max_bps = grant.as_ref().and_then(|g| g.max_bps());
                             rds_desktop::serve_desktop_with(
                                 conn,
@@ -920,7 +968,9 @@ async fn serve_stream(
                                         .is_some_and(|g| !g.permits_desktop_control()),
                                     frame_route: Some(desktop_frame_route),
                                     output_height,
+                                    source_extent,
                                     payload_receipts,
+                                    reverse_clipboard,
                                     ..Default::default()
                                 },
                             )
@@ -1084,7 +1134,8 @@ fn service_kind(hello: &StreamHello) -> Option<ServiceKind> {
         StreamHello::Desktop(_)
         | StreamHello::DesktopV2 { .. }
         | StreamHello::DesktopV3 { .. }
-        | StreamHello::DesktopV4 { .. } => ServiceKind::Desktop,
+        | StreamHello::DesktopV4 { .. }
+        | StreamHello::DesktopV5 { .. } => ServiceKind::Desktop,
         StreamHello::Sync
         | StreamHello::SyncTransfer { .. }
         | StreamHello::SyncTransferV2 { .. } => ServiceKind::Sync,
@@ -1104,6 +1155,7 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
         | StreamHello::DesktopV2 { hello: h, .. }
         | StreamHello::DesktopV3 { hello: h, .. }
         | StreamHello::DesktopV4 { hello: h, .. }
+        | StreamHello::DesktopV5 { hello: h, .. }
             if !grant.permits_display(h.display) =>
         {
             return Err(format!("display {} outside grant constraints", h.display));
@@ -1119,10 +1171,10 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
     Ok(())
 }
 
-fn desktop_caps(enabled: bool) -> Option<rds_core::DesktopCaps> {
+async fn desktop_caps(enabled: bool) -> Option<rds_core::DesktopCaps> {
     #[cfg(feature = "desktop")]
     if enabled {
-        return rds_desktop::capabilities().ok();
+        return rds_desktop::capabilities_bounded().await.ok();
     }
     let _ = enabled;
     None

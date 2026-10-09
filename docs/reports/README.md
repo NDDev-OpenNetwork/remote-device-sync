@@ -6,6 +6,8 @@ number comes out of `rds-bench` or a named tool run.
 
 ## Files
 
+- [Clipboard, monitors and concurrent windows](rds-desktop-features-20261009.md)
+  — scoped native/transport acceptance, resource bounds and retained failures.
 - `bench-<yyyymmdd>-<hhmmss>-{a,b}.json` — raw suite output;
   `rds-bench run --scenario all --json …`
 - `bench-<…>.md` — rendered markdown of the same suite

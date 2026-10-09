@@ -37,12 +37,15 @@ pub struct Options {
     /// Use validated frame receipts; requires updated local and remote agents.
     #[arg(long, action=clap::ArgAction::Set, num_args=0..=1, require_equals=true, default_missing_value="true", default_value="false")]
     pub payload_receipts: bool,
+    /// Share UTF-8 text clipboard with the focused remote window (V5).
+    #[arg(long, action=clap::ArgAction::Set, num_args=0..=1, require_equals=true, default_missing_value="true", default_value="true")]
+    pub clipboard: bool,
     /// Video quality profile; preserve source aspect ratio without upscaling.
     #[arg(long, value_enum, default_value = "full-hd")]
     pub resolution: Resolution,
     #[arg(long, default_value = "0")]
     pub display: u32,
-    #[arg(long, default_value = "60")]
+    #[arg(long, default_value = "30")]
     pub max_fps: NonZeroU32,
     /// Decode/statistics without opening a native window.
     #[arg(long, conflicts_with = "report")]
@@ -176,6 +179,13 @@ mod native {
             };
         }
         let (viewer, handle, mut input) = Viewer::new(options.display)?;
+        let device = match &source {
+            Source::Managed { peer, .. } => rds_net::parse_target(peer)
+                .map(|address| format!("Device {}", &address.id.to_string()[..8]))
+                .unwrap_or_else(|_| peer.chars().take(80).collect()),
+            Source::Direct { target, .. } => format!("Device {}", &target.id.to_string()[..8]),
+        };
+        handle.label(format!("RDS · {device} · Display {}", options.display));
         if let Some(path) = &options.diagnostic_visual_probe {
             use std::io::Read;
             let file = std::fs::File::from(rustix::fs::open(
@@ -437,23 +447,15 @@ mod native {
     ) -> anyhow::Result<bool> {
         let started = attempt.started;
         view.stage("opening desktop");
-        let (mut channel, mut events) = if options.payload_receipts {
-            client
-                .desktop_profile_separated_receipts(
-                    Some(session),
-                    hello(options),
-                    options.resolution.height(),
-                )
-                .await?
-        } else {
-            client
-                .desktop_profile_separated(
-                    Some(session),
-                    hello(options),
-                    options.resolution.height(),
-                )
-                .await?
-        };
+        let (mut channel, mut events) = client
+            .desktop_features(
+                Some(session),
+                hello(options),
+                options.resolution.height(),
+                options.payload_receipts,
+                options.clipboard,
+            )
+            .await?;
         tracing::info!(
             payload_receipts = options.payload_receipts,
             "native desktop delivery receipt mode"
@@ -521,6 +523,11 @@ mod native {
                         control_progress.clipboard_ready(id, bytes);
                         view.clipboard_ack(id, bytes);
                     }
+                    Some(
+                        event @ (rds_core::DesktopEvent::ClipboardOffer { .. }
+                        | rds_core::DesktopEvent::ClipboardChunk { .. }
+                        | rds_core::DesktopEvent::ClipboardError { .. }),
+                    ) => view.clipboard_event(event),
                     None => {
                         tracing::warn!("managed desktop event channel ended");
                         return Ok(false);
@@ -581,6 +588,7 @@ mod native {
                 session: Some(rand_id()),
                 output_height: Some(options.resolution.height()),
                 payload_receipts: options.payload_receipts,
+                reverse_clipboard: options.clipboard && !options.headless,
                 ..Default::default()
             },
         )
@@ -624,6 +632,7 @@ mod native {
                     },
                     Some(rds_core::DesktopEvent::InputAck { seq,.. }) => view.input_ack(seq),
                     Some(rds_core::DesktopEvent::ClipboardReady { id, bytes }) => {control_progress.clipboard_ready(id, bytes);view.clipboard_ack(id, bytes);},
+                    Some(event @ (rds_core::DesktopEvent::ClipboardOffer { .. } | rds_core::DesktopEvent::ClipboardChunk { .. } | rds_core::DesktopEvent::ClipboardError { .. })) => view.clipboard_event(event),
                     None => break Ok(false),
                 },
                 frame = session.frames.recv() => match frame {
@@ -658,6 +667,7 @@ mod native {
                         session: Some(rand::random()),
                         output_height: Some(options.resolution.height()),
                         payload_receipts: options.payload_receipts,
+                        reverse_clipboard: options.clipboard && !options.headless,
                         ..Default::default()
                     },
                 )

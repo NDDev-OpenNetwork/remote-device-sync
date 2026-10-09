@@ -177,6 +177,15 @@ pub enum Command {
         hello: Box<crate::DesktopHello>,
         output_height: u32,
     },
+    /// Explicit V5 clipboard session with separated media/control events.
+    /// Older managers refuse this additive command. Legacy APIs stay V2–V4.
+    DesktopFeatures {
+        session: Option<SessionId>,
+        hello: Box<crate::DesktopHello>,
+        output_height: u32,
+        payload_receipts: bool,
+        clipboard: bool,
+    },
 }
 
 /// Never Debug: paths may contain private information.
@@ -452,6 +461,16 @@ mod tests {
                 12,
             ),
             (Command::DesktopEvents { route: id }, 13),
+            (
+                Command::DesktopFeatures {
+                    session: Some(id),
+                    hello: hello(),
+                    output_height: 1080,
+                    payload_receipts: true,
+                    clipboard: true,
+                },
+                16,
+            ),
             (
                 Command::DesktopSeparatedReceipts {
                     session: Some(id),
