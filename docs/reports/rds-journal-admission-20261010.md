@@ -48,8 +48,15 @@ network result or hardware-independent latency guarantee.
 
 PR147's first dependency job failed before running cargo-deny: Docker Hub refused
 the action's image pull with HTTP 429, including a separately retained retry.
-The shared workflow is being repaired separately to execute the same pinned
-tool natively. Do not describe those attempts as successful dependency scans.
+The shared workflow correction merged as
+`ci-workflows@f81098b50c5b8fea9dd270f365125deafcdaca80` in
+[PR163](https://github.com/NDDev-OpenNetwork/ci-workflows/pull/163).
+Its native Rust dependency fixture passed all three tools, and the same pinned
+cargo-deny 0.20.2 passed this RDS tree with all features and the existing policy.
+RDS's three reusable references move together; the consumed Rust CI and CodeQL
+workflow contents are unchanged. The dependency job retains all categories,
+permissions and its check name. The two original container attempts remain
+failures, not successful dependency scans.
 
 Physical/native installed acceptance, quotas and disk-space reservation,
 destination-edit preconditions, fair collection, the large-file interruption

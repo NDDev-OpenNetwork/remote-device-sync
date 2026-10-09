@@ -28,7 +28,7 @@ jobs:
       actions: read           # the callee reads this run for SARIF upload bookkeeping
       contents: read          # check out the tree being analysed
       security-events: write  # publish CodeQL results to code scanning
-    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/public-codeql.yml@d92026cf31a10a0eeaa532e1f323c7cfdfbfac5b # 0.1.29
+    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/public-codeql.yml@f81098b50c5b8fea9dd270f365125deafcdaca80 # commit:f81098b50c5b8fea9dd270f365125deafcdaca80
     with:
       languages: '["rust", "actions"]'
       runner: ubuntu-latest
