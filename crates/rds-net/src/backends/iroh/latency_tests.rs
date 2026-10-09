@@ -181,7 +181,7 @@ async fn endpoint_with_selector(link: Link, selector: Arc<dyn PathSelector>) -> 
         .mtu_discovery_config(None)
         .prefer_same_path_acks(true)
         .enable_segmentation_offload(false);
-    iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .clear_ip_transports()
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .unwrap()
@@ -192,7 +192,15 @@ async fn endpoint_with_selector(link: Link, selector: Arc<dyn PathSelector>) -> 
         .alpns(vec![rds_core::ALPN.to_vec()])
         .bind()
         .await
-        .unwrap()
+        .unwrap();
+    let sockets = endpoint.bound_sockets();
+    assert_eq!(sockets.len(), 1);
+    assert!(sockets[0].ip().is_loopback() && sockets[0].port() != 0);
+    // Loopback is normally excluded from peer address publication. Both
+    // directions of this isolated fixture must advertise their actual socket;
+    // seeding only the dialer's target does not configure the accepting peer.
+    endpoint.add_external_addr(sockets[0]).await;
+    endpoint
 }
 
 fn loopback_target(endpoint: &iroh::Endpoint, custom: CustomAddr) -> iroh::EndpointAddr {

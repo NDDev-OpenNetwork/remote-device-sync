@@ -52,6 +52,13 @@ link is selected, UDP is validated and pending stream bytes are dropped before
 recovery begins. All three real actor fixtures and strict network Clippy pass
 locally; no production transport policy or recovery deadline changed.
 
+A subsequent macOS setup failure showed that the accepting endpoint also
+needs the reverse UDP address. Both isolated endpoints now explicitly publish
+their bound loopback socket before connecting; loopback is normally filtered
+from peer address publication. The fixture still verifies validated UDP and a
+selected custom link before injecting loss. Local actor tests and strict Clippy
+pass with this symmetric setup.
+
 PR #140 also closes the ordinary Cmd+C/Cmd+X → app-switch race. One five-second
 handoff is armed while focused and fenced by the native pasteboard change count.
 A newer copy drains an older snapshot without publishing it. Six viewer
