@@ -714,6 +714,12 @@ async fn view_only_and_failed_injection_never_ack_but_keep_control_alive() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn impaired_link_latency_gate() {
     let _case = SESSION_CASE.lock().await;
+    // Opt-in diagnostics expose the existing application timing probes without
+    // changing the workload, cohort, percentile calculation or latency budget.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     // 60 fps of ~1 KB frames ≈ one datagram per frame — enough samples
     // to make percentiles meaningful without saturating the lossy link.
     let mut h = harness(60, 1024, 60, Some(Impairment::lossy()), true).await;
