@@ -41,9 +41,9 @@ can neither read nor publish clipboard content.
 The native macOS viewer publishes a completed reverse transfer through
 `NSPasteboard` on the AppKit main thread. Its local-to-remote Cmd+V handling is
 still explicit. Cmd+C/Cmd+X translate to remote Ctrl+C/Ctrl+X and retain Shift
-for terminal Ctrl+Shift+C. macOS clipboard qualification and Linux
-Wayland portal clipboard integration remain platform gates; a build must not
-claim those paths because X11 and AppKit passed.
+for terminal Ctrl+Shift+C. AppKit's isolated named-pasteboard probe qualifies
+native publication; ordinary installed cross-device use remains a separate
+observation. Linux Wayland portal clipboard remains a platform gate.
 
 `DesktopV5` is additive and has no silent downgrade. A caller that needs the
 legacy peer contract sets `SessionOpts::reverse_clipboard` to `false`; the

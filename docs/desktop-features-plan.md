@@ -2,8 +2,10 @@
 
 Scope: existing Linux X11 serving and macOS native viewing. Finish bidirectional
 UTF-8 text clipboard, simultaneous monitors, and simultaneous device windows.
-Code, native fixtures and installed observations are separate facts. PR #139 is
-a draft until these concrete acceptance conditions pass.
+Code, native fixtures and installed observations are separate facts.
+[PR #139](https://github.com/NDDev-OpenNetwork/remote-device-sync/pull/139) follows
+these acceptance conditions; [retained qualification](reports/rds-desktop-features-20261009.md)
+records native proof and remaining installed observations.
 
 1. Preserve V2/V3/V4 wire tags. Negotiate reverse clipboard via additive V5;
    an additive local IPC request must select it. Old local API calls stay old.
@@ -24,10 +26,11 @@ a draft until these concrete acceptance conditions pass.
 4. Route reverse clipboard to the main-thread viewer state machine. Request
    only while its window is focused; publish only a requested matching transfer,
    with a pasteboard change-count fence. Background devices must not overwrite
-   the Mac clipboard. Reset transfer state at focus loss/reconnect/close; do not
+   the Mac clipboard. Drop unrequested offers at focus loss; retain an already
+   requested transfer under the pasteboard fence. Reset at reconnect/close; do not
    log payloads. Translate Cmd+C/Command cut to remote Control chords, matching
    the existing explicit Command paste behavior. Exercise real AppKit text
-   publication using a temporary test value and restore the native clipboard.
+   publication using an isolated named pasteboard, preserving the user's general clipboard.
 5. Preserve legacy X-screen numbering and add stable monitor identifiers, with
    one shared catalog used by capture/input/capabilities. Use RandR 1.5 monitor
    names/outputs, a bounded topology subscription, root offsets and checked
