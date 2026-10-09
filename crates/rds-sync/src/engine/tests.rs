@@ -475,7 +475,6 @@ async fn flag_watcher_wait(flag: &Arc<AtomicBool>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn manifest_scan_honors_cancel_flag() {
     let dir = Scratch::new();
-    std::fs::create_dir(&dir.0).unwrap();
     let path = dir.0.join("scan.bin");
     std::fs::write(&path, vec![0x5Au8; 1_000_000]).unwrap();
 
