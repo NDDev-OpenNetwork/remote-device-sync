@@ -77,7 +77,7 @@ w3-path-snapshot)
     note "gate w3-path-snapshot — complete initial path observation"
     green_bars
     cargo test --locked -p rds-net --features transport-noq --lib || fail "path observer and transport library"
-    cargo test --locked --target-dir target --manifest-path vendor/noq-proto/Cargo.toml \
+    cargo test --locked --target-dir "${CARGO_TARGET_DIR:-target}" --manifest-path vendor/noq-proto/Cargo.toml \
         --lib || fail "protocol engine and snapshot eligibility"
     cargo run --locked --release -q -p rds-bench -- run --scenario handshake \
         --iterations 100 --json "$REPORTS/bench-w3-path-snapshot.json" \
