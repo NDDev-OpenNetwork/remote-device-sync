@@ -106,7 +106,9 @@ impl AudioFormat {
 /// One encoded audio packet ready for a future wire stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioPacket {
-    /// Monotonic packet sequence within one audio session.
+    /// Monotonic packet sequence within one audio session. `u64::MAX` is
+    /// reserved as the exhausted playout position; start a new session instead
+    /// of wrapping the sequence and accepting old audio again.
     pub seq: u64,
     /// Capture timestamp in microseconds on the source's monotonic clock.
     pub timestamp_us: u64,
@@ -140,6 +142,9 @@ impl AudioPacket {
     /// mono frame for a stereo output, so the TOC channel bit need not match.
     fn validate(&self, format: AudioFormat, frame_samples: usize) -> Result<(), AudioError> {
         format.validate()?;
+        if self.seq == u64::MAX {
+            return Err(AudioError::InvalidPacket("audio sequence exhausted"));
+        }
         let valid_duration = [
             FrameDuration::Ms2_5,
             FrameDuration::Ms5,
@@ -233,6 +238,10 @@ impl OpusEncoder {
         if pcm.len() != expected {
             return Err(AudioError::InvalidFrame("PCM frame has the wrong length"));
         }
+        let next_seq = self
+            .next_seq
+            .checked_add(1)
+            .ok_or(AudioError::InvalidFrame("audio sequence exhausted"))?;
         let mut data = vec![0u8; MAX_OPUS_PACKET_BYTES];
         let len = self
             .inner
@@ -246,7 +255,7 @@ impl OpusEncoder {
             data: Bytes::from(data),
         };
         packet.validate(self.format, self.frame_samples)?;
-        self.next_seq = self.next_seq.wrapping_add(1);
+        self.next_seq = next_seq;
         Ok(packet)
     }
 }
@@ -312,18 +321,31 @@ pub enum PushOutcome {
     Accepted,
     Duplicate,
     Late,
+    /// The oldest packet, including the incoming packet, was discarded.
     DroppedOverflow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopOutcome {
     Packet,
-    Gap { sequence: u64 },
+    /// Exactly one missing frame interval, suitable for one PLC decode.
+    Gap {
+        sequence: u64,
+    },
+    /// A hole larger than the entire buffer's capacity. The caller must reset
+    /// its decoder/playout clock before the next packet, not conceal this
+    /// unbounded interval one frame at a time. `to` is the next retained packet.
+    Discontinuity {
+        from: u64,
+        to: u64,
+    },
 }
 
 /// Sequence-aware bounded reorder buffer. It never waits on a timer and never
-/// allocates beyond its configured packet count; the playout owner decides
-/// when a Gap should become decoder PLC.
+/// retains more than its configured packet count. `target_delay` is the number
+/// of queued successor packets tolerated before declaring missing audio, not
+/// a timer or startup prebuffer. The playout owner supplies timing and decides
+/// when to invoke PLC; complete silence alone does not make this buffer tick.
 pub struct JitterBuffer {
     format: AudioFormat,
     frame_samples: usize,
@@ -366,26 +388,36 @@ impl JitterBuffer {
     pub fn push(&mut self, packet: AudioPacket) -> Result<PushOutcome, AudioError> {
         packet.validate(self.format, self.frame_samples)?;
         if self.next_sequence.is_some_and(|next| packet.seq < next) {
-            self.late += 1;
+            self.late = self.late.saturating_add(1);
             return Ok(PushOutcome::Late);
         }
         if self.packets.contains_key(&packet.seq) {
-            self.duplicates += 1;
+            self.duplicates = self.duplicates.saturating_add(1);
             return Ok(PushOutcome::Duplicate);
         }
         let mut outcome = PushOutcome::Accepted;
         if self.packets.len() == self.capacity {
+            self.overflow = self.overflow.saturating_add(1);
+            // Compare before evicting: an old out-of-order arrival must not
+            // displace newer audio already inside the bounded window.
+            if self
+                .packets
+                .first_key_value()
+                .is_some_and(|(oldest, _)| packet.seq < *oldest)
+            {
+                return Ok(PushOutcome::DroppedOverflow);
+            }
             self.packets.pop_first();
-            self.overflow += 1;
             outcome = PushOutcome::DroppedOverflow;
         }
         self.packets.insert(packet.seq, packet);
-        self.accepted += 1;
+        self.accepted = self.accepted.saturating_add(1);
         Ok(outcome)
     }
 
-    /// Pop the next packet or report a sequence gap once the target delay is
-    /// exceeded. The caller should invoke decoder PLC for a gap.
+    /// Pop a packet, one PLC interval, or an explicit large discontinuity once
+    /// the queued-successor threshold is exceeded. Work is bounded by retained
+    /// packets, even if the peer sends an arbitrarily distant sequence number.
     pub fn pop(&mut self) -> Option<(PopOutcome, Option<AudioPacket>)> {
         let next = match self.next_sequence {
             Some(next) => next,
@@ -396,13 +428,27 @@ impl JitterBuffer {
             }
         };
         if let Some(packet) = self.packets.remove(&next) {
-            self.next_sequence = Some(next.wrapping_add(1));
+            // Admission reserves MAX, so incrementing an admitted packet is safe.
+            self.next_sequence = Some(next + 1);
             return Some((PopOutcome::Packet, Some(packet)));
         }
         if self.packets.len() > self.target_delay {
             let available = *self.packets.first_key_value()?.0;
-            self.next_sequence = Some(available);
-            self.gaps += available.wrapping_sub(next);
+            // push/start_at preserve this floor for every retained packet.
+            let missing = available - next;
+            if missing > self.capacity as u64 {
+                self.next_sequence = Some(available);
+                self.gaps = self.gaps.saturating_add(missing);
+                return Some((
+                    PopOutcome::Discontinuity {
+                        from: next,
+                        to: available,
+                    },
+                    None,
+                ));
+            }
+            self.next_sequence = Some(next + 1);
+            self.gaps = self.gaps.saturating_add(1);
             return Some((PopOutcome::Gap { sequence: next }, None));
         }
         None
@@ -415,6 +461,14 @@ impl JitterBuffer {
         if self.next_sequence.is_some() {
             return Err(AudioError::InvalidFrame("jitter playout already started"));
         }
+        if sequence == u64::MAX {
+            return Err(AudioError::InvalidFrame("audio sequence exhausted"));
+        }
+        let before = self.packets.len();
+        self.packets.retain(|seq, _| *seq >= sequence);
+        self.late = self
+            .late
+            .saturating_add((before - self.packets.len()) as u64);
         self.next_sequence = Some(sequence);
         Ok(())
     }
@@ -442,6 +496,21 @@ mod tests {
             timestamp_us: seq * 20_000,
             samples: 960,
             data: Bytes::from_static(&[0xf8]),
+        }
+    }
+
+    #[test]
+    fn encoder_exhaustion_is_refused_before_native_encoding() {
+        let mut encoder = OpusEncoder::new(AudioFormat::MONO_48_KHZ).unwrap();
+        encoder.next_seq = u64::MAX - 1;
+        let pcm = vec![0.0; encoder.frame_samples()];
+        assert_eq!(encoder.encode(&pcm, 0).unwrap().seq, u64::MAX - 1);
+        for _ in 0..2 {
+            assert_eq!(
+                encoder.encode(&pcm, 0),
+                Err(AudioError::InvalidFrame("audio sequence exhausted"))
+            );
+            assert_eq!(encoder.next_seq, u64::MAX);
         }
     }
 
