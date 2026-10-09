@@ -1,6 +1,7 @@
-# Destination-bound receive journals — implementation and qualification plan
+# Destination-bound receive journals — 2026-10-10
 
-Status: confirmed baseline defect; implementation and qualification pending.
+Status: implemented; all 121 sync test executions passed at `29bcfd6`.
+The registered full checkpoint and final cross-platform qualification are pending.
 Milestone: W1.10/W8.2, preserving W4 signed path-scope boundaries.
 
 ## Source finding

@@ -68,6 +68,12 @@ initial observer-registration race, not a reason to raise its timeout.
 Integrate and qualify the combined source before advancing installed artifacts;
 the native acceptance rows below remain open.
 
+The later main-branch CI run37999738254 retained a separate control RTT p95
+failure: 445 ms across 601 probes versus the unchanged 400 ms limit. The earlier
+cohort enlargement did not repair runtime latency. Diagnose this tail with the
+actual application/transport timing before declaring the combined native rollout
+qualified; keep the failing result even when other runs pass.
+
 1. Re-read current public/estate heads, open PRs and operation receipts. An
    expired plan or an earlier successful pin is not authorization to replay a
    stale transaction. Preserve other worktrees and unpublished commits.
