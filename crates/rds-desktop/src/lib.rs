@@ -164,3 +164,21 @@ pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
     #[cfg(not(all(target_os = "linux", feature = "x11")))]
     Err(DesktopError::Capture("no capture backend built".into()))
 }
+
+/// Inventory reads run outside the async transport executor. A stalled native
+/// display keeps its permit until the call returns, even if the caller times
+/// out; subsequent probes cannot create unbounded native workers.
+pub async fn capabilities_bounded() -> Result<DesktopCaps, DesktopError> {
+    static PROBES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let permit = PROBES
+        .try_acquire()
+        .map_err(|_| DesktopError::Capture("display inventory busy".into()))?;
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        capabilities()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .map_err(|_| DesktopError::Capture("display inventory timed out".into()))?
+        .map_err(|_| DesktopError::Capture("display inventory worker ended".into()))?
+}

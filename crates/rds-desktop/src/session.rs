@@ -15,7 +15,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use rds_core::{DesktopControl, DesktopEvent, DesktopHello, FrameHeader};
+use rds_core::{ClipboardErrorCode, DesktopControl, DesktopEvent, DesktopHello, FrameHeader};
 use rds_net::{Connection, PathStats, RecvStream, SendStream};
 use rds_net::{read_frame, write_frame};
 use std::borrow::Borrow;
@@ -331,12 +331,18 @@ pub struct SessionConfig {
     /// Explicit per-session height overrides the deployment fallback. Zero
     /// keeps native geometry; None uses RDS_DESKTOP_OUTPUT_HEIGHT if supplied.
     pub output_height: Option<u32>,
+    /// Native extent advertised at admission. Refuse a resize racing the
+    /// initial capture probe rather than using stale viewer coordinates.
+    pub source_extent: Option<(u32, u32)>,
     /// Hard ceiling for encoder bitrate — the grant's `max_bps`
     /// constraint lands here when the connection is grant-authorized.
     pub bitrate_ceiling: Option<u64>,
     /// Deny input even when a backend is available. Encoder steering and
     /// heartbeats remain usable. The agent derives this from verified grants.
     pub view_only: bool,
+    /// The V5 greeting explicitly opted into native→viewer text clipboard
+    /// offers. Legacy sessions keep only the original viewer→native paste.
+    pub reverse_clipboard: bool,
     /// Input backend override. `None` lazily probes on the input worker.
     /// Synthetic sessions should supply a synthetic sink, never the host's.
     pub input_sink: Option<Box<dyn crate::InputSink>>,
@@ -708,7 +714,7 @@ pub async fn serve_desktop_with(
             };
             let mut source = match producer.take() {
                 Some(p) => p,
-                None => platform_producer(hello.display, frame_interval, config.output_height),
+                None => platform_producer(hello.display, frame_interval, config.output_height, config.source_extent),
             };
             let mut seq = 0u64;
             let mut generation = 0;
@@ -1229,198 +1235,280 @@ pub async fn serve_desktop_with(
     // peer goes away. `send` also carries DesktopEvent replies.
     let send_clock = clock.clone();
     let session_display = hello.display;
+    // `read_frame` owns a partially consumed prefix/body and is intentionally
+    // not cancellation-safe.  Keep it in one reader task while the session
+    // loop also waits for native clipboard changes; canceling a `select!`
+    // branch must never discard a half-read control frame.
     let control = async {
+        let (control_tx, mut control_rx) =
+            mpsc::channel::<Result<DesktopControl, std::io::Error>>(16);
+        let mut reader = JoinSet::new();
+        reader.spawn(async move {
+            loop {
+                let result = read_frame::<_, DesktopControl>(&mut recv).await;
+                let done = result.is_err();
+                if control_tx.send(result).await.is_err() || done {
+                    break;
+                }
+            }
+        });
         let mut assembly = crate::clipboard::Assembly::default();
-        let mut clipboard = None;
+        let mut watching = config.reverse_clipboard && !config.view_only;
+        let mut clipboard = watching.then(|| crate::clipboard::Worker::watch(session_display));
+        let mut reverse = crate::clipboard::ReverseSender::default();
         loop {
             let read_started = Instant::now();
-            match read_frame::<_, DesktopControl>(&mut recv).await {
-                Ok(DesktopControl::Input(ev)) => {
-                    if config.view_only {
-                        tracing::debug!("view-only input dropped");
-                        continue;
-                    }
-                    // The grant/display constraint was scoped to the
-                    // hello's display — an event targeting another
-                    // display is out of scope. Skip it (and don't ack:
-                    // an ack reports the event handled).
-                    if ev.display_id != session_display {
-                        tracing::warn!(
-                            event_display = ev.display_id,
-                            session_display,
-                            "input event for out-of-scope display dropped"
-                        );
-                        continue;
-                    }
-                    let mut worker = input.take().unwrap_or_else(|| {
-                        super::input::worker::InputWorker::new(input_sink.take())
-                    });
-                    let seq = ev.seq;
-                    let received_ms = send_clock.now_ms();
-                    let input_started = Instant::now();
-                    match tokio::time::timeout(FRAME_SEND_TIMEOUT, worker.inject(ev)).await {
-                        Ok(Ok(())) => input = Some(worker),
-                        Ok(Err(e)) => {
-                            input = Some(worker);
-                            tracing::warn!("input injection failed: {e}");
-                            continue;
-                        }
-                        Err(_) => {
-                            // The platform input call never returned (a
-                            // wedged X server). Drop the worker — its
-                            // running syscall may still finish, per its
-                            // contract — so the next event probes a fresh
-                            // sink, and count this event unacked rather
-                            // than stalling the whole control plane.
-                            tracing::warn!("input injection timed out; dropping wedged worker");
-                            continue;
-                        }
-                    }
-                    controls.input_refresh_until_ms.store(
-                        send_clock.now_ms().saturating_add(INPUT_REFRESH_BURST_MS),
-                        Ordering::Release,
-                    );
-                    controls
-                        .input_refresh_pending
-                        .store(true, Ordering::Release);
-                    delivery_feedback
-                        .inputs_handled
-                        .fetch_add(1, Ordering::Relaxed);
-                    delivery_feedback.max_input_inject_ms.fetch_max(
-                        input_started.elapsed().as_millis() as u64,
-                        Ordering::Relaxed,
-                    );
-                    tracing::trace!(target:"rds_desktop::input_timing", input_seq=seq,
-                        received_ms, handled_ms=send_clock.now_ms(), inject_ms=input_started.elapsed().as_millis(),
-                        "desktop input injected");
-                    if acks {
-                        let ack_started = Instant::now();
-                        let ack = DesktopEvent::InputAck {
-                            seq,
-                            handled_ts_ms: send_clock.now_ms(),
-                        };
-                        if write_control_reply(&mut send.0, &ack).await.is_err() {
-                            break;
-                        }
-                        tracing::trace!(target:"rds_desktop::input_timing", input_seq=seq,
-                            ack_write_ms=ack_started.elapsed().as_millis(), "desktop input acknowledgement written");
+            enum ControlWork {
+                Control(Result<DesktopControl, std::io::Error>),
+                Clipboard(Option<crate::clipboard::ClipboardChange>),
+                SendChunk,
+            }
+            let work = tokio::select! {
+                result = control_rx.recv() => ControlWork::Control(result.unwrap_or_else(|| Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "control reader ended")))),
+                change = async { match &mut clipboard { Some(worker) => worker.next_change().await, None => std::future::pending().await } }, if watching => ControlWork::Clipboard(change),
+                _ = tokio::task::yield_now(), if reverse.sending() => ControlWork::SendChunk,
+            };
+            match work {
+                ControlWork::Clipboard(Some(change)) => {
+                    if let Some(event) = reverse.offer(change.text)
+                        && write_control_reply(&mut send.0, &event).await.is_err()
+                    {
+                        break;
                     }
                 }
-                Ok(DesktopControl::RequestIdr) => match media_repair.request() {
-                    crate::media_repair::Request::Accepted => {
-                        tracing::info!(
-                            media_repair_generation = media_repair.generation(),
-                            "desktop explicit media repair accepted"
+                ControlWork::Clipboard(None) => {
+                    watching = false;
+                    clipboard = None;
+                    reverse.invalidate_offer();
+                    tracing::warn!("clipboard watcher unavailable; video and input remain active");
+                }
+                ControlWork::SendChunk => {
+                    if let Some(event) = reverse.next_chunk()
+                        && write_control_reply(&mut send.0, &event).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                ControlWork::Control(result) => match result {
+                    Ok(DesktopControl::Input(ev)) => {
+                        if config.view_only {
+                            tracing::debug!("view-only input dropped");
+                            continue;
+                        }
+                        // The grant/display constraint was scoped to the
+                        // hello's display — an event targeting another
+                        // display is out of scope. Skip it (and don't ack:
+                        // an ack reports the event handled).
+                        if ev.display_id != session_display {
+                            tracing::warn!(
+                                event_display = ev.display_id,
+                                session_display,
+                                "input event for out-of-scope display dropped"
+                            );
+                            continue;
+                        }
+                        let mut worker = input.take().unwrap_or_else(|| {
+                            super::input::worker::InputWorker::new(input_sink.take())
+                        });
+                        let seq = ev.seq;
+                        let received_ms = send_clock.now_ms();
+                        let input_started = Instant::now();
+                        match tokio::time::timeout(FRAME_SEND_TIMEOUT, worker.inject(ev)).await {
+                            Ok(Ok(())) => input = Some(worker),
+                            Ok(Err(e)) => {
+                                input = Some(worker);
+                                tracing::warn!("input injection failed: {e}");
+                                continue;
+                            }
+                            Err(_) => {
+                                // The platform input call never returned (a
+                                // wedged X server). Drop the worker — its
+                                // running syscall may still finish, per its
+                                // contract — so the next event probes a fresh
+                                // sink, and count this event unacked rather
+                                // than stalling the whole control plane.
+                                tracing::warn!("input injection timed out; dropping wedged worker");
+                                continue;
+                            }
+                        }
+                        controls.input_refresh_until_ms.store(
+                            send_clock.now_ms().saturating_add(INPUT_REFRESH_BURST_MS),
+                            Ordering::Release,
                         );
+                        controls
+                            .input_refresh_pending
+                            .store(true, Ordering::Release);
+                        delivery_feedback
+                            .inputs_handled
+                            .fetch_add(1, Ordering::Relaxed);
+                        delivery_feedback.max_input_inject_ms.fetch_max(
+                            input_started.elapsed().as_millis() as u64,
+                            Ordering::Relaxed,
+                        );
+                        tracing::trace!(target:"rds_desktop::input_timing", input_seq=seq,
+                        received_ms, handled_ms=send_clock.now_ms(), inject_ms=input_started.elapsed().as_millis(),
+                        "desktop input injected");
+                        if acks {
+                            let ack_started = Instant::now();
+                            let ack = DesktopEvent::InputAck {
+                                seq,
+                                handled_ts_ms: send_clock.now_ms(),
+                            };
+                            if write_control_reply(&mut send.0, &ack).await.is_err() {
+                                break;
+                            }
+                            tracing::trace!(target:"rds_desktop::input_timing", input_seq=seq,
+                            ack_write_ms=ack_started.elapsed().as_millis(), "desktop input acknowledgement written");
+                        }
                     }
-                    crate::media_repair::Request::Coalesced => {
-                        tracing::debug!("desktop repair already delivering an independent picture");
+                    Ok(DesktopControl::RequestIdr) => match media_repair.request() {
+                        crate::media_repair::Request::Accepted => {
+                            tracing::info!(
+                                media_repair_generation = media_repair.generation(),
+                                "desktop explicit media repair accepted"
+                            );
+                        }
+                        crate::media_repair::Request::Coalesced => {
+                            tracing::debug!(
+                                "desktop repair already delivering an independent picture"
+                            );
+                        }
+                        crate::media_repair::Request::Exhausted => {
+                            tracing::warn!("desktop repair generation exhausted");
+                            break;
+                        }
+                    },
+                    Ok(DesktopControl::SetBitrate(bps)) => {
+                        let bps = u64::from(bps.max(50_000)).min(ceiling);
+                        controls.requested.store(bps, Ordering::Relaxed);
                     }
-                    crate::media_repair::Request::Exhausted => {
-                        tracing::warn!("desktop repair generation exhausted");
+                    Ok(DesktopControl::Heartbeat { seq, ts_ms }) => {
+                        tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq,
+                        read_wait_us=read_started.elapsed().as_micros(), "desktop heartbeat control read");
+                        let reply_started = Instant::now();
+                        let written = write_control_reply(
+                            &mut send.0,
+                            &DesktopEvent::Heartbeat { seq, ts_ms },
+                        )
+                        .await
+                        .is_ok();
+                        tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq, written,
+                        write_us=reply_started.elapsed().as_micros(), "desktop heartbeat reply write completed");
+                        if !written {
+                            break;
+                        }
+                    }
+                    Ok(DesktopControl::FrameReceived {
+                        seq,
+                        digest,
+                        obsolete,
+                    }) => {
+                        let Some(receipts) = &payload_receipts else {
+                            tracing::warn!(
+                                frame_seq = seq,
+                                "payload receipt on a legacy desktop session refused"
+                            );
+                            break;
+                        };
+                        let accepted = receipts.confirm(seq, &digest, obsolete);
+                        tracing::trace!(target:"rds_desktop::frame_timing",frame_seq=seq,accepted,obsolete,
+                        "desktop validated payload receipt observed");
+                    }
+                    Ok(DesktopControl::ClipboardRequest { id, format: _ }) => {
+                        // Reverse clipboard is an explicit capability AND a
+                        // control scope; view-only cannot exfiltrate a seat's
+                        // clipboard even when it requests the V5 greeting.
+                        if !config.reverse_clipboard || config.view_only {
+                            break;
+                        }
+                        let result = if watching {
+                            reverse.request(id)
+                        } else {
+                            Err(ClipboardErrorCode::Unavailable)
+                        };
+                        if let Err(code) = result
+                            && write_control_reply(
+                                &mut send.0,
+                                &DesktopEvent::ClipboardError { id, code },
+                            )
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(DesktopControl::ClipboardChunk {
+                        id,
+                        offset,
+                        total,
+                        data,
+                    }) => {
+                        if config.view_only {
+                            tracing::warn!("view-only clipboard refused");
+                            break;
+                        }
+                        let text = match assembly.push(id, offset, total, data) {
+                            Ok(text) => text,
+                            Err(error) => {
+                                tracing::warn!(%error,"clipboard transfer refused");
+                                break;
+                            }
+                        };
+                        if let Some(text) = text {
+                            let publish_started = Instant::now();
+                            tracing::info!(
+                                transfer_id = id,
+                                bytes = total,
+                                "desktop clipboard publication started"
+                            );
+                            match tokio::time::timeout(
+                                Duration::from_secs(2),
+                                clipboard
+                                    .get_or_insert_with(|| {
+                                        crate::clipboard::Worker::new(session_display)
+                                    })
+                                    .publish(text),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    tracing::info!(
+                                        transfer_id = id,
+                                        bytes = total,
+                                        publish_ms = publish_started.elapsed().as_millis(),
+                                        "desktop clipboard publication completed"
+                                    );
+                                    let reply_started = Instant::now();
+                                    if write_control_reply(
+                                        &mut send.0,
+                                        &DesktopEvent::ClipboardReady { id, bytes: total },
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
+                                    }
+                                    tracing::info!(
+                                        transfer_id = id,
+                                        bytes = total,
+                                        reply_ms = reply_started.elapsed().as_millis(),
+                                        "desktop clipboard ready reply written"
+                                    );
+                                }
+                                result => {
+                                    tracing::warn!(error=?result,"clipboard publication failed; ending control before paste input");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error,"desktop control ended");
+                        tracing::debug!(target:"rds_desktop::control_timing", error_kind=?error.kind(),
+                        read_wait_us=read_started.elapsed().as_micros(), "desktop control reader ended");
                         break;
                     }
                 },
-                Ok(DesktopControl::SetBitrate(bps)) => {
-                    let bps = u64::from(bps.max(50_000)).min(ceiling);
-                    controls.requested.store(bps, Ordering::Relaxed);
-                }
-                Ok(DesktopControl::Heartbeat { seq, ts_ms }) => {
-                    tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq,
-                        read_wait_us=read_started.elapsed().as_micros(), "desktop heartbeat control read");
-                    let reply_started = Instant::now();
-                    let written =
-                        write_control_reply(&mut send.0, &DesktopEvent::Heartbeat { seq, ts_ms })
-                            .await
-                            .is_ok();
-                    tracing::trace!(target:"rds_desktop::control_timing", heartbeat_seq=seq, written,
-                        write_us=reply_started.elapsed().as_micros(), "desktop heartbeat reply write completed");
-                    if !written {
-                        break;
-                    }
-                }
-                Ok(DesktopControl::FrameReceived {
-                    seq,
-                    digest,
-                    obsolete,
-                }) => {
-                    let Some(receipts) = &payload_receipts else {
-                        tracing::warn!(
-                            frame_seq = seq,
-                            "payload receipt on a legacy desktop session refused"
-                        );
-                        break;
-                    };
-                    let accepted = receipts.confirm(seq, &digest, obsolete);
-                    tracing::trace!(target:"rds_desktop::frame_timing",frame_seq=seq,accepted,obsolete,
-                        "desktop validated payload receipt observed");
-                }
-                Ok(DesktopControl::ClipboardChunk {
-                    id,
-                    offset,
-                    total,
-                    data,
-                }) => {
-                    if config.view_only {
-                        tracing::warn!("view-only clipboard refused");
-                        break;
-                    }
-                    let text = match assembly.push(id, offset, total, data) {
-                        Ok(text) => text,
-                        Err(error) => {
-                            tracing::warn!(%error,"clipboard transfer refused");
-                            break;
-                        }
-                    };
-                    if let Some(text) = text {
-                        let publish_started = Instant::now();
-                        tracing::info!(
-                            transfer_id = id,
-                            bytes = total,
-                            "desktop clipboard publication started"
-                        );
-                        let owner = clipboard
-                            .get_or_insert_with(|| crate::clipboard::Worker::new(session_display));
-                        match tokio::time::timeout(Duration::from_secs(2), owner.publish(text))
-                            .await
-                        {
-                            Ok(Ok(())) => {
-                                tracing::info!(
-                                    transfer_id = id,
-                                    bytes = total,
-                                    publish_ms = publish_started.elapsed().as_millis(),
-                                    "desktop clipboard publication completed"
-                                );
-                                let reply_started = Instant::now();
-                                if write_control_reply(
-                                    &mut send.0,
-                                    &DesktopEvent::ClipboardReady { id, bytes: total },
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    break;
-                                }
-                                tracing::info!(
-                                    transfer_id = id,
-                                    bytes = total,
-                                    reply_ms = reply_started.elapsed().as_millis(),
-                                    "desktop clipboard ready reply written"
-                                );
-                            }
-                            result => {
-                                tracing::warn!(error=?result,"clipboard publication failed; ending control before paste input");
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::debug!(%error,"desktop control ended");
-                    tracing::debug!(target:"rds_desktop::control_timing", error_kind=?error.kind(),
-                        read_wait_us=read_started.elapsed().as_micros(), "desktop control reader ended");
-                    break;
-                }
             }
         }
     };
@@ -1447,6 +1535,9 @@ async fn write_control_reply<W: AsyncWrite + Unpin>(
         DesktopEvent::InputAck { .. } => "input_ack",
         DesktopEvent::Heartbeat { .. } => "heartbeat",
         DesktopEvent::ClipboardReady { .. } => "clipboard_ready",
+        DesktopEvent::ClipboardOffer { .. } => "clipboard_offer",
+        DesktopEvent::ClipboardChunk { .. } => "clipboard_chunk",
+        DesktopEvent::ClipboardError { .. } => "clipboard_error",
     };
     match tokio::time::timeout(CONTROL_REPLY_TIMEOUT, write_frame(send, event)).await {
         Ok(result) => result,
@@ -1472,23 +1563,23 @@ impl Drop for SessionSend {
     }
 }
 
-/// Platform capture producer, or a `NullProducer` when the build has no
-/// capture backend (session still serves control input + heartbeats).
+/// Platform capture producer, or an empty source when native capture is
+/// unavailable. Empty production ends the owning session's task group.
 fn platform_producer(
     _display: u32,
     _interval: Duration,
     _height: Option<u32>,
+    _extent: Option<(u32, u32)>,
 ) -> Box<dyn FrameProducer> {
     #[cfg(all(target_os = "linux", feature = "x11"))]
-    match x11::X11Producer::new(_display, _interval, _height) {
+    match x11::X11Producer::new(_display, _interval, _height, _extent) {
         Ok(p) => return Box::new(p),
         Err(e) => tracing::warn!("capture init failed: {e}"),
     }
     Box::new(NullProducer)
 }
 
-/// Producer that yields nothing — the control plane of the session
-/// stays live while the video side cleanly idles.
+/// Producer that yields nothing; the owning session ends its task group.
 pub struct NullProducer;
 
 impl FrameProducer for NullProducer {
@@ -1647,6 +1738,7 @@ mod x11 {
             display: u32,
             interval: Duration,
             requested: Option<u32>,
+            extent: Option<(u32, u32)>,
         ) -> Result<Self, DesktopError> {
             let output_height = match requested {
                 Some(0) => None,
@@ -1672,6 +1764,17 @@ mod x11 {
                 },
             };
             let capturer = X11Capturer::new(display)?;
+            if let Some(extent) = extent
+                && capturer
+                    .displays()
+                    .iter()
+                    .find(|info| info.index == display)
+                    .is_none_or(|info| (info.width, info.height) != extent)
+            {
+                return Err(DesktopError::Capture(
+                    "display changed during session admission".into(),
+                ));
+            }
             let fps = 1.0 / interval.as_secs_f32();
             let encoder = H264Encoder::new(4_000_000, fps)?;
             Ok(Self {

@@ -307,6 +307,7 @@ struct State {
     submission_debt: SubmissionDebt,
     wake_pending: bool,
     status: String,
+    label: String,
     extent: (u32, u32),
     report: ViewerReport,
     delays: Vec<f64>,
@@ -314,6 +315,7 @@ struct State {
     sending: Vec<f64>,
     input_latency: InputLatency,
     clipboard_latency: ClipboardLatency,
+    clipboard: super::clipboard::Clipboard,
     close: bool,
     interrupted: Option<Instant>,
     network_stage: String,
@@ -361,6 +363,11 @@ impl ViewerHandle {
     /// arrives. The existing coalescing flag keeps a stalled loop bounded.
     pub fn heartbeat_ui(&self) {
         let mut state = lock(&self.state);
+        self.wake(&mut state);
+    }
+    pub fn label(&self, label: String) {
+        let mut state = lock(&self.state);
+        state.label = label;
         self.wake(&mut state);
     }
     pub fn stage(&self, stage: &str) {
@@ -443,6 +450,7 @@ impl ViewerHandle {
             state.report.clipboard_transfers_canceled +=
                 state.clipboard_latency.pending.len() as u64;
             state.clipboard_latency.pending.clear();
+            state.clipboard.reset();
             if let Some(probe) = &mut state.visual_probe {
                 probe.reset();
             }
@@ -453,12 +461,41 @@ impl ViewerHandle {
         }
         self.wake(&mut state);
     }
+
+    /// Stage clipboard metadata or a bounded chunk for the owning window.
+    /// Only its main-thread focus/generation state can request and publish it.
+    pub fn clipboard_event(&self, event: rds_core::DesktopEvent) {
+        let mut state = lock(&self.state);
+        match event {
+            rds_core::DesktopEvent::ClipboardOffer { id, format, bytes } => {
+                state.clipboard.offer(id, format, bytes)
+            }
+            rds_core::DesktopEvent::ClipboardChunk {
+                id,
+                offset,
+                total,
+                data,
+            } => {
+                if let Err(error) = state.clipboard.chunk(id, offset, total, data) {
+                    tracing::warn!(%error, "remote clipboard transfer refused");
+                }
+            }
+            rds_core::DesktopEvent::ClipboardError { id, code } => {
+                state.clipboard.failed(id);
+                tracing::warn!(?code, "remote clipboard unavailable");
+            }
+            _ => return,
+        }
+        self.wake(&mut state);
+    }
+
     pub fn display_extent(&self, width: u32, height: u32) {
         lock(&self.state).extent = (width, height);
     }
     /// A local epoch distinguishes frame/input sequence numbers after reconnect.
     pub fn begin_session(&self, span: tracing::Span) {
         let mut state = lock(&self.state);
+        state.clipboard.reset();
         state.session_span = span;
         state.report.session_epoch = state.report.session_epoch.saturating_add(1);
         tracing::info!(parent: &state.session_span,
@@ -681,6 +718,7 @@ impl Viewer {
                 submission_debt: SubmissionDebt::default(),
                 wake_pending: false,
                 status: "Connecting".into(),
+                label: "RDS".into(),
                 extent: (0, 0),
                 report: ViewerReport::default(),
                 delays: Vec::new(),
@@ -688,6 +726,7 @@ impl Viewer {
                 sending: Vec::new(),
                 input_latency: InputLatency::default(),
                 clipboard_latency: ClipboardLatency::default(),
+                clipboard: super::clipboard::Clipboard::default(),
                 close: false,
                 interrupted: None,
                 network_stage: "starting".into(),
@@ -748,6 +787,35 @@ struct App {
     last_window_status: Option<String>,
 }
 impl App {
+    fn clipboard_work(&mut self, event_loop: &ActiveEventLoop) {
+        if !lock(&self.handle.state).clipboard.needs_work() {
+            return;
+        }
+        let Ok(generation) = super::platform::clipboard_generation() else {
+            return;
+        };
+        let text = lock(&self.handle.state).clipboard.publish(generation);
+        if let Some(text) = text
+            && let Err(error) = super::platform::publish_text(&text)
+        {
+            self.handle
+                .status(format!("Clipboard unavailable: {error}"));
+        }
+        // Publication changes the native generation. Read again before a new
+        // request so a completed transfer cannot invalidate its successor.
+        let Ok(generation) = super::platform::clipboard_generation() else {
+            return;
+        };
+        let request = lock(&self.handle.state).clipboard.request(generation);
+        if let Some(control) = request
+            && self.input.send(ViewerInput::Control(control)).is_err()
+        {
+            self.fail(
+                event_loop,
+                DesktopError::Input("clipboard request queue full".into()),
+            );
+        }
+    }
     fn sample_window(&self) {
         if let Some(window) = &self.window {
             let elapsed = self.handle.started.elapsed().as_millis() as u64;
@@ -973,6 +1041,7 @@ impl ApplicationHandler<()> for App {
                 window.request_redraw();
                 self.window = Some(window);
                 self.gpu = Some(gpu);
+                lock(&self.handle.state).clipboard.focus(true);
             }
             Err(error) => self.fail(event_loop, error),
         }
@@ -983,13 +1052,15 @@ impl ApplicationHandler<()> for App {
         state.wake_pending = false;
         let close = state.close;
         state.last_ui_ms = self.handle.started.elapsed().as_millis() as u64;
-        let status = state.status.clone();
+        let status = format!("{} — {}", state.label, state.status);
+
         drop(state);
+        self.clipboard_work(event_loop);
         if let Some(window) = &self.window {
             // Media wakeups do not change status. Avoid repeated AppKit title
             // allocations/notifications on the latency-sensitive UI thread.
             if self.last_window_status.as_deref() != Some(status.as_str()) {
-                window.set_title(&format!("RDS — {status}"));
+                window.set_title(&status);
                 self.last_window_status = Some(status);
             }
             window.request_redraw();
@@ -1023,6 +1094,7 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(false) => {
+                lock(&self.handle.state).clipboard.focus(false);
                 if let Some(probe) = &mut lock(&self.handle.state).visual_probe {
                     probe.keyboard_focus_lost();
                 }
@@ -1047,6 +1119,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::Focused(true) => {
+                lock(&self.handle.state).clipboard.focus(true);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -1160,6 +1233,15 @@ impl ApplicationHandler<()> for App {
                                     return;
                                 }
                             }
+                        }
+                        if cfg!(target_os = "macos")
+                            && matches!(code, 45 | 46)
+                            && (self.keys.contains(&125) || self.keys.contains(&126))
+                        {
+                            for kind in super::input::command_chord(&self.keys, code) {
+                                self.input(event_loop, kind);
+                            }
+                            return;
                         }
                         if command_paste {
                             for kind in super::input::command_paste_chord(&self.keys) {

@@ -505,6 +505,9 @@ async fn execute(
             })
         }
         Command::Desktop { session, ref hello }
+        | Command::DesktopFeatures {
+            session, ref hello, ..
+        }
         | Command::DesktopSeparated {
             session, ref hello, ..
         }
@@ -519,6 +522,7 @@ async fn execute(
         } => {
             let output_height = match &command {
                 Command::DesktopProfile { output_height, .. }
+                | Command::DesktopFeatures { output_height, .. }
                 | Command::DesktopSeparated { output_height, .. }
                 | Command::DesktopSeparatedReceipts { output_height, .. }
                 | Command::DesktopProfileReceipts { output_height, .. } => Some(*output_height),
@@ -539,9 +543,19 @@ async fn execute(
                     session: Some(rand::random()),
                     output_height,
                     relay_encoded: true,
+                    reverse_clipboard: matches!(
+                        command,
+                        Command::DesktopFeatures {
+                            clipboard: true,
+                            ..
+                        }
+                    ),
                     payload_receipts: matches!(
                         command,
-                        Command::DesktopSeparatedReceipts { .. }
+                        Command::DesktopFeatures {
+                            payload_receipts: true,
+                            ..
+                        } | Command::DesktopSeparatedReceipts { .. }
                             | Command::DesktopProfileReceipts { .. }
                     ),
                     ..Default::default()
@@ -551,7 +565,9 @@ async fn execute(
             .map_err(|_| ErrorCode::Remote)?;
             let registration = if matches!(
                 command,
-                Command::DesktopSeparated { .. } | Command::DesktopSeparatedReceipts { .. }
+                Command::DesktopSeparated { .. }
+                    | Command::DesktopSeparatedReceipts { .. }
+                    | Command::DesktopFeatures { .. }
             ) {
                 Some(events.register()?)
             } else {
@@ -598,6 +614,7 @@ impl Client {
             Command::OpenTcp { .. }
                 | Command::Desktop { .. }
                 | Command::DesktopProfile { .. }
+                | Command::DesktopFeatures { .. }
                 | Command::DesktopSeparated { .. }
                 | Command::DesktopSeparatedReceipts { .. }
                 | Command::DesktopProfileReceipts { .. }
@@ -643,6 +660,7 @@ impl Client {
             Command::OpenTcp { .. }
                 | Command::Desktop { .. }
                 | Command::DesktopProfile { .. }
+                | Command::DesktopFeatures { .. }
                 | Command::DesktopSeparated { .. }
                 | Command::DesktopSeparatedReceipts { .. }
                 | Command::DesktopProfileReceipts { .. }
@@ -729,7 +747,7 @@ impl Client {
         hello: rds_core::DesktopHello,
         output_height: u32,
     ) -> Result<(ManagedDesktop, ManagedEvents), Error> {
-        self.desktop_separated_mode(session, hello, output_height, false)
+        self.desktop_separated_mode(session, hello, output_height, false, false)
             .await
     }
 
@@ -741,7 +759,21 @@ impl Client {
         hello: rds_core::DesktopHello,
         output_height: u32,
     ) -> Result<(ManagedDesktop, ManagedEvents), Error> {
-        self.desktop_separated_mode(session, hello, output_height, true)
+        self.desktop_separated_mode(session, hello, output_height, true, false)
+            .await
+    }
+
+    /// Open explicitly negotiated reverse clipboard on isolated event/media
+    /// sockets. Callers may select legacy paste-only mode by disabling it.
+    pub async fn desktop_features(
+        &self,
+        session: Option<SessionId>,
+        hello: rds_core::DesktopHello,
+        output_height: u32,
+        payload_receipts: bool,
+        clipboard: bool,
+    ) -> Result<(ManagedDesktop, ManagedEvents), Error> {
+        self.desktop_separated_mode(session, hello, output_height, payload_receipts, clipboard)
             .await
     }
 
@@ -751,9 +783,18 @@ impl Client {
         hello: rds_core::DesktopHello,
         output_height: u32,
         payload_receipts: bool,
+        clipboard: bool,
     ) -> Result<(ManagedDesktop, ManagedEvents), Error> {
         let display = hello.display;
-        let command = if payload_receipts {
+        let command = if clipboard {
+            Command::DesktopFeatures {
+                session,
+                hello: Box::new(hello),
+                output_height,
+                payload_receipts,
+                clipboard,
+            }
+        } else if payload_receipts {
             Command::DesktopSeparatedReceipts {
                 session,
                 hello: Box::new(hello),

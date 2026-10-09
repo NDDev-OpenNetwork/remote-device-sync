@@ -120,9 +120,106 @@ pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
     }
     Ok(text)
 }
+
+#[cfg(target_os = "macos")]
+pub(super) fn clipboard_generation() -> Result<i64, crate::DesktopError> {
+    let _main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
+        crate::DesktopError::Input("clipboard access requires the main thread".into())
+    })?;
+    Ok(objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as i64)
+}
+#[cfg(not(target_os = "macos"))]
+pub(super) fn clipboard_generation() -> Result<i64, crate::DesktopError> {
+    Err(crate::DesktopError::Input(
+        "clipboard publication unavailable".into(),
+    ))
+}
+
+/// Publish a bounded UTF-8 value to the viewer's native clipboard.  This is
+/// called only after a remote offer was explicitly requested and fully
+/// reassembled, so a malformed peer cannot partially replace the user's
+/// clipboard.
+#[cfg(target_os = "macos")]
+pub(super) fn publish_text(text: &str) -> Result<(), crate::DesktopError> {
+    write_pasteboard(&objc2_app_kit::NSPasteboard::generalPasteboard(), text)
+}
+#[cfg(target_os = "macos")]
+fn write_pasteboard(
+    board: &objc2_app_kit::NSPasteboard,
+    text: &str,
+) -> Result<(), crate::DesktopError> {
+    use objc2_app_kit::NSPasteboardTypeString;
+    use objc2_foundation::{MainThreadMarker, NSString};
+    let _main = MainThreadMarker::new().ok_or_else(|| {
+        crate::DesktopError::Input("clipboard access requires the main thread".into())
+    })?;
+    if text.len() > crate::clipboard::MAX_TEXT_BYTES {
+        return Err(crate::DesktopError::Input(
+            "clipboard text exceeds 1 MiB".into(),
+        ));
+    }
+    // SAFETY: AppKit's thread is verified and NSString remains retained for
+    // the synchronous operation; no clipboard content is diagnostic output.
+    unsafe {
+        board.clearContents();
+        if !board.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) {
+            return Err(crate::DesktopError::Input(
+                "native clipboard publication refused".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+/// Isolated AppKit qualification on a fresh named pasteboard, never the user's
+/// general clipboard. Must run on the native main thread.
+#[doc(hidden)]
+#[cfg(target_os = "macos")]
+pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    let _main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
+        crate::DesktopError::Input("clipboard probe requires the main thread".into())
+    })?;
+    let board = NSPasteboard::pasteboardWithUniqueName();
+    let result = (|| {
+        for text in [
+            String::new(),
+            "Привет 🖥️\nHello".into(),
+            "UTF-8 🖥️\n".repeat(8000),
+        ] {
+            let before = board.changeCount();
+            write_pasteboard(&board, &text)?;
+            // SAFETY: the isolated board and retained returned string are
+            // accessed synchronously on the verified AppKit main thread.
+            let read =
+                unsafe { board.stringForType(NSPasteboardTypeString) }.map(|s| s.to_string());
+            if read.as_deref() != Some(text.as_str()) || board.changeCount() == before {
+                return Err(crate::DesktopError::Input(
+                    "native clipboard probe mismatch".into(),
+                ));
+            }
+        }
+        Ok(3)
+    })();
+    board.clearContents();
+    result
+}
+#[doc(hidden)]
+#[cfg(not(target_os = "macos"))]
+pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
+    Err(crate::DesktopError::Input(
+        "native AppKit probe requires macOS".into(),
+    ))
+}
 #[cfg(not(target_os = "macos"))]
 pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
     Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn publish_text(_text: &str) -> Result<(), crate::DesktopError> {
+    Err(crate::DesktopError::Input(
+        "native clipboard publication is unavailable on this viewer".into(),
+    ))
 }
 
 #[cfg(target_os = "macos")]

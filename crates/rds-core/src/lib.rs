@@ -130,6 +130,16 @@ pub enum StreamHello {
         hello: DesktopHello,
         output_height: u32,
     },
+    /// Desktop session with explicit reverse text-clipboard negotiation.
+    /// `payload_receipts` retains the DesktopV4 delivery proof in the same
+    /// additive greeting; older agents refuse this mode before session work.
+    DesktopV5 {
+        session: [u8; 16],
+        hello: DesktopHello,
+        output_height: u32,
+        payload_receipts: bool,
+        clipboard: bool,
+    },
 }
 
 /// Answer to a [`StreamHello`], sent before any service payload.
@@ -145,6 +155,8 @@ pub enum HelloAck {
     Desktop(DesktopCaps),
     /// DesktopV4 accepted with validated-payload receipts enabled.
     DesktopV4(DesktopCaps),
+    /// DesktopV5 accepted with its explicitly negotiated extensions.
+    DesktopV5(DesktopCaps),
 }
 
 /// What the serving side offers.
@@ -179,7 +191,8 @@ pub enum ServiceKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopHello {
-    /// Display index to capture.
+    /// Display ID from the serving peer's capability list. Legacy X-screen
+    /// IDs retain their numbers; logical monitor IDs need not be contiguous.
     pub display: u32,
     /// Upper bound on produced frames per second.
     pub max_fps: u32,
@@ -197,10 +210,33 @@ pub struct DesktopCaps {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayInfo {
+    /// Serving peer's display ID; the legacy field name/layout is preserved.
     pub index: u32,
     pub width: u32,
     pub height: u32,
     pub primary: bool,
+}
+
+/// Clipboard representation negotiated on a desktop session.
+///
+/// The first wire extension intentionally carries text only.  Additional
+/// formats must be added as new variants with their own bounds and native
+/// conversion rules; treating arbitrary MIME bytes as text would make the
+/// security and size contract ambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardFormat {
+    TextUtf8,
+}
+
+/// Typed failure for a reverse clipboard transfer.  The payload deliberately
+/// contains no native error text or clipboard content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardErrorCode {
+    Unavailable,
+    UnsupportedFormat,
+    TooLarge,
+    Expired,
+    InvalidRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +296,9 @@ pub enum DesktopControl {
         digest: [u8; 32],
         obsolete: bool,
     },
+    /// Request the payload for a previously offered remote clipboard value.
+    /// Requests are session-scoped and must match the latest offer ID.
+    ClipboardRequest { id: u64, format: ClipboardFormat },
 }
 
 impl std::fmt::Debug for DesktopControl {
@@ -285,6 +324,11 @@ impl std::fmt::Debug for DesktopControl {
                 .field("total", total)
                 .field("bytes", &data.len())
                 .finish(),
+            Self::ClipboardRequest { id, format } => f
+                .debug_struct("ClipboardRequest")
+                .field("id", id)
+                .field("format", format)
+                .finish(),
             Self::FrameReceived { seq, .. } => f
                 .debug_struct("FrameReceived")
                 .field("seq", seq)
@@ -294,7 +338,7 @@ impl std::fmt::Debug for DesktopControl {
 }
 
 /// Server→client messages on the desktop control stream (v2).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DesktopEvent {
     /// One input event was injected (sent when `DesktopHello::input_acks`).
     InputAck { seq: u64, handled_ts_ms: u64 },
@@ -302,6 +346,67 @@ pub enum DesktopEvent {
     Heartbeat { seq: u64, ts_ms: u64 },
     /// Clipboard is owned by the target selection service; no payload echoed.
     ClipboardReady { id: u64, bytes: u32 },
+    /// A remote native clipboard changed.  The content is not included in
+    /// the offer; the viewer explicitly requests it after applying policy.
+    ClipboardOffer {
+        id: u64,
+        format: ClipboardFormat,
+        bytes: u32,
+    },
+    /// One bounded chunk of a requested remote clipboard value.
+    ClipboardChunk {
+        id: u64,
+        offset: u32,
+        total: u32,
+        data: Vec<u8>,
+    },
+    /// Reverse clipboard transfer failed without exposing native details.
+    ClipboardError { id: u64, code: ClipboardErrorCode },
+}
+
+impl std::fmt::Debug for DesktopEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InputAck { seq, handled_ts_ms } => f
+                .debug_struct("InputAck")
+                .field("seq", seq)
+                .field("handled_ts_ms", handled_ts_ms)
+                .finish(),
+            Self::Heartbeat { seq, ts_ms } => f
+                .debug_struct("Heartbeat")
+                .field("seq", seq)
+                .field("ts_ms", ts_ms)
+                .finish(),
+            Self::ClipboardReady { id, bytes } => f
+                .debug_struct("ClipboardReady")
+                .field("id", id)
+                .field("bytes", bytes)
+                .finish(),
+            Self::ClipboardOffer { id, format, bytes } => f
+                .debug_struct("ClipboardOffer")
+                .field("id", id)
+                .field("format", format)
+                .field("bytes", bytes)
+                .finish(),
+            Self::ClipboardChunk {
+                id,
+                offset,
+                total,
+                data,
+            } => f
+                .debug_struct("ClipboardChunk")
+                .field("id", id)
+                .field("offset", offset)
+                .field("total", total)
+                .field("bytes", &data.len())
+                .finish(),
+            Self::ClipboardError { id, code } => f
+                .debug_struct("ClipboardError")
+                .field("id", id)
+                .field("code", code)
+                .finish(),
+        }
+    }
 }
 
 /// One input event plus the metadata the serving side needs to route and
@@ -512,5 +617,64 @@ mod tests {
             postcard::to_stdvec(&HelloAck::DesktopV4(caps())).unwrap()[0],
             4
         );
+        assert_eq!(
+            postcard::to_stdvec(&StreamHello::DesktopV5 {
+                session: [1; 16],
+                hello: hello(),
+                output_height: 1080,
+                payload_receipts: true,
+                clipboard: true,
+            })
+            .unwrap()[0],
+            13
+        );
+        assert_eq!(
+            postcard::to_stdvec(&HelloAck::DesktopV5(caps())).unwrap()[0],
+            5
+        );
+    }
+
+    #[test]
+    fn reverse_clipboard_messages_are_append_only_and_redact_payloads() {
+        let request = DesktopControl::ClipboardRequest {
+            id: 91,
+            format: ClipboardFormat::TextUtf8,
+        };
+        let request_bytes = postcard::to_stdvec(&request).unwrap();
+        assert_eq!(request_bytes[0], 6);
+        assert!(matches!(
+            postcard::from_bytes::<DesktopControl>(&request_bytes).unwrap(),
+            DesktopControl::ClipboardRequest {
+                id: 91,
+                format: ClipboardFormat::TextUtf8
+            }
+        ));
+
+        let payload = b"private clipboard body".to_vec();
+        let event = DesktopEvent::ClipboardChunk {
+            id: 91,
+            offset: 0,
+            total: payload.len() as u32,
+            data: payload.clone(),
+        };
+        let debug = format!("{event:?}");
+        assert!(!debug.contains("private clipboard body"));
+        assert!(!debug.contains(&format!("{payload:?}")));
+        assert!(matches!(
+            postcard::from_bytes::<DesktopEvent>(
+                &postcard::to_stdvec(&DesktopEvent::ClipboardOffer {
+                    id: 91,
+                    format: ClipboardFormat::TextUtf8,
+                    bytes: payload.len() as u32,
+                })
+                .unwrap()
+            )
+            .unwrap(),
+            DesktopEvent::ClipboardOffer {
+                id: 91,
+                format: ClipboardFormat::TextUtf8,
+                bytes: 22
+            }
+        ));
     }
 }

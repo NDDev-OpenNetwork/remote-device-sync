@@ -245,7 +245,7 @@ pub struct DesktopSession {
     /// measure latency without a decoder.
     pub frame_headers: mailbox::Receiver<FrameHeader>,
     /// Server→client control events (input acks, heartbeat echoes).
-    pub events: mailbox::Receiver<DesktopEvent>,
+    pub events: mpsc::Receiver<DesktopEvent>,
     /// Encoded wire frames in relay mode; `None` on a direct session.
     pub encoded: Option<mpsc::Receiver<EncodedDelivery>>,
     /// Send input or encoder control to the serving side.
@@ -325,6 +325,9 @@ pub struct SessionOpts {
     /// resync (IDR on sequence gaps) still runs; decode-chain discipline
     /// is the downstream viewer's job.
     pub relay_encoded: bool,
+    /// Negotiate reverse text clipboard offers.  Production viewers opt in
+    /// explicitly; the library default remains legacy-compatible.
+    pub reverse_clipboard: bool,
 }
 
 /// One encoded frame exactly as it arrived on the wire, published in relay
@@ -384,7 +387,24 @@ impl DesktopSession {
         let uni = conn
             .uni_streams(route)
             .map_err(|e| DesktopError::Io(std::io::Error::other(e.to_string())))?;
-        let greeting = if opts.payload_receipts {
+        let greeting = if opts.reverse_clipboard {
+            let session = opts.session.ok_or_else(|| {
+                DesktopError::Capture("reverse clipboard requires an isolated session route".into())
+            })?;
+            let output_height = opts.output_height.unwrap_or(0);
+            if output_height != 0 && !(16..=4320).contains(&output_height) {
+                return Err(DesktopError::Capture(
+                    "video height must be 0 or 16..=4320".into(),
+                ));
+            }
+            StreamHello::DesktopV5 {
+                session,
+                hello,
+                output_height,
+                payload_receipts: opts.payload_receipts,
+                clipboard: true,
+            }
+        } else if opts.payload_receipts {
             let session = opts.session.ok_or_else(|| {
                 DesktopError::Capture("payload receipts require an isolated session route".into())
             })?;
@@ -428,9 +448,14 @@ impl DesktopSession {
             rds_net::wire::prioritize_control(&send.0, &greeting)?;
             write_frame(&mut send.0, &greeting).await?;
             let caps = match read_frame::<_, HelloAck>(&mut recv).await? {
-                HelloAck::DesktopV4(caps) if opts.payload_receipts => caps,
-                HelloAck::Desktop(caps) if !opts.payload_receipts => caps,
-                HelloAck::Ok if !opts.payload_receipts => DesktopCaps {
+                HelloAck::DesktopV5(caps) if opts.reverse_clipboard => caps,
+                HelloAck::DesktopV4(caps) if opts.payload_receipts && !opts.reverse_clipboard => {
+                    caps
+                }
+                HelloAck::Desktop(caps) if !opts.payload_receipts && !opts.reverse_clipboard => {
+                    caps
+                }
+                HelloAck::Ok if !opts.payload_receipts && !opts.reverse_clipboard => DesktopCaps {
                     displays: vec![],
                     codecs: vec![],
                 },
@@ -450,7 +475,7 @@ impl DesktopSession {
         let (header_tx, frame_headers) = mailbox::channel(64);
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<DesktopControl>(64);
         let (receipt_tx, mut receipt_rx) = mpsc::channel::<DesktopControl>(MAX_FRAME_READERS);
-        let (events_tx, events) = mailbox::channel::<DesktopEvent>(128);
+        let (events_tx, events) = mpsc::channel::<DesktopEvent>(128);
         let (encoded_tx, encoded) = match opts.relay_encoded {
             true => {
                 // Compressed references must reach local decode in order. One
@@ -549,10 +574,14 @@ impl DesktopSession {
                                 observation.heartbeat(seq, rtt);
                                 rtt_marker.store(rtt.as_millis() as u64, Ordering::Relaxed);
                             }
-                            events_tx.send(ev);
+                            if !matches!(tokio::time::timeout(FRAME_STREAM_TIMEOUT, events_tx.send(ev)).await, Ok(Ok(()))) {
+                                break;
+                            }
                         }
                         Ok(ev) => {
-                            events_tx.send(ev);
+                            if !matches!(tokio::time::timeout(FRAME_STREAM_TIMEOUT, events_tx.send(ev)).await, Ok(Ok(()))) {
+                                break;
+                            }
                         }
                         Err(error) => {
                             tracing::debug!(target:"rds_desktop::control_timing", control_instance, error_kind=?error.kind(),

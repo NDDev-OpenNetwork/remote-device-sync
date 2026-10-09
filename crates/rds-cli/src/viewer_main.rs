@@ -26,6 +26,7 @@ struct Config {
     grant_file: Option<PathBuf>,
     resolution: Option<rds_cli::desktop::Resolution>,
     payload_receipts: Option<bool>,
+    clipboard: Option<bool>,
     diagnostic_visual_probe: Option<PathBuf>,
 }
 
@@ -121,6 +122,11 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                     && matches.value_source("payload_receipts") != Some(ValueSource::CommandLine)
                 {
                     cli.options.payload_receipts = enabled;
+                }
+                if let Some(enabled) = config.clipboard
+                    && matches.value_source("clipboard") != Some(ValueSource::CommandLine)
+                {
+                    cli.options.clipboard = enabled;
                 }
                 if let Some(probe) = config.diagnostic_visual_probe
                     && matches.value_source("diagnostic_visual_probe")
