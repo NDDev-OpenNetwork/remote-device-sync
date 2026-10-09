@@ -7,7 +7,11 @@ static DISK_POOL_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(()
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("rds-sink-cancel-{:032x}", rand::random::<u128>())))
+        let path =
+            std::env::temp_dir().join(format!("rds-sink-cancel-{:032x}", rand::random::<u128>()));
+        // Claim the directory before this guard owns recursive cleanup.
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
     }
 }
 impl Drop for Scratch {
@@ -80,6 +84,7 @@ fn dropping_queued_journal_preparation_does_not_create_receive_state() {
         .build()
         .unwrap();
     let root = Scratch::new();
+    let pending = root.0.join("not-created");
     runtime.block_on(async {
         let (release, blocked) = std::sync::mpsc::channel();
         let (started, ready) = tokio::sync::oneshot::channel();
@@ -93,7 +98,7 @@ fn dropping_queued_journal_preparation_does_not_create_receive_state() {
             tokio::time::timeout(
                 Duration::from_millis(10),
                 prepare_journal(
-                    &root.0,
+                    &pending,
                     "data.bin",
                     &manifest,
                     Arc::new(AtomicBool::new(false)),
@@ -108,7 +113,7 @@ fn dropping_queued_journal_preparation_does_not_create_receive_state() {
         // The single blocking worker has finished any previously queued open.
         tokio::task::spawn_blocking(|| ()).await.unwrap();
         assert!(
-            !root.0.exists(),
+            !pending.exists(),
             "abandoned queued preparation created state"
         );
         assert!(Journal::open(&root.0, "data.bin", &manifest).is_ok());
@@ -119,8 +124,9 @@ fn dropping_queued_journal_preparation_does_not_create_receive_state() {
 async fn journal_preparation_observes_peer_and_caller_cancellation() {
     for peer_canceled in [false, true] {
         let root = Scratch::new();
+        let pending = root.0.join("not-created");
         let result = prepare_journal(
-            &root.0,
+            &pending,
             "data.bin",
             &crate::manifest_of(b"never admitted"),
             Arc::new(AtomicBool::new(peer_canceled)),
@@ -131,7 +137,7 @@ async fn journal_preparation_observes_peer_and_caller_cancellation() {
         assert!(
             matches!(result, Err(crate::SyncError::Io(ref e)) if e.kind() == std::io::ErrorKind::Interrupted)
         );
-        assert!(!root.0.exists());
+        assert!(!pending.exists());
     }
 }
 
