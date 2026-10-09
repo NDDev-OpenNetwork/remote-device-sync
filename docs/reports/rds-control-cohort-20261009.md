@@ -7,8 +7,9 @@ A separate 15-second diagnostic reproduction also failed: 149 completed probes,
 p50 141 ms, p95 420 ms and p99 522 ms. Video queue p95 was 1 ms, so the assertion's
 old wording, “backlog leaked,” did not establish a cause.
 
-The raw diagnostic contained eight samples above 400 ms, several in adjacent
-100 ms-spaced groups following one delayed reliable-stream interval. QUIC's
+The raw diagnostic contained eight samples above 400 ms, including adjacent
+100 ms-spaced groups. Shared delay within a reliable stream is a plausible
+explanation for this correlation, not a proved packet-level cause. QUIC's
 [ordered stream delivery](https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2)
 explains why successive probes are not independent loss observations. The
 [SRE measurement guidance](https://sre.google/sre-book/service-level-objectives/)
