@@ -45,6 +45,10 @@ These results do not close the CI failure. Retain the next exact-head CI
 failure, if any, and use the new state evidence before choosing a fix. Do not
 raise the deadline or change path selection based only on the old message.
 
-Workspace checks and exact-head CI results are recorded after completion.
+At `47e06a5`, macOS arm64 workspace validation passed formatting, strict
+all-target Clippy, 925 tests (2 explicitly ignored) and `cargo deny check`.
+Both native packaging jobs and supply-chain jobs passed in PR146; the full
+Linux/macOS test matrix and Rust CodeQL are still running at this observation.
+These checks do not explain the original standby failure.
 This increment does not close the desktop wave, native acceptance or topology
 parity, and does not claim installed-artifact qualification.
