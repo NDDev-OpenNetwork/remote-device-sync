@@ -58,6 +58,16 @@ A newer copy drains an older snapshot without publishing it. Six viewer
 clipboard state tests pass, including delayed offers after blur, expiry, a new
 local copy and superseding an in-flight transfer.
 
+The Linux job for [PR #141](https://github.com/NDDev-OpenNetwork/remote-device-sync/pull/141)
+failed `impaired_link_latency_gate` at 428 ms control p95 while capture queue
+p95 was 1 ms. That fixture sent a heartbeat for each media-loop iteration,
+never consumed its reliable event queue and repeatedly sampled one cached RTT.
+It now drains control events, sends probes independently at 10 Hz and records
+one shared-clock RTT per completed echo, with at least 50 completed probes.
+The 400 ms control bound and all existing media/impairment assertions remain.
+The corrected case passed once, then three required consecutive local runs;
+strict fixture Clippy passed. Final-head CI remains independent evidence.
+
 ## Resource and privacy contracts
 
 The clipboard worker wakes on XFixes/native socket readiness, with 4 Hz owner
