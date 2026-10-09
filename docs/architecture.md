@@ -360,8 +360,8 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
                        ▼
    ┌──────────┬──────────────┬───────────┐
    rds-relay  rds-desktop    rds-audio    rds-sync
-   proto+     capture/codec/ Opus paths   FastCDC+BLAKE3
-   iroh shim  input/render   packet/core  manifests/delta
+   proto+     capture/codec/ Opus codec   FastCDC+BLAKE3
+   iroh shim  input/render   + jitter     manifests/delta
    └──────────┴──────────────┴───────────┘
                        ▼
         ┌──────────────────────────────┐
@@ -375,7 +375,9 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
 
 - **`rds-server`** — runs on the GDS services host: the packet relay and
   the signed-record discovery directory; later the registry bridge into
-  estate state, presence and audit. Sees only encrypted traffic.
+  estate state, presence and audit. The relay forwards encrypted application
+  payloads; the directory handles signed endpoint/policy metadata. Encryption
+  of relayed payloads does not hide directory metadata from that server.
 - **`rds-agent`** — daemon on each controlled device. Binds the endpoint
   (Ed25519 identity persisted), connects to its home relay, accepts
   `rds/0` connections, serves streams to an allowlist of peers. The default local
