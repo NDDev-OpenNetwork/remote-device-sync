@@ -1,5 +1,9 @@
 # Desktop feedback observation windows — 2026-10-10
 
+Follow-up: the previously unexplained standby failure has a deterministic
+reproducer and an [initial-observer fix](rds-initial-path-observation-20261010.md).
+The observations below remain the record of this earlier investigation.
+
 Baseline: `c3dc9c18e5881c24a1519a4493c4af6b6e19521f`. Its
 [macOS CI job](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/37974406899)
 failed two independent checks: recovered frame delivery reduced bitrate from

@@ -61,10 +61,12 @@ remain W9.1. The source is not installed merely to claim a new audio service.
 
 ## Wave 2 — finish the existing desktop delivery (W6, W9.2, W4.5/W10.4)
 
-Current prerequisite: resolve the macOS delivery/standby failures retained in
-[the feedback-window investigation](reports/rds-feedback-windows-20261010.md).
-The timer has a failing-before deterministic reproducer; standby setup remains
-under investigation. Passing local retries do not establish its root cause.
+The [feedback timer](reports/rds-feedback-windows-20261010.md) and
+[late path observer](reports/rds-initial-path-observation-20261010.md) now have
+failing-before regressions and qualified fixes. The standby failure was an
+initial observer-registration race, not a reason to raise its timeout.
+Integrate and qualify the combined source before advancing installed artifacts;
+the native acceptance rows below remain open.
 
 1. Re-read current public/estate heads, open PRs and operation receipts. An
    expired plan or an earlier successful pin is not authorization to replay a
