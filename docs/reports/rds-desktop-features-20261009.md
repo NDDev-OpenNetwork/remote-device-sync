@@ -12,7 +12,7 @@ reverse clipboard negotiates V5. Implementation and review:
 |---|---|---|
 | Dedicated Xvfb, two X roots and two RandR regions | Five native library tests passed | Known pixels, pointer offsets, removed-monitor refusal; UTF-8/INCR both ways, repeated same-owner copies, empty text and no own-publication echo |
 | Real isolated V5/Noq clipboard session | Included in the five native tests | Offer/request/chunks, stale offer rejection retaining the fresh offer, large INCR text and heartbeat while media output waits |
-| Native AppKit named pasteboard | Three cases passed | Empty, Unicode and large text on the main thread; no mutation of the user's general clipboard |
+| Native AppKit named pasteboard | Four cases passed | Empty, Unicode, large text and oversized read/write refusal on the main thread; no mutation of the user's general clipboard |
 | Real local manager, two peers and two routes on one peer | Iroh and Noq passed | Closing one preserves other video, input ACKs and heartbeat; selected-session state cannot redirect an explicit route |
 | Native viewer launch planning | Five tests passed | Explicit destinations, monitor choice, eight-window ceiling, deduplication, conflicting-grant refusal and saved quality |
 | Real Iroh standby/recovery fixtures | Three tests passed | Initial blocked standby, retired standby restoration and existing-stream blackhole recovery |

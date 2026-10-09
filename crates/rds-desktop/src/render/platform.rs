@@ -101,24 +101,43 @@ pub(super) fn remote_activity() -> RemoteActivity {
 
 #[cfg(target_os = "macos")]
 pub(super) fn paste_text() -> Result<Option<String>, crate::DesktopError> {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-    let main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
+    read_pasteboard(&objc2_app_kit::NSPasteboard::generalPasteboard())
+}
+
+#[cfg(target_os = "macos")]
+fn read_pasteboard(
+    board: &objc2_app_kit::NSPasteboard,
+) -> Result<Option<String>, crate::DesktopError> {
+    use objc2_app_kit::NSPasteboardTypeString;
+    use objc2_foundation::{MainThreadMarker, NSUTF8StringEncoding};
+    let _main = MainThreadMarker::new().ok_or_else(|| {
         crate::DesktopError::Input("clipboard access requires the main thread".into())
     })?;
-    let _main = main;
     // SAFETY: called for an explicit paste gesture on AppKit's verified main
     // thread. Retained Cocoa objects live through the copy; nothing is logged.
-    let text = unsafe { NSPasteboard::generalPasteboard().stringForType(NSPasteboardTypeString) }
-        .map(|s| s.to_string());
-    if text
-        .as_ref()
-        .is_some_and(|s| s.len() > crate::clipboard::MAX_TEXT_BYTES)
-    {
+    let Some(text) = (unsafe { board.stringForType(NSPasteboardTypeString) }) else {
+        return Ok(None);
+    };
+    // UTF-8 cannot use fewer bytes than UTF-16 code units. This cheap bound
+    // also avoids scanning an arbitrarily large native string for conversion.
+    if text.length() > crate::clipboard::MAX_TEXT_BYTES {
         return Err(crate::DesktopError::Input(
             "clipboard text exceeds 1 MiB".into(),
         ));
     }
-    Ok(text)
+    if !text.canBeConvertedToEncoding(NSUTF8StringEncoding) {
+        return Err(crate::DesktopError::Input(
+            "clipboard text cannot be represented as UTF-8".into(),
+        ));
+    }
+    // Check Cocoa's byte count before allocating the Rust copy. A user may
+    // have copied a native value much larger than the wire transfer ceiling.
+    if text.lengthOfBytesUsingEncoding(NSUTF8StringEncoding) > crate::clipboard::MAX_TEXT_BYTES {
+        return Err(crate::DesktopError::Input(
+            "clipboard text exceeds 1 MiB".into(),
+        ));
+    }
+    Ok(Some(text.to_string()))
 }
 
 #[cfg(target_os = "macos")]
@@ -176,6 +195,7 @@ fn write_pasteboard(
 #[cfg(target_os = "macos")]
 pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use objc2_foundation::NSString;
     let _main = objc2_foundation::MainThreadMarker::new().ok_or_else(|| {
         crate::DesktopError::Input("clipboard probe requires the main thread".into())
     })?;
@@ -190,15 +210,36 @@ pub fn native_clipboard_probe() -> Result<u32, crate::DesktopError> {
             write_pasteboard(&board, &text)?;
             // SAFETY: the isolated board and retained returned string are
             // accessed synchronously on the verified AppKit main thread.
-            let read =
-                unsafe { board.stringForType(NSPasteboardTypeString) }.map(|s| s.to_string());
+            let read = read_pasteboard(&board)?;
             if read.as_deref() != Some(text.as_str()) || board.changeCount() == before {
                 return Err(crate::DesktopError::Input(
                     "native clipboard probe mismatch".into(),
                 ));
             }
         }
-        Ok(3)
+        let oversized = "x".repeat(crate::clipboard::MAX_TEXT_BYTES + 1);
+        let before = board.changeCount();
+        if write_pasteboard(&board, &oversized).is_ok() || board.changeCount() != before {
+            return Err(crate::DesktopError::Input(
+                "native clipboard oversized publication was not refused".into(),
+            ));
+        }
+        // SAFETY: the probe owns this named board on the verified main thread.
+        // Seed it directly to exercise the independent native-read bound.
+        unsafe {
+            board.clearContents();
+            if !board.setString_forType(&NSString::from_str(&oversized), NSPasteboardTypeString) {
+                return Err(crate::DesktopError::Input(
+                    "native clipboard oversized fixture was refused".into(),
+                ));
+            }
+        }
+        if read_pasteboard(&board).is_ok() {
+            return Err(crate::DesktopError::Input(
+                "native clipboard oversized read was not refused".into(),
+            ));
+        }
+        Ok(4)
     })();
     board.clearContents();
     result
