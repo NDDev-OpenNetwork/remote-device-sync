@@ -1,6 +1,6 @@
 //! Resumable receive state under an opened destination root.
 //!
-//! `.rds-sync/<root-hex>/parts/<chunk-hash-hex>` contains verified bytes,
+//! `.rds-sync/v2-<root-hex>-<destination-hash>/parts/<chunk-hash-hex>` holds verified bytes,
 //! including chunks reused from the old destination. Advisory `meta` holds
 //! postcard + a BLAKE3 trailer. I/O uses directory capabilities, exclusive
 //! staging files and atomic replacement; no descendant symlink is followed.
@@ -54,6 +54,7 @@ struct Meta {
 /// is informational; later I/O must not use it as a confinement proof.
 pub struct Journal {
     state: Directory,
+    journal_id: String,
     dir: Directory,
     parts: Directory,
     dest_parent: Directory,
@@ -96,7 +97,6 @@ impl Journal {
         // normalization-insensitive filesystems. One persistent inode also
         // avoids accumulating a lock file for every historical destination.
         let receive_lock = state.lock("receive.lock".as_ref())?;
-        let content_id = hex(&manifest.root);
         let (dest_parent, dest_name) = root.parent(&rel, true)?;
         // The destination's parent is the common ownership point even when
         // different configured roots overlap. Keep its assembly inode on the
@@ -110,12 +110,13 @@ impl Journal {
         };
         check_stop(stop)?;
         dest_state.discard_owned(ASSEMBLY.as_ref())?;
+        let (journal_id, existing_journal) = select_journal(&state, &rel, manifest)?;
         // W1.10: a resume always opens the offered root, so verified-meta
         // journals binding this same destination under a different content
         // id are unreachable resume state. Collect them under the held
         // receive locks — everything else (other rels, malformed or
         // foreign entries) is not attributable and stays.
-        collect_superseded(&state, &rel, &content_id, stop)?;
+        collect_superseded(&state, &rel, &journal_id, &manifest.root, stop)?;
         check_stop(stop)?;
         // Refuse symlinks and special files even if they contain no reusable
         // bytes. NONBLOCK + fstat prevents a FIFO from blocking admission.
@@ -124,7 +125,10 @@ impl Journal {
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
-        let dir = state.child(content_id.as_ref(), true)?;
+        let dir = match existing_journal {
+            Some(dir) => dir,
+            None => state.child(journal_id.as_ref(), true)?,
+        };
         let parts = dir.child("parts".as_ref(), true)?;
         parts.discard_owned(PENDING.as_ref())?;
         write_meta(
@@ -137,6 +141,7 @@ impl Journal {
         )?;
         let mut journal = Self {
             state,
+            journal_id,
             dir,
             parts,
             dest_parent,
@@ -331,7 +336,7 @@ impl Journal {
         remove_if_present(&self.dir, "parts".as_ref(), true)?;
         self.dir.sync()?;
         hit(Point::PartsRemoved)?;
-        remove_if_present(&self.state, hex(&self.manifest.root).as_ref(), true)?;
+        remove_if_present(&self.state, self.journal_id.as_ref(), true)?;
         self.state.sync()?;
         hit(Point::JournalRemoved)?;
         Ok(())
@@ -352,6 +357,52 @@ const META_LIMIT: usize = 8 * 1024;
 /// A content-id directory name: the lowercase hex of a BLAKE3 root.
 fn is_content_id(name: &str) -> bool {
     name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The name binds recovery even if advisory metadata is torn. The relative
+/// path has already passed `check_rel_path`; aliases deliberately do not share
+/// cached bytes across separately authorized lexical destinations.
+fn scoped_id(rel: &Path, root: &ChunkHash) -> String {
+    format!(
+        "v2-{}-{}",
+        hex(root),
+        blake3::hash(rel.as_os_str().as_encoded_bytes()).to_hex()
+    )
+}
+
+fn is_journal_id(name: &str) -> bool {
+    is_content_id(name)
+        || name
+            .strip_prefix("v2-")
+            .and_then(|rest| rest.split_once('-'))
+            .is_some_and(|(root, dest)| is_content_id(root) && is_content_id(dest))
+}
+
+/// Prefer destination-bound state. Legacy state is reusable only when its
+/// verified metadata proves this exact destination/content association. A
+/// malformed or foreign legacy entry stays untouched and cannot block a new
+/// scoped journal. Unsafe entries at the selected scoped name still fail closed.
+fn select_journal(
+    state: &Directory,
+    rel: &Path,
+    manifest: &Manifest,
+) -> io::Result<(String, Option<Directory>)> {
+    let name = scoped_id(rel, &manifest.root);
+    match state.child(name.as_ref(), false) {
+        Ok(dir) => return Ok((name, Some(dir))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let legacy = hex(&manifest.root);
+    if let Ok(dir) = state.child(legacy.as_ref(), false)
+        && let Ok(Some(meta)) = read_meta(&dir)
+        && meta.rel_path == rel.to_string_lossy()
+        && meta.root == manifest.root
+        && meta.size == manifest.size
+    {
+        return Ok((legacy, Some(dir)));
+    }
+    Ok((name, None))
 }
 
 /// Postcard body with its BLAKE3 trailer verified — the only decoding
@@ -380,6 +431,7 @@ fn collect_superseded(
     state: &Directory,
     rel: &Path,
     own: &str,
+    current_root: &ChunkHash,
     stop: &dyn Fn() -> bool,
 ) -> io::Result<()> {
     let rel_str = rel.to_string_lossy();
@@ -389,7 +441,7 @@ fn collect_superseded(
         let Some(name) = name.to_str() else {
             return Ok(());
         };
-        if name == own || !is_content_id(name) {
+        if name == own || !is_journal_id(name) {
             return Ok(());
         }
         let superseded = state
@@ -398,7 +450,10 @@ fn collect_superseded(
             .ok()
             .and_then(|(entry, meta)| {
                 let meta = meta?;
-                (meta.rel_path == rel_str && hex(&meta.root) == name).then_some((entry, meta))
+                (meta.rel_path == rel_str
+                    && meta.root != *current_root
+                    && (hex(&meta.root) == name || scoped_id(rel, &meta.root) == name))
+                    .then_some((entry, meta))
             });
         if let Some((entry, _)) = superseded
             && let Err(error) = collect_journal(&entry, state, name.as_ref(), stop, &mut budget)

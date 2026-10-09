@@ -335,8 +335,12 @@ async fn corrupt_part_is_refetched() {
     // dir with all-but-last parts correct and the last poisoned, so
     // resume re-fetches exactly one chunk.
     let manifest = manifest_of(&data);
-    let root_hex: String = manifest.root.iter().map(|b| format!("{b:02x}")).collect();
-    let parts = server_dir.join(".rds-sync").join(&root_hex).join("parts");
+    let name = format!(
+        "v2-{}-{}",
+        blake3::Hash::from(manifest.root).to_hex(),
+        blake3::hash(b"corruptme.bin").to_hex()
+    );
+    let parts = server_dir.join(".rds-sync").join(name).join("parts");
     std::fs::create_dir_all(&parts).unwrap();
     // Write all-but-last parts correctly, poison the last one.
     let keep = manifest.chunks.len() - 1;
