@@ -24,10 +24,12 @@ records native proof and remaining installed observations.
    offer and one outgoing transfer per session; expire them and preserve the
    latest offer when a stale request arrives.
 4. Route reverse clipboard to the main-thread viewer state machine. Request
-   only while its window is focused; publish only a requested matching transfer,
+   while focused or during a five-second explicit Copy/Cut handoff after blur;
+   publish only a requested matching transfer,
    with a pasteboard change-count fence. Background devices must not overwrite
-   the Mac clipboard. Drop unrequested offers at focus loss; retain an already
-   requested transfer under the pasteboard fence. Reset at reconnect/close; do not
+   the Mac clipboard. Drop unrequested offers at focus loss unless an explicit
+   copy handoff is active; retain requested transfers under the pasteboard fence.
+   A newer copy drains an older snapshot without publishing it. Reset at reconnect/close; do not
    log payloads. Translate Cmd+C/Command cut to remote Control chords, matching
    the existing explicit Command paste behavior. Exercise real AppKit text
    publication using an isolated named pasteboard, preserving the user's general clipboard.

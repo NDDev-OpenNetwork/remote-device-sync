@@ -1238,6 +1238,9 @@ impl ApplicationHandler<()> for App {
                             && matches!(code, 45 | 46)
                             && (self.keys.contains(&125) || self.keys.contains(&126))
                         {
+                            if let Ok(generation) = super::platform::clipboard_generation() {
+                                lock(&self.handle.state).clipboard.copying(generation);
+                            }
                             for kind in super::input::command_chord(&self.keys, code) {
                                 self.input(event_loop, kind);
                             }

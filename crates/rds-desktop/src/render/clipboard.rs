@@ -7,6 +7,8 @@ use crate::{
 use rds_core::{ClipboardFormat, DesktopControl};
 use std::time::{Duration, Instant};
 
+const COPY_HANDOFF: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
 pub(super) struct Clipboard {
     focused: bool,
@@ -16,11 +18,12 @@ pub(super) struct Clipboard {
     complete: Option<String>,
     generation: Option<i64>,
     authorized: bool,
+    copy_intent: Option<(i64, Instant)>,
 }
 impl Clipboard {
     pub(super) fn needs_work(&self) -> bool {
         self.complete.is_some()
-            || (self.focused
+            || ((self.focused || self.copy_pending())
                 && self.offered.is_some()
                 && self
                     .requested
@@ -29,8 +32,18 @@ impl Clipboard {
     }
     pub(super) fn focus(&mut self, focused: bool) {
         self.focused = focused;
-        if !focused {
+        if !focused && !self.copy_pending() {
             self.offered = None;
+        }
+    }
+    fn copy_pending(&self) -> bool {
+        self.copy_intent
+            .is_some_and(|(_, at)| at.elapsed() < COPY_HANDOFF)
+    }
+    pub(super) fn copying(&mut self, generation: i64) {
+        if self.focused {
+            self.offered = None;
+            self.copy_intent = Some((generation, Instant::now()));
         }
     }
     pub(super) fn reset(&mut self) {
@@ -39,11 +52,22 @@ impl Clipboard {
         self.focused = focused;
     }
     pub(super) fn offer(&mut self, id: u64, format: ClipboardFormat, bytes: u32) {
-        if self.focused && format == ClipboardFormat::TextUtf8 && bytes as usize <= MAX_TEXT_BYTES {
+        if (self.focused || self.copy_pending())
+            && format == ClipboardFormat::TextUtf8
+            && bytes as usize <= MAX_TEXT_BYTES
+        {
             self.offered = Some((id, bytes));
         }
     }
     pub(super) fn request(&mut self, generation: i64) -> Option<DesktopControl> {
+        if self
+            .copy_intent
+            .is_some_and(|(before, at)| before != generation || at.elapsed() >= COPY_HANDOFF)
+        {
+            self.copy_intent = None;
+            self.offered = None;
+            return None;
+        }
         if self
             .requested
             .as_ref()
@@ -52,10 +76,14 @@ impl Clipboard {
             self.requested = None;
             self.assembly = Assembly::default();
         }
-        if !self.focused || self.requested.is_some() || self.complete.is_some() {
+        if (!self.focused && !self.copy_pending())
+            || self.requested.is_some()
+            || self.complete.is_some()
+        {
             return None;
         }
         let (id, bytes) = self.offered.take()?;
+        self.copy_intent = None;
         self.requested = Some((id, bytes, Instant::now()));
         self.generation = Some(generation);
         self.authorized = true;
@@ -108,7 +136,10 @@ impl Clipboard {
     }
     pub(super) fn publish(&mut self, generation: i64) -> Option<String> {
         let value = self.complete.take()?;
-        let permitted = self.authorized && self.generation == Some(generation);
+        // A newer explicit Copy/Cut supersedes this in-flight snapshot. Drain
+        // it without changing the pasteboard, then request the latest offer.
+        let permitted =
+            self.authorized && self.generation == Some(generation) && self.copy_intent.is_none();
         self.authorized = false;
         self.generation = None;
         permitted.then_some(value)
@@ -118,6 +149,57 @@ impl Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_copy_accepts_one_delayed_offer_after_switching_apps() {
+        let mut c = Clipboard::default();
+        c.focus(true);
+        c.copying(17);
+        c.focus(false);
+        c.offer(1, ClipboardFormat::TextUtf8, 3);
+        assert!(c.needs_work());
+        assert!(c.request(17).is_some());
+        c.chunk(1, 0, 3, b"abc".to_vec()).unwrap();
+        assert_eq!(c.publish(17), Some("abc".into()));
+        c.offer(2, ClipboardFormat::TextUtf8, 0);
+        assert!(c.request(17).is_none());
+        assert!(!c.needs_work());
+    }
+    #[test]
+    fn copy_handoff_expires_and_cannot_replace_a_new_local_copy() {
+        for expired in [false, true] {
+            let mut c = Clipboard::default();
+            c.focus(true);
+            c.copying(17);
+            c.focus(false);
+            c.offer(1, ClipboardFormat::TextUtf8, 0);
+            if expired {
+                c.copy_intent = Some((17, Instant::now() - COPY_HANDOFF));
+            }
+            assert!(c.request(if expired { 17 } else { 18 }).is_none());
+            assert!(c.publish(17).is_none());
+            c.copying(18); // Background callers cannot arm another handoff.
+            c.offer(2, ClipboardFormat::TextUtf8, 0);
+            assert!(c.request(18).is_none());
+        }
+    }
+    #[test]
+    fn newer_copy_drains_the_old_transfer_without_publishing_it() {
+        let mut c = Clipboard::default();
+        c.focus(true);
+        c.offer(1, ClipboardFormat::TextUtf8, 3);
+        assert!(c.request(9).is_some());
+        c.copying(9);
+        c.focus(false);
+        c.offer(2, ClipboardFormat::TextUtf8, 3);
+        c.chunk(1, 0, 3, b"old".to_vec()).unwrap();
+        assert!(c.publish(9).is_none());
+        assert!(matches!(
+            c.request(9),
+            Some(DesktopControl::ClipboardRequest { id: 2, .. })
+        ));
+        c.chunk(2, 0, 3, b"new".to_vec()).unwrap();
+        assert_eq!(c.publish(9), Some("new".into()));
+    }
     #[test]
     fn background_windows_and_unsolicited_chunks_never_publish() {
         let mut c = Clipboard::default();
