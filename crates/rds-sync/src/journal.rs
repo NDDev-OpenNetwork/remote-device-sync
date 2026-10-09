@@ -24,6 +24,23 @@ use crate::{
 /// Directory name (under the sync root) holding in-flight state.
 pub const STATE_DIR: &str = ".rds-sync";
 const ASSEMBLY: &str = "assembly";
+// Opportunistic cleanup must not make admission walk an arbitrary history.
+// Count every sibling/part name, including unknown entries. This is a work
+// bound, not a space quota or a promise to eventually sweep foreign entries.
+const MAX_COLLECTION_ENTRIES: usize = 4096;
+
+struct CollectionBudget(usize);
+
+impl CollectionBudget {
+    fn visit(&mut self, stop: &dyn Fn() -> bool) -> io::Result<()> {
+        check_stop(stop)?;
+        if self.0 == 0 {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        self.0 -= 1;
+        Ok(())
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Meta {
@@ -366,8 +383,9 @@ fn collect_superseded(
     stop: &dyn Fn() -> bool,
 ) -> io::Result<()> {
     let rel_str = rel.to_string_lossy();
+    let mut budget = CollectionBudget(MAX_COLLECTION_ENTRIES);
     let result = state.visit_children(|name| {
-        check_stop(stop)?;
+        budget.visit(stop)?;
         let Some(name) = name.to_str() else {
             return Ok(());
         };
@@ -383,9 +401,11 @@ fn collect_superseded(
                 (meta.rel_path == rel_str && hex(&meta.root) == name).then_some((entry, meta))
             });
         if let Some((entry, _)) = superseded
-            && let Err(error) = collect_journal(&entry, state, name.as_ref(), stop)
+            && let Err(error) = collect_journal(&entry, state, name.as_ref(), stop, &mut budget)
         {
-            if error.kind() == io::ErrorKind::Interrupted {
+            if error.kind() == io::ErrorKind::Interrupted
+                || (error.kind() == io::ErrorKind::WouldBlock && budget.0 == 0)
+            {
                 return Err(error);
             }
             tracing::warn!(%error, "superseded journal collection incomplete");
@@ -395,6 +415,13 @@ fn collect_superseded(
     if let Err(error) = result {
         if error.kind() == io::ErrorKind::Interrupted {
             return Err(error);
+        }
+        if error.kind() == io::ErrorKind::WouldBlock && budget.0 == 0 {
+            tracing::debug!(
+                entries = MAX_COLLECTION_ENTRIES,
+                "journal collection deferred at work limit"
+            );
+            return Ok(());
         }
         tracing::warn!(%error, "journal collection could not list state");
     }
@@ -412,11 +439,12 @@ fn collect_journal(
     state: &Directory,
     name: &std::ffi::OsStr,
     stop: &dyn Fn() -> bool,
+    budget: &mut CollectionBudget,
 ) -> io::Result<()> {
     check_stop(stop)?;
     if let Ok(parts) = entry.child("parts".as_ref(), false) {
         parts.visit_children(|part| {
-            check_stop(stop)?;
+            budget.visit(stop)?;
             let Some(p) = part.to_str() else {
                 return Ok(());
             };
