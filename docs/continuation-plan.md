@@ -1,7 +1,8 @@
 # Current implementation continuation — 2026-10-07
 
-This is the current execution order for stabilizing the implemented system.
-It supplements [remediation-plan.md](remediation-plan.md); W0–W10 identifiers
+Execution order is now maintained in the [October 9 stability
+plan](stability-plan-20261009.md). This dated continuation retains the
+implementation/research trail and supplements [remediation-plan.md](remediation-plan.md); W0–W10 identifiers
 retain their original acceptance requirements. Source, tests and live artifact
 observations decide status. A historical receipt, successful build or sampled
 RTT does not establish installed interactive stability.

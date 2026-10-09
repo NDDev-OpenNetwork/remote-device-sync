@@ -27,6 +27,8 @@ content review, and unrelated projects are outside the audit.
 | A6 | `capture/{sck,image_copy,kms,pipewire}.rs` return `Ok(None)`; native macOS/Wayland input and hardware codec modules return `false`. Agent explicitly refuses audio. | Native serving and device audio are implementation work, not a documentation or feature-flag change. No capability promotion from library tests. |
 | A7 | ACK progress, independent initial validation, persistent relay registration and standby restoration exist in both backend adapters/vendored engines. | Physical topology parity, interface recreation, suspend/rebind, owned UDP-blocked carrier, federation and complete retired-path accounting remain open. |
 | A8 | Release packaging has digest/provenance checks; current release documentation also describes an older published preview. Current docs and dated progress sections sometimes mix those epochs. | Separate current implementation from historical release content; bind source, consumed gitlink, artifact, running image and effective policy independently. |
+| A9 | Thirty Noq CodeQL alerts remained open despite successful scanner jobs. | [Exact source review](reports/rds-noq-codeql-review-20261009.md) distinguishes public protocol constants/input parsing from intentional optional-hook/qlog bindings. Preserve scanner coverage and individually recorded dispositions. |
+| A10 | The first audio checkpoint exposed two tests contending for the same global disk pool; a 15 ms sleep did not establish concurrency. | [Fixture correction](reports/rds-sync-pool-fixture-20261009.md) serializes exhaustive probes and explicitly observes full admission. Production limits remain unchanged; rerun the failed gate. |
 
 ## Wave 1 — repair the audio foundation (W9.1, W0.1)
 

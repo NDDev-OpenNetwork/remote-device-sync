@@ -1,5 +1,11 @@
 # Implementation plan — owned connectivity core (v0.2) and beyond
 
+The registered `w9-audio-foundation` checkpoint covers packet validation,
+fixed-duration libopus codec and bounded reorder/loss contracts, with a synthetic
+codec benchmark. It does not qualify an audio service, native device I/O or
+A/V synchronization. See [audio.md](audio.md) and the current
+[stability execution order](stability-plan-20261009.md).
+
 The registered `w8-directory-foundation` checkpoint covers directory scan,
 snapshot wire and dry-run planning contracts plus a reproducible synthetic
 release benchmark. Its scope and open destructive-service acceptance gates are

@@ -1,7 +1,7 @@
 # Roadmap
 
-Current execution order and reopened gates are in the
-[2026-09-24 remediation plan](remediation-plan.md), backed by the
+Current execution order is in the [2026-10-09 stability plan](stability-plan-20261009.md).
+Reopened acceptance gates remain in the [2026-09-24 remediation plan](remediation-plan.md), backed by the
 [implementation/session audit](reports/rds-audit-20260924.md).
 The milestones below preserve the original direction; historical checkpoint
 completion does not establish that the audited defects or product gaps are closed.
