@@ -1,5 +1,9 @@
 use super::*;
 
+// These two fixtures deliberately exhaust the same process-wide pool. They
+// must not reserve permits against each other while waiting for their workers.
+static DISK_POOL_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
@@ -269,23 +273,63 @@ async fn session_open_refuses_wrong_version_with_clear_error() {
 /// blocking threads at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn disk_jobs_share_one_bounded_pool() {
+    let _exclusive = DISK_POOL_TEST.lock().await;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::{Condvar, Mutex};
+
+    // Retain each admitted worker until the whole pool has arrived. A sleep
+    // measures scheduler luck and can run serially on a busy machine. Always
+    // open the gate on drop, including timeout/panic, so blocking work cannot
+    // keep the test runtime alive forever.
+    struct Release(Arc<(Mutex<bool>, Condvar)>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.0.lock().unwrap() = true;
+            self.0.1.notify_all();
+        }
+    }
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = Release(gate.clone());
+    let (started, mut starts) = mpsc::channel(MAX_DISK_JOBS * 2);
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..(MAX_DISK_JOBS * 2) {
         let (a, p) = (active.clone(), peak.clone());
+        let gate = gate.clone();
+        let started = started.clone();
         set.spawn(disk_job(move || {
             let n = a.fetch_add(1, Ordering::SeqCst) + 1;
             p.fetch_max(n, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(15));
+            started.try_send(()).unwrap();
+            drop(
+                gate.1
+                    .wait_while(gate.0.lock().unwrap(), |released| !*released)
+                    .unwrap(),
+            );
             a.fetch_sub(1, Ordering::SeqCst);
         }));
     }
-    while set.join_next().await.is_some() {}
+    let filled = tokio::time::timeout(Duration::from_secs(30), async {
+        for _ in 0..MAX_DISK_JOBS {
+            starts
+                .recv()
+                .await
+                .expect("disk worker announced admission");
+        }
+    })
+    .await;
+    if filled.is_ok() {
+        assert_eq!(DISK_JOBS.available_permits(), 0);
+        assert_eq!(active.load(Ordering::SeqCst), MAX_DISK_JOBS);
+    }
+    drop(release);
+    while let Some(result) = set.join_next().await {
+        result.unwrap().unwrap();
+    }
+    filled.expect("disk pool never filled");
     assert_eq!(active.load(Ordering::SeqCst), 0);
-    assert!(peak.load(Ordering::SeqCst) <= MAX_DISK_JOBS);
-    assert!(peak.load(Ordering::SeqCst) > 1, "jobs never overlapped");
+    assert_eq!(peak.load(Ordering::SeqCst), MAX_DISK_JOBS);
 }
 
 /// W1.9: the token→flag projection must flip promptly and stay scoped to
@@ -321,6 +365,7 @@ async fn dropping_cancel_projection_stops_its_waiter() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canceled_disk_waiter_retains_running_work_budget() {
+    let _exclusive = DISK_POOL_TEST.lock().await;
     let _other = DISK_JOBS
         .acquire_many((MAX_DISK_JOBS - 1) as u32)
         .await
