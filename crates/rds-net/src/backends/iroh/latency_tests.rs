@@ -195,6 +195,20 @@ async fn endpoint_with_selector(link: Link, selector: Arc<dyn PathSelector>) -> 
         .unwrap()
 }
 
+fn loopback_target(endpoint: &iroh::Endpoint, custom: CustomAddr) -> iroh::EndpointAddr {
+    let sockets = endpoint.bound_sockets();
+    assert_eq!(sockets.len(), 1, "fixture must bind one loopback socket");
+    assert!(sockets[0].ip().is_loopback() && sockets[0].port() != 0);
+    // These fixtures require an already configured UDP sibling. Seed its
+    // real bound address instead of depending on asynchronous peer-address
+    // advertisement after a custom-only bootstrap. The selector still proves
+    // that the custom link is selected before blackholing its stream work.
+    iroh::EndpointAddr::from_parts(
+        endpoint.id(),
+        [TransportAddr::Custom(custom), TransportAddr::Ip(sockets[0])],
+    )
+}
+
 #[derive(Debug)]
 struct StandbySelector {
     phase: AtomicU8,
@@ -322,7 +336,7 @@ async fn actual_iroh_actor_reopens_a_retired_standby_before_the_next_failure() {
             selector.clone(),
         )
         .await;
-        let target = iroh::EndpointAddr::from_parts(b.id(), [TransportAddr::Custom(b_addr)]);
+        let target = loopback_target(&b, b_addr);
         let (client, server) = tokio::join!(a.connect(target, rds_core::ALPN), async {
             b.accept().await.unwrap().await
         });
@@ -548,7 +562,7 @@ async fn actual_iroh_actor_retires_blackholed_preferred_link_and_delivers_pendin
         let a_addr=CustomAddr::from_parts(0x72647374657374,b"a");let b_addr=CustomAddr::from_parts(0x72647374657374,b"b");
         let a=endpoint(Link {addr:a_addr,fabric:fabric.clone(),drop_packets:Arc::new(AtomicBool::new(false)),dropped:Arc::new(AtomicU64::new(0))},armed.clone()).await;
         let b=endpoint(Link {addr:b_addr.clone(),fabric,drop_packets:dropping.clone(),dropped:dropped.clone()},armed.clone()).await;
-        let target=iroh::EndpointAddr::from_parts(b.id(),[TransportAddr::Custom(b_addr)]);
+        let target=loopback_target(&b,b_addr);
         let (client,server)=tokio::join!(a.connect(target,rds_core::ALPN),async {b.accept().await.unwrap().await});
         let (client,server)=(client.unwrap(),server.unwrap());
         let (mut request,mut reply)=client.open_bi().await.unwrap();request.write_all(b"warm").await.unwrap();
