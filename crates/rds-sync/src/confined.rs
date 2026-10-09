@@ -128,30 +128,38 @@ impl Directory {
         self.sync()
     }
 
-    /// Entry names in this pinned directory — names only; nothing is
-    /// resolved, opened or followed. The caller decides which names are
-    /// attributable; `.`/`..` are never reported.
-    pub(crate) fn children(&self) -> io::Result<Vec<OsString>> {
-        self.children_checked(|_| Ok(true))
-    }
-
     /// Inspect every name before retaining it. Scanners enforce cancellation
     /// and enumeration budgets here, before a wide directory is allocated.
     pub(crate) fn children_checked(
         &self,
         mut check: impl FnMut(&OsStr) -> io::Result<bool>,
     ) -> io::Result<Vec<OsString>> {
+        let mut out = Vec::new();
+        self.visit_children(|name| {
+            if check(name)? {
+                out.push(name.to_os_string());
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Visit names without retaining a directory-sized list. Names are not
+    /// opened or followed; a callback error stops enumeration immediately.
+    pub(crate) fn visit_children(
+        &self,
+        mut visit: impl FnMut(&OsStr) -> io::Result<()>,
+    ) -> io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let mut dir = rustix::fs::Dir::read_from(&*self.0)?;
-        let mut out = Vec::new();
         while let Some(entry) = dir.read() {
             let entry = entry?;
             let name = OsStr::from_bytes(entry.file_name().to_bytes());
-            if name != "." && name != ".." && check(name)? {
-                out.push(name.to_os_string());
+            if name != "." && name != ".." {
+                visit(name)?;
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Inspect one direct child without following a symlink. The scanner uses

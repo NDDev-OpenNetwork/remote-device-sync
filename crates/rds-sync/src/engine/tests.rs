@@ -72,6 +72,69 @@ fn canceling_finish_discards_stores_that_have_not_started() {
     queued_writer(true);
 }
 
+#[test]
+fn dropping_queued_journal_preparation_does_not_create_receive_state() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let root = Scratch::new();
+    runtime.block_on(async {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        });
+        ready.await.unwrap();
+        let manifest = crate::manifest_of(b"never admitted");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                prepare_journal(
+                    &root.0,
+                    "data.bin",
+                    &manifest,
+                    Arc::new(AtomicBool::new(false)),
+                    None
+                )
+            )
+            .await
+            .is_err()
+        );
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        // The single blocking worker has finished any previously queued open.
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert!(
+            !root.0.exists(),
+            "abandoned queued preparation created state"
+        );
+        assert!(Journal::open(&root.0, "data.bin", &manifest).is_ok());
+    });
+}
+
+#[tokio::test]
+async fn journal_preparation_observes_peer_and_caller_cancellation() {
+    for peer_canceled in [false, true] {
+        let root = Scratch::new();
+        let result = prepare_journal(
+            &root.0,
+            "data.bin",
+            &crate::manifest_of(b"never admitted"),
+            Arc::new(AtomicBool::new(peer_canceled)),
+            Some(Arc::new(AtomicBool::new(!peer_canceled))),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(crate::SyncError::Io(ref e)) if e.kind() == std::io::ErrorKind::Interrupted)
+        );
+        assert!(!root.0.exists());
+    }
+}
+
 #[tokio::test]
 async fn normal_finish_drains_and_verifies_every_queued_store() {
     let root = Scratch::new();

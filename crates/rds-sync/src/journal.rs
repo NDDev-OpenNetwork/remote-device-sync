@@ -55,8 +55,22 @@ impl Journal {
     /// and re-verify existing parts. A root with an active receive is
     /// refused immediately; callers can retry once its transfer ends.
     pub fn open(dest_dir: &Path, rel_path: &str, manifest: &Manifest) -> Result<Self, SyncError> {
+        Self::open_cancellable(dest_dir, rel_path, manifest, &|| false)
+    }
+
+    /// Open with cancellation between directory entries and content chunks.
+    /// An in-progress syscall completes; verified parts stay resumable and
+    /// both receive locks release when cancellation returns `Interrupted`.
+    pub fn open_cancellable(
+        dest_dir: &Path,
+        rel_path: &str,
+        manifest: &Manifest,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Self, SyncError> {
+        check_stop(stop)?;
         check_manifest(manifest)?;
         let rel = check_rel_path(rel_path)?;
+        check_stop(stop)?;
         let root = Directory::open_root(dest_dir, true)?;
         let state = root.child(STATE_DIR.as_ref(), true)?;
         state.make_private()?;
@@ -77,13 +91,15 @@ impl Journal {
         } else {
             Some(dest_state.lock("receive.lock".as_ref())?)
         };
+        check_stop(stop)?;
         dest_state.discard_owned(ASSEMBLY.as_ref())?;
         // W1.10: a resume always opens the offered root, so verified-meta
         // journals binding this same destination under a different content
         // id are unreachable resume state. Collect them under the held
         // receive locks — everything else (other rels, malformed or
         // foreign entries) is not attributable and stays.
-        collect_superseded(&state, &rel, &content_id);
+        collect_superseded(&state, &rel, &content_id, stop)?;
+        check_stop(stop)?;
         // Refuse symlinks and special files even if they contain no reusable
         // bytes. NONBLOCK + fstat prevents a FIFO from blocking admission.
         let existing = match dest_parent.read_file(&dest_name) {
@@ -116,19 +132,25 @@ impl Journal {
             have: HashSet::new(),
             fetched: 0,
         };
-        journal.rescan()?;
+        journal.rescan(stop)?;
         if let Some(file) = existing {
-            journal.seed_from_destination(file)?;
+            journal.seed_from_destination(file, stop)?;
         }
+        check_stop(stop)?;
         Ok(journal)
     }
 
     /// Reused chunks become immutable verified parts before advertising have.
     /// File size and original offsets do not constrain content-defined reuse.
     /// Reading remains bounded to one chunk plus the manifest's hash index.
-    fn seed_from_destination(&mut self, file: File) -> Result<(), SyncError> {
+    fn seed_from_destination(
+        &mut self,
+        file: File,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(), SyncError> {
         let mut wanted: HashMap<(ChunkHash, u32), Vec<u32>> = HashMap::new();
         for (i, c) in self.manifest.chunks.iter().enumerate() {
+            check_stop(stop)?;
             if !self.have.contains(&(i as u32)) {
                 wanted.entry((c.hash, c.len)).or_default().push(i as u32);
             }
@@ -142,6 +164,7 @@ impl Journal {
             AVG_CHUNK as usize,
             MAX_CHUNK as usize,
         ) {
+            check_stop(stop)?;
             let chunk = chunk.map_err(io::Error::from)?;
             let hash = *blake3::hash(&chunk.data).as_bytes();
             if let Some(indices) = wanted.remove(&(hash, chunk.length as u32)) {
@@ -155,9 +178,10 @@ impl Journal {
         Ok(())
     }
 
-    fn rescan(&mut self) -> Result<(), SyncError> {
+    fn rescan(&mut self, stop: &dyn Fn() -> bool) -> Result<(), SyncError> {
         self.have.clear();
         for (i, c) in self.manifest.chunks.iter().enumerate() {
+            check_stop(stop)?;
             let name = hex(&c.hash);
             let data = match self.parts.read_state(name.as_ref(), c.len as usize) {
                 Ok(data) => data,
@@ -335,19 +359,20 @@ fn read_meta(dir: &Directory) -> io::Result<Option<Meta>> {
 /// Remove verified superseded journals for `rel` under `state`. Best
 /// effort: a torn or hostile sibling must never block a fresh transfer,
 /// so per-entry failures are logged and skipped rather than returned.
-fn collect_superseded(state: &Directory, rel: &Path, own: &str) {
+fn collect_superseded(
+    state: &Directory,
+    rel: &Path,
+    own: &str,
+    stop: &dyn Fn() -> bool,
+) -> io::Result<()> {
     let rel_str = rel.to_string_lossy();
-    let children = match state.children() {
-        Ok(children) => children,
-        Err(error) => {
-            tracing::warn!(%error, "journal collection could not list state");
-            return;
-        }
-    };
-    for name in children {
-        let Some(name) = name.to_str() else { continue };
+    let result = state.visit_children(|name| {
+        check_stop(stop)?;
+        let Some(name) = name.to_str() else {
+            return Ok(());
+        };
         if name == own || !is_content_id(name) {
-            continue;
+            return Ok(());
         }
         let superseded = state
             .child(name.as_ref(), false)
@@ -358,11 +383,22 @@ fn collect_superseded(state: &Directory, rel: &Path, own: &str) {
                 (meta.rel_path == rel_str && hex(&meta.root) == name).then_some((entry, meta))
             });
         if let Some((entry, _)) = superseded
-            && let Err(error) = collect_journal(&entry, state, name.as_ref())
+            && let Err(error) = collect_journal(&entry, state, name.as_ref(), stop)
         {
+            if error.kind() == io::ErrorKind::Interrupted {
+                return Err(error);
+            }
             tracing::warn!(%error, "superseded journal collection incomplete");
         }
+        Ok(())
+    });
+    if let Err(error) = result {
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        tracing::warn!(%error, "journal collection could not list state");
     }
+    Ok(())
 }
 
 /// Remove only the names this engine could have written inside a
@@ -371,22 +407,42 @@ fn collect_superseded(state: &Directory, rel: &Path, own: &str) {
 /// alias aborts collection and preserves the journal instead of
 /// unlinking foreign data. `rmdir` refuses non-empty, matching
 /// `cleanup`'s never-sweep-the-unknown contract.
-fn collect_journal(entry: &Directory, state: &Directory, name: &std::ffi::OsStr) -> io::Result<()> {
+fn collect_journal(
+    entry: &Directory,
+    state: &Directory,
+    name: &std::ffi::OsStr,
+    stop: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    check_stop(stop)?;
     if let Ok(parts) = entry.child("parts".as_ref(), false) {
-        for part in parts.children()? {
-            let Some(p) = part.to_str() else { continue };
+        parts.visit_children(|part| {
+            check_stop(stop)?;
+            let Some(p) = part.to_str() else {
+                return Ok(());
+            };
             if is_content_id(p) || p == PENDING {
-                parts.discard_owned(part.as_ref())?;
+                parts.discard_owned(part)?;
             }
-        }
+            Ok(())
+        })?;
+        check_stop(stop)?;
         parts.sync()?;
         remove_if_present(entry, "parts".as_ref(), true)?;
     }
+    check_stop(stop)?;
     entry.discard_owned(PENDING.as_ref())?;
     entry.discard_owned("meta".as_ref())?;
     entry.sync()?;
     remove_if_present(state, name, true)?;
     state.sync()
+}
+
+fn check_stop(stop: &dyn Fn() -> bool) -> io::Result<()> {
+    if stop() {
+        Err(io::Error::from(io::ErrorKind::Interrupted))
+    } else {
+        Ok(())
+    }
 }
 
 fn write_meta(dir: &Directory, meta: &Meta) -> Result<(), SyncError> {
