@@ -15,8 +15,10 @@ use thiserror::Error;
 /// contract. RFC 6716 permits multi-frame packets whose total size can be
 /// larger; this crate intentionally does not expose those yet.
 pub const MAX_OPUS_FRAME_BYTES: usize = 1275;
-/// Maximum payload accepted for the current one-frame-per-packet contract.
-pub const MAX_OPUS_PACKET_BYTES: usize = MAX_OPUS_FRAME_BYTES;
+/// Maximum packet size in the RDS one-frame profile: a maximum-size frame
+/// plus its TOC byte (RFC 6716 section 3.2.2). Additional Opus padding is
+/// accepted only within this same packet bound.
+pub const MAX_OPUS_PACKET_BYTES: usize = MAX_OPUS_FRAME_BYTES + 1;
 /// The default interactive frame duration.
 pub const DEFAULT_FRAME_DURATION_MS: u32 = 20;
 /// The standards-defined Opus frame durations.
@@ -120,16 +122,7 @@ impl AudioPacket {
         format: AudioFormat,
         frame_samples: usize,
     ) -> Result<Self, AudioError> {
-        format.validate()?;
-        if frame.samples as usize != frame_samples {
-            return Err(AudioError::InvalidFrame("wire frame sample count mismatch"));
-        }
-        if frame.data.is_empty() || frame.data.len() > MAX_OPUS_PACKET_BYTES {
-            return Err(AudioError::InvalidPacket(
-                "wire packet size is outside bounds",
-            ));
-        }
-        Ok(Self {
+        let packet = Self {
             seq: frame.seq,
             timestamp_us: frame
                 .capture_ts_ms
@@ -137,7 +130,43 @@ impl AudioPacket {
                 .ok_or(AudioError::InvalidPacket("wire timestamp overflow"))?,
             samples: frame.samples,
             data: Bytes::from(frame.data),
-        })
+        };
+        packet.validate(format, frame_samples)?;
+        Ok(packet)
+    }
+
+    /// Check framing and the negotiated duration without changing a decoder.
+    /// PCM channels describe decoder output: Opus can legitimately encode a
+    /// mono frame for a stereo output, so the TOC channel bit need not match.
+    fn validate(&self, format: AudioFormat, frame_samples: usize) -> Result<(), AudioError> {
+        format.validate()?;
+        let valid_duration = [
+            FrameDuration::Ms2_5,
+            FrameDuration::Ms5,
+            FrameDuration::Ms10,
+            FrameDuration::Ms20,
+            FrameDuration::Ms40,
+            FrameDuration::Ms60,
+        ]
+        .into_iter()
+        .any(|duration| duration.samples(format.sample_rate) == frame_samples);
+        if !valid_duration || self.samples as usize != frame_samples {
+            return Err(AudioError::InvalidFrame("packet sample count mismatch"));
+        }
+        if self.data.is_empty() || self.data.len() > MAX_OPUS_PACKET_BYTES {
+            return Err(AudioError::InvalidPacket("packet size is outside bounds"));
+        }
+        let parsed = opus::packet::parse(&self.data)
+            .map_err(|_| AudioError::InvalidPacket("malformed Opus packet"))?;
+        if parsed.frames.len() != 1 {
+            return Err(AudioError::InvalidPacket("expected one Opus frame"));
+        }
+        let samples = opus::packet::get_nb_samples(&self.data, format.sample_rate)
+            .map_err(|_| AudioError::InvalidPacket("invalid Opus duration"))?;
+        if samples != frame_samples {
+            return Err(AudioError::InvalidFrame("Opus duration mismatch"));
+        }
+        Ok(())
     }
 
     /// Convert to the current core wire record. The core wire timestamp is in
@@ -216,6 +245,7 @@ impl OpusEncoder {
             samples: self.frame_samples as u32,
             data: Bytes::from(data),
         };
+        packet.validate(self.format, self.frame_samples)?;
         self.next_seq = self.next_seq.wrapping_add(1);
         Ok(packet)
     }
@@ -247,12 +277,7 @@ impl OpusDecoder {
     }
 
     pub fn decode(&mut self, packet: &AudioPacket) -> Result<Vec<f32>, AudioError> {
-        if packet.samples as usize != self.frame_samples {
-            return Err(AudioError::InvalidFrame("packet sample count mismatch"));
-        }
-        if packet.data.is_empty() || packet.data.len() > MAX_OPUS_PACKET_BYTES {
-            return Err(AudioError::InvalidPacket("packet size is outside bounds"));
-        }
+        packet.validate(self.format, self.frame_samples)?;
         let mut pcm = vec![0.0; self.frame_samples * self.format.channels as usize];
         let decoded = self
             .inner
@@ -339,16 +364,7 @@ impl JitterBuffer {
     }
 
     pub fn push(&mut self, packet: AudioPacket) -> Result<PushOutcome, AudioError> {
-        if packet.samples as usize != self.frame_samples {
-            return Err(AudioError::InvalidFrame(
-                "jitter packet sample count mismatch",
-            ));
-        }
-        if packet.data.is_empty() || packet.data.len() > MAX_OPUS_PACKET_BYTES {
-            return Err(AudioError::InvalidPacket(
-                "jitter packet size is outside bounds",
-            ));
-        }
+        packet.validate(self.format, self.frame_samples)?;
         if self.next_sequence.is_some_and(|next| packet.seq < next) {
             self.late += 1;
             return Ok(PushOutcome::Late);
@@ -425,7 +441,7 @@ mod tests {
             seq,
             timestamp_us: seq * 20_000,
             samples: 960,
-            data: Bytes::from_static(&[0x01, 0x02]),
+            data: Bytes::from_static(&[0xf8]),
         }
     }
 
