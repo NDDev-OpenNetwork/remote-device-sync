@@ -42,6 +42,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSObject", "NSProcessInfo"], optional = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
 noq.workspace = true
 rds-bench = { workspace = true, features = ["transport-noq"] }
 rds-sync.workspace = true

@@ -165,6 +165,13 @@ async fn delivery_pause(extra_hold: Duration, sustained: bool) {
     use rds_net::{read_frame, write_frame};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    // Preserve the controller's actual reduction reason in a failing test's
+    // output, rather than inferring it from the final bitrate and path stats.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+
     tokio::time::timeout(Duration::from_secs(10), async {
         // Pause before server datagrams are emitted. This creates delayed
         // media without deliberately losing packets or receiver ACKs.
