@@ -9,8 +9,8 @@ Verdict: **foundation checks passed; audio service not qualified**
 - topology: synthetic in-process; no audio source, sink or remote service
 - NOT RUN: native device I/O, network playout, drift/A-V synchronization, microphone permission and installed qualification
 
-## Manual checklist (fill before merge)
-- [ ] All "not run" items above explained
-- [ ] Reports committed: bench-*.json, bench-*.md, this file
-- [ ] docs/ updated for anything this wave changed
-- [ ] security/unsafe review done for new code paths
+## Manual checklist
+- [x] All "not run" items above explained in [the scoped review](rds-audio-stability-20261009.md)
+- [x] Reports committed: bench-w9-audio-foundation.json, bench-w9-audio-foundation.md, this file
+- [x] docs/audio.md and the execution plan describe the changed contract
+- [x] Packet bounds, decoder admission, sequence/gap semantics and unchanged unsafe boundary reviewed

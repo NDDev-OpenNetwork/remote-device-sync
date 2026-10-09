@@ -32,6 +32,10 @@ content review, and unrelated projects are outside the audit.
 
 ## Wave 1 — repair the audio foundation (W9.1, W0.1)
 
+Implemented and qualified at the registered library checkpoint; see
+[the source-bound report](reports/rds-audio-stability-20261009.md). This status
+does not close W9.1 device/service acceptance. Wave 2 remains next.
+
 1. Add failing regressions for malformed frame tables, forged sample counts,
    valid multi-frame packets outside the selected contract, maximum frame plus
    header, and invalid input leaving decoder state unchanged. Use the existing
