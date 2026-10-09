@@ -241,9 +241,12 @@ async fn delayed_accept_observes_paths_established_before_actor_registration() {
         let b = endpoint(b_link, Arc::new(AtomicBool::new(false))).await;
         // Accept the QUIC handshake, but deliberately defer the Iroh future
         // that registers this connection with its path-observation actor.
+        #[allow(clippy::async_yields_async)]
+        // Returning the unpolled accepting future is the regression trigger.
+        let accept_without_registration = async { b.accept().await.unwrap().accept().unwrap() };
         let (client, pending_server) = tokio::join!(
             a.connect(loopback_target(&b, target_custom), rds_core::ALPN),
-            async { b.accept().await.unwrap().accept().unwrap() }
+            accept_without_registration
         );
         let client = client.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
