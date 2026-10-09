@@ -1,6 +1,6 @@
-# Checkpoint W8-JOURNAL-ADMISSION — 20261009-210743
+# Checkpoint W8-JOURNAL-ADMISSION — 20261009-230142
 
-Verdict: **PASS — bounded journal preparation only**
+Verdict: **pending review**
 
 ## Automated checks
 - fmt/workspace clippy/workspace tests: PASS
@@ -10,7 +10,7 @@ Verdict: **PASS — bounded journal preparation only**
 - physical power loss, disk quotas, fair background GC, recursive apply: NOT RUN
 
 ## Manual checklist (fill before merge)
-- [x] All "not run" items remain open in the [review](rds-journal-admission-20261010.md)
-- [x] Original generated report and benchmark committed at `fb2cf2a`
-- [x] Current journal contract and stability plan updated
-- [x] No unsafe/wire/auth change; no-follow/single-link checks and unknown entries retained
+- [ ] All "not run" items above explained
+- [ ] Reports committed: bench-*.json, bench-*.md, this file
+- [ ] docs/ updated for anything this wave changed
+- [ ] security/unsafe review done for new code paths
