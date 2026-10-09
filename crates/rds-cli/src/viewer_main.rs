@@ -303,10 +303,14 @@ fn window_plan(
             connection.displays
         };
         for display in displays {
-            if windows
+            if let Some(existing) = windows
                 .iter()
-                .any(|w: &WindowRequest| w.target == connection.target && w.display == display)
+                .find(|w: &&WindowRequest| w.target == connection.target && w.display == display)
             {
+                anyhow::ensure!(
+                    existing.grant_file == connection.grant_file,
+                    "duplicate device/display has conflicting grant files"
+                );
                 continue;
             }
             anyhow::ensure!(
@@ -425,6 +429,10 @@ mod tests {
             )
             .is_err()
         );
+        let conflicting: Config = serde_json::from_str(
+            r#"{"connections":[{"target":"device-a","displays":[0],"grant_file":"a.json"},{"target":"device-a","displays":[0],"grant_file":"b.json"}]}"#,
+        ).unwrap();
+        assert!(window_plan(conflicting.connections, 0).is_err());
     }
     #[test]
     fn all_displays_prefers_logical_monitors_without_duplicating_the_root() {
