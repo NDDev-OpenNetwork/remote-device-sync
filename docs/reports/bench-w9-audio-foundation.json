@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "scenario": "audio-codec-reorder-v1",
+  "source_commit": "93ae814121a0bacdc4d79539dc47c793f83bfc51",
+  "source_tree": "730e6581b0dbd32fd16f33b5d32984856cf665b6",
+  "worktree_clean": true,
+  "binary_digest": "4c4a1e672f03a6901886e6fd2db00763b032e223b8b684e388fa362471b38ca7",
+  "lockfile_digest": "94d0262a584f3573d387dd3885fed605d5abb09e80ed8167468a0ce80c5c8bd2",
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
+  "os": "macos",
+  "architecture": "aarch64",
+  "features": [
+    "default"
+  ],
+  "warmup_frames": 32,
+  "failures": 0,
+  "skips": 0,
+  "rows": [
+    {
+      "sample_rate": 8000,
+      "channels": 1,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 23,
+      "encoded_bytes": 9254,
+      "encoded_digest": "4b733b8b2567462df8a081e5d6f48c1fde8bfc290366051d7fd475727e3a0521",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 77875,
+        "p95_ns": 154208,
+        "p99_ns": 282083,
+        "max_ns": 2450250
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 2750,
+        "p95_ns": 6125,
+        "p99_ns": 12542,
+        "max_ns": 24167
+      },
+      "pipeline_ns": 51362375
+    },
+    {
+      "sample_rate": 8000,
+      "channels": 2,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 48,
+      "encoded_bytes": 24000,
+      "encoded_digest": "d183581a3c155a547dd6b774a46515cc8b9b3b5b2ae445987bd577dd916fb4a7",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 76292,
+        "p95_ns": 105833,
+        "p99_ns": 151708,
+        "max_ns": 302750
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 14500,
+        "p95_ns": 19584,
+        "p99_ns": 77583,
+        "max_ns": 107458
+      },
+      "pipeline_ns": 49182042
+    },
+    {
+      "sample_rate": 12000,
+      "channels": 1,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 25,
+      "encoded_bytes": 8979,
+      "encoded_digest": "29ef15649351a80d7cf16dd9c7484f30df822ecda42e8fd64955c0bdf73aa2f2",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 105875,
+        "p95_ns": 151458,
+        "p99_ns": 187583,
+        "max_ns": 273458
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 3375,
+        "p95_ns": 5709,
+        "p99_ns": 9875,
+        "max_ns": 25084
+      },
+      "pipeline_ns": 58482875
+    },
+    {
+      "sample_rate": 12000,
+      "channels": 2,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 68,
+      "encoded_bytes": 34000,
+      "encoded_digest": "4b808753ce45ddf3e4dfa97dc97395a459db4491312be9671327d326a047b534",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 82583,
+        "p95_ns": 109541,
+        "p99_ns": 246916,
+        "max_ns": 573791
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 17167,
+        "p95_ns": 25375,
+        "p99_ns": 77500,
+        "max_ns": 210875
+      },
+      "pipeline_ns": 54186625
+    },
+    {
+      "sample_rate": 16000,
+      "channels": 1,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 51,
+      "encoded_bytes": 24013,
+      "encoded_digest": "9f7503625a42f92751653876b8c8532120370bbbfa010cf564b98dce68456125",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 72625,
+        "p95_ns": 77834,
+        "p99_ns": 108917,
+        "max_ns": 176500
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 9792,
+        "p95_ns": 11334,
+        "p99_ns": 52625,
+        "max_ns": 56416
+      },
+      "pipeline_ns": 42299792
+    },
+    {
+      "sample_rate": 16000,
+      "channels": 2,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 89,
+      "encoded_bytes": 43987,
+      "encoded_digest": "6178b0dc8cb8c0108ca75fb29675fe4047ba814e54efc371a43d7fd6966960ec",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 98583,
+        "p95_ns": 144667,
+        "p99_ns": 327959,
+        "max_ns": 1789667
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 17750,
+        "p95_ns": 30708,
+        "p99_ns": 75833,
+        "max_ns": 228292
+      },
+      "pipeline_ns": 67099042
+    },
+    {
+      "sample_rate": 24000,
+      "channels": 1,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 68,
+      "encoded_bytes": 33997,
+      "encoded_digest": "e233820e05fcd68d73758b1b79137716fc5fc240ff00f36f028335da61797903",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 68458,
+        "p95_ns": 99875,
+        "p99_ns": 131875,
+        "max_ns": 163000
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 12167,
+        "p95_ns": 26000,
+        "p99_ns": 51709,
+        "max_ns": 80375
+      },
+      "pipeline_ns": 44321375
+    },
+    {
+      "sample_rate": 24000,
+      "channels": 2,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 128,
+      "encoded_bytes": 64000,
+      "encoded_digest": "dcd18f6882f1070979ac9accf3c4d49c7469f6a408656d90ebcf5eec1b240d8d",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 98416,
+        "p95_ns": 129625,
+        "p99_ns": 178542,
+        "max_ns": 314959
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 19459,
+        "p95_ns": 25916,
+        "p99_ns": 74042,
+        "max_ns": 123542
+      },
+      "pipeline_ns": 62910083
+    },
+    {
+      "sample_rate": 48000,
+      "channels": 1,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 129,
+      "encoded_bytes": 64250,
+      "encoded_digest": "87fc33c36f1988ac6fdad2a0d6dea6c377ce3ecec08f62c2eeffec80ff8da036",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 80875,
+        "p95_ns": 89542,
+        "p99_ns": 103000,
+        "max_ns": 148917
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 13292,
+        "p95_ns": 16209,
+        "p99_ns": 47750,
+        "max_ns": 68125
+      },
+      "pipeline_ns": 49204291
+    },
+    {
+      "sample_rate": 48000,
+      "channels": 2,
+      "frames": 500,
+      "decoded": 490,
+      "concealed": 10,
+      "max_queued": 4,
+      "max_packet_bytes": 249,
+      "encoded_bytes": 124250,
+      "encoded_digest": "078bb3f1ffed70b1f35111e0289dfb34f8adbc233c1736e4ffb3fca5c5c9eed0",
+      "encode": {
+        "samples": 500,
+        "p50_ns": 126959,
+        "p95_ns": 138709,
+        "p99_ns": 160875,
+        "max_ns": 211833
+      },
+      "decode_or_plc": {
+        "samples": 500,
+        "p50_ns": 23084,
+        "p95_ns": 25708,
+        "p99_ns": 67958,
+        "max_ns": 73375
+      },
+      "pipeline_ns": 77074500
+    }
+  ],
+  "limitations": "Synthetic synchronous release-build wall time, 20 ms frames and 440 Hz PCM; groups of four arrive in reverse order, with frame 21 of every 50 omitted unless it is the final packet. Every output has the exact PCM length and finite samples, every loss has one PLC interval, and the buffer never exceeds four packets. No timer, device callback, network, optical latency, A/V drift or perceptual-quality measurement. Decode timing includes packet validation/PCM allocation or PLC. No machine-independent speed threshold."
+}
