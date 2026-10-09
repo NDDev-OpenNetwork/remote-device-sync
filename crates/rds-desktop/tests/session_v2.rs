@@ -723,10 +723,23 @@ async fn impaired_link_latency_gate() {
     let mut queue_ms = Vec::new();
     let mut wire_ms = Vec::new();
     let mut last_seq: Option<u64> = None;
+    let mut probes = tokio::time::interval(Duration::from_millis(100));
+    probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let end = Instant::now() + Duration::from_secs(15);
     while Instant::now() < end {
-        h.session.heartbeat().await.ok();
         tokio::select! {
+            _ = probes.tick() => {
+                h.session.heartbeat().await.expect("control writer ended under impairment");
+            }
+            event = h.session.events.recv() => {
+                let event = event.expect("control reader ended under impairment");
+                if let DesktopEvent::Heartbeat { ts_ms, .. } = event {
+                    // Every completed probe contributes one sample. Repeatedly
+                    // sampling a cached RTT per media frame is biased and an
+                    // unread reliable event queue backpressures its reader.
+                    rtts.push(h.clock.now_ms().saturating_sub(ts_ms));
+                }
+            }
             hd = h.session.frame_headers.recv() => {
                 if let Some(hd) = hd {
                     if let Some(prev) = last_seq {
@@ -743,9 +756,6 @@ async fn impaired_link_latency_gate() {
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-        }
-        if let Some(rtt) = h.session.control_rtt() {
-            rtts.push(rtt.as_millis() as u64);
         }
     }
 
@@ -776,6 +786,11 @@ async fn impaired_link_latency_gate() {
         latencies.len() > 50,
         "too few frames arrived: {}",
         latencies.len()
+    );
+    assert!(
+        rtts.len() >= 50,
+        "too few completed control probes: {}",
+        rtts.len()
     );
     // Protocol queues stay bounded: capture→send wait is the bounded
     // channel and pacing time — must stay near zero even under loss.

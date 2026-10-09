@@ -52,11 +52,28 @@ link is selected, UDP is validated and pending stream bytes are dropped before
 recovery begins. All three real actor fixtures and strict network Clippy pass
 locally; no production transport policy or recovery deadline changed.
 
+A subsequent macOS setup failure showed that the accepting endpoint also
+needs the reverse UDP address. Both isolated endpoints now explicitly publish
+their bound loopback socket before connecting; loopback is normally filtered
+from peer address publication. The fixture still verifies validated UDP and a
+selected custom link before injecting loss. Local actor tests and strict Clippy
+pass with this symmetric setup.
+
 PR #140 also closes the ordinary Cmd+C/Cmd+X → app-switch race. One five-second
 handoff is armed while focused and fenced by the native pasteboard change count.
 A newer copy drains an older snapshot without publishing it. Six viewer
 clipboard state tests pass, including delayed offers after blur, expiry, a new
 local copy and superseding an in-flight transfer.
+
+The Linux job for [PR #141](https://github.com/NDDev-OpenNetwork/remote-device-sync/pull/141)
+failed `impaired_link_latency_gate` at 428 ms control p95 while capture queue
+p95 was 1 ms. That fixture sent a heartbeat for each media-loop iteration,
+never consumed its reliable event queue and repeatedly sampled one cached RTT.
+It now drains control events, sends probes independently at 10 Hz and records
+one shared-clock RTT per completed echo, with at least 50 completed probes.
+The 400 ms control bound and all existing media/impairment assertions remain.
+The corrected case passed once, then three required consecutive local runs;
+strict fixture Clippy passed. Final-head CI remains independent evidence.
 
 ## Resource and privacy contracts
 
