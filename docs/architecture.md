@@ -77,7 +77,7 @@ retry policy without recreating the endpoint or replaying application input.
 Status: version 0.1.0, with implemented connectivity, managed SSH/single-file
 transfer and an experimental native X11 desktop path. Current capability states
 live in [capability-matrix.md](capability-matrix.md); remaining acceptance and
-execution order live in [continuation-plan.md](continuation-plan.md).
+execution order live in [stability-plan-20261009.md](stability-plan-20261009.md).
 [Research](research.md) separates the dated stack survey from current decisions.
 
 Agent local service starts after endpoint bind, independently of external relay
@@ -361,7 +361,7 @@ adapter never owns a connection or calls Vector/OpenObserve directly.
    ┌──────────┬──────────────┬───────────┐
    rds-relay  rds-desktop    rds-audio    rds-sync
    proto+     capture/codec/ Opus paths   FastCDC+BLAKE3
-   iroh shim  input/render   (scaffold)   manifests/delta
+   iroh shim  input/render   packet/core  manifests/delta
    └──────────┴──────────────┴───────────┘
                        ▼
         ┌──────────────────────────────┐
@@ -738,7 +738,7 @@ requires a new run for qualification.
 ## Product scope and milestones
 
 [Roadmap](roadmap.md) owns the milestone definitions; the
-[continuation plan](continuation-plan.md) owns the current execution order.
+[stability plan](stability-plan-20261009.md) owns the current execution order.
 The code supplies a shared endpoint/session manager, signed discovery and
 grants, native russh client access through a scoped TCP adapter, durable
 resumable single-file transfer, and an experimental X11/OpenH264/native viewer.

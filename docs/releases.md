@@ -1,5 +1,11 @@
 # Engineering preview releases
 
+This document describes the published `0.1.0` artifact, not the capabilities
+of current `main`. Subsequent implementation and unfinished acceptance are
+tracked in the [capability matrix](capability-matrix.md) and
+[stability plan](stability-plan-20261009.md); an unchanged workspace version
+string does not bind an installed binary to the current source.
+
 The `0.1.0` release is an engineering preview for isolated evaluation. It is
 not a production-readiness gate, a completed remote-desktop product, or an
 automatic upgrade of development deployments. The detailed remaining work is

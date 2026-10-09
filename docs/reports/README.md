@@ -6,6 +6,12 @@ number comes out of `rds-bench` or a named tool run.
 
 ## Files
 
+- [Audio foundation stability](rds-audio-stability-20261009.md) — reproduced
+  admission/reorder defects, cross-platform library checks and the registered
+  [codec benchmark](bench-w9-audio-foundation.md).
+- [Sync pool fixture](rds-sync-pool-fixture-20261009.md) and
+  [Noq CodeQL review](rds-noq-codeql-review-20261009.md) retain independent
+  verification findings without changing production limits or scanner coverage.
 - [Clipboard, monitors and concurrent windows](rds-desktop-features-20261009.md)
   — scoped native/transport acceptance, resource bounds and retained failures.
 - `bench-<yyyymmdd>-<hhmmss>-{a,b}.json` — raw suite output;

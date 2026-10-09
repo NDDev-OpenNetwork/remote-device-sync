@@ -1,6 +1,7 @@
 # System completion plan — 2026-10-08
 
-This plan is the executable follow-up to `continuation-plan.md`. It was
+Current execution order is in [stability-plan-20261009.md](stability-plan-20261009.md).
+This dated plan retains the follow-up requirements to `continuation-plan.md`. It was
 initially audited against `9bd1840e`; directory foundation contracts were then
 reviewed after `cc7cc8cc`. Current behavior is described in
 [`directory-sync.md`](directory-sync.md). A capability changes state only after its code,
@@ -20,7 +21,9 @@ wire/authz path, platform probe, tests, and installed qualification all pass.
   the safety foundation; recursive scanner, snapshot wire assembly and a
   filesystem-free one-way/conflict planning model now exist. Journal-backed
   recursive apply, persisted tombstone lifecycle, watch/reconcile, metadata
-  policy, two-way service behavior and journal GC are not implemented.
+  policy, two-way service behavior and general journal quotas/GC are not
+  implemented. Verified same-destination superseded-journal cleanup exists in
+  `journal::collect_superseded`; its enumeration budget remains open.
 - Noq and owned relay have strong in-process evidence but remain experimental
   until the topology, interface-change, UDP-blocked and parity matrix is run on
   real supported devices.

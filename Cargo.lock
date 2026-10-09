@@ -4226,6 +4226,7 @@ dependencies = [
  "postcard",
  "rand 0.10.3",
  "rds-agent",
+ "rds-audio",
  "rds-cli",
  "rds-discovery",
  "rds-net",

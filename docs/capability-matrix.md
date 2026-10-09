@@ -34,7 +34,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | service:desktop | experimental | enabled + `desktop` build flag; usable capture backend; grant scope | capture→encode→decode→stats contract tests |
 | service:desktop-managed | implemented | manager-owned remote session relays encoded frames over local IPC v5; viewer decodes via `RelayDecoder` (`desktop` build flag for real decode) | relay e2e + managed-channel tests; `rds desktop` defaults to it, `--direct` kept |
 | service:sync | implemented | enabled + `--sync-dir` configured | `rds-sync` tests, resumable transfer tests |
-| service:audio | stub | bounded libopus/jitter core exists; native device I/O and service wiring unavailable | `rds-audio` library tests; no advertised audio service |
+| service:audio | stub | [validated libopus/jitter core](audio.md) exists; native device I/O and service wiring unavailable | `rds-audio` packet/codec/reorder tests; no advertised audio service |
 | service:sync-read | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
 | service:sync-write | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
 | service:desktop-view | implemented | grant scope; usable capture backend | view/control scope separation and desktop contract tests |
