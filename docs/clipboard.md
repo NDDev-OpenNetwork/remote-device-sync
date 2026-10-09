@@ -33,10 +33,13 @@ contain transfer IDs and byte counts only. A remote paste published by the
 session's own X11 selection owner is ignored by the external-owner watcher, so
 the two directions do not echo each other indefinitely.
 
-Only a focused viewer requests a remote offer. A request may complete after
-focus moves to a local app, provided the native clipboard change-count has not
-changed. Background devices cannot initiate a replacement. View-only sessions
-can neither read nor publish clipboard content.
+A focused viewer requests remote offers. An explicit Cmd+C/Cmd+X also permits
+one offer arriving within five seconds after switching to a local app, with
+the native clipboard change-count captured at the gesture. A new local copy
+cancels that handoff; background windows cannot arm it. A request may complete
+after focus changes under the same change-count fence. A newer explicit copy
+drains an older transfer without publishing its stale snapshot. View-only
+sessions can neither read nor publish clipboard content.
 
 The native macOS viewer publishes a completed reverse transfer through
 `NSPasteboard` on the AppKit main thread. Its local-to-remote Cmd+V handling is
