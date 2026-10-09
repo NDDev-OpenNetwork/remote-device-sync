@@ -45,9 +45,13 @@ struct ShmPath {
 pub struct X11Capturer {
     conn: RustConnection,
     root: x11rb::protocol::xproto::Window,
+    x: i16,
+    y: i16,
     width: u16,
     height: u16,
-    screen: usize,
+    displays: Vec<DisplayInfo>,
+    selected: super::x11_displays::Display,
+    topology_dirty: bool,
     shm: Option<ShmPath>,
     /// DAMAGE object on the root window — idle detection so a still
     /// desktop costs no capture/encode work at all.
@@ -86,40 +90,49 @@ impl X11Capturer {
             Err(_) => true,
         }
     }
-    /// Connect to `$DISPLAY` and select `screen`.
-    pub fn new(screen: u32) -> Result<Self, DesktopError> {
-        let (conn, default_screen) =
+    /// Select an X root by its legacy index or a RandR logical monitor by its
+    /// high-bit ID from `capabilities()`. IDs never depend on list ordering.
+    pub fn new(display_index: u32) -> Result<Self, DesktopError> {
+        let (conn, _) =
             RustConnection::connect(None).map_err(|e| DesktopError::Capture(e.to_string()))?;
-        let setup = conn.setup();
-        let idx = screen as usize;
-        let display = setup
-            .roots
-            .get(idx)
+        let displays = super::x11_displays::catalog(&conn)?;
+        let geometry = displays
+            .iter()
+            .find(|display| display.id == display_index)
+            .cloned()
             .ok_or_else(|| DesktopError::Capture("X11 display does not exist".into()))?;
-        let root = display.root;
-        let (width, height) = (display.width_in_pixels, display.height_in_pixels);
-        // Frames are decoded as packed 32bpp pixels; a server whose root
-        // depth has no 32bpp pixmap format cannot produce them — refuse
-        // honestly rather than panic or emit corrupt frames.
-        let ok = setup
+        let root = geometry.root;
+        if crate::frame_bytes(usize::from(geometry.width), usize::from(geometry.height)).is_none() {
+            return Err(DesktopError::Capture(
+                "selected display exceeds frame memory bounds".into(),
+            ));
+        }
+        if !conn
+            .setup()
             .pixmap_formats
             .iter()
-            .any(|f| f.depth == display.root_depth && f.bits_per_pixel == 32);
-        if !ok {
-            return Err(DesktopError::Capture(format!(
-                "X11 screen {idx} root depth {} has no 32bpp format",
-                display.root_depth
-            )));
+            .any(|f| f.depth == geometry.root_depth && f.bits_per_pixel == 32)
+        {
+            return Err(DesktopError::Capture(
+                "selected X11 root has no 32bpp format".into(),
+            ));
         }
-        let _ = default_screen;
-        let shm = Self::try_shm(&conn, width, height);
+        super::x11_displays::subscribe(&conn, root)?;
+        let shm = Self::try_shm(&conn, geometry.width, geometry.height);
         let damage = Self::try_damage(&conn, root);
         Ok(Self {
             conn,
             root,
-            width,
-            height,
-            screen: idx,
+            x: geometry.x,
+            y: geometry.y,
+            width: geometry.width,
+            height: geometry.height,
+            displays: displays
+                .iter()
+                .map(super::x11_displays::Display::info)
+                .collect(),
+            selected: geometry,
+            topology_dirty: false,
             shm,
             damage,
             dirty: true,
@@ -190,6 +203,14 @@ impl X11Capturer {
     }
 
     fn capture_pixels(&mut self) -> Result<Cow<'_, [u8]>, DesktopError> {
+        let dirty = self.changed();
+        self.dirty |= dirty;
+        // Monitor objects can be edited without RandR event delivery on some
+        // servers. One small geometry reply fences every monitor capture.
+        if self.topology_dirty || self.selected.monitor.is_some() {
+            super::x11_displays::still_matches(&self.conn, &self.selected)?;
+            self.topology_dirty = false;
+        }
         if let Some(shm) = &self.shm {
             // The GetImage reply arrives after the server has finished
             // writing the segment. No new request can reuse it while the
@@ -198,8 +219,8 @@ impl X11Capturer {
                 .conn
                 .shm_get_image(
                     self.root,
-                    0,
-                    0,
+                    self.x,
+                    self.y,
                     self.width,
                     self.height,
                     !0,
@@ -230,8 +251,8 @@ impl X11Capturer {
             .get_image(
                 ImageFormat::Z_PIXMAP,
                 self.root,
-                0,
-                0,
+                self.x,
+                self.y,
                 self.width,
                 self.height,
                 !0,
@@ -265,12 +286,7 @@ impl Capturer for X11Capturer {
     }
 
     fn displays(&self) -> Vec<DisplayInfo> {
-        vec![DisplayInfo {
-            index: self.screen as u32,
-            width: u32::from(self.width),
-            height: u32::from(self.height),
-            primary: true,
-        }]
+        self.displays.clone()
     }
 
     /// Damage-driven change detection: drains pending events; any
@@ -279,15 +295,22 @@ impl Capturer for X11Capturer {
     /// subtracts the region back to empty to re-arm notification.
     fn changed(&mut self) -> bool {
         let mut dirty = std::mem::take(&mut self.dirty);
-        let Some(dmg) = self.damage else {
-            return true;
-        };
+        if self.damage.is_none() {
+            dirty = true;
+        }
         while let Ok(Some(ev)) = self.conn.poll_for_event() {
-            if matches!(ev, Event::DamageNotify(e) if e.damage == dmg) {
+            if matches!(
+                ev,
+                Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_)
+            ) {
+                self.topology_dirty = true;
+                dirty = true;
+            }
+            if matches!(ev, Event::DamageNotify(e) if Some(e.damage) == self.damage) {
                 dirty = true;
             }
         }
-        if dirty {
+        if dirty && let Some(dmg) = self.damage {
             let _ = self.conn.damage_subtract(dmg, 0u32, 0u32);
         }
         dirty
@@ -307,19 +330,130 @@ impl Drop for X11Capturer {
 
 /// Displays visible over X11.
 pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
-    match X11Capturer::new(0) {
-        Ok(c) => Ok(DesktopCaps {
-            displays: c.displays(),
-            codecs: vec![rds_core::Codec::H264],
-        }),
-        Err(e) => Err(e),
+    // Inventory must not allocate a full capture mapping or DAMAGE object.
+    // Validate the same pixel/memory contract, then let the requested session
+    // own its native capture resources once.
+    let (conn, _) =
+        RustConnection::connect(None).map_err(|e| DesktopError::Capture(e.to_string()))?;
+    let displays = super::x11_displays::catalog(&conn)?
+        .into_iter()
+        .filter(|display| {
+            crate::frame_bytes(usize::from(display.width), usize::from(display.height)).is_some()
+                && conn
+                    .setup()
+                    .pixmap_formats
+                    .iter()
+                    .any(|format| format.depth == display.root_depth && format.bits_per_pixel == 32)
+        })
+        .map(|display| display.info())
+        .collect::<Vec<_>>();
+    if displays.is_empty() {
+        return Err(DesktopError::Capture(
+            "no display satisfies the capture memory/pixel contract".into(),
+        ));
     }
+    Ok(DesktopCaps {
+        displays,
+        codecs: vec![rds_core::Codec::H264],
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires a dedicated Xvfb server; configures two RandR monitors"]
+    fn randr_monitor_capture_and_input_share_regions_and_removed_ids_fail() {
+        use crate::{InputSink, input::x11::XtestInput};
+        use x11rb::protocol::{
+            randr::{ConnectionExt as _, MonitorInfo},
+            xproto::{CreateGCAux, Rectangle},
+        };
+        let (conn, _) = RustConnection::connect(None).unwrap();
+        let root = conn.setup().roots[0].root;
+        let atom = |name: &[u8]| conn.intern_atom(false, name).unwrap().reply().unwrap().atom;
+        let left = atom(b"RDS_TEST_LEFT");
+        let right = atom(b"RDS_TEST_RIGHT");
+        for (name, x) in [(left, 0), (right, 640)] {
+            conn.randr_set_monitor(
+                root,
+                MonitorInfo {
+                    name,
+                    primary: name == left,
+                    automatic: false,
+                    x,
+                    y: 0,
+                    width: 640,
+                    height: 720,
+                    width_in_millimeters: 170,
+                    height_in_millimeters: 190,
+                    outputs: vec![],
+                },
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        }
+        let catalog = super::super::x11_displays::catalog(&conn).unwrap();
+        let selected = catalog.iter().find(|d| d.monitor == Some(right)).unwrap();
+        let id = selected.id;
+        let mut capture = X11Capturer::new(id).unwrap();
+        let gc = conn.generate_id().unwrap();
+        conn.create_gc(gc, root, &CreateGCAux::new().foreground(0x123456))
+            .unwrap()
+            .check()
+            .unwrap();
+        conn.poly_fill_rectangle(
+            root,
+            gc,
+            &[Rectangle {
+                x: 640,
+                y: 0,
+                width: 640,
+                height: 720,
+            }],
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        let raw = capture.capture().unwrap();
+        assert_eq!((raw.width, raw.height), (640, 720));
+        assert_eq!(&raw.data[..3], &[0x56, 0x34, 0x12]);
+        let mut input = XtestInput::for_display(id).unwrap();
+        input
+            .inject(&rds_core::InputEvent {
+                seq: 0,
+                event_ts_ms: 0,
+                display_id: id,
+                kind: rds_core::InputKind::PointerMove { x: 7., y: 9. },
+            })
+            .unwrap();
+        let point = conn.query_pointer(root).unwrap().reply().unwrap();
+        assert_eq!((point.root_x, point.root_y), (647, 9));
+        conn.randr_delete_monitor(root, right)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(X11Capturer::new(id).is_err());
+        capture.topology_dirty = true;
+        assert!(capture.capture().is_err());
+        assert!(
+            input
+                .inject(&rds_core::InputEvent {
+                    seq: 1,
+                    event_ts_ms: 0,
+                    display_id: id,
+                    kind: rds_core::InputKind::PointerMove { x: 1., y: 1. }
+                })
+                .is_err()
+        );
+        conn.randr_delete_monitor(root, left)
+            .unwrap()
+            .check()
+            .unwrap();
+        conn.free_gc(gc).unwrap().check().unwrap();
+    }
     /// Explicit native fixture: never silently succeeds without capture.
     #[test]
     #[ignore = "requires a dedicated Xvfb server; repaints its root"]

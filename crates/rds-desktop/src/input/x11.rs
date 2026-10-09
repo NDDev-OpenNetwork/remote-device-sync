@@ -29,9 +29,13 @@ const MAX_SCROLL_CLICKS: f64 = 32.0;
 pub struct XtestInput {
     conn: Arc<RustConnection>,
     root: x11rb::protocol::xproto::Window,
+    origin_x: i16,
+    origin_y: i16,
     screen: u32,
     width: u16,
     height: u16,
+    selected: crate::capture::x11_displays::Display,
+    topology_dirty: bool,
     keymap: KeyMap,
     server: String,
     keys: BTreeMap<u32, repeat::Hold>,
@@ -56,16 +60,10 @@ impl XtestInput {
             .map_err(|e| error(&e.to_string()))?
             .reply()
             .map_err(|e| error(&e.to_string()))?;
-        let setup = conn.setup();
-        let display = setup
-            .roots
-            .get(screen as usize)
-            .ok_or_else(|| error("X11 display does not exist"))?;
-        let (root, width, height) = (
-            display.root,
-            display.width_in_pixels,
-            display.height_in_pixels,
-        );
+        let geometry = crate::capture::x11_displays::select(&conn, screen)?;
+        let root = geometry.root;
+        crate::capture::x11_displays::subscribe(&conn, root)?;
+        let (width, height) = (geometry.width, geometry.height);
         if !conn
             .xkb_use_extension(1, 0)
             .map_err(|e| error(&e.to_string()))?
@@ -93,9 +91,13 @@ impl XtestInput {
         Ok(Self {
             conn: Arc::new(conn),
             root,
+            origin_x: geometry.x,
+            origin_y: geometry.y,
             screen,
             width,
             height,
+            selected: geometry,
+            topology_dirty: false,
             keymap,
             server,
             keys: BTreeMap::new(),
@@ -158,18 +160,8 @@ impl XtestInput {
     }
 
     fn key(&mut self, code: u32, pressed: bool) -> Result<(), DesktopError> {
-        // Core keyboard-map notifications invalidate the cached physical map.
-        // Layout group changes keep physical names unchanged. Releases use the
-        // exact native key pressed, even if another client replaced the map.
-        while let Some(event) = self
-            .conn
-            .poll_for_event()
-            .map_err(|e| error(&e.to_string()))?
-        {
-            if matches!(event, x11rb::protocol::Event::MappingNotify(_)) {
-                self.keymap = load_keymap(&self.conn)?;
-            }
-        }
+        // Map notifications are drained once at inject's shared boundary.
+        // Releases retain the exact native key recorded at key-down.
         let key = if let Some(hold) = self.keys.get(&code) {
             hold.key
         } else {
@@ -287,6 +279,26 @@ fn delta(value: f64) -> Result<i16, DesktopError> {
 
 impl InputSink for XtestInput {
     fn inject(&mut self, event: &InputEvent) -> Result<(), DesktopError> {
+        // A changed catalog may remove/reassign a region. Validate before
+        // injecting into it rather than redirecting an existing session.
+        while let Some(native) = self
+            .conn
+            .poll_for_event()
+            .map_err(|e| error(&e.to_string()))?
+        {
+            self.topology_dirty |= matches!(
+                native,
+                x11rb::protocol::Event::RandrScreenChangeNotify(_)
+                    | x11rb::protocol::Event::RandrNotify(_)
+            );
+            if matches!(native, x11rb::protocol::Event::MappingNotify(_)) {
+                self.keymap = load_keymap(&self.conn)?;
+            }
+        }
+        if self.topology_dirty || self.selected.monitor.is_some() {
+            crate::capture::x11_displays::still_matches(&self.conn, &self.selected)?;
+            self.topology_dirty = false;
+        }
         if event.display_id != self.screen {
             return Err(error("input event targets another X11 display"));
         }
@@ -302,8 +314,12 @@ impl InputSink for XtestInput {
                     0,
                     0,
                     0,
-                    coordinate(x, self.width)?,
-                    coordinate(y, self.height)?,
+                    coordinate(x, self.width)?
+                        .checked_add(self.origin_x)
+                        .ok_or_else(|| error("pointer coordinate overflow"))?,
+                    coordinate(y, self.height)?
+                        .checked_add(self.origin_y)
+                        .ok_or_else(|| error("pointer coordinate overflow"))?,
                 )
                 .map_err(|e| error(&e.to_string()))?
                 .check()

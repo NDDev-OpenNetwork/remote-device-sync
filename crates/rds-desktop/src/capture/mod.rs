@@ -11,6 +11,8 @@
 
 #[cfg(all(target_os = "linux", feature = "x11"))]
 pub mod x11;
+#[cfg(all(target_os = "linux", feature = "x11"))]
+pub(crate) mod x11_displays;
 
 #[cfg(target_os = "linux")]
 pub mod image_copy;
