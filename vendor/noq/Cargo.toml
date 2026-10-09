@@ -233,6 +233,7 @@ version = "0.2"
 
 [dependencies.proto]
 version = "1.3.0"
+path = "../noq-proto"
 default-features = false
 package = "noq-proto"
 

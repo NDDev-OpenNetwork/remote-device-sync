@@ -497,6 +497,16 @@ impl Connection {
         Path::new(&self.0, id)
     }
 
+    /// Snapshot of established, non-abandoned path IDs, including the handshake
+    /// path. Subscribe to [`Self::path_events`] first to cover concurrent changes.
+    /// Events may overlap the snapshot; consumers must process them idempotently.
+    pub fn established_paths(&self) -> Vec<PathId> {
+        self.0
+            .lock_without_waking("established_paths")
+            .inner
+            .established_paths()
+    }
+
     /// A stream of [`PathEvent`]s for all paths in this connection.
     ///
     /// The stream will yield a [`PathEvent`] whenever there is a change in the state of any path in

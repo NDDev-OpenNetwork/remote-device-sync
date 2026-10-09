@@ -434,30 +434,24 @@ impl RemoteStateActor {
             })
             .into_mut();
 
-        // Store PathId(0), set path_status and select best path, check if holepunching
-        // is needed.
-        if let Some(path) = conn.path(PathId::ZERO) {
-            let path_remote = self
-                .state
+        // Events are not replayed to new subscribers. A busy accepting task can
+        // register after an additional path has already established, so seed
+        // every established path after subscribing, not just the handshake one.
+        for path_id in conn.established_paths() {
+            let Some(path) = conn.path(path_id) else { continue };
+            self.state
                 .register_and_configure_path(conn_id, conn_state, &path);
-
-            if let Some(path_remote) = path_remote
-                && !path_remote.is_relay()
-                && conn.side().is_client()
-            {
-                // We may have raced this with a relay address.  Try and add any
-                // relay addresses we have back.
-                let relays = self
-                    .state
-                    .paths
-                    .addrs()
-                    .filter(|addr| addr.is_relay())
-                    .map(|addr| transports::FourTuple::from_remote(addr.clone()))
-                    .collect::<Vec<_>>();
-                for open_addr in relays {
-                    self.state
-                        .open_path_on_conn(conn_id, conn_state, &conn, &open_addr);
-                }
+        }
+        if conn.side().is_client()
+            && conn_state.paths.get(&PathId::ZERO).is_some_and(|path| !path.is_relay())
+        {
+            // Preserve the original handshake-path relay restoration policy.
+            let relays = self.state.paths.addrs()
+                .filter(|addr| addr.is_relay())
+                .map(|addr| transports::FourTuple::from_remote(addr.clone()))
+                .collect::<Vec<_>>();
+            for open_addr in relays {
+                self.state.open_path_on_conn(conn_id, conn_state, &conn, &open_addr);
             }
         }
         self.trigger_holepunching();
@@ -1055,6 +1049,11 @@ impl State {
         let network_path = self
             .mapped_addrs
             .to_transport_tuple(&path.network_path().ok()?)?;
+        // A path may be present in both the initial snapshot and the event
+        // queue. Do not emit duplicate opens or count the same path twice.
+        if conn_state.paths.get(&path.id()) == Some(&network_path) {
+            return Some(network_path);
+        }
         event!(
             target: "iroh::_events::path::open",
             Level::DEBUG,

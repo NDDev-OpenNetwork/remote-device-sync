@@ -794,6 +794,26 @@ impl Connection {
         self.paths.keys().copied().collect()
     }
 
+    /// Snapshot of established, non-abandoned paths, including the handshake
+    /// path. Pending initial validation and retained abandoned paths are excluded.
+    /// Subscribe to path events before taking this snapshot to cover changes
+    /// racing with the read; the caller must tolerate duplicate observations.
+    pub fn established_paths(&self) -> Vec<PathId> {
+        if self.is_closed() {
+            return Vec::new();
+        }
+        self.spaces[SpaceKind::Data]
+            .number_spaces
+            .iter()
+            .filter(|(id, space)| {
+                matches!(space.open_status, OpenStatus::Informed)
+                    && self.paths.contains_key(id)
+                    && !self.abandoned_paths.contains(id)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Gets the local [`PathStatus`] for a known [`PathId`]
     pub fn path_status(&self, path_id: PathId) -> Result<PathStatus, ClosedPath> {
         self.path(path_id)
