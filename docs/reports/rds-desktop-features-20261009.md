@@ -43,6 +43,21 @@ not opt into standby maintenance. Setup now explicitly retains standby paths,
 matching the blackhole assertion's precondition. The real stream recovery
 assertion and bounded deadline are unchanged.
 
+The final macOS job for [PR #140](https://github.com/NDDev-OpenNetwork/remote-device-sync/pull/140)
+subsequently exposed that the custom-only target still relied on asynchronous
+peer-address advertisement to learn its required UDP sibling. The retired-path
+and blackhole fixtures now include the endpoint's real bound loopback socket
+in their initial target. They retain the explicit assertion that the custom
+link is selected, UDP is validated and pending stream bytes are dropped before
+recovery begins. All three real actor fixtures and strict network Clippy pass
+locally; no production transport policy or recovery deadline changed.
+
+PR #140 also closes the ordinary Cmd+C/Cmd+X → app-switch race. One five-second
+handoff is armed while focused and fenced by the native pasteboard change count.
+A newer copy drains an older snapshot without publishing it. Six viewer
+clipboard state tests pass, including delayed offers after blur, expiry, a new
+local copy and superseding an in-flight transfer.
+
 ## Resource and privacy contracts
 
 The clipboard worker wakes on XFixes/native socket readiness, with 4 Hz owner
