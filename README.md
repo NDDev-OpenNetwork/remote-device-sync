@@ -9,10 +9,11 @@ paths are hole-punched, and a self-hosted relay covers egress-only
 networks. See [docs/architecture.md](docs/architecture.md) for the research
 and protocol decisions.
 
-Current readiness: the [2026-09-24 audit](docs/reports/rds-audit-20260924.md)
-identifies authorization, discovery, sync and owned-transport blockers.
-The [remediation plan](docs/remediation-plan.md) defines their fixes and the
-remaining SSH broker/reattachment, interactive desktop and platform work.
+Current capabilities and limits are in the [capability matrix](docs/capability-matrix.md).
+The [stability plan](docs/stability-plan-20261009.md) orders remaining
+implementation and qualification work; the [remediation plan](docs/remediation-plan.md)
+retains its acceptance criteria. The [September 24 audit](docs/reports/rds-audit-20260924.md)
+is historical defect evidence, not the current implementation status.
 
 The `0.1.0` [engineering preview](docs/releases.md) packages native SSH,
 agent, relay and directory binaries for Linux x86_64 and macOS arm64. Desktop
