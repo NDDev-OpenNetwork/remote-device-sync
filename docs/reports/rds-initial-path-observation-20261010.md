@@ -36,8 +36,21 @@ snapshot, then tolerate overlapping observations. A stream alone is not a
 complete initial-state snapshot. The change adds no wire frame, cryptographic
 operation, unsafe block or new dependency version.
 
-Initial focused verification passed all 113 network library tests and the
-protocol snapshot regression. Full checkpoint, scanner and cross-platform
-results follow separately. Later event-stream overflow reconciliation, complete
+At clean source `971de4b`, the registered `w3-path-snapshot` checkpoint passed
+formatting, strict workspace Clippy, workspace tests, all 113 network library
+tests and all 430 protocol-engine tests: 1,469 successful test executions,
+zero failures and two explicitly ignored checks. Native cargo-deny 0.20.2 also
+passed all four policy categories. The first checkpoint stopped on Clippy's
+async-yields-async lint: returning the unpolled accepting future is intentional
+in this regression. A narrowly scoped documented test annotation fixes that
+lint without changing production behavior or delaying the test further.
+
+The [handshake measurement](bench-w3-path-snapshot.md) and
+[raw JSON](bench-w3-path-snapshot.json) record 100/100 successful local Iroh
+handshakes: p50 0.90 ms, p95 1.16 ms, p99 1.82 ms. This is a smoke cohort,
+not a before/after improvement or physical/WAN latency result. GitHub results
+are separate exact-head evidence.
+
+Later event-stream overflow reconciliation, complete
 retired-path accounting, physical topology parity and installed qualification
 remain open; this report closes none of those by implication.

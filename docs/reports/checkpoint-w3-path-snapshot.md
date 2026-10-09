@@ -1,6 +1,6 @@
 # Checkpoint W3-PATH-SNAPSHOT — 20261009-220606
 
-Verdict: **pending review**
+Verdict: **PASS — initial established-path observation only**
 
 ## Automated checks
 - fmt/workspace clippy/workspace tests: PASS
@@ -11,7 +11,7 @@ Verdict: **pending review**
   parity and installed qualification: NOT RUN
 
 ## Manual checklist (fill before merge)
-- [ ] All "not run" items above explained
-- [ ] Reports committed: bench-*.json, bench-*.md, this file
-- [ ] docs/ updated for anything this wave changed
-- [ ] security/unsafe review done for new code paths
+- [x] Open boundaries retained in the [review](rds-initial-path-observation-20261010.md)
+- [x] Original generated report and benchmark committed at `1c1d4b6`
+- [x] Architecture and each vendored patch provenance updated
+- [x] No added unsafe/crypto/wire behavior; initial validation and abandonment gates retained
