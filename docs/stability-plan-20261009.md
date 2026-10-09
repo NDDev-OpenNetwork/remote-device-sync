@@ -93,6 +93,11 @@ the full desktop or transport milestone.
 
 ## Wave 3 — bounded durable sync (W1.9/W1.10, W8.1–W8.6)
 
+Current increment: make journal preparation observe peer/caller/async-drop
+cancellation, stream catalog names and bound opportunistic cleanup work.
+Quota admission, fair background reclamation and destination overwrite policy
+remain separate unfinished changes. This does not close native Wave 2 acceptance.
+
 1. Bound journal enumeration and cleanup work/memory under existing receive
    locks. Preserve unknown entries, unsafe aliases and unrelated destinations;
    cancellation must release work at a documented boundary. Test large stale
