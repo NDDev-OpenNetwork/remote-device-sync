@@ -1,5 +1,12 @@
 # Noq-proto 1.3 path observation and optional ACK routing
 
+`Connection::established_paths` now exposes a read-only snapshot of path IDs
+whose initial establishment is informed and which have not been abandoned.
+It includes the handshake path while the connection is open. The Noq adapter
+forwards this for Iroh's subscribe-then-snapshot registration; no validation or
+packet scheduling decision changes. A pending/abandoned/high-ID/closed-connection
+regression covers the snapshot boundary.
+
 Exact published crates.io noq-proto1.3.0 source, checksum
 7c1e5b6fe668491eca022f745a0a9402585626c73a7b839b3424ace15d6a9c8f.
 Published upstream revision: c1f411562e6078852749b8bcf1190523096a107f,

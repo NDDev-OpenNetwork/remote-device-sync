@@ -1,5 +1,11 @@
 # Iroh1.3 periodic custom selection patch
 
+Initial actor registration subscribes before reading Noq's established-path
+snapshot. A deferred accepting future can otherwise miss an already validated
+standby permanently because the event stream does not replay history. Identical
+snapshot/event observations do not emit duplicate opens or increment metrics.
+The original handshake-path relay restoration policy is retained.
+
 Upstream: published crates.io `iroh`1.3.0, checksum
 885787b892b5e2507c701f132ecbd45d2bad4bbb75157a19427087c16dadb833.
 Original SPDX MIT OR Apache-2.0 license files from exact upstream tag v1.3.0
