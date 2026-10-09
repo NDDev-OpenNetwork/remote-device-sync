@@ -385,6 +385,40 @@ fn open_path() -> TestResult {
 }
 
 #[test]
+fn established_snapshot_excludes_pending_and_abandoned_paths() -> TestResult {
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    assert_eq!(pair.conn(Client).established_paths(), vec![PathId::ZERO]);
+    let server_addr = pair.routes.public_server_addr();
+    let path_id = pair.open_path(Client, FourTuple::from_remote(server_addr), PathStatus::Available)?;
+    assert!(!pair.conn(Client).established_paths().contains(&path_id));
+    pair.drive();
+    assert!(pair.conn(Client).established_paths().contains(&path_id));
+    assert!(pair.conn(Server).established_paths().contains(&path_id));
+    pair.close_path(Client, path_id, 0u8.into())?;
+    // Accounting retains the abandoned path until discard, but a new observer
+    // must not promote that retained state into an eligible route.
+    assert!(pair.conn(Client).paths().contains(&path_id));
+    assert!(!pair.conn(Client).established_paths().contains(&path_id));
+    pair.drive();
+    assert!(!pair.conn(Server).established_paths().contains(&path_id));
+    for _ in 0..8 {
+        let id = pair.open_path(Client, FourTuple::from_remote(server_addr), PathStatus::Available)?;
+        pair.drive();
+        assert!(pair.conn(Client).established_paths().contains(&id));
+        pair.close_path(Client, id, 0u8.into())?;
+        pair.drive();
+    }
+    let id = pair.open_path(Client, FourTuple::from_remote(server_addr), PathStatus::Available)?;
+    pair.drive();
+    assert!(id > PathId::from(MAX_PATHS), "fixture must exceed the concurrent path budget");
+    assert_eq!(pair.conn(Client).established_paths(), vec![PathId::ZERO, id]);
+    let now = pair.time;
+    pair.conn_mut(Client).close(now, 0u8.into(), bytes::Bytes::new());
+    assert!(pair.conn(Client).established_paths().is_empty());
+    Ok(())
+}
+
+#[test]
 fn open_path_key_update() -> TestResult {
     let _guard = subscribe();
     let mut pair = ConnPair::builder().enable_multipath().connect();
