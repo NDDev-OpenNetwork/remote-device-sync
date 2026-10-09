@@ -31,6 +31,18 @@ use rds_net::wire::{CONTROL_STREAM_PRIORITY, MEDIA_STREAM_PRIORITY};
 
 /// Pacing sample interval for the bitrate controller.
 const PACING_INTERVAL: Duration = Duration::from_millis(250);
+
+fn pacing_interval() -> tokio::time::Interval {
+    // Each sample represents an observation window. An immediate first tick
+    // has no window, and Skip can compress two pressure samples after a stall.
+    let mut tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + PACING_INTERVAL,
+        PACING_INTERVAL,
+    );
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick
+}
+
 /// Capture briefly after accepted input even when a compositor's root DAMAGE
 /// notification does not describe the redirected application repaint.
 const INPUT_REFRESH_BURST_MS: u64 = 250;
@@ -861,8 +873,7 @@ pub async fn serve_desktop_with(
             let mut last_acknowledged = 0;
             let mut pressure = DeliveryPressure::default();
             let mut health = Instant::now();
-            let mut tick = tokio::time::interval(PACING_INTERVAL);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut tick = pacing_interval();
             loop {
                 tick.tick().await;
                 // A viewer-filed target survives past one tick: the
@@ -2326,6 +2337,35 @@ async fn send_payload<W: AsyncWrite + Unpin, T: Borrow<Produced>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_feedback_waits_for_its_first_observation_window() {
+        let started = tokio::time::Instant::now();
+        let mut tick = pacing_interval();
+        tick.tick().await;
+        assert_eq!(started.elapsed(), PACING_INTERVAL);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_feedback_does_not_compress_pressure_samples_after_a_stall() {
+        let mut tick = pacing_interval();
+        tick.tick().await;
+        // Wake shortly before an original schedule boundary. Skipping old
+        // ticks must not turn this single late observation into two signals
+        // of sustained delivery pressure only ten milliseconds apart.
+        tokio::time::advance(Duration::from_millis(740)).await;
+        tick.tick().await;
+        let observed_at = tokio::time::Instant::now();
+        let mut pressure = DeliveryPressure::default();
+        assert!(!pressure.sample(1, 0, 0, false, false));
+        tick.tick().await;
+        assert!(
+            observed_at.elapsed() >= PACING_INTERVAL,
+            "delivery pressure was sampled again after {:?}",
+            observed_at.elapsed()
+        );
+        assert!(pressure.sample(1, 0, 0, false, false));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn blocked_clipboard_reply_obeys_control_deadline_after_partial_header() {

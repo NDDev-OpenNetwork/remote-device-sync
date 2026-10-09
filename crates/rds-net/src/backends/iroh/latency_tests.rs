@@ -368,8 +368,31 @@ async fn actual_iroh_actor_reopens_a_retired_standby_before_the_next_failure() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
-        .await
-        .expect("UDP standby never validated");
+        .await;
+        if original.is_err() {
+            for (side, conn) in [("client", &client), ("server", &server)] {
+                for path in conn.paths().iter() {
+                    eprintln!(
+                        "standby setup {side}: id={} ip={} selected={} rtt={:?}",
+                        path.id(),
+                        path.is_ip(),
+                        path.is_selected(),
+                        path.rtt()
+                    );
+                }
+            }
+            eprintln!("standby setup client addresses: {:?}", a.addr());
+            eprintln!("standby setup server addresses: {:?}", b.addr());
+            eprintln!(
+                "standby setup client remote: {:?}",
+                a.remote_info(b.id()).await
+            );
+            eprintln!(
+                "standby setup server remote: {:?}",
+                b.remote_info(a.id()).await
+            );
+        }
+        let original = original.expect("both UDP and custom paths were not established");
         selector.phase.store(1, Ordering::Release);
         let restored = tokio::time::timeout(Duration::from_secs(5), async {
             loop {

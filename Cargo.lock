@@ -4326,6 +4326,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "wgpu",
  "winit",
  "x11rb 0.14.0",
