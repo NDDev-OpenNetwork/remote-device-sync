@@ -97,6 +97,10 @@ the full desktop or transport milestone.
 
 Current increment: make journal preparation observe peer/caller/async-drop
 cancellation, stream catalog names and bound opportunistic cleanup work.
+The follow-up [destination-binding audit](reports/rds-journal-destination-scope-20261010.md)
+confirmed that content-only journal selection could reuse another destination's
+cached bytes. Bind new state to the normalized destination, retain only verified
+same-destination legacy resume, and qualify both formats before native rollout.
 Quota admission, fair background reclamation and destination overwrite policy
 remain separate unfinished changes. This does not close native Wave 2 acceptance.
 

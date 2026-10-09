@@ -73,6 +73,21 @@ EOF
 }
 
 case "$GATE" in
+w8-journal-scope)
+    note "gate w8-journal-scope — destination-bound resume and legacy attribution"
+    green_bars
+    cargo test --locked -p rds-sync || fail "journal scope and transfer contracts"
+    cargo run --locked --release -p rds-bench --example journal_preparation -- \
+        --json "$REPORTS/bench-w8-journal-scope.json" \
+        --md "$REPORTS/bench-w8-journal-scope.md" || fail "journal scope benchmark"
+    write_checkpoint "w8-journal-scope" "pending review" \
+        "- fmt/workspace clippy/workspace tests: PASS
+- destination isolation, legacy attribution, torn metadata, confinement and recovery: PASS
+- grant-scoped real stream regression on Iroh and Noq: PASS
+- local release benchmark: 100 samples/case, including equal-content destinations
+- physical power loss, disk quotas, principal isolation and installed qualification: NOT RUN" \
+        "$REPORTS/bench-w8-journal-scope.json" "$REPORTS/bench-w8-journal-scope.md"
+    ;;
 w3-path-snapshot)
     note "gate w3-path-snapshot — complete initial path observation"
     green_bars
