@@ -41,6 +41,215 @@ impl Drop for Scratch {
     }
 }
 
+#[test]
+fn canceled_journal_open_does_not_create_state_or_destination_parents() {
+    let root = Scratch::new();
+    let dest = root.0.join("not-created");
+    let result =
+        Journal::open_cancellable(&dest, "nested/data.bin", &crate::manifest_of(NEW), &|| true);
+    assert!(matches!(result, Err(SyncError::Io(ref e)) if e.kind() == io::ErrorKind::Interrupted));
+    assert!(
+        !dest.exists(),
+        "pre-canceled preparation mutated the filesystem"
+    );
+}
+
+#[test]
+fn canceling_journal_open_preserves_resumability_and_releases_receive_locks() {
+    use std::cell::Cell;
+    let root = Scratch::new();
+    let manifest = crate::manifest_of(NEW);
+    let state = root.0.join(STATE_DIR);
+    // Use a different destination parent to exercise both held receive locks.
+    std::fs::create_dir(root.0.join("nested")).unwrap();
+    std::fs::write(root.0.join("nested/data.bin"), OLD).unwrap();
+    plant_journal(
+        &state,
+        "nested/data.bin",
+        manifest.root,
+        &[(&manifest.chunks[0].hash, NEW)],
+    );
+    let observations = Cell::new(0);
+    let result = Journal::open_cancellable(&root.0, "nested/data.bin", &manifest, &|| {
+        observations.set(observations.get() + 1);
+        observations.get() >= 4
+    });
+    assert!(matches!(result, Err(SyncError::Io(ref e)) if e.kind() == io::ErrorKind::Interrupted));
+    assert_eq!(std::fs::read(root.0.join("nested/data.bin")).unwrap(), OLD);
+    let resumed = Journal::open(&root.0, "nested/data.bin", &manifest).unwrap();
+    assert!(
+        resumed.complete(),
+        "verified parts must survive canceled preparation"
+    );
+}
+
+#[test]
+fn canceled_collection_retains_metadata_and_unknown_entries_then_resumes() {
+    let root = Scratch::new();
+    let manifest = crate::manifest_of(NEW);
+    let state_path = root.0.join(STATE_DIR);
+    plant_journal(&state_path, "data.bin", manifest.root, &[]);
+    let entry_path = state_path.join(hex(&manifest.root));
+    let parts_path = entry_path.join("parts");
+    for n in 0..32u8 {
+        std::fs::write(parts_path.join(hex(&[n; 32])), [n]).unwrap();
+    }
+    let foreign = parts_path.join("not-owned");
+    std::fs::write(&foreign, b"retain").unwrap();
+    let state = Directory::open_root(&state_path, false).unwrap();
+    let entry = state.child(hex(&manifest.root).as_ref(), false).unwrap();
+    let stop = || std::fs::read_dir(&parts_path).unwrap().count() < 33;
+    let result = collect_journal(
+        &entry,
+        &state,
+        hex(&manifest.root).as_ref(),
+        &stop,
+        &mut CollectionBudget(MAX_COLLECTION_ENTRIES),
+    );
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+    assert!(
+        entry_path.join("meta").exists(),
+        "partial cleanup must retain attribution"
+    );
+    assert_eq!(std::fs::read_dir(&parts_path).unwrap().count(), 32);
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"retain");
+    // Unknown residue refuses rmdir; it is never swept to finish cleanup.
+    assert!(
+        collect_journal(
+            &entry,
+            &state,
+            hex(&manifest.root).as_ref(),
+            &|| false,
+            &mut CollectionBudget(MAX_COLLECTION_ENTRIES)
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read_dir(&parts_path).unwrap().count(), 1);
+    assert!(entry_path.join("meta").exists());
+}
+
+#[test]
+fn cleanup_work_limit_preserves_attribution_until_remaining_parts_are_removed() {
+    let root = Scratch::new();
+    let manifest = crate::manifest_of(NEW);
+    let state_path = root.0.join(STATE_DIR);
+    plant_journal(&state_path, "data.bin", manifest.root, &[]);
+    let entry_path = state_path.join(hex(&manifest.root));
+    let parts_path = entry_path.join("parts");
+    for n in 0..32u8 {
+        std::fs::write(parts_path.join(hex(&[n; 32])), [n]).unwrap();
+    }
+    let state = Directory::open_root(&state_path, false).unwrap();
+    let entry = state.child(hex(&manifest.root).as_ref(), false).unwrap();
+    let result = collect_journal(
+        &entry,
+        &state,
+        hex(&manifest.root).as_ref(),
+        &|| false,
+        &mut CollectionBudget(8),
+    );
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(std::fs::read_dir(&parts_path).unwrap().count(), 24);
+    assert!(entry_path.join("meta").exists());
+    collect_journal(
+        &entry,
+        &state,
+        hex(&manifest.root).as_ref(),
+        &|| false,
+        &mut CollectionBudget(32),
+    )
+    .unwrap();
+    assert!(
+        !entry_path.exists(),
+        "a later bounded pass can finish known cleanup"
+    );
+}
+
+#[test]
+fn wide_foreign_catalog_does_not_block_new_journal_admission() {
+    use std::cell::Cell;
+    let root = Scratch::new();
+    let state = root.0.join(STATE_DIR);
+    std::fs::create_dir(&state).unwrap();
+    for n in 0..MAX_COLLECTION_ENTRIES + 64 {
+        std::fs::write(state.join(format!("foreign-{n}")), b"retain").unwrap();
+    }
+    let visited = Cell::new(0);
+    let result = Journal::open_cancellable(&root.0, "data.bin", &crate::manifest_of(NEW), &|| {
+        visited.set(visited.get() + 1);
+        visited.get() > MAX_COLLECTION_ENTRIES + 32
+    });
+    assert!(
+        result.is_ok(),
+        "admission must defer the remaining foreign catalog"
+    );
+    assert_eq!(
+        std::fs::read_dir(&state).unwrap().count(),
+        MAX_COLLECTION_ENTRIES + 66
+    );
+    assert_eq!(std::fs::read(root.0.join("data.bin")).unwrap(), OLD);
+}
+
+#[test]
+fn resumed_part_scan_can_stop_before_reading_the_next_chunk() {
+    use std::cell::Cell;
+    let root = Scratch::new();
+    let data = vec![71u8; MAX_CHUNK as usize * 8];
+    let manifest = crate::manifest_of(&data);
+    assert!(manifest.chunks.len() > 2);
+    let mut journal = Journal::open(&root.0, "data.bin", &manifest).unwrap();
+    for (i, chunk) in manifest.chunks.iter().enumerate() {
+        let offset = chunk.offset as usize;
+        journal
+            .store(i as u32, &data[offset..offset + chunk.len as usize])
+            .unwrap();
+    }
+    let observed = Cell::new(0);
+    let result = journal.rescan(&|| {
+        observed.set(observed.get() + 1);
+        observed.get() > 1
+    });
+    assert!(matches!(result, Err(SyncError::Io(ref e)) if e.kind() == io::ErrorKind::Interrupted));
+    assert_eq!(journal.have.len(), 1);
+    drop(journal);
+    assert!(
+        Journal::open(&root.0, "data.bin", &manifest)
+            .unwrap()
+            .complete()
+    );
+    assert_eq!(std::fs::read(root.0.join("data.bin")).unwrap(), OLD);
+}
+
+#[test]
+fn destination_reuse_stops_after_one_verified_chunk_and_resumes() {
+    let root = Scratch::new();
+    let data = (0..MAX_CHUNK as usize * 8)
+        .map(|i| 53 + (i / MAX_CHUNK as usize) as u8)
+        .collect::<Vec<_>>();
+    let manifest = crate::manifest_of(&data);
+    let mut journal = Journal::open(&root.0, "data.bin", &manifest).unwrap();
+    assert!(journal.have.is_empty());
+    std::fs::write(root.0.join("data.bin"), &data).unwrap();
+    let parts = root
+        .0
+        .join(STATE_DIR)
+        .join(hex(&manifest.root))
+        .join("parts");
+    let result = journal
+        .seed_from_destination(File::open(root.0.join("data.bin")).unwrap(), &|| {
+            std::fs::read_dir(&parts).unwrap().next().is_some()
+        });
+    assert!(matches!(result, Err(SyncError::Io(ref e)) if e.kind() == io::ErrorKind::Interrupted));
+    assert_eq!(std::fs::read_dir(&parts).unwrap().count(), 1);
+    drop(journal);
+    assert!(
+        Journal::open(&root.0, "data.bin", &manifest)
+            .unwrap()
+            .complete()
+    );
+    assert_eq!(std::fs::read(root.0.join("data.bin")).unwrap(), data);
+}
+
 fn run(root: &Path, operation: &str, point: Point, action: Action) {
     let manifest = crate::manifest_of(NEW);
     let (armed, result) = match operation {

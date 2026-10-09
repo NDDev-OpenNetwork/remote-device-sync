@@ -91,6 +91,22 @@ w3-path-snapshot)
   parity and installed qualification: NOT RUN" \
         "$REPORTS/bench-w3-path-snapshot.json" "$REPORTS/bench-w3-path-snapshot.md"
     ;;
+w8-journal-admission)
+    note "gate w8-journal-admission — cancellable preparation and bounded cleanup"
+    green_bars
+    cargo test --locked -p rds-sync || fail "journal and transfer contracts"
+    cargo run --locked --release -p rds-bench --example journal_preparation -- \
+        --json "$REPORTS/bench-w8-journal-admission.json" \
+        --md "$REPORTS/bench-w8-journal-admission.md" || fail "journal preparation benchmark"
+    write_checkpoint "w8-journal-admission" "pending review" \
+        "- fmt/workspace clippy/workspace tests: PASS
+- rds-sync cancellation, confinement, recovery, directory and transfer checks: PASS
+- local release journal benchmark: 100 samples/case; verified 4 MiB resume,
+  pre-canceled admission, admission beside 8192 retained foreign names
+- physical power loss, disk quotas, fair background GC, recursive apply: NOT RUN" \
+        "$REPORTS/bench-w8-journal-admission.json" \
+        "$REPORTS/bench-w8-journal-admission.md"
+    ;;
 w9-audio-foundation)
     note "gate w9-audio-foundation — packet validation, codec and bounded reorder only"
     green_bars

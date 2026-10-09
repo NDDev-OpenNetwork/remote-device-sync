@@ -1475,12 +1475,9 @@ async fn receive(
 ) -> anyhow::Result<(PathBuf, Stats)> {
     // Journal open walks and re-verifies every stored part — disk-bound
     // work belongs on the blocking pool, not an async worker.
-    let journal = {
-        let (dir, rel, manifest) = (dir.to_path_buf(), rel.to_string(), manifest.clone());
-        disk_job(move || Journal::open(&dir, &rel, &manifest))
-            .await
-            .context("journal open task")?
-    };
+    let journal = prepare_journal(dir, rel, manifest, frames.stop_flag(), cancel_flag.clone())
+        .await
+        .context("journal open task")?;
     let journal = match journal {
         Ok(journal) => journal,
         Err(e) => {
@@ -1535,6 +1532,38 @@ async fn receive(
     )
     .await?;
     Ok(result)
+}
+
+/// Dropping the async waiter must also stop preparation that is already on
+/// the blocking pool, including a job queued behind a long-running syscall.
+struct PreparationCancellation(Arc<AtomicBool>);
+
+impl Drop for PreparationCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+async fn prepare_journal(
+    dir: &Path,
+    rel: &str,
+    manifest: &Manifest,
+    peer_stop: Arc<AtomicBool>,
+    caller_stop: Option<Arc<AtomicBool>>,
+) -> Result<Result<Journal, crate::SyncError>, tokio::task::JoinError> {
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let _cancel = PreparationCancellation(abandoned.clone());
+    let (dir, rel, manifest) = (dir.to_path_buf(), rel.to_string(), manifest.clone());
+    disk_job(move || {
+        Journal::open_cancellable(&dir, &rel, &manifest, &|| {
+            abandoned.load(Ordering::Acquire)
+                || peer_stop.load(Ordering::Acquire)
+                || caller_stop
+                    .as_ref()
+                    .is_some_and(|f| f.load(Ordering::Acquire))
+        })
+    })
+    .await
 }
 
 async fn receive_chunks(

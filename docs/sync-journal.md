@@ -54,7 +54,13 @@ keeps the guard alive while the writer drains and returns its journal.
 A store already executing remains atomic at its existing filesystem transaction
 boundary; cancellation cannot interrupt a filesystem syscall or roll back a
 committed part. Journal scan/open and assembly retain their separate cancellation
-limits. The receive lock remains owned for as long as that work needs it; it is
+limits. `Journal::open_cancellable` checks cancellation before filesystem
+preparation, between catalog entries, before each saved-part read, and between
+destination-reuse chunks. The engine combines peer/control termination, caller
+cancellation and an async-waiter drop guard. A queued abandoned open performs no
+filesystem mutation; a running syscall completes before the next check. A
+canceled open returns `Interrupted`, retains verified parts and releases both
+receive locks. The receive lock remains owned for as long as that work needs it; it is
 never forcibly removed to let a retry overlap. Immediate reconnection may still
 be refused while the previous operation unwinds. Recovery must reconcile actual
 verified content and allow bounded convergence, not assume a fixed sleep proves
@@ -74,8 +80,18 @@ error logs a generic warning and leaves a successful transfer successful.
 Reopening reconstructs verified state from remaining parts and/or destination
 bytes. Unknown entries are preserved; recursive deletion is never attempted.
 
-Recovery work is bounded by the requested manifest and a fixed number of
-temporary names. It does not enumerate historical journals. A crashed assembly
+Recovery of the offered journal verifies its requested manifest and known
+temporary names. Opening also attempts to collect verified superseded journals
+for the same destination. This uses a streaming directory visitor and a shared
+4096-entry budget across catalog siblings and their parts; unknown names also
+consume that budget. Exhausting it defers cleanup and allows the new receive to
+proceed. Partial cleanup retains attribution metadata until known parts and
+their directory have been removed. Directory order is unspecified: a large
+foreign prefix can defer later entries on every pass, so this is not a fair
+background collector or an eventual-reclamation guarantee. Cancellation ends
+the entire preparation instead of being swallowed as a cleanup warning.
+
+A crashed assembly
 has at most one known temporary inode per destination parent, reclaimed on the
 next receive there. Old random `.rds-stage-*` files have no trustworthy ownership
 receipt and are preserved. Inactive journals, abandoned destinations, disk quotas
