@@ -73,6 +73,22 @@ EOF
 }
 
 case "$GATE" in
+w9-audio-foundation)
+    note "gate w9-audio-foundation — packet validation, codec and bounded reorder only"
+    green_bars
+    cargo test --locked -p rds-audio || fail "audio contracts"
+    cargo run --locked --release -q -p rds-bench --example audio_foundation -- \
+        --json "$REPORTS/bench-w9-audio-foundation.json" \
+        --md "$REPORTS/bench-w9-audio-foundation.md" || fail "audio benchmark"
+    write_checkpoint "$GATE" "foundation checks passed; audio service not qualified" \
+        "- fmt/workspace clippy/workspace tests: PASS
+- packet, codec and jitter contracts: PASS
+- release benchmark: bench-w9-audio-foundation.{json,md}; exact output duration, finite PCM and bounded packet retention
+- topology: synthetic in-process; no audio source, sink or remote service
+- NOT RUN: native device I/O, network playout, drift/A-V synchronization, microphone permission and installed qualification" \
+        "$REPORTS/bench-w9-audio-foundation.json" \
+        "$REPORTS/bench-w9-audio-foundation.md"
+    ;;
 w8-directory-foundation)
     note "gate w8-directory-foundation — scan, wire and planning contracts only"
     green_bars
