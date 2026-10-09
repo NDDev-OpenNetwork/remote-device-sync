@@ -138,6 +138,9 @@ fn maintain_probe_proof(ctx: &PathSelectionContext<'_>) {
     }
 }
 impl PathSelector for SetupSelector {
+    fn maintain_standby_paths(&self) -> bool {
+        true
+    }
     fn refresh_interval(&self) -> Option<Duration> {
         Some(Duration::from_secs(1))
     }

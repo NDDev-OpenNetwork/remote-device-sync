@@ -238,6 +238,7 @@ async fn delivery_pause(extra_hold: Duration, sustained: bool) {
         )
         .await
         .unwrap();
+        let held_at = std::time::Instant::now();
         gate.close();
         start.send(()).unwrap();
         while calls.load(Ordering::SeqCst) < 1 {
@@ -257,6 +258,7 @@ async fn delivery_pause(extra_hold: Duration, sustained: bool) {
             "capture kept encoding into an unacknowledged transport backlog"
         );
         gate.open();
+        let actual_hold = held_at.elapsed();
         let encoded = session.encoded.as_mut().unwrap();
         let first = encoded.recv().await.unwrap().header.seq;
         let mut last = first;
@@ -276,7 +278,7 @@ async fn delivery_pause(extra_hold: Duration, sustained: bool) {
             tokio::time::sleep(Duration::from_millis(550)).await;
             assert!(
                 bitrate.load(Ordering::SeqCst) >= initial_bitrate,
-                "a recovered delay unnecessarily reduced image quality: initial={initial_bitrate}, current={}, observed_misses={}, path={:?}",
+                "a recovered delay unnecessarily reduced image quality: actual_transport_hold={actual_hold:?}, initial={initial_bitrate}, current={}, observed_misses={}, path={:?}",
                 bitrate.load(Ordering::SeqCst), misses.load(Ordering::Relaxed), observer.current_path_stats()
             );
         }
