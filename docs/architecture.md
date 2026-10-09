@@ -832,5 +832,12 @@ the vendored published Noq-proto 1.3 source. A validated backup can return its
 ACK without depending on the selected data path. ACKs for abandoned/unvalidated
 paths can use another route; single-path/handshake scheduling is unchanged.
 No wire, crypto, congestion or reliable-retransmission algorithm changes.
+Iroh's initial observer subscribes before reading a protocol-owned snapshot of
+established path IDs. A delayed accepting task can otherwise miss a standby
+that finished validation before actor registration. The small
+[Noq adapter extension](../vendor/noq/RDS-PATCH.md) forwards this snapshot;
+duplicate snapshot/event observations do not double-count paths. This does not
+replace the engine's validation or packet scheduling decisions.
+
 See [patch provenance](../vendor/noq-proto/RDS-PATCH.md) and
 [failure/qualification evidence](reports/rds-warm-standby-20261006.md).

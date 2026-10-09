@@ -73,6 +73,24 @@ EOF
 }
 
 case "$GATE" in
+w3-path-snapshot)
+    note "gate w3-path-snapshot — complete initial path observation"
+    green_bars
+    cargo test --locked -p rds-net --features transport-noq --lib || fail "path observer and transport library"
+    cargo test --locked --target-dir "${CARGO_TARGET_DIR:-target}" --manifest-path vendor/noq-proto/Cargo.toml \
+        --lib || fail "protocol engine and snapshot eligibility"
+    cargo run --locked --release -q -p rds-bench -- run --scenario handshake \
+        --iterations 100 --json "$REPORTS/bench-w3-path-snapshot.json" \
+        --md "$REPORTS/bench-w3-path-snapshot.md" || fail "initial connection benchmark"
+    write_checkpoint "w3-path-snapshot" "pending review" \
+        "- fmt/workspace clippy/workspace tests: PASS
+- network library with both transport adapters: PASS
+- complete protocol-engine unit suite including snapshot eligibility: PASS
+- 100 loopback handshakes: PASS; source-bound benchmark is a smoke measurement
+- later broadcast overflow, complete retired-path accounting, physical topology
+  parity and installed qualification: NOT RUN" \
+        "$REPORTS/bench-w3-path-snapshot.json" "$REPORTS/bench-w3-path-snapshot.md"
+    ;;
 w8-journal-admission)
     note "gate w8-journal-admission — cancellable preparation and bounded cleanup"
     green_bars

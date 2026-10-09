@@ -224,6 +224,68 @@ struct StandbySelector {
     confirmed: AtomicBool,
     ip_drained: AtomicBool,
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_accept_observes_paths_established_before_actor_registration() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let fabric = Fabric::default();
+        let link = |label: &[u8]| Link {
+            addr: CustomAddr::from_parts(0x7264736c61746561, label),
+            fabric: fabric.clone(),
+            drop_packets: Arc::new(AtomicBool::new(false)),
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+        let a = endpoint(link(b"a"), Arc::new(AtomicBool::new(false))).await;
+        let b_link = link(b"b");
+        let target_custom = b_link.addr.clone();
+        let b = endpoint(b_link, Arc::new(AtomicBool::new(false))).await;
+        // Accept the QUIC handshake, but deliberately defer the Iroh future
+        // that registers this connection with its path-observation actor.
+        #[allow(clippy::async_yields_async)]
+        // Returning the unpolled accepting future is the regression trigger.
+        let accept_without_registration = async { b.accept().await.unwrap().accept().unwrap() };
+        let (client, pending_server) = tokio::join!(
+            a.connect(loopback_target(&b, target_custom), rds_core::ALPN),
+            accept_without_registration
+        );
+        let client = client.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let paths = client.paths();
+                if paths.iter().any(|p| p.is_ip()) && paths.iter().any(|p| !p.is_ip()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("client did not establish both paths before server registration");
+        let server = pending_server.await.unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let paths = server.paths();
+                if paths.iter().any(|p| p.is_ip()) && paths.iter().any(|p| !p.is_ip()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let snapshot = server
+            .paths()
+            .iter()
+            .map(|p| (p.id(), p.is_ip()))
+            .collect::<Vec<_>>();
+        tokio::join!(a.close(), b.close());
+        assert!(
+            observed.is_ok(),
+            "late observer lost established paths: {snapshot:?}"
+        );
+    })
+    .await
+    .expect("late path observation fixture stalled");
+}
+
 impl PathSelector for StandbySelector {
     fn refresh_interval(&self) -> Option<Duration> {
         Some(Duration::from_secs(1))
