@@ -6,6 +6,24 @@ retain their original acceptance requirements. Source, tests and live artifact
 observations decide status. A historical receipt, successful build or sampled
 RTT does not establish installed interactive stability.
 
+## Current desktop feature wave — clipboard, monitors, sessions
+
+The source now contains three bounded, independently negotiated increments:
+
+- `DesktopV5` offer/request/chunk text clipboard reverse sync, with X11 ICCCM
+  INCR and native AppKit publication;
+- one shared X11 root/monitor catalog, stable logical monitor IDs and checked
+  capture/input offsets, while retaining legacy X-screen numbering;
+- explicit per-session routes and the existing bounded local/agent session
+  registries for concurrent devices and monitors.
+
+Native X11 owner-change/INCR and RandR region/removal fixtures now pass on a
+dedicated Xvfb. The AppKit named-pasteboard probe passes on macOS, and a real
+Iroh/Noq test retains two devices and two monitor routes when one window closes.
+Current application installation and ordinary interactive clipboard/window
+qualification remain separate from these source tests. Wayland portal
+clipboard and physical connector/EDID identity remain platform workstreams. See [clipboard.md](clipboard.md) and [multi-monitor.md](multi-monitor.md).
+
 ## Audit boundary
 
 Review available session evidence from the requested harnesses and compare each
@@ -29,7 +47,7 @@ older revisions independently; neither is silently assumed to equal main.
 | S3 | Published source, consumer pins and installed artifacts can diverge; stale branches/PRs may duplicate a newer implementation. | Git branches, PRs, immutable estate gitlink | Preserve unpublished commits; reconcile against actual merged code; signed atomic commits and reviewed PR merges |
 | S4 | Current docs still contain obsolete present-tense claims about TCP-only SSH, missing transfer, core runtime dependencies, grants and relay failover. | Architecture, capability matrix, platform docs, progress ledger | Replace current claims from code; retain dated evidence and unsupported capability labels |
 | S5 | Input ACK, payload receipt, decoded-frame submission and physical pixels prove different things. | Native diagnostics, visual probe, bench reports | Exact-build typing/Backspace count and causal submission evidence; loss and unanswered probes included |
-| S6 | Optional platform/media modules remain real stubs. Directory sync, native serving on macOS/Wayland, audio and automatic GDS grant issuance are not implemented. | Backend probe files, audio crate, sync engine, GDS policy adapters | Explicit later implementation/qualification tasks; never mark these complete from X11 or loopback results |
+| S6 | Optional platform/media modules remain real stubs. Directory sync, native serving on macOS/Wayland, audio device I/O/playout and automatic GDS grant issuance are unfinished; bounded audio and directory foundation cores are implemented. | Backend probe files, audio crate, sync engine, GDS policy adapters | Explicit later implementation/qualification tasks; never mark these complete from X11 or loopback results |
 | S7 | Owned relay drain priority was reused as RTT, making progress budgets effectively infinite. | Noq path policy | Keep real RTT separate from ranking; negative deadline regression and positive engine/drain qualification |
 | S8 | A compiled architecture test retained an absolute source-checkout filename, making shared-cache verification depend on a removed checkout. | Core layering test; infrastructure fixture path resolution | Embed source-only assertions; resolve required live fixture files from the runtime checkout; preserve the original assertions |
 | S9 | Initial path validation without a finite path idle policy can retain a failed standby attempt and its long probe backoff. | Shared Noq-proto engine used by both backends | Independent validation deadline, explicit abandonment/fresh-ID recovery, last-path protection, full engine suite and real actor restoration |

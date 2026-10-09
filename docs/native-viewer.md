@@ -37,6 +37,11 @@ fails this requested mode; there is no silent fallback. Existing calls and sessi
 without this option retain Desktop/V2/V3 wire shapes and FIN-based delivery.
 `--payload-receipts=false` overrides an enabled native configuration for comparison.
 
+The native viewer also requests `DesktopV5` so text clipboard offers can travel
+back to the host. V5 carries the same receipt flag plus explicit reverse
+clipboard negotiation; a peer that cannot decode V5 is reported as an upgrade
+requirement rather than silently receiving new event variants.
+
 DesktopV4 confirms an encoded frame's complete, bounded EOF read on its isolated
 session route. The proof carries the frame sequence, BLAKE3 payload digest and an
 obsolete disposition if a newer independent picture made the frame unnecessary.
@@ -184,7 +189,7 @@ The window scales video without changing its aspect ratio and translates
 pointer positions into the original display coordinates, including when video
 is downscaled. Physical keys use the wire's evdev vocabulary; the target's
 keyboard layout interprets them. IME/text composition, rich clipboard/audio and
-monitor-switching UI are not implemented. Focus loss releases held keys and
+automatic hotplug migration is not implemented. Focus loss releases held keys and
 buttons. Input queue overflow closes the session instead of silently losing
 a release. The queue holds at most 1024 controls. Only adjacent absolute pointer
 moves on the same display collapse; motion before a button, key or scroll remains
@@ -376,7 +381,7 @@ publication, not typing text through keyboard-layout substitutions.
 
 One transfer is bounded to 1 MiB of UTF-8, with at most 32 KiB control chunks
 (the native sender uses 16 KiB), exact ordered offsets, a five-second idle
-deadline and a thirty-second total assembly deadline. There are at most four
+deadline and a thirty-second total assembly deadline. There are at most eight
 active native selection workers and eight outstanding INCR requests per worker.
 View-only sessions refuse publication. Publication failure ends the control
 session before subsequent paste input can consume an unrelated old clipboard.
@@ -388,9 +393,15 @@ clean frame and no input or paste is replayed automatically. The transport
 connection and unrelated service streams remain outside that session shutdown.
 Publication start/completion and reply completion record transfer ID, byte
 count and stage duration only.
-Contents are neither logged nor written to disk. There is no background scan or
-automatic export of every local clipboard change. Images, files, rich formats,
-reverse clipboard remain outside this text path. Cmd+V becomes a bounded remote
+Contents are neither logged nor written to disk. The V5 reverse path watches
+native owner changes on the serving X11 session, requires a matching offer
+request, and publishes only a fully reassembled UTF-8 value to the viewer's
+native clipboard only after the request was initiated while that viewer window
+was focused; the in-flight transfer may finish after focus moves to the local
+app, while its pasteboard generation must remain unchanged. Use `--clipboard=false` (or `clipboard: false` in
+viewer configuration) to keep the legacy one-way behavior. It is disabled for
+legacy V2/V3/V4 sessions. Images, files and rich formats remain outside this
+text path. Cmd+V becomes a bounded remote
 Ctrl+V chord; Cmd+Shift+V retains Shift for terminal Ctrl+Shift+V. Temporarily
 held Super keys are released/restored while Control brackets the chord; the
 original held modifier state is retained afterward. Other Super shortcuts keep

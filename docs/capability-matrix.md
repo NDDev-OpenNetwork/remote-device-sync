@@ -34,7 +34,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | service:desktop | experimental | enabled + `desktop` build flag; usable capture backend; grant scope | capture→encode→decode→stats contract tests |
 | service:desktop-managed | implemented | manager-owned remote session relays encoded frames over local IPC v5; viewer decodes via `RelayDecoder` (`desktop` build flag for real decode) | relay e2e + managed-channel tests; `rds desktop` defaults to it, `--direct` kept |
 | service:sync | implemented | enabled + `--sync-dir` configured | `rds-sync` tests, resumable transfer tests |
-| service:audio | stub | no codec; wire shape reserved in v2 | `ServiceKind::Audio` variant only |
+| service:audio | stub | bounded libopus/jitter core exists; native device I/O and service wiring unavailable | `rds-audio` library tests; no advertised audio service |
 | service:sync-read | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
 | service:sync-write | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
 | service:desktop-view | implemented | grant scope; usable capture backend | view/control scope separation and desktop contract tests |
@@ -58,6 +58,14 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | desktop-backend:pipewire | stub | XDG portal consent; backend unwritten | `probe()` returns `Ok(None)` |
 | desktop-backend:screencapturekit | stub | macOS 12.3+, screen-record permission; backend unwritten | `probe()` returns `Ok(None)` |
 | desktop-backend:dxgi | unavailable | Windows host; no module | roadmap only |
+
+## Desktop session features
+
+| Capability | State | Runtime prerequisites | Evidence |
+|---|---|---|---|
+| desktop:clipboard-text-reverse | experimental | `DesktopV5`; X11 serving clipboard and native viewer clipboard; text only | bounded offer/request/chunk tests; native Xvfb and isolated AppKit probe; installed qualification separate |
+| desktop:multi-monitor-x11 | experimental | RandR monitor objects or multi-root X server; fresh session after layout changes | native RandR known-pixel/input/removal fixture; physical desktop qualification separate |
+| desktop:multi-session | implemented | per-session route IDs; local manager ≤32 sessions; agent connection/service limits | session routing and managed-channel tests |
 
 ## Codecs and presentation
 

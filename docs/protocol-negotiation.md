@@ -41,3 +41,10 @@ cannot decode it, and frame streams carry the matching
 `UniHello::DesktopFrames { id }` route
 ([desktop-frame-delivery.md](desktop-frame-delivery.md)). Broader service
 capability negotiation and mixed service admission remain separate work.
+
+`StreamHello::DesktopV5` is the additive desktop capability for reverse text
+clipboard. It carries the existing per-session route and output profile plus
+explicit `payload_receipts` and `clipboard` flags; the matching
+`HelloAck::DesktopV5` is required before offers are sent. V2/V3/V4 peers keep
+their exact layouts and never receive new clipboard event variants. There is no
+silent downgrade from a requested V5 session.
