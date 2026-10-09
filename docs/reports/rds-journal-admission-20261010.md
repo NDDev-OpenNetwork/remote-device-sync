@@ -38,10 +38,19 @@ part rescan, destination reuse and a wide foreign catalog. Existing returned-err
 and process-exit recovery checks also pass; these do not simulate physical power
 loss or prove behavior on a genuinely full disk.
 
-The [release benchmark](bench-w8-journal-admission.md) and
+After integration of the initial-path observer fix, clean
+`aeb8045c8a68f0d3274fe8c9afca738b0e583550` passed the same registered gate:
+1,050 passing test executions, zero failures and two ignored checks. The initial
+combined run and both CI platforms exposed a test fixture that created its
+already-owned scratch directory twice. Removing that redundant creation fixes
+the observed `AlreadyExists` assertion; production behavior is unchanged by it.
+The original ten-receipt W8 fork is preserved independently under
+`docs/receipts/w8-journal-admission-119d122.jsonl`.
+
+The current [release benchmark](bench-w8-journal-admission.md) and
 [raw source/digest-bound JSON](bench-w8-journal-admission.json) contain 100 samples
-per case on macOS arm64. A verified 4 MiB/16-chunk resume measured p95 24.578 ms;
-admission beside 8,192 retained foreign entries measured p95 20.792 ms;
+per case on macOS arm64 at the combined source. A verified 4 MiB/16-chunk resume
+measured p95 27.820 ms; admission beside 8,192 retained foreign entries measured p95 25.011 ms;
 pre-canceled admission measured p95 2 µs and created no directory. Setup is
 excluded and the cache is warm. These are local observations, not a speedup,
 network result or hardware-independent latency guarantee.
@@ -63,3 +72,11 @@ destination-edit preconditions, fair collection, the large-file interruption
 campaign and recursive/two-way apply remain open. This checkpoint closes only
 the bounded preparation increment; deployed artifacts and consumer pins require
 their own qualification and reconciliation.
+
+Two separate follow-ups prevent treating this increment as full stability:
+[PR149](https://github.com/NDDev-OpenNetwork/remote-device-sync/pull/149)
+binds cached journal state to the destination, and
+[main CI run37999738254](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/37999738254)
+retained a control RTT p95 of445ms across601 probes against the400ms budget.
+That latency failure shows the earlier cohort correction was not a runtime fix.
+Neither concern is hidden by this successful bounded-admission checkpoint.
