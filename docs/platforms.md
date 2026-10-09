@@ -14,9 +14,10 @@ Build support is distinct from serving capability and native acceptance; see
 
 ## Selection model
 
-Every platform capability lives behind a trait in `rds-desktop`
-(`Capturer`, `Encoder`, `Decoder`, `InputSink`) or `rds-audio`
-(`AudioSource`/`AudioSink`). Backends expose a `probe`/`available`
+Desktop platform capabilities use the `rds-desktop` traits
+`Capturer`, `Encoder`, `Decoder` and `InputSink`. Audio currently exposes only
+the [packet, codec and reorder core](audio.md); device source/sink interfaces
+and adapters remain planned. Desktop backends expose a `probe`/`available`
 function; a fixed preference order per platform picks the first usable
 one at runtime — never compile-time alone. Probing logs the demotion
 reason so "silently on the slow path" is impossible.
