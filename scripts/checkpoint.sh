@@ -73,6 +73,25 @@ EOF
 }
 
 case "$GATE" in
+w6-tabbed-workspace)
+    note "gate w6-tabbed-workspace — independent device/display tabs"
+    green_bars
+    cargo clippy --locked -p rds-desktop -p rds-cli --all-targets --features rds-cli/desktop -- -D warnings || fail "workspace viewer feature clippy"
+    cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --lib || fail "workspace presentation and orchestration contracts"
+    cargo test --locked -p rds-cli --features desktop --bin rds-viewer || fail "workspace launch compatibility"
+    cargo test --locked -p rds-client --test multiple_desktops || fail "simultaneous peer and monitor routing"
+    cargo run --locked --release -p rds-bench --example workspace_churn -- \
+        --json "$REPORTS/bench-w6-tabbed-workspace.json" \
+        --md "$REPORTS/bench-w6-tabbed-workspace.md" || fail "bounded tab-state churn benchmark"
+    write_checkpoint "w6-tabbed-workspace" "pending review" \
+        "- fmt/workspace clippy/workspace tests: PASS
+- desktop/CLI feature Clippy and library/launch contracts: PASS
+- simultaneous real peer and monitor channels on both transports: PASS
+- release tab-state churn: 100 samples each for 1/4/8 open tabs
+- native UI, physical clipboard/input, GPU/memory soak and installed qualification: separate review required
+- retained impaired control RTT failure: OPEN; no threshold change" \
+        "$REPORTS/bench-w6-tabbed-workspace.json" "$REPORTS/bench-w6-tabbed-workspace.md"
+    ;;
 w1-sync-supervision)
     note "gate w1-sync-supervision — terminal control and abandoned assembly"
     green_bars
