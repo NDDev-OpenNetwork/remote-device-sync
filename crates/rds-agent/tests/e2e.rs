@@ -55,6 +55,14 @@ fn tcp_target_policy_matches_equivalent_ip_spellings() {
 }
 
 #[test]
+fn tcp_target_policy_keeps_the_maximum_port_valid_and_scoped() {
+    let policy = AgentPolicy::ssh_only(("127.0.0.1".into(), u16::MAX));
+    assert!(policy.permits_tcp("127.0.0.1", u16::MAX));
+    assert!(!policy.permits_tcp("127.0.0.1", 1));
+    assert!(!policy.permits_tcp("127.0.0.1", 0));
+}
+
+#[test]
 fn tcp_target_policy_rejects_malformed_targets_in_development_mode() {
     let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 22));
     policy.allow_any_tcp = true;
@@ -139,6 +147,11 @@ async fn canonical_ipv6_tcp_target_connects_without_widening_policy() {
 async fn ping_and_tcp_forward_over_relay() {
     let (_relay, relay_url) = test_relay().await;
     let echo_port = tcp_echo().await;
+    // Keep a second listener alive: the kernel supplies a distinct valid port,
+    // including when the allowed listener receives u16::MAX. A reachable
+    // denied target also distinguishes policy refusal from connection failure.
+    let denied_port = tcp_echo().await;
+    assert_ne!(echo_port, denied_port);
 
     // Agent side.
     let agent_ep = bind_endpoint(EndpointConfig::default().with_relay(&relay_url).unwrap())
@@ -181,8 +194,13 @@ async fn ping_and_tcp_forward_over_relay() {
     assert_eq!(&buf, b"hello over rds");
 
     // A target outside the allowlist is refused at the service level.
-    let err = rds_cli::open_tcp(&conn, "127.0.0.1", echo_port + 1).await;
-    assert!(err.is_err(), "unexpectedly allowed off-policy target");
+    let Err(err) = rds_cli::open_tcp(&conn, "127.0.0.1", denied_port).await else {
+        panic!("unexpectedly allowed off-policy target");
+    };
+    assert_eq!(
+        err.to_string(),
+        format!("forward rejected: tcp target 127.0.0.1:{denied_port} not permitted")
+    );
 
     agent_task.abort();
 }
