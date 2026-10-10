@@ -1191,7 +1191,15 @@ impl ApplicationHandler<()> for App {
         }
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        if event_loop.exiting() {
+            return;
+        }
         self.workspace_updates(event_loop);
+        // A queued workspace CloseWindow can exit during this same callback.
+        // It must take precedence over a clipboard reply and deferred paste.
+        if event_loop.exiting() {
+            return;
+        }
         self.sample_window();
         let mut state = lock(&self.session.handle.state);
         state.wake_pending = false;
@@ -1200,6 +1208,15 @@ impl ApplicationHandler<()> for App {
         let status = format!("{} — {}", state.label, state.status);
 
         drop(state);
+        if close {
+            if self.workspace.is_some() {
+                self.workspace_close_active(event_loop);
+            } else {
+                self.release(event_loop);
+                event_loop.exit();
+            }
+            return;
+        }
         self.clipboard_work(event_loop);
         if let Some(window) = &self.window {
             // Media wakeups do not change status. Avoid repeated AppKit title
@@ -1210,14 +1227,6 @@ impl ApplicationHandler<()> for App {
             }
             window.request_redraw();
         }
-        if close {
-            if self.workspace.is_some() {
-                self.workspace_close_active(event_loop);
-                return;
-            }
-            self.release(event_loop);
-            event_loop.exit();
-        }
     }
     fn window_event(
         &mut self,
@@ -1225,6 +1234,9 @@ impl ApplicationHandler<()> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if event_loop.exiting() {
+            return;
+        }
         // Focus-generated key snapshots are not fresh user gestures. Held
         // modifiers are reconciled when the next real input arrives.
         if matches!(

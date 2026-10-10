@@ -18,12 +18,18 @@ struct ClipboardProbe {
     valid_pastes: u64,
     shifted_pastes: u64,
     tab_presses: u64,
+    paste_attempts: u64,
+    closed_with_reply: bool,
     unexpected_text: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let close_with_reply = args.last().is_some_and(|arg| arg == "--close-with-reply");
+    if close_with_reply {
+        args.pop();
+    }
     let clipboard_report = match args.as_slice() {
         [] => None,
         [flag, path] if flag == "--clipboard-report" => {
@@ -32,9 +38,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Some(std::path::PathBuf::from(path))
         }
-        _ => return Err("usage: workspace_preview [--clipboard-report NEW_PATH]".into()),
+        _ => {
+            return Err(
+                "usage: workspace_preview [--clipboard-report NEW_PATH [--close-with-reply]]"
+                    .into(),
+            );
+        }
     };
     let clipboard_probe = clipboard_report.is_some();
+    if close_with_reply && !clipboard_probe {
+        return Err("close probe requires a clipboard report".into());
+    }
     let probe = Arc::new(Mutex::new(ClipboardProbe::default()));
     let observations = probe.clone();
     let devices = vec![
@@ -82,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let id = tab.id.value();
                     let probe = probe.clone();
+                    let workspace = workspace.clone();
                     sessions.insert(id, tokio::spawn(async move {
                         view.status("Connected · isolated preview");
                         view.display_extent(960, 540);
@@ -108,6 +123,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let (transfer, text, _) = pending_reply.take().unwrap();
                                         view.clipboard_event(DesktopEvent::ClipboardChunk { id: transfer,
                                             offset: 0, total: text.len() as u32, data: text.into_bytes() });
+                                        if close_with_reply && transfer == 2 {
+                                            probe.lock().unwrap().closed_with_reply = true;
+                                            workspace.update(WorkspaceUpdate::CloseWindow).expect("close probe queue");
+                                        }
                                     }
                                     let color = match id % 3 { 0 => [86, 106, 33], 1 => [137, 75, 37], _ => [72, 50, 128] };
                                     let mut data = vec![0; 960 * 540 * 4];
@@ -172,6 +191,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        let report = view.report();
+                        probe.lock().unwrap().paste_attempts += report.clipboard_transfers
+                            + report.clipboard_pending_transfers as u64;
                         println!("tab={id} closed controls={controls} held_keys={} held_buttons={}", keys.len(), buttons.len());
                     }));
                 }
@@ -210,15 +232,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .open(report)?;
         writeln!(
             file,
-            "{{\"copies\":{},\"transfers\":{},\"pastes\":{},\"valid_pastes\":{},\"unexpected_text\":{},\"shifted_pastes\":{},\"tab_presses\":{}}}",
+            "{{\"copies\":{},\"transfers\":{},\"pastes\":{},\"valid_pastes\":{},\"unexpected_text\":{},\"shifted_pastes\":{},\"tab_presses\":{},\"paste_attempts\":{},\"closed_with_reply\":{}}}",
             state.copies,
             state.transfers,
             state.pastes,
             state.valid_pastes,
             state.unexpected_text,
             state.shifted_pastes,
-            state.tab_presses
+            state.tab_presses,
+            state.paste_attempts,
+            state.closed_with_reply
         )?;
+        if close_with_reply && (!state.closed_with_reply || state.paste_attempts != 1) {
+            return Err("closing callback admitted a pending paste".into());
+        }
         if state.valid_pastes == 0
             || state.pastes != state.valid_pastes
             || state.unexpected_text != 0
