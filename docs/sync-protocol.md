@@ -85,20 +85,30 @@ negotiation remain W2.1/W2.2.
 The budget uses Tokio's monotonic clock and belongs to one process session.
 Resume starts a new budget while retaining verified journal history.
 
-Individual frame reads/writes, chunk body reads/writes, waiting for a chunk stream
+Expected phase-frame reads/writes, chunk body reads/writes, waiting for a chunk stream
 and opening an outgoing chunk stream retain a five-minute stall bound, additionally
 limited by the absolute session budget. Empty batches and streams fail immediately.
 The default permits disk-bound work on slow devices; it is not a measured latency
 target. Zero or overflowing absolute budgets are rejected before transfer work.
 
+While chunk streams are active, both wire profiles supervise terminal control
+traffic without an independent control-idle timeout: silence on that stream is
+normal while data progresses. `Refuse`, v2 `Cancel`, control EOF and unexpected
+frames end the data phase; data-I/O stalls and the absolute session deadline
+remain enforced. The owned reader projects refusal/cancellation/EOF to blocking
+work before a phase consumes its queued message. An early `Done` is retained by
+the sender and validated after its owned chunk tasks have drained.
+
 Cancellation drops the async operation, its owned sender task set, and receive
-queue producer. Filesystem syscalls already executing on the blocking pool cannot
-be canceled. Bounded queued work may drain and a started assembly may still finish
-its complete atomic replacement after timeout. No Done is emitted by that canceled
-operation. Treat completion as uncertain and reconcile destination content before
-claiming rollback or retrying conflicting work; the journal's root lock remains
-owned until disk work releases it. Per-session resource accounting and
-publication barriers remain W2.5/W8, not an implied guarantee here.
+queue producer. Preparation and assembly own drop guards that project abandonment
+into queued/running disk work; the writer discards stores that have not started.
+Filesystem syscalls already executing on the blocking pool cannot be canceled.
+Assembly checks cancellation before staging, between chunks and before publication.
+If cancellation races an already-started rename/durability sequence, completion
+remains uncertain: reconcile destination content before claiming rollback or
+retrying conflicting work. No `Done` is emitted by the canceled operation. The
+journal's root lock remains owned until disk work releases it. Quotas and broader
+per-session resource policy remain W2.5/W8, not an implied guarantee here.
 
 On the v2 route cancellation is additionally typed: `send_file_cancel` and
 `recv_file_cancel` take a `CancellationToken` (the managed client binds the
@@ -107,7 +117,7 @@ the control stream so the peer observes a deliberate abort rather than a bare
 stream reset. The receiving side watches the control stream during collection,
 so a peer `Cancel` stops chunk receive deterministically instead of waiting for
 the absolute deadline. A v1 stream cannot express `Cancel`; sending one there
-maps to `Refuse`, and canceling still drops the owned work locally.
+maps to `Refuse`, which the peer also observes during the data phase.
 
 ## Validation
 
