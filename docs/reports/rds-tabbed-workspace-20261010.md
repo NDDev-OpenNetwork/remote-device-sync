@@ -151,3 +151,26 @@ opened, produced encoded pictures and closed all three display sessions while
 retaining the local manager identity. No synthetic keys remained held. Those
 headless functional probes are not hardware/FPS or physical-input acceptance,
 and do not replace the final source's complete platform qualification.
+
+## Connected-device discovery follow-up
+
+Installed native acceptance exposed a duplicate computer card when the saved
+profile used a connection ticket and the local manager reported the same peer
+as a bare endpoint ID. Startup discovery compared the two serialized strings.
+The new regression fails against that comparison and passes when discovery
+compares the endpoint identity through the existing target parser.
+
+The saved profile key, ticket routes and external grant reference are retained.
+This only suppresses an automatically added duplicate; it does not merge
+explicit authorization profiles or resolve unknown names by guessing. Different
+peers and malformed/unresolved targets remain distinct. The client library's
+33 desktop/Noq feature tests pass, including alternate routes for the same peer.
+The workspace model and its recorded transition benchmark are unchanged.
+
+The identity/routing distinction matches the upstream
+[EndpointAddr model](https://www.iroh.computer/blog/iroh-0-94-0-the-endpoint-takeover),
+and was checked against this repository's actual `EndpointAddr`, `Ticket` and
+`parse_target` implementations. The installed observation establishes visible
+connection, settings and real display inventory; multiple physical computers,
+clipboard applications and sustained network acceptance retain their separate
+qualification boundaries.
