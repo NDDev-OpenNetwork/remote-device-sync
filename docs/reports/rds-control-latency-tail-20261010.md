@@ -29,6 +29,34 @@ document and test its intended contract before changing its workload; if no such
 difference is observed, retain that negative finding and continue delivery analysis.
 Neither an increased deadline nor a passing retry closes the original failure.
 
+## Reproduced feature-dependent fixture error
+
+At clean `664b2a6`, a codec-only probe used the actual `SyntheticProducer` for
+1,024 sequence prefixes at each of 256 and 1,024 bytes. OpenH264 rejected all
+2,048 payloads: zero decoded or buffered results. The probe accelerates cadence
+only; it does not change generated payload bytes or claim network timing.
+Two planned instrumented feature cohorts then completed: the first failed at
+599 probes with p50/p95/p99 152/445/706 ms; the second passed at 601 probes with
+139/346/450 ms. Both results are retained, with no selection by outcome.
+
+A new clean-link regression makes the unintended traffic observable: before the
+fix, the first 20 headers included two keyframes although only the initial key
+was due. The fake H.264 bytes had provoked an extra codec repair. After the fix,
+exactly the one intended keyframe arrives. This is independent of the aggregate
+RTT's stochastic result.
+
+The shared protocol/header-arrival harness now takes the existing encoded relay
+tap and drains its bounded queue with an owned task. It never sends synthetic
+pattern bytes through an optional codec. Input/control, stream ordering, loss,
+jitter, seed, frame payload/cadence, probe cohort, percentiles and the 400 ms gate
+remain unchanged. Real codec tests and the managed H.264 native fixture retain
+the decoder boundary separately. The older relay test is renamed to describe
+payload preservation and deferred decode outcomes; accepting `NeedIdr` was never
+proof of successful decoding.
+
+This repairs an inconsistent test workload; it does not yet establish the cause
+of every retained RTT outlier. Default and feature-profile validation follow.
+
 [Main CI run 37999738254](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/37999738254)
 at `6825d5d` failed the Ubuntu impairment case with 601 completed probes:
 RTT p50 174 ms, p95 445 ms and p99 683 ms versus the unchanged 400 ms p95 budget.
