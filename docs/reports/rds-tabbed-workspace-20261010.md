@@ -1,7 +1,7 @@
 # Native workspace implementation — 2026-10-10
 
-Status: implementation and native preview verified; final integration and
-platform/network qualification in progress, W6/W9.2.
+Status: implementation checkpoint and bounded native acceptance pass, W6/W9.2.
+Final artifact and installed/platform/network qualification remain distinct.
 
 Before this wave, the viewer could launch up to eight independent processes for
 explicit device/display pairs, without a tab bar, picker or in-window settings.
@@ -138,3 +138,16 @@ Source review confirmed that an authorized Copy reply could remain queued in
 a hidden tab because only the active mailbox was drained. That correction
 is a separate source change, and this earlier checkpoint/build does not
 qualify it. Neither candidate has been described as installed acceptance.
+
+## Final implementation receipt
+
+Clean `94260b1` passes the full registered checkpoint: 1,136 passing executions,
+zero failed and two explicit native ignores, with an intact 22-record receipt
+chain. The final native clipboard/input/lifecycle corrections and actual A/B
+results are recorded in [the handoff report](rds-workspace-clipboard-20261010.md).
+
+On `5c3cf0c`, separate 15-second Linux Xvfb managed previews for Iroh and Noq
+opened, produced encoded pictures and closed all three display sessions while
+retaining the local manager identity. No synthetic keys remained held. Those
+headless functional probes are not hardware/FPS or physical-input acceptance,
+and do not replace the final source's complete platform qualification.
