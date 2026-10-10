@@ -1,6 +1,6 @@
 {
-  "source": "5c3cf0cde2161d5e16fba9dac9719d33f3e5f210",
-  "tree": "f8127f5bdf160e5bfa5841b6ab5d3bbcf3a6d370",
+  "source": "ab341dffbf5c4ea2b72af66a36c94430c8064a19",
+  "tree": "4d27e8ca07a7a09589af18b2ceef98f070d7c3c6",
   "clean": true,
   "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
   "os": "macos",
@@ -11,12 +11,12 @@
       "transitions_per_sample": 1024,
       "timing": {
         "count": 100,
-        "min_ns": 32000,
-        "p50_ns": 32625,
-        "p95_ns": 33334,
-        "p99_ns": 34416,
-        "max_ns": 38958,
-        "mean_ns": 32743.34
+        "min_ns": 32167,
+        "p50_ns": 32708,
+        "p95_ns": 34917,
+        "p99_ns": 35458,
+        "max_ns": 35625,
+        "mean_ns": 32915.82
       }
     },
     {
@@ -25,11 +25,11 @@
       "timing": {
         "count": 100,
         "min_ns": 56791,
-        "p50_ns": 57042,
-        "p95_ns": 57334,
-        "p99_ns": 57417,
-        "max_ns": 59000,
-        "mean_ns": 57089.95
+        "p50_ns": 57084,
+        "p95_ns": 57417,
+        "p99_ns": 59083,
+        "max_ns": 62792,
+        "mean_ns": 57189.09
       }
     },
     {
@@ -37,12 +37,12 @@
       "transitions_per_sample": 1024,
       "timing": {
         "count": 100,
-        "min_ns": 67625,
-        "p50_ns": 67834,
-        "p95_ns": 82834,
-        "p99_ns": 84166,
-        "max_ns": 85625,
-        "mean_ns": 70166.26
+        "min_ns": 67667,
+        "p50_ns": 68000,
+        "p95_ns": 82959,
+        "p99_ns": 83250,
+        "max_ns": 86208,
+        "mean_ns": 70368.35
       }
     }
   ],

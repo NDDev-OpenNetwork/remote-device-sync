@@ -1,10 +1,9 @@
-# Checkpoint W6-TABBED-WORKSPACE — 20261010-055758
+# Checkpoint W6-TABBED-WORKSPACE — 20261010-064726
 
-Verdict: **automated checkpoint PASS; native clipboard/input preview PASS**
+Verdict: **automated checkpoint PASS; later close-callback correction recorded separately**
 
-Source: clean `5c3cf0cde2161d5e16fba9dac9719d33f3e5f210`.
+Source: clean `ab341dffbf5c4ea2b72af66a36c94430c8064a19`.
 1,136 passing test executions, zero failed, two explicit native ignores.
-Receipt chain: 20 records, verified intact.
 
 ## Automated checks
 - fmt/workspace clippy/workspace tests: PASS
@@ -20,13 +19,9 @@ Receipt chain: 20 records, verified intact.
 - [x] docs/ updated for anything this wave changed
 - [x] security/unsafe review done for new code paths
 
-Review: new native keyboard, clipboard and texture-lifetime behavior has no new
-unsafe block or wire/identity policy change. The failing-before texture teardown
-regression passes. The implementation-equivalent `9d18d22` native runs verify
-exact synthetic clipboard text, ordinary Tab, shifted paste, local-form input
-and clean timed shutdown. Earlier managed fixtures verify both transports and
-three independently encoded displays through the production local manager.
-See [the native handoff report](rds-workspace-clipboard-20261010.md) for retained
-failures, scope and final native receipts. Physical remote applications, Linux
-viewer clipboard, installed fleet and sustained GPU/resource/network acceptance
-remain explicitly separate; failed historical latency cohorts remain recorded.
+This checkpoint covers window-owned physical modifiers and the previously
+qualified tab/clipboard/texture behavior. Native clipboard/window evidence and
+physical/network/installed limits remain in the workspace reports. The later
+close-with-reply fixture reproduced an extra paste during window exit; its
+correction and exact native before/after evidence belong to the next source.
+No new unsafe block, protocol tag or authentication policy was introduced.
