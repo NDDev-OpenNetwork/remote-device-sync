@@ -757,7 +757,7 @@ async fn impaired_link_latency_gate() {
     let _case = SESSION_CASE.lock().await;
     // Opt-in diagnostics expose the existing application timing probes without
     // changing the workload, cohort, percentile calculation or latency budget.
-    let _ = tracing_subscriber::fmt()
+    let tracing = tracing_subscriber::fmt()
         .with_env_filter({
             // Keep terminal diagnostics in failed CI output even when RUST_LOG
             // is absent. Explicit profiling directives can add packet detail.
@@ -768,6 +768,9 @@ async fn impaired_link_latency_gate() {
         })
         .with_test_writer()
         .try_init();
+    if let Err(error) = tracing {
+        eprintln!("impaired diagnostics: tracing initialization failed: {error}");
+    }
     // 60 fps of ~1 KB frames ≈ one datagram per frame — enough samples
     // to make percentiles meaningful without saturating the lossy link.
     let mut h = harness(60, 1024, 60, Some(Impairment::lossy()), true).await;
@@ -779,6 +782,7 @@ async fn impaired_link_latency_gate() {
     let mut last_seq: Option<u64> = None;
     let mut outstanding = std::collections::BTreeSet::new();
     let mut offered = 0usize;
+    let mut probe_tick_lateness_us = Vec::new();
     let mut probes = tokio::time::interval(Duration::from_millis(100));
     probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Keep the workload and latency budgets unchanged, but measure a full
@@ -788,7 +792,8 @@ async fn impaired_link_latency_gate() {
     let end = Instant::now() + Duration::from_secs(60);
     while Instant::now() < end {
         tokio::select! {
-            _ = probes.tick() => {
+            scheduled = probes.tick() => {
+                probe_tick_lateness_us.push(scheduled.elapsed().as_micros().min(u64::MAX as u128) as u64);
                 let seq = h.session.heartbeat().await.expect("control writer ended under impairment");
                 assert!(outstanding.insert(seq));
                 offered += 1;
@@ -858,7 +863,9 @@ async fn impaired_link_latency_gate() {
     let (s, c) = (s_stats.get(), c_stats.get());
     let lat_p95 = p95(latencies.clone());
     let rtt_p95 = p95(rtts.clone());
-    eprintln!(
+    // Format first: streaming format arguments can interleave with trace
+    // writers and split the cohort's only machine-readable summary.
+    let summary = format!(
         "impaired: frames={} lat_p95={}ms lat_p99={}ms queue_p95={}ms wire_p95={}ms control_samples={} rtt_p50={}ms rtt_p95={}ms rtt_p99={}ms server_out={:?} client_out={:?}",
         latencies.len(),
         lat_p95,
@@ -872,6 +879,15 @@ async fn impaired_link_latency_gate() {
         s,
         c
     );
+    eprintln!("{summary}");
+    let scheduling = format!(
+        "impaired scheduling: probe_tick_lateness_p95={}us probe_tick_lateness_max={}us server_pump={:?} client_pump={:?}",
+        p95(probe_tick_lateness_us.clone()),
+        probe_tick_lateness_us.iter().max().copied().unwrap_or(0),
+        s_stats.timing(),
+        c_stats.timing()
+    );
+    eprintln!("{scheduling}");
     // Proof the link itself was impaired, underneath QUIC: both
     // directions show real seeded drops and sustained media traffic.
     assert!(s.dropped > 0, "server-outbound loss never engaged: {s:?}");

@@ -202,7 +202,7 @@ pub async fn spawn(upstream: SocketAddr, cfg: Impairment) -> std::io::Result<Pro
 #[cfg(feature = "transport-noq")]
 mod socket;
 #[cfg(feature = "transport-noq")]
-pub use socket::{ImpairingSocket, StatsHandle};
+pub use socket::{ImpairingSocket, SocketTimingStats, StatsHandle};
 
 /// Delay queue + sender shared between the receive loop and dispatcher.
 struct Pipe {
