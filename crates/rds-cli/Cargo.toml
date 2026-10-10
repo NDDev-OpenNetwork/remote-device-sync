@@ -47,5 +47,9 @@ name = "rds-viewer"
 path = "src/viewer_main.rs"
 required-features = ["desktop"]
 
+[[example]]
+name = "workspace_managed_preview"
+required-features = ["desktop"]
+
 [lints]
 workspace = true
