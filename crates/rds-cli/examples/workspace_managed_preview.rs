@@ -294,7 +294,9 @@ async fn main() -> anyhow::Result<()> {
         serve(a.clone(), 0, stats.clone()),
         serve(b.clone(), 1, stats.clone()),
     ];
-    let root = std::env::temp_dir().canonicalize()?.join(format!(
+    // The macOS per-user temporary path can already consume most of sun_path.
+    // Canonical /tmp keeps this private fixture's IPC names below that bound.
+    let root = std::path::Path::new("/tmp").canonicalize()?.join(format!(
         "rds-workspace-managed-{:032x}",
         rand::random::<u128>()
     ));
