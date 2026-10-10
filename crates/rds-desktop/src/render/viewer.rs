@@ -715,11 +715,14 @@ impl Viewer {
             error: None,
             last_window_status: None,
             workspace: None,
+            activity: None,
         };
         Ok((Self { event_loop, app }, handle, receiver))
     }
     pub fn run(mut self) -> Result<(), DesktopError> {
-        let _activity = super::platform::remote_activity();
+        if self.app.workspace.is_none() {
+            self.app.activity = Some(super::platform::remote_activity());
+        }
         self.event_loop
             .run_app(&mut self.app)
             .map_err(|e| DesktopError::Capture(e.to_string()))?;
@@ -811,6 +814,7 @@ struct App {
     error: Option<DesktopError>,
     last_window_status: Option<String>,
     workspace: Option<workspace::Deck>,
+    activity: Option<super::platform::RemoteActivity>,
 }
 impl App {
     fn clipboard_work(&mut self, event_loop: &ActiveEventLoop) {

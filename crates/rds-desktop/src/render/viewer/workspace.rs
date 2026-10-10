@@ -306,6 +306,9 @@ impl App {
                 return;
             }
             deck.inactive.insert(id, session);
+            if self.activity.is_none() {
+                self.activity = Some(super::super::platform::remote_activity());
+            }
         }
         self.workspace_select(deck, id, event_loop);
         if let Some(chrome) = &mut deck.chrome {
@@ -330,6 +333,7 @@ impl App {
                 self.session = blank;
                 self.session.handle.status("Ready");
                 deck.active = None;
+                self.activity = None;
                 if let Some(gpu) = &mut self.gpu {
                     gpu.clear_picture();
                 }
