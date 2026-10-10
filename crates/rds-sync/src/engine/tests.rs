@@ -141,6 +141,82 @@ async fn journal_preparation_observes_peer_and_caller_cancellation() {
     }
 }
 
+#[test]
+fn dropping_queued_assembly_retains_destination_and_verified_parts() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let root = Scratch::new();
+    std::fs::write(root.0.join("data.bin"), b"old destination").unwrap();
+    let bytes = b"verified replacement";
+    let manifest = crate::manifest_of(bytes);
+    let mut journal = Journal::open(&root.0, "data.bin", &manifest).unwrap();
+    journal.store(0, bytes).unwrap();
+    runtime.block_on(async {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        });
+        ready.await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                assemble_journal(journal, Arc::new(AtomicBool::new(false)), None,)
+            )
+            .await
+            .is_err()
+        );
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert_eq!(
+            std::fs::read(root.0.join("data.bin")).unwrap(),
+            b"old destination",
+            "abandoned assembly published from the blocking queue"
+        );
+        let resumed = Journal::open(&root.0, "data.bin", &manifest).unwrap();
+        assert!(
+            resumed.complete(),
+            "abandoned assembly discarded verified resume state"
+        );
+    });
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_control_during_data_has_no_independent_idle_deadline() {
+    let (tx, rx) = mpsc::channel(8);
+    // Isolate phase timing from transport idle timers and packet scheduling.
+    let mut frames = ControlFrames {
+        rx,
+        stop: Arc::new(AtomicBool::new(false)),
+        cause: Arc::new(std::sync::Mutex::new(None)),
+        cause_notify: Arc::new(tokio::sync::Notify::new()),
+        quit: tokio_util::sync::CancellationToken::new(),
+        reader: None,
+    };
+    assert!(
+        tokio::time::timeout(READ_STALL * 2, frames.during_data())
+            .await
+            .is_err(),
+        "quiet control interrupted an independently progressing data phase"
+    );
+    tx.send(SyncMsg::Cancel {
+        reason: "after quiet data".into(),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        frames.during_data().await.unwrap(),
+        SyncMsg::Cancel { .. }
+    ));
+    drop(tx);
+    assert!(frames.during_data().await.is_err());
+}
+
 #[tokio::test]
 async fn normal_finish_drains_and_verifies_every_queued_store() {
     let root = Scratch::new();
@@ -569,6 +645,34 @@ async fn control_reader_flags_peer_cancel_before_consumption() {
         other => panic!("expected Cancel, got {other:?}"),
     }
     frames.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_reader_flags_refusal_before_consumption_on_both_profiles() {
+    for wire in [Wire::V1, Wire::v2([3; 16], SessionLimits::LOCAL)] {
+        let (_send, recv, mut peer_send, _ca, _cb, _ea, _eb) = stream_pair().await;
+        let mut frames = ControlFrames::open(wire, recv);
+        wire.send(
+            &mut peer_send,
+            &SyncMsg::Refuse {
+                reason: "do not start queued disk work".into(),
+            },
+        )
+        .await
+        .unwrap();
+        flag_watcher_wait(&frames.stop_flag()).await;
+        assert!(
+            frames
+                .abort_cause("missing reason")
+                .await
+                .contains("do not start")
+        );
+        assert!(matches!(
+            frames.during_data().await.unwrap(),
+            SyncMsg::Refuse { .. }
+        ));
+        frames.close().await;
+    }
 }
 
 /// Ordered phase traffic flows through the queue untouched and `stop`

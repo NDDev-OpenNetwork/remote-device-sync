@@ -586,7 +586,10 @@ check Done against their offered root. Empty/oversized batches, noncanonical Nee
 bitmaps and duplicate/unrequested chunks are refused. The default absolute session
 budget is one hour, with five-minute I/O stalls; library callers can select an
 explicit total budget. Already-running blocking disk work can finish after
-cancellation, so commit outcome may remain uncertain. See
+cancellation; preparation/assembly drop guards stop abandoned work at cooperative
+barriers, while a rename already in progress still has an uncertain commit outcome.
+Both profiles watch terminal control messages during chunk transfer without an
+independent control-idle timeout; data-I/O and absolute session bounds remain. See
 [the precise protocol contract](sync-protocol.md). Assembly concatenates
 verified parts, checks the BLAKE3 root, and installs an exclusively created
 `assembly` inode from the destination parent's private `.rds-sync` directory
