@@ -74,3 +74,13 @@ owns input. Releases still clear old widget state after a local dialog closes;
 they cannot consume the remote release. Winit focus-generated synthetic keys
 are ignored before either local or remote gesture routing. Native revalidation
 and the new source's complete checks remain required.
+
+The keyboard-routing candidate's native run delivered ordinary Tab down/up to
+the synthetic remote sink (the baseline delivered neither), and again recorded
+two exact-text pastes without unexpected content. Its timed shutdown then
+reproduced a debug panic from one unpainted `TexturesDelta`; no final report was
+written, so the run is not classified as successful shutdown acceptance.
+A dedicated regression fails before the fix. `UiFrame::drop` now explicitly
+clears CPU-side texture commands when their window/GPU owner ends. Live texture
+uploads/frees still pass through the painter. All 44 render tests pass after
+this correction; the native run must be repeated through its normal deadline.
