@@ -35,7 +35,8 @@ If Paste follows a tab switch before copied text arrives, one pending gesture
 waits up to five seconds. It retains the original Shift intent (including
 terminal paste), destination tab, settings revision and connection epoch.
 New input, focus loss, reconnect, closing either session, changed native
-clipboard ownership or expiry cancels it with a visible message. No stale-text
+clipboard ownership or expiry cancels it with a visible message. Closing the
+workspace cancels pending paste before processing a concurrent clipboard reply. No stale-text
 fallback or delayed paste into a different tab is permitted. Turning clipboard
 off leaves the remote computer's own paste shortcut available without reading
 the local clipboard. Linux native viewer clipboard publication remains unavailable;

@@ -1,8 +1,8 @@
 # Workspace clipboard handoff — 2026-10-10
 
-Status: native handoff/teardown accepted within the synthetic-peer boundary.
-The final window-modifier ownership change passes 44 render tests and strict
-viewer Clippy; its combined checkpoint and final platform artifacts are pending.
+Status: native handoff, keyboard ownership, teardown and close/reply ordering
+have bounded acceptance evidence. Final combined qualification and installed
+convergence remain separate.
 Milestone: W6/W9.2 native workspace input ownership.
 
 The workspace retains each hidden tab's clipboard mailbox, but only drains the
@@ -125,3 +125,11 @@ attempts, two transfers and two valid synthetic pastes, then failed its expected
 one-paste shutdown contract. This is a retained negative result, not a successful
 qualification. The fixed callback ordering and the same fixture are qualified
 separately below.
+
+The same native close-with-reply scenario on clean `4082699` finished with exit
+zero: two Copy requests, one paste attempt, one transfer and one valid paste;
+`closed_with_reply` was true and unexpected text remained zero. All three
+workers ended with no held keys/buttons. The baseline had admitted and delivered
+two pastes before failing the same one-paste contract. This confirms that the
+new close callback suppresses the pending gesture, rather than relying on input
+queue destruction to discard it later.
