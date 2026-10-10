@@ -1,6 +1,8 @@
 //! Native window presentation. A single pending BGRA frame feeds a GPU surface;
 //! window/input handling stays on the OS main thread and networking stays async.
 
+pub mod workspace;
+
 #[cfg(feature = "viewer")]
 mod clipboard;
 #[cfg(feature = "viewer")]
