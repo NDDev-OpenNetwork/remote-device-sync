@@ -1,5 +1,11 @@
 # Deep research: remote + sync, all-Rust, minimum latency
 
+This file preserves dated research and design proposals. Current capability
+claims follow the code, [capability matrix](capability-matrix.md) and owning
+contracts; current execution follows the [stability plan](stability-plan-20261009.md).
+An older stack survey or proposed backend here is not implemented support.
+
+
 ## 2026-10-07 contemporaneous replacement proof
 
 [RFC 9000 §8.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-8.2) defines

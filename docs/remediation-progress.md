@@ -14,11 +14,15 @@ sections describe their original increments, not the current inventory.
 The owned backend remains experimental.
 
 The current [capability matrix](capability-matrix.md) and
-[continuation plan](continuation-plan.md) govern present capability claims.
+[stability plan](stability-plan-20261009.md) govern present capability claims.
 Native Rust SSH, the shared session manager, resumable single-file transfer,
 X11 capture/input and bounded native wgpu presentation are implemented.
-ScreenCaptureKit, image-copy/PipeWire serving, audio and recursive/two-way sync
-remain unavailable or stubs as listed in the matrix. Native input-to-visible,
+ScreenCaptureKit and image-copy/PipeWire serving remain stubs. The libopus
+packet/jitter core and directory scan/wire/preview foundation are implemented;
+audio service/device I/O and recursive/two-way apply remain unavailable as
+listed in the matrix. The native workspace implements eight device/display
+tabs, per-display profiles, saved preferences and collapsible panels; its
+physical multi-PC/clipboard/WAN acceptance remains separate. Native input-to-visible,
 physical topology and release acceptance retain their own gates.
 
 The [verified transfer contract](benchmark-transfer.md) includes receiver
@@ -1473,7 +1477,7 @@ alert. This strengthens release qualification without changing Rust runtime code
 Ordinary `send`/`recv` and selected/explicit `session send`/`session recv` now
 reuse the agent endpoint and session identity. The manager delegates to the
 existing Rust sync engine, with one transfer per session and eight active
-transfers across its outgoing sessions. Local IPC v4 requires a coordinated
+transfers across its outgoing sessions. At this dated increment, local IPC v4 required a coordinated
 CLI/agent upgrade. Local paths are caller-resolved, absolute UTF-8 paths within
 the same-UID filesystem trust boundary.
 

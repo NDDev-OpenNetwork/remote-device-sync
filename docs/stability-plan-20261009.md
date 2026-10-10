@@ -1,6 +1,7 @@
 # Stability execution plan — 2026-10-09
 
-Baseline: `93be1f014329e2ea7d573c209c514a67d4b22fb8`. This is the current
+Original audit baseline: `93be1f014329e2ea7d573c209c514a67d4b22fb8`.
+Status reconciled against the implementation on 2026-10-10. This is the current
 execution order for the unfinished requirements in [the remediation
 plan](remediation-plan.md), replacing the order in [the continuation
 plan](continuation-plan.md) and [October 8 completion plan](completion-plan-20261008.md).
@@ -15,49 +16,30 @@ rollout files require checking surviving read-only history projections; session
 titles and cwd indexes alone are insufficient. Ancestor-workspace sessions need
 content review, and unrelated projects are outside the audit.
 
-## Findings checked against the baseline
+## Source-checked findings and remaining boundaries
 
-| ID | Actual code/evidence | Remaining boundary |
+| ID | Current code/evidence | Remaining boundary |
 |---|---|---|
-| A1 | `rds-audio/src/lib.rs`: packet admission checks byte length and the caller's sample count, without parsing the Opus frame table or confirming its duration. Decoder checks duration only after a stateful decode. | Validate packet structure and duration before buffering or touching decoder state; distinguish the 1275-byte frame limit from packet framing. |
-| A2 | `JitterBuffer::push/pop/start_at`: full buffers discard a retained packet before considering an older incoming packet; leading queued packets survive `start_at`; one `Gap` skips an arbitrary sequence range. Sequence/counters wrap. | Specify monotonic playout, exact loss duration, retention policy, startup and sequence exhaustion; test adversarial reordering and all loss boundaries before audio I/O. |
-| A3 | `rds-sync/src/journal.rs` already has `collect_superseded` and verified metadata/inode checks. `Directory::children` materializes an entire directory. | Preserve safe same-destination cleanup. General quotas, bounded collection, interrupted collection and newer-destination conflict policy remain open; do not describe all GC as absent. |
-| A4 | `DesktopV5`, `clipboard::{Assembly,ReverseSender}`, native clipboard worker and `render::clipboard` implement bidirectional text. `viewer_main::window_plan`, `x11_displays` and `multiple_desktops` implement independent windows and monitor routes. | Exact installed-build acceptance, focus/copy handoff, multiple independent native windows and physical monitor transitions still need evidence. Retain V2–V4 compatibility and view-only refusal. |
-| A5 | `rds-core` has grant v3, per-session desktop/sync tags and local wire v5; `rds-agent` limits/authz and `rds-client::local` own bounded service/session lifetimes. | Automatic issuer enrollment/renewal, account/seat isolation, negotiated global resource/QoS limits and mixed-load qualification are unfinished. Do not redo already implemented IDs and directional grants. |
-| A6 | `capture/{sck,image_copy,kms,pipewire}.rs` return `Ok(None)`; native macOS/Wayland input and hardware codec modules return `false`. Agent explicitly refuses audio. | Native serving and device audio are implementation work, not a documentation or feature-flag change. No capability promotion from library tests. |
-| A7 | ACK progress, independent initial validation, persistent relay registration and standby restoration exist in both backend adapters/vendored engines. | Physical topology parity, interface recreation, suspend/rebind, owned UDP-blocked carrier, federation and complete retired-path accounting remain open. |
-| A8 | Release packaging has digest/provenance checks; current release documentation also describes an older published preview. Current docs and dated progress sections sometimes mix those epochs. | Separate current implementation from historical release content; bind source, consumed gitlink, artifact, running image and effective policy independently. |
-| A9 | Thirty Noq CodeQL alerts remained open despite successful scanner jobs. | [Exact source review](reports/rds-noq-codeql-review-20261009.md) distinguishes public protocol constants/input parsing from intentional optional-hook/qlog bindings. Preserve scanner coverage and individually recorded dispositions. |
-| A10 | The first audio checkpoint exposed two tests contending for the same global disk pool; a 15 ms sleep did not establish concurrency. | [Fixture correction](reports/rds-sync-pool-fixture-20261009.md) serializes exhaustive probes and explicitly observes full admission. Production limits remain unchanged; rerun the failed gate. |
+| A1 | `rds-audio::AudioPacket::validate` uses the existing libopus parser to check structure, one-frame duration and sample count before buffering/stateful decode; maximum frame and packet framing are distinct. [Audio repair](reports/rds-audio-stability-20261009.md). | Native device clocks/I/O, service admission and A/V acceptance remain W9; do not repeat the completed packet-validation repair. |
+| A2 | Bounded jitter retains the newest set, rejects pre-playout packets, removes pre-start stale entries, accounts each concealed interval and refuses sequence exhaustion. Adversarial reorder/loss/overflow tests cover the library contract. | Device playout, real clock drift, loss/late interaction and synchronized video remain separate. |
+| A3 | Journal preparation streams names, observes cancellation between entries/chunks and limits opportunistic collection to 4096 entries; state is destination-bound and verified legacy resume stays with that destination. [Preparation](reports/rds-journal-admission-20261010.md) and [binding](reports/rds-journal-destination-scope-20261010.md). | Persisted quota admission, fair background reclamation, local-writer overwrite/conflict policy and physical crash/disk-full acceptance remain open. |
+| A4 | DesktopV5 text clipboard, RandR catalog, concurrent tagged sessions, eight-tab native workspace, per-display profiles, saved preferences and collapsible bars are implemented. [Workspace](reports/rds-tabbed-workspace-20261010.md) and [chrome](reports/rds-workspace-chrome-20261010.md) have scoped native evidence. | Physical multi-PC/display transitions and clipboard handoff, suspend/WAN/soak, rich formats and Linux viewer clipboard publication remain separate. Original toolbar specks were not reproduced. |
+| A5 | Grant v3, directional desktop/sync scopes, per-session tags, local IPC v5 and bounded service/session lifetimes exist. | Automatic issuer/enrollment/renewal, account/seat isolation, negotiated global QoS and mixed-load qualification remain unfinished. |
+| A6 | ScreenCaptureKit/image-copy/KMS/PipeWire probes return unavailable; macOS/Wayland input and hardware codec modules remain stubs; agent refuses audio. | Native serving/device audio require implementation and platform acceptance; no promotion from library tests. |
+| A7 | ACK progress, initial validation deadlines, persistent relay registration, standby restoration and the observer-registration race fix exist in both adapters/vendored engines. | Physical topology parity, interface recreation/suspend/rebind, owned UDP-blocked carrier/federation and retired-path accounting remain open. The retained Noq control-reader incident is not closed by a passing later cohort. |
+| A8 | Release docs distinguish the published 0.1.0 preview from current main; source, consumed gitlink, qualified artifact, running image and policy remain independent facts. | Current contract navigation must stay aligned with code; deployment receipts belong to the private estate and require live re-observation. |
+| A9 | The original baseline left 30 vendored Noq alerts; [exact source review](reports/rds-noq-codeql-review-20261009.md) records individual dispositions without removing scanner coverage. | New alerts need their own review; historical alert counts are not a current provider observation. |
+| A10 | The sync disk-pool fixture now serializes exhaustive probes and observes admission instead of sleeping. [Fixture correction](reports/rds-sync-pool-fixture-20261009.md) and subsequent registered checkpoints passed. | Preserve the original failure and existing production limits; this is completed fixture work, not a pending retry. |
 
-## Wave 1 — repair the audio foundation (W9.1, W0.1)
+## Completed Wave 1 — audio foundation repair (W9.1, W0.1)
 
-Implemented and qualified at the registered library checkpoint; see
-[the source-bound report](reports/rds-audio-stability-20261009.md). This status
-does not close W9.1 device/service acceptance. Wave 2 remains next.
-
-1. Add failing regressions for malformed frame tables, forged sample counts,
-   valid multi-frame packets outside the selected contract, maximum frame plus
-   header, and invalid input leaving decoder state unchanged. Use the existing
-   libopus parser; do not introduce another Opus implementation.
-2. Define the existing fixed 20 ms, one-frame packet profile precisely. Apply
-   the same validation in wire conversion, jitter admission and decode. Keep
-   codec-supported channel conversion distinct from the negotiated PCM channel
-   count. Validate negotiated sample counts, not arbitrary caller integers.
-3. Define bounded jitter behavior before adding device clocks: retain the
-   newest bounded set on overflow, reject packets before the playout floor,
-   discard pre-start stale entries, represent every concealed interval, and
-   avoid sequence wrap reopening old audio. Make large discontinuities explicit
-   instead of silently compressing elapsed audio into one PLC call.
-4. Add deterministic reorder/loss/duplicate/overflow/exhaustion tests and real
-   libopus encode/decode tests on all supported rates/channels. Preserve the
-   original failing cases in the report. No audio service advertisement.
-5. Run workspace checks plus a registered audio-foundation checkpoint and a
-   reproducible codec/buffer benchmark through `rds-bench`. Commit fixes in
-   separate packet-validation and jitter changes, then their evidence/docs.
-
-Exit: an exact, bounded library contract; device audio and A/V synchronization
-remain W9.1. The source is not installed merely to claim a new audio service.
+The packet-validation and jitter repairs are implemented and qualified at the
+registered library checkpoint; see [the source-bound report](reports/rds-audio-stability-20261009.md).
+The existing fixed 20 ms/one-frame profile uses libopus validation consistently
+in wire conversion, jitter admission and decode. Negative state-preservation,
+reorder/loss/overflow/exhaustion tests and the reproducible codec benchmark
+cover this increment. No audio service is advertised. Device audio and A/V
+synchronization remain W9.1; these completed library tasks are not the next wave.
 
 ## Wave 2 — finish the existing desktop delivery (W6, W9.2, W4.5/W10.4)
 
@@ -65,21 +47,23 @@ The [feedback timer](reports/rds-feedback-windows-20261010.md) and
 [late path observer](reports/rds-initial-path-observation-20261010.md) now have
 failing-before regressions and qualified fixes. The standby failure was an
 initial observer-registration race, not a reason to raise its timeout.
-Integrate and qualify the combined source before advancing installed artifacts;
-the native acceptance rows below remain open.
+These source repairs are included in the qualified workspace increment.
+Source-bound artifact/installation receipts remain private deployment evidence;
+the physical acceptance rows below remain open.
 
 The owner's multi-device/multi-display workflow is now implemented as a native
 tabbed workspace, with per-display profiles and explicit session ownership.
 [The workspace report](reports/rds-tabbed-workspace-20261010.md) records the
 model/feature checks and real loopback manager/QUIC/H.264 native interaction.
-Finish the source-bound Linux/native artifacts and installed acceptance before
-calling that rollout complete. Physical clipboard handoff remains a separate row.
+The later [chrome follow-up](reports/rds-workspace-chrome-20261010.md) adds
+panel collapse and fixes idle-frame restoration and redraw ownership.
+Physical clipboard handoff and multi-PC/WAN acceptance remain separate rows;
+source tests do not establish them.
 
-The later main-branch CI run37999738254 retained a separate control RTT p95
+The later main-branch CI run 37999738254 retained a separate control RTT p95
 failure: 445 ms across 601 probes versus the unchanged 400 ms limit. The earlier
-cohort enlargement did not repair runtime latency. Diagnose this tail with the
-actual application/transport timing before declaring the combined native rollout
-qualified; keep the failing result even when other runs pass.
+cohort enlargement did not repair runtime latency. The failing result is retained; the next paragraph records its harness
+diagnosis, which is separate from installed runtime and physical latency.
 The [codec-profile investigation](reports/rds-control-latency-tail-20261010.md)
 subsequently reproduced unintended repair traffic when synthetic transport bytes
 were decoded as H.264. The corrected header harness is feature-independent and
@@ -106,29 +90,27 @@ retains the 400 ms gate; it is not a claimed production transport latency repair
    the installed build. Report ACK, complete payload, decoded submission and
    physical pixels separately. Missing physical evidence stays NOT RUN.
 
-Exit: reviewed source, consumed source and installed/running artifacts have
-independent verified provenance. This closes the bounded feature rollout, not
-the full desktop or transport milestone.
+The source/checkpoint part of the bounded feature increment is complete.
+Deployment completion is determined by the private estate's exact receipts.
+Wave 2 physical/clipboard/mixed-load acceptance and the full desktop/transport
+milestones remain open.
 
 ## Wave 3 — bounded durable sync (W1.9/W1.10, W8.1–W8.6)
 
-Current increment: make journal preparation observe peer/caller/async-drop
-cancellation, stream catalog names and bound opportunistic cleanup work.
-The follow-up [destination-binding audit](reports/rds-journal-destination-scope-20261010.md)
-confirmed that content-only journal selection could reuse another destination's
-cached bytes. Bind new state to the normalized destination, retain only verified
-same-destination legacy resume, and qualify both formats before native rollout.
-Main CI then exposed missing legacy data-phase control supervision; the
-[terminal-supervision follow-up](reports/rds-sync-terminal-supervision-20261010.md)
-covers refusal/EOF, quiet control during active data and dropped queued assembly.
-This correction must qualify before any native candidate is promoted.
-Quota admission, fair background reclamation and destination overwrite policy
-remain separate unfinished changes. This does not close native Wave 2 acceptance.
+Completed increments: journal preparation now observes peer/caller/async-drop
+cancellation, streams catalog names and bounds opportunistic collection.
+The [destination-binding repair](reports/rds-journal-destination-scope-20261010.md)
+binds new state to normalized destinations and retains only verified
+same-destination legacy resume. The [terminal-supervision follow-up](reports/rds-sync-terminal-supervision-20261010.md)
+covers legacy/tagged control refusal/EOF, quiet control during active data
+and dropped queued assembly at the registered `w1-sync-supervision` checkpoint.
+These repairs retain their source/qualification evidence; quota admission,
+fair background reclamation and destination overwrite policy are next.
+They do not close native Wave 2 acceptance or recursive sync.
 
-1. Bound journal enumeration and cleanup work/memory under existing receive
-   locks. Preserve unknown entries, unsafe aliases and unrelated destinations;
-   cancellation must release work at a documented boundary. Test large stale
-   catalogs, malformed metadata, symlinks/hardlinks and interrupted cleanup.
+1. Preserve the existing bounded/cancellable preparation and destination
+   ownership contracts while adding quotas and reclamation. Retain large-catalog,
+   malformed-state, aliasing, interrupted-cleanup and control-supervision regressions.
 2. Define quota admission and its persisted accounting using the existing
    journal owner. Reserve final-assembly space, retain resumability, distinguish
    disk-full from corruption, and avoid a second independent state database.

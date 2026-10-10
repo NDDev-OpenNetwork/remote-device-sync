@@ -38,12 +38,21 @@ rds-viewer device-a --list-displays
 rds-viewer device-a --all-displays --max-fps 30
 ```
 
-At most eight windows are launched together. Each child receives explicit
-peer/display/quality/clipboard choices; config lists cannot recursively launch
-more windows. Version-1 `viewer.json` may contain `connections`, each with
-`target`, `displays` and optional device-specific `grant_file`. A command-line
-target overrides this list. Grants remain destination-bound and each device
-needs its own authorization; sharing a launch does not widen a grant.
+The default launch opens one [tabbed workspace](native-viewer.md#tabbed-workspace)
+with at most eight display tabs across the requested devices. **Connect** and
+**Open all displays** add actual inventories within that bound; selection and
+settings are per tab. **Save workspace** stores tab order and profiles in
+version-1 `viewer-workspace.json`; legacy `viewer.json` connections are imported
+only when no saved or explicit workspace supersedes them. Explicit command-line
+targets replace saved launch intent. The collapse arrow or Ctrl+Shift+H hides
+both local bars while tab shortcuts remain available.
+
+`--separate-windows` opts into at most eight independent child windows, each
+with explicit peer/display/quality/clipboard choices. Config lists cannot
+recursively launch more windows. Legacy version-1 `viewer.json` may contain
+`connections` with `target`, `displays` and a device-specific `grant_file`. Grants
+remain destination-bound and each device needs its own authorization; sharing
+a workspace or launch does not widen a grant.
 
 The protocol keeps control traffic at the highest QUIC priority and puts each
 session's media on its own tagged unidirectional route. Clipboard chunks are interleaved with input/heartbeat work; independent

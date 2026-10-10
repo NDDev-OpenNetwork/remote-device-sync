@@ -20,6 +20,13 @@ agent, relay and directory binaries for Linux x86_64 and macOS arm64. Desktop
 features are excluded from those binaries. Read the verification, compatibility
 and remaining-qualification notes before evaluating the release.
 
+The [native viewer](docs/native-viewer.md#tabbed-workspace) opens one workspace
+for several computers and displays. Use **Connect**, select a display or
+**Open all displays**, and switch with Ctrl+Tab. Settings belong to each tab;
+**Save workspace** retains its order and profiles. The up/down arrow or
+Ctrl+Shift+H hides/restores the local panels. Physical multi-PC/WAN acceptance
+remains separate from the implemented native workspace.
+
 ## Layout
 
 ```text
@@ -80,7 +87,7 @@ rds --direct --key-file /private/path/client.key desktop <ticket>
 # Build both ends with --features desktop; --headless keeps decode/stats.
 
 # Self-hosted relay instead of the public n0 relays:
-rds-relay --addr 0.0.0.0:3340
+rds-relay --addr 0.0.0.0:3340 --allow <operator-endpoint-id> --allow <remote-endpoint-id>
 rds-agent --relay http://relay.host:3340 ...
 # Configure relay settings on the operator agent too.
 

@@ -1,7 +1,10 @@
 # W6 workspace chrome follow-up
 
-The requested increment removes transient toolbar artifacts and provides an
-explicit compact mode. Code and native observations determine the diagnosis;
+The scoped implementation/checkpoint is complete; see
+[the source-bound report](reports/rds-workspace-chrome-20261010.md). The steps
+below are the retained implementation checklist, not pending work to rerun.
+It provides an explicit compact mode and repairs observed redraw/restoration
+paths. Physical acceptance and the original intermittent artifact remain separate. Code and native observations determine the diagnosis;
 the reported intermittent black pixels have not yet been reproduced locally.
 
 1. Check the actual GPU composition, font texture lifetime and presentation

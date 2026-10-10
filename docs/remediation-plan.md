@@ -3,9 +3,11 @@
 Date: 2026-09-24. Baseline: `87e7aeabaad861b0d3c63f6641c91539be19a3e0`.
 Status: **in progress**. Current task results and remaining checks are in
 [remediation-progress.md](remediation-progress.md). No whole wave is closed yet.
-The [2026-10-07 continuation plan](continuation-plan.md) is the current execution
-order for installed interactive recovery, relay readiness and state convergence.
-Its source-verified findings supplement the original acceptance tables below.
+The [stability plan](stability-plan-20261009.md) owns the current execution
+order. The [October 7 continuation](continuation-plan.md) and
+[October 8 completion plan](completion-plan-20261008.md) retain historical
+planning snapshots; their findings are not new instructions to redo completed
+work. The acceptance tables below remain requirements until their actual gates pass.
 Evidence and finding IDs: [implementation/session audit](reports/rds-audit-20260924.md).
 This plan supplements the original WS0–WS8 plan and reopens acceptance where
 the audit found defects or missing evidence. Historical C0–C8 receipts remain
@@ -237,8 +239,8 @@ new Rust modules only where a real ownership boundary is needed.
 
 W2.2/W2.4 implementation update (2026-09-26): [managed single-file transfers](local-sessions.md)
 reuse the agent identity and pin session handles. New transfer-specific uni tags
-isolate delayed/canceled data, with bounded live routes and coordinated IPC v4
-migration. [The receipt](reports/rds-managed-sync-20260926.md) covers both
+isolate delayed/canceled data, with bounded live routes and the then-current IPC v4
+migration. The current manager contract is IPC v5; see [local sessions](local-sessions.md). [The receipt](reports/rds-managed-sync-20260926.md) covers both
 transport backends, preserved TCP on cancellation, grants and real CLI processes.
 
 W2.4 implementation update (2026-09-27): the [managed desktop channel](local-sessions.md#managed-desktop-channels)

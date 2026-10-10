@@ -1,12 +1,12 @@
 # Workspace state churn
 
-Source: `a9515128f0fdfdba0b045b17d9a77bf9ff51db86`; tree: `7ecf810270bab6a9effb8e0f0825f69481df65e5`; clean: `true`; `rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)`; macos / aarch64.
+Source: `51bf87057c6286496797529c24477905d630c8b6`; tree: `59988487e174a5daa27a7c38937885c8c68ad88e`; clean: `true`; `rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)`; macos / aarch64.
 
 | Tabs | Samples | Transitions/sample | p50 µs | p95 µs | p99 µs |
 |---|---|---|---|---|---|
-| 1 | 100 | 1024 | 31.166 | 31.667 | 33.083 |
-| 4 | 100 | 1024 | 52.542 | 54.375 | 100.625 |
-| 8 | 100 | 1024 | 75.500 | 77.958 | 100.542 |
+| 1 | 100 | 1024 | 11.458 | 32.375 | 32.583 |
+| 4 | 100 | 1024 | 19.125 | 20.125 | 20.209 |
+| 8 | 100 | 1024 | 28.459 | 68.208 | 68.584 |
 
 Every sample checks capacity, exact revisions, non-reused identities and empty final ownership.
 

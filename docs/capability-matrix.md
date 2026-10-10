@@ -2,7 +2,9 @@
 
 matrix_version: 1
 
-Single source of truth for what this build claims to do. States:
+Claim registry for the implemented build, checked against code and tests.
+The implementation is the source of truth; a row does not promote a stub or
+replace platform/product acceptance. States:
 
 - `implemented` — code landed and covered by tests/CI on a supported
   platform. Does not imply production or WAN qualification.
@@ -63,9 +65,12 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 
 | Capability | State | Runtime prerequisites | Evidence |
 |---|---|---|---|
-| desktop:clipboard-text-reverse | experimental | `DesktopV5`; X11 serving clipboard and native viewer clipboard; text only | bounded offer/request/chunk tests; native Xvfb and isolated AppKit probe; installed qualification separate |
+| desktop:clipboard-text-reverse | experimental | `DesktopV5`; X11 serving clipboard and AppKit viewer clipboard; text only; Linux viewer publication unavailable | bounded offer/request/chunk tests; native Xvfb and isolated AppKit probe; installed qualification separate |
 | desktop:multi-monitor-x11 | experimental | RandR monitor objects or multi-root X server; fresh session after layout changes | native RandR known-pixel/input/removal fixture; physical desktop qualification separate |
 | desktop:multi-session | implemented | per-session route IDs; local manager ≤32 sessions; agent connection/service limits | session routing and managed-channel tests |
+| desktop:workspace-tabs | implemented | native `viewer` surface; up to eight tabs across actual device/display inventories; each remote needs its own authorization | workspace model, managed native routing and idle-frame restoration tests; physical multi-PC acceptance separate |
+| desktop:workspace-profiles | implemented | version-1 `viewer-workspace.json`; per-display geometry/FPS/input/clipboard/receipt settings; existing grant paths only | bounded preference/launch tests; [viewer contract](native-viewer.md#tabbed-workspace) |
+| desktop:workspace-panels | implemented | local up/down arrows or Ctrl+Shift+H; window-scoped state and full-window aspect-preserving mapping | layout/HiDPI/pointer ownership tests and native still-image fixture |
 
 ## Codecs and presentation
 
@@ -82,7 +87,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | Capability | State | Runtime prerequisites | Evidence |
 |---|---|---|---|
 | platform:linux-x86_64 | implemented | — | CI ubuntu lane |
-| platform:macos-arm64 | experimental | native viewer; capture/input backends still stubbed; signing/notarization open | CI macos lane compiles+tests, Metal viewer qualification |
+| platform:macos-arm64 | experimental | native viewer; capture/input backends still stubbed; Developer ID distribution/notarization open | CI macos lane compiles+tests, Metal viewer qualification |
 
 ## Discovery, policy, observability
 
