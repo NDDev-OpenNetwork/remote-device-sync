@@ -55,8 +55,13 @@ toggle outside editing forms. No preference schema change is needed.
   Upload counts 2/2/3 prove idle restoration, while frame/timing admission counts
   stayed at one. The title followed each tab and restored pixels were visibly
   present. This is native synthetic acceptance, without physical remote input.
-- Full registered W6 checkpoint, strict feature Clippy, Linux native qualification
-  and publication/installed adoption remain pending in this work-in-progress report.
+- Registered W6 checkpoint: 1,142 passing test executions, zero failed and two
+  explicit native ignores; workspace/feature strict Clippy and launch/managed
+  routing contracts passed. The release model benchmark ran 100 samples each
+  of 1/4/8 tabs, 1,024 transitions per sample; p95 31.667/54.375/77.958 microseconds.
+  This is a local tab-model measurement, not GPU or network latency.
+- Linux native qualification and publication/installed adoption are subsequent
+  source-bound steps, not established by this local implementation checkpoint.
 
 The fixture is `workspace_preview --still`: two synthetic computers and three
 displays, one frame each, synthetic input only. A per-bundle `RDS_PREVIEW_STILL`
