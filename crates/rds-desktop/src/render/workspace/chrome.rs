@@ -52,6 +52,15 @@ pub(crate) struct UiFrame {
     pub content: egui::Rect,
 }
 
+impl Drop for UiFrame {
+    fn drop(&mut self) {
+        // The window/GPU owner is ending. Pending CPU texture commands have
+        // no future painter; explicitly discard them rather than requiring a
+        // final presentation from an occluded or already destroyed surface.
+        self.textures.clear();
+    }
+}
+
 pub(crate) struct Chrome {
     context: egui::Context,
     input: egui_winit::State,
@@ -108,11 +117,23 @@ impl Chrome {
         window: &winit::window::Window,
         event: &winit::event::WindowEvent,
     ) -> bool {
+        let keyboard = matches!(event, winit::event::WindowEvent::KeyboardInput { .. });
+        let local_keyboard = self.editing();
+        // egui-winit consumes Tab unconditionally and reads native Paste before
+        // reporting consumption. Remote key presses must bypass those effects.
+        if !local_keyboard
+            && let winit::event::WindowEvent::KeyboardInput { event, .. } = event
+            && event.state == winit::event::ElementState::Pressed
+        {
+            return false;
+        }
+        // Releases still clear egui's previous held-key state after a dialog
+        // closes, but cannot consume the remote tab's matching key release.
         let response = self.input.on_window_event(window, event);
         if response.repaint {
             window.request_redraw();
         }
-        response.consumed
+        response.consumed && (!keyboard || local_keyboard)
     }
 
     pub fn editing(&self) -> bool {
@@ -316,5 +337,24 @@ fn video_label(size: VideoSize) -> &'static str {
         VideoSize::Hd => "HD",
         VideoSize::FullHd => "Full HD",
         VideoSize::Native => "Native resolution",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn closing_without_another_paint_discards_pending_texture_commands() {
+        let mut textures = egui::TexturesDelta::default();
+        textures.free(egui::TextureId::Managed(7));
+        let frame = UiFrame {
+            primitives: vec![],
+            textures,
+            pixels_per_point: 1.,
+            content: egui::Rect::NOTHING,
+        };
+        // A minimized/closing window can own one final unpainted UI update.
+        // Its GPU is being destroyed, so it must not require another paint.
+        drop(frame);
     }
 }
