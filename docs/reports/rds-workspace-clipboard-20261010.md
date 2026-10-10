@@ -1,7 +1,8 @@
 # Workspace clipboard handoff — 2026-10-10
 
-Status: implementation, 43 render regressions and strict desktop/CLI Clippy pass;
-native handoff and complete combined checkpoint remain in progress.
+Status: native handoff/teardown accepted within the synthetic-peer boundary.
+The final window-modifier ownership change passes 44 render tests and strict
+viewer Clippy; its combined checkpoint and final platform artifacts are pending.
 Milestone: W6/W9.2 native workspace input ownership.
 
 The workspace retains each hidden tab's clipboard mailbox, but only drains the
@@ -101,3 +102,13 @@ per-tab mailboxes, with synthetic peer/input endpoints. Real network/manager/
 codec coexistence has its separate managed-preview evidence. Physical remote
 clipboard applications, installed fleet convergence, Linux viewer clipboard and
 resource/latency soak remain outside this bounded native result.
+
+## Window modifier ownership
+
+Final ownership review found physical modifier flags stored in the replaceable
+session and reset on selection. A second Tab while Control remained physically
+held would therefore miss the workspace shortcut until another modifier event.
+The flags now belong to the native window and clear on actual window focus loss.
+Only forwarded remote key/button ownership is released or replaced per tab.
+This also preserves physical modifiers across settings/reconnect replacement,
+without forwarding a new remote key until real input requires reconciliation.
