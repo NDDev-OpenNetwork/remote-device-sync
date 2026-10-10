@@ -98,3 +98,20 @@ If the CI tail recurs, correlate that failed runner's application/packet timing
 before making another transport change. Keep Noq experimental and physical
 mixed-load/native topology qualification separate. Installed runtime must keep
 its original build provenance until a separately qualified update.
+
+## Checkpoint calibration defect retained
+
+The first registered C1 run passed workspace formatting/strict Clippy/tests,
+owned-transport checks and deterministic simulation, then failed its calibration
+transfer. [The original failed suite](bench-20261010-203148-noq.json) is retained.
+The preexisting scenario reused the 32 MiB bulk payload with a 10 Mbps cap and
+15-second deadline: payload serialization alone requires 26.8435456 seconds.
+That configuration cannot complete even on an ideal transport; it is separate
+from the BBR change and the 400ms control gate.
+
+Calibration now owns `--calibration-mib` (default 4 MiB); the ordinary transfer
+retains 32 MiB. Its 15-second deadline and 0.4–1.2 goodput ratio remain. Invalid
+rate/size/deadline combinations are refused before backend selection or endpoint
+creation. Regressions preserve bulk size, reject the original impossible budget
+before an invalid backend is reached, and cover invalid numeric inputs. The
+changed registered checkpoint must complete before a passing receipt is emitted.

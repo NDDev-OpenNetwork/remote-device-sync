@@ -130,5 +130,14 @@
     "nominal_rate_bytes_per_second": 33276000,
     "measured_40ms_rate_bytes_per_second": 831900
   },
-  "interpretation": "Reproduced BBR correctness defect fixed. Cohort distributions overlap: no demonstrated aggregate control improvement or original CI closure. Packet correlation establishes ordered recovery in the observed samples. Trace may perturb scheduling; seeds fix RNG draws, not the QUIC packet schedule. Reader RTT vs gate event-observation RTT remain distinct."
+  "interpretation": "Reproduced BBR correctness defect fixed. Cohort distributions overlap: no demonstrated aggregate control improvement or original CI closure. Packet correlation establishes ordered recovery in the observed samples. Trace may perturb scheduling; seeds fix RNG draws, not the QUIC packet schedule. Reader RTT vs gate event-observation RTT remain distinct.",
+  "calibration_checkpoint_failure": {
+    "report": "bench-20261010-203148-noq.json",
+    "payload_mib": 32,
+    "cap_mbps": 10,
+    "deadline_s": 15,
+    "ideal_payload_minimum_s": 26.8435456,
+    "cause": "physically impossible preexisting default budget",
+    "repair": "independent calibration payload default4MiB; ordinary bulk payload32MiB, operation15sec and0.4..1.2 ratio retained; preflight before backend/world"
+  }
 }

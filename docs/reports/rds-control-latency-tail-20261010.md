@@ -1,6 +1,6 @@
 # Retained control-latency failure — 2026-10-10
 
-Status: investigation open. The [October11 follow-up](rds-control-startup-pacing-20261011.md)
+Status: investigation open. The [October 11 follow-up](rds-control-startup-pacing-20261011.md)
 fixes an independently reproduced BBR startup-pacing defect and adds passive
 scheduler evidence; it does not establish closure of this retained latency tail.
 The latency budget remains unchanged.
