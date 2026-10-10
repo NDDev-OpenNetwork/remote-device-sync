@@ -45,12 +45,10 @@ congestion-controller defect. Trace capture can itself perturb scheduling.
 
 ## Next verification
 
-1. Capture the same per-sequence observations on Linux, retaining both passing
-   and failing cohorts and the actual packet/loss counters. Do not select only
-   runs that meet the budget.
-2. Correlate delayed delivery with transport ACK/loss/retransmission and driver
-   scheduling before changing configuration. Application timestamps alone do
-   not prove network-only delay.
+1. Reproduce the original aggregate failure while retaining application and
+   transport events. The observed passing cohorts below are not that failure.
+2. Distinguish expected ordered-stream recovery, driver scheduling and an actual
+   implementation defect before changing configuration or measurement design.
 3. If a defect is identified, add a deterministic regression where possible,
    then compare unchanged workloads on both supported platforms. Keep the
    original failure and separate synthetic impairment from physical topology.
@@ -60,3 +58,40 @@ defines PTO from smoothed RTT, RTT variation and maximum ACK delay. That primary
 reference predates the requested research cutoff; it does not justify lowering
 loss thresholds, changing congestion control or weakening the RDS latency gate
 without evidence from this implementation.
+
+## Linux observations and packet correlation
+
+At `239a74c`, the same opt-in application trace completed 601 probes on Linux
+x86_64 under a one-CPU qualification budget. The gate reported RTT p50 141 ms,
+p95 357 ms and p99 419 ms. Client write p95 was 389 µs and server reply write
+p95 was 435 µs; the two delivery intervals had independent p95 values of
+253.527 ms and 155.052 ms. Seven monotonic probe observations exceeded 400 ms.
+The source was clean before and after the run; no transport policy changed.
+
+A separate diagnostic run added `noq_proto::connection=trace` to the filter.
+It completed 601 probes with gate RTT p95 352 ms and p99 433 ms. Its longest
+monotonic probe RTT was 576 ms. The packet trace correlates that probe with
+missing bytes in the existing reliable control stream:
+
+| Time relative to first transmission | Observed event |
+|---|---|
+| 0 ms | Packet 1054 carries stream range `[2876,2886)` for heartbeat 314. |
+| 175 ms | The following range `[2886,2896)` arrives, but heartbeat 315 is not yet readable. |
+| 251 ms | ACK processing reports loss; packet 1060 retransmits `[2876,2886)`. |
+| 438 ms | Further ACK/loss processing leads to packet 1067 carrying that same range. |
+| 520 ms | The missing range is observed at the receiver; heartbeats 314–317 become readable together. |
+| 576 ms | Heartbeat 314's reply reaches the client. |
+
+This establishes ordered-stream blocking behind a missing range in that sample.
+It does not establish that PTO caused the original CI failure, or that stream
+ordering is defective. [RFC 9000 §2.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2)
+requires an ordered-stream delivery capability and permits repeated transmission
+of the same stream bytes. The priority of a stream cannot make a later message
+readable before a missing earlier range on that stream.
+
+Source review also confirms that `rds-net::wire::write_frame` already admits the
+length prefix and payload in one buffer, with a partial-write regression. That
+earlier repair must not be repeated or credited as a new solution to this tail.
+Raw diagnostic traces stay outside the public module; these synthetic numeric
+observations contain no deployment identities. All three diagnostic cohorts
+and the original failed CI result remain distinct evidence.
