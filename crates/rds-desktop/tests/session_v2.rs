@@ -758,7 +758,14 @@ async fn impaired_link_latency_gate() {
     // Opt-in diagnostics expose the existing application timing probes without
     // changing the workload, cohort, percentile calculation or latency budget.
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter({
+            // Keep terminal diagnostics in failed CI output even when RUST_LOG
+            // is absent. Explicit profiling directives can add packet detail.
+            let directives = std::env::var("RUST_LOG").unwrap_or_default();
+            tracing_subscriber::EnvFilter::new(format!(
+                "warn,rds_desktop::session=debug,rds_desktop::client=debug,rds_desktop::control_timing=debug,rds_net::uni=debug,{directives}"
+            ))
+        })
         .with_test_writer()
         .try_init();
     // 60 fps of ~1 KB frames ≈ one datagram per frame — enough samples
@@ -787,7 +794,12 @@ async fn impaired_link_latency_gate() {
                 offered += 1;
             }
             event = h.session.events.recv() => {
-                let event = event.expect("control reader ended under impairment");
+                let event = event.unwrap_or_else(|| panic!(
+                    "control reader ended under impairment: elapsed_ms={} offered={offered} completed={} pending={} frames={} last_seq={last_seq:?} server_finished={} encoded_drain_finished={} receive={:?}",
+                    h.clock.now_ms(), rtts.len(), outstanding.len(), latencies.len(),
+                    h.server_task.is_finished(), h._encoded_drain.0.is_finished(),
+                    h.session.receive_stats()
+                ));
                 if let DesktopEvent::Heartbeat { seq, ts_ms } = event {
                     // Every completed probe contributes one sample. Repeatedly
                     // sampling a cached RTT per media frame is biased and an
