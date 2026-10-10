@@ -351,6 +351,10 @@ async fn actor(
                         let grant_file = if grant_file.is_empty() {
                             config.devices.iter().find(|device| device.key == target).and_then(|device| device.grant_file.clone())
                         } else { Some(PathBuf::from(grant_file)) };
+                        if config.devices.iter().any(|device| device.key == target && device.grant_file != grant_file) {
+                            let _ = view.update(WorkspaceUpdate::Message("This device already has a different authorization profile".into()));
+                            continue;
+                        }
                         let key = target.clone();
                         let original = config.devices.iter().find(|device| device.key == key)
                             .map_or(target.as_str(), |device| device.target.as_str());

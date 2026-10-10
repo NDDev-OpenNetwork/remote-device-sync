@@ -246,6 +246,7 @@ impl App {
             let mut state = lock(&self.session.handle.state);
             state.clipboard.focus(false);
             state.occluded = true;
+            state.presenting = false;
             state.native_window = None;
             state.submission_debt.hidden();
         }
@@ -262,6 +263,7 @@ impl App {
         self.session.pointer_point = None;
         let mut state = lock(&self.session.handle.state);
         state.occluded = false;
+        state.presenting = true;
         state.clipboard.focus(
             self.window.as_ref().is_some_and(|w| w.has_focus())
                 && !deck.chrome.as_ref().is_some_and(Chrome::editing),
@@ -421,6 +423,11 @@ impl App {
                 gpu.clear_picture();
             }
         } else {
+            {
+                let mut state = lock(&new.handle.state);
+                state.presenting = false;
+                state.occluded = true;
+            }
             deck.inactive.insert(id, new);
         }
         if deck

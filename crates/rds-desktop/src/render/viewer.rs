@@ -309,6 +309,7 @@ struct State {
     pending: Option<Pending>,
     submission_debt: SubmissionDebt,
     wake_pending: bool,
+    presenting: bool,
     status: String,
     label: String,
     extent: (u32, u32),
@@ -442,7 +443,9 @@ impl ViewerHandle {
         {
             state.report.frames_replaced += 1;
         }
-        self.wake(&mut state);
+        if state.presenting {
+            self.wake(&mut state);
+        }
     }
     pub fn status(&self, text: impl Into<String>) {
         let mut state = lock(&self.state);
@@ -759,6 +762,7 @@ impl SessionView {
                 pending: None,
                 submission_debt: SubmissionDebt::default(),
                 wake_pending: false,
+                presenting: true,
                 status: "Connecting".into(),
                 label: "RDS".into(),
                 extent: (0, 0),
