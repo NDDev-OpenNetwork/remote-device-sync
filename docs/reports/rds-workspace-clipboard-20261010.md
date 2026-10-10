@@ -84,3 +84,20 @@ A dedicated regression fails before the fix. `UiFrame::drop` now explicitly
 clears CPU-side texture commands when their window/GPU owner ends. Live texture
 uploads/frees still pass through the painter. All 44 render tests pass after
 this correction; the native run must be repeated through its normal deadline.
+
+## Completed native handoff and shutdown checks
+
+On clean `9d18d22`, two new 180-second native preview runs finished with exit
+code zero and their final reports. Each received exactly one synthetic clipboard
+transfer and one valid paste, with no unexpected text. The second run also
+recorded one shifted paste and one ordinary remote Tab press. All three display
+workers in each run closed with zero held keys/buttons. The first run confirms
+the texture teardown fix; the second confirms restoration of remote input after
+using the local connection form. Local typing and exact pasted text were visibly
+verified in that form, with no remote transfer of the local field contents.
+
+These checks exercise the real native event loop, widgets, AppKit clipboard and
+per-tab mailboxes, with synthetic peer/input endpoints. Real network/manager/
+codec coexistence has its separate managed-preview evidence. Physical remote
+clipboard applications, installed fleet convergence, Linux viewer clipboard and
+resource/latency soak remain outside this bounded native result.

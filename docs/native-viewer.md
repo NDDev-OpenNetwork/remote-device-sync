@@ -10,8 +10,10 @@ physical monitor IDs are advertised. Existing connected computers also appear
 in the picker. A device without a usable desktop reports an error; the viewer
 does not create endpoint identities, issue grants or relax authorization.
 
-Click a tab or use Ctrl+Tab / Ctrl+Shift+Tab. A tab's context menu moves it left
-or right. Closing a tab ends only its desktop channel; other tabs and unrelated
+Click a tab or use Ctrl+Tab / Ctrl+Shift+Tab. Ordinary Tab belongs to the
+remote screen; local widgets receive keyboard presses only while their form or
+control owns input. Focus-generated synthetic keys never replay remote actions.
+A tab's context menu moves it left or right. Closing a tab ends only its desktop channel; other tabs and unrelated
 SSH/sync streams remain owned by their existing sessions. Switching releases
 held input on the previous display. Hidden displays cannot initiate clipboard
 publication; a Copy or request already authorized while selected may finish its
