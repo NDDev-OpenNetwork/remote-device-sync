@@ -1,10 +1,10 @@
-# Checkpoint W6-TABBED-WORKSPACE — 20261010-051706
+# Checkpoint W6-TABBED-WORKSPACE — 20261010-055758
 
-Verdict: **automated checkpoint PASS; native/installed acceptance remains open**
+Verdict: **automated checkpoint PASS; native clipboard/input preview PASS**
 
-Source: clean `6008b424464f225e1bb2f6cd6e5cbb0fa72f0362`.
-1,135 passing test executions, zero failed, two explicit native ignores.
-Receipt chain: 19 records, verified intact.
+Source: clean `5c3cf0cde2161d5e16fba9dac9719d33f3e5f210`.
+1,136 passing test executions, zero failed, two explicit native ignores.
+Receipt chain: 20 records, verified intact.
 
 ## Automated checks
 - fmt/workspace clippy/workspace tests: PASS
@@ -20,11 +20,13 @@ Receipt chain: 19 records, verified intact.
 - [x] docs/ updated for anything this wave changed
 - [x] security/unsafe review done for new code paths
 
-Review retains the previous private/native boundaries and historical failed
-RTT cohorts. Source `6008b42` includes the clipboard handoff, with 178 passing
-feature-library tests and a successful macOS production build. Native delayed
-Copy/switch/Paste counters confirmed transfer ownership, but the subsequent
-plain-Tab interaction exposed local-widget interception. Its later correction
-and native revalidation are separate from this successful earlier checkpoint.
-Neither source qualification nor a synthetic peer establishes installed fleet,
-physical capture/input, full native clipboard or long-duration resource acceptance.
+Review: new native keyboard, clipboard and texture-lifetime behavior has no new
+unsafe block or wire/identity policy change. The failing-before texture teardown
+regression passes. The implementation-equivalent `9d18d22` native runs verify
+exact synthetic clipboard text, ordinary Tab, shifted paste, local-form input
+and clean timed shutdown. Earlier managed fixtures verify both transports and
+three independently encoded displays through the production local manager.
+See [the native handoff report](rds-workspace-clipboard-20261010.md) for retained
+failures, scope and final native receipts. Physical remote applications, Linux
+viewer clipboard, installed fleet and sustained GPU/resource/network acceptance
+remain explicitly separate; failed historical latency cohorts remain recorded.
