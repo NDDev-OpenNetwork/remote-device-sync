@@ -24,6 +24,7 @@ pub(super) struct Storage {
     directory: Option<PathBuf>,
     pending: VecDeque<Vec<u8>>,
     health: Health,
+    snapshot_name: String,
 }
 
 impl Storage {
@@ -35,7 +36,38 @@ impl Storage {
             },
             directory,
             pending: VecDeque::new(),
+            snapshot_name: format!("state-{}.json", std::process::id()),
         }
+    }
+
+    pub(super) fn scoped(directory: Option<PathBuf>, tab: u64, revision: u64) -> Self {
+        let mut storage = Self::new(directory);
+        storage.snapshot_name = format!("state-{}-tab-{tab}-{revision}.json", std::process::id());
+        storage
+    }
+
+    pub(super) async fn remove_snapshot(&self) {
+        let Some(directory) = &self.directory else {
+            return;
+        };
+        let path = directory.join(&self.snapshot_name);
+        let _ = tokio::task::spawn_blocking(move || -> io::Result<()> {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if metadata.is_file()
+                && metadata.nlink() == 1
+                && metadata.mode() & 0o777 == 0o600
+                && metadata.uid() == rustix::process::geteuid().as_raw()
+            {
+                std::fs::remove_file(path)?;
+            }
+            Ok(())
+        })
+        .await;
     }
 
     pub(super) fn health(&self) -> Health {
@@ -89,7 +121,7 @@ impl Storage {
             return;
         };
         if let Some(bytes) = snapshot {
-            let path = directory.join(format!("state-{}.json", std::process::id()));
+            let path = directory.join(&self.snapshot_name);
             let result =
                 tokio::task::spawn_blocking(move || crate::logging::viewer_snapshot(&path, &bytes))
                     .await;
