@@ -188,7 +188,7 @@ impl App {
             return false;
         };
         if let WindowEvent::ModifiersChanged(modifiers) = event {
-            self.session.modifiers = *modifiers;
+            self.modifiers = *modifiers;
         }
         // A delayed paste is a single gesture, never a queued macro. New input
         // cancels it; modifier/key releases alone preserve the original Shift.
@@ -221,9 +221,9 @@ impl App {
             && event.state == ElementState::Pressed
             && !event.repeat
             && event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::Tab)
-            && self.session.modifiers.state().control_key()
+            && self.modifiers.state().control_key()
         {
-            if let Some(id) = deck.model.cycle(self.session.modifiers.state().shift_key()) {
+            if let Some(id) = deck.model.cycle(self.modifiers.state().shift_key()) {
                 self.workspace_select(&mut deck, id, event_loop);
             }
             consumed = true;
@@ -296,7 +296,6 @@ impl App {
         }
         deck.active = Some(id);
         let _ = deck.model.select(id);
-        self.session.modifiers = Default::default();
         self.session.pointer = false;
         self.session.pointer_point = None;
         let mut state = lock(&self.session.handle.state);

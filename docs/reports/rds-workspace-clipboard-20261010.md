@@ -84,3 +84,11 @@ A dedicated regression fails before the fix. `UiFrame::drop` now explicitly
 clears CPU-side texture commands when their window/GPU owner ends. Live texture
 uploads/frees still pass through the painter. All 44 render tests pass after
 this correction; the native run must be repeated through its normal deadline.
+
+Final ownership review found physical modifier flags stored in the replaceable
+session and reset on selection. A second Tab while Control remained physically
+held would therefore miss the workspace shortcut until another modifier event.
+The flags now belong to the native window and clear on actual window focus loss.
+Only forwarded remote key/button ownership is released or replaced per tab.
+This also preserves physical modifiers across settings/reconnect replacement,
+without forwarding a new remote key until real input requires reconciliation.

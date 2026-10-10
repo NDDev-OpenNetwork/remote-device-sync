@@ -716,6 +716,7 @@ impl Viewer {
             last_window_status: None,
             workspace: None,
             activity: None,
+            modifiers: Default::default(),
         };
         Ok((Self { event_loop, app }, handle, receiver))
     }
@@ -741,7 +742,6 @@ struct SessionView {
     input: InputSender,
     display: u32,
     seq: u64,
-    modifiers: winit::event::Modifiers,
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
     pointer: bool,
@@ -826,7 +826,6 @@ impl SessionView {
             input,
             display,
             seq: 0,
-            modifiers: Default::default(),
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
             pointer: false,
@@ -844,6 +843,8 @@ struct App {
     last_window_status: Option<String>,
     workspace: Option<workspace::Deck>,
     activity: Option<super::platform::RemoteActivity>,
+    // Physical modifier flags belong to the window, not a replaceable tab.
+    modifiers: winit::event::Modifiers,
 }
 impl App {
     fn clipboard_work(&mut self, event_loop: &ActiveEventLoop) {
@@ -947,7 +948,7 @@ impl App {
         }
     }
     fn sync_modifiers(&mut self, event_loop: &ActiveEventLoop) {
-        for (code, pressed) in modifier_changes(&self.session.keys, self.session.modifiers) {
+        for (code, pressed) in modifier_changes(&self.session.keys, self.modifiers) {
             if !key_transition(&mut self.session.keys, code, pressed) {
                 continue;
             }
@@ -987,7 +988,7 @@ impl App {
         ) && let Some(point) = self.session.pointer_point
             && let Some(probe) = &mut lock(&self.session.handle.state).visual_probe
         {
-            if self.session.modifiers.state().is_empty() {
+            if self.modifiers.state().is_empty() {
                 probe.click(point, self.session.seq, Instant::now());
             } else {
                 probe.modified_click(point);
@@ -1008,7 +1009,7 @@ impl App {
         {
             probe.key(
                 *code,
-                self.session.modifiers.state().is_empty(),
+                self.modifiers.state().is_empty(),
                 self.session.seq,
                 Instant::now(),
             );
@@ -1257,6 +1258,7 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(false) => {
+                self.modifiers = Default::default();
                 lock(&self.session.handle.state).clipboard.focus(false);
                 if let Some(probe) = &mut lock(&self.session.handle.state).visual_probe {
                     probe.keyboard_focus_lost();
@@ -1288,7 +1290,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.session.modifiers = modifiers;
+                self.modifiers = modifiers;
                 self.sync_modifiers(event_loop);
             }
             WindowEvent::KeyboardInput { event, .. } => {
