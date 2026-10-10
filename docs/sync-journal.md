@@ -56,6 +56,15 @@ flag is published before dropping the job sender. Pending chunk stores are not
 drained merely because a canceled producer closed its channel. Normal `finish`
 keeps the guard alive while the writer drains and returns its journal.
 
+Explicit peer refusal/cancellation and receive errors now retain the sink in
+the parent receive owner across control selection. They stop and join that exact
+writer under a five-second cleanup budget, disposing of any returned journal
+before reporting termination. Canceling a drain waiter cannot discard its join
+handle. Cleanup failure retains the original transfer cause and explicitly
+reports incomplete cleanup. This closes the store-worker completion race; it
+does not forcibly release a lock held by a running syscall, journal scan or
+abandoned assembly, or promise synchronous cleanup after an async-waiter drop.
+
 A store already executing remains atomic at its existing filesystem transaction
 boundary; cancellation cannot interrupt a filesystem syscall or roll back a
 committed part. Journal scan/open and assembly retain their separate cancellation

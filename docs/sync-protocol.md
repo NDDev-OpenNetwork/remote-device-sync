@@ -70,6 +70,10 @@ cannot make duplicate indices count toward completion. The journal writer drains
 before the final completeness check. A one-shot worker-exit signal wakes collection
 on verification/storage failure or panic, including when the peer sends no further
 frames. Error propagation does not depend on reaching the next queue send.
+Ordinary terminal control retains and joins the chunk-store worker before
+returning its receive error, with a bounded cleanup deadline and disposal of its
+locked output. Waiter-drop and uninterruptible filesystem limits remain as
+described below.
 Send/receive byte counts describe the unique
 payload actually transferred; identical reuse reports zero wire chunks and bytes.
 

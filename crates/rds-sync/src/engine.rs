@@ -1360,10 +1360,10 @@ struct JournalSink {
     // Fields drop in declaration order: publish cancellation before closing
     // the sender wakes the blocking receiver with its remaining queued data.
     cancel: StoreCancellation,
-    jobs: mpsc::Sender<(u32, Vec<u8>, tokio::sync::SemaphorePermit<'static>)>,
+    jobs: Option<mpsc::Sender<(u32, Vec<u8>, tokio::sync::SemaphorePermit<'static>)>>,
     /// First store failure, for error reporting across the task split.
     error: Arc<std::sync::Mutex<Option<String>>>,
-    task: tokio::task::JoinHandle<Result<Journal, crate::SyncError>>,
+    task: Option<tokio::task::JoinHandle<Result<Journal, crate::SyncError>>>,
 }
 
 /// A running filesystem syscall cannot be aborted. Stop between stores and
@@ -1420,9 +1420,9 @@ impl JournalSink {
         };
         (
             Self {
-                jobs,
+                jobs: Some(jobs),
                 error,
-                task,
+                task: Some(task),
                 cancel,
             },
             stopped,
@@ -1438,32 +1438,84 @@ impl JournalSink {
             .acquire()
             .await
             .expect("disk-job semaphore never closes");
-        self.jobs.send((index, data, permit)).await.map_err(|_| {
-            let why = self
-                .error
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
-                .unwrap_or_default();
-            anyhow::anyhow!("journal writer died {why}")
-        })
+        self.jobs
+            .as_ref()
+            .context("journal writer already closed")?
+            .send((index, data, permit))
+            .await
+            .map_err(|_| {
+                let why = self
+                    .error
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                    .unwrap_or_default();
+                anyhow::anyhow!("journal writer died {why}")
+            })
     }
 
     /// Drain queued stores and take the journal back.
-    async fn finish(self) -> anyhow::Result<Journal> {
-        let Self {
-            jobs,
-            task,
-            cancel,
-            error: _,
-        } = self;
-        drop(jobs);
-        let result = task.await;
-        drop(cancel);
+    #[cfg(test)]
+    async fn finish(mut self) -> anyhow::Result<Journal> {
+        self.finish_ref().await
+    }
+
+    // Retain the handle in its owner across the await. Terminal control can
+    // cancel this waiter and still join the exact filesystem worker below.
+    async fn finish_ref(&mut self) -> anyhow::Result<Journal> {
+        self.jobs.take();
+        let result = self
+            .task
+            .as_mut()
+            .context("journal writer already joined")?
+            .await;
+        self.task.take();
         match result {
             Ok(Ok(j)) => Ok(j),
             Ok(Err(e)) => Err(anyhow::anyhow!("chunk store failed: {e}")),
             Err(e) => Err(anyhow::anyhow!("journal task join: {e}")),
+        }
+    }
+
+    async fn cancel_and_join(&mut self) -> anyhow::Result<()> {
+        self.cancel.canceled.store(true, Ordering::Release);
+        self.cancel.task.abort();
+        self.jobs.take();
+        if let Some(task) = self.task.as_mut() {
+            let result = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .context("journal writer cancellation cleanup timed out")?;
+            // A returned Journal may still own both root locks. Dispose of the
+            // output before exposing completed cancellation to the caller.
+            self.task.take();
+            match result {
+                Ok(Ok(journal)) => drop(journal),
+                Ok(Err(error)) => return Err(error).context("journal writer cleanup"),
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => return Err(error).context("journal writer cleanup join"),
+            }
+        }
+        Ok(())
+    }
+}
+
+struct ReceiveStore {
+    sink: JournalSink,
+    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
+    requested: Vec<u32>,
+    total: u64,
+}
+
+impl ReceiveStore {
+    async fn new(journal: Journal) -> Self {
+        let requested = journal.need();
+        let total = journal.total() as u64;
+        let (sink, stopped) = JournalSink::start(journal).await;
+        Self {
+            sink,
+            stopped: Some(stopped),
+            requested,
+            total,
         }
     }
 }
@@ -1509,19 +1561,31 @@ async fn receive(
     // from this select, including dropping the whole receive future, stops
     // abandoned disk work at its next cooperative cancellation barrier.
     let peer_stop = frames.stop_flag();
+    let mut store = ReceiveStore::new(journal).await;
     let result = tokio::select! {
-        result = receive_chunks(uni, journal, manifest, wire, cancel_flag, peer_stop) => result?,
+        result = receive_chunks(uni, &mut store, manifest, wire, cancel_flag, peer_stop) => result,
         _ = send.stopped() => {
-            bail!("{}", frames.abort_cause("sync control stream closed during receive").await)
+            Err(anyhow::anyhow!("{}", frames.abort_cause("sync control stream closed during receive").await))
         }
         msg = frames.during_data() => match msg {
             Ok(SyncMsg::Cancel { reason }) => {
-                bail!("peer canceled transfer: {reason}")
+                Err(anyhow::anyhow!("peer canceled transfer: {reason}"))
             }
-            Ok(SyncMsg::Refuse { reason }) => bail!("peer refused transfer: {reason}"),
-            Ok(other) => bail!("unexpected control frame during receive: {other:?}"),
-            Err(e) => return Err(e).context("sync control read during receive"),
+            Ok(SyncMsg::Refuse { reason }) => Err(anyhow::anyhow!("peer refused transfer: {reason}")),
+            Ok(other) => Err(anyhow::anyhow!("unexpected control frame during receive: {other:?}")),
+            Err(e) => Err(e).context("sync control read during receive"),
         },
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(primary) => {
+            if let Err(cleanup) = store.sink.cancel_and_join().await {
+                return Err(
+                    primary.context(format!("sync receive cleanup not completed: {cleanup:#}"))
+                );
+            }
+            return Err(primary);
+        }
     };
     wire.send(
         send,
@@ -1567,18 +1631,21 @@ async fn prepare_journal(
 
 async fn receive_chunks(
     mut uni: rds_net::UniStreams,
-    journal: Journal,
+    store: &mut ReceiveStore,
     manifest: &Manifest,
     wire: Wire,
     cancel_flag: Option<Arc<AtomicBool>>,
     peer_stop: Arc<AtomicBool>,
 ) -> anyhow::Result<(PathBuf, Stats)> {
-    let total = journal.total() as u64;
+    let total = store.total;
 
     // Chunk streams arrive on the already claimed transfer/service route;
     // neither other services nor different transfer IDs can consume them.
-    let mut requested: std::collections::HashSet<u32> = journal.need().into_iter().collect();
-    let (sink, stopped) = JournalSink::start(journal).await;
+    let mut requested: std::collections::HashSet<u32> = store.requested.iter().copied().collect();
+    let stopped = store
+        .stopped
+        .take()
+        .context("journal exit observer already taken")?;
     // Remove only requested unique indices from the bounded set. Disk stores
     // remain asynchronous; after draining the sink, require complete verified
     // journal state before assembly or a success response.
@@ -1639,7 +1706,7 @@ async fn receive_chunks(
                                 Ok(Err(e)) => bail!("chunk body read: {e}"),
                                 Err(_) => bail!("chunk body stalled"),
                             }
-                            sink.put(i, buf).await?;
+                            store.sink.put(i, buf).await?;
                             stream_chunks += 1;
                             fetched_bytes += u64::from(len);
                         }
@@ -1662,11 +1729,11 @@ async fn receive_chunks(
             // Retrieve the real storage/panic error, even when the peer stops
             // sending immediately after the corrupt chunk. Do not wait for its
             // next frame or the unrelated network stall deadline.
-            sink.finish().await?;
+            store.sink.finish_ref().await?;
             bail!("journal writer exited before collection completed");
         }
     };
-    let journal = sink.finish().await?;
+    let journal = store.sink.finish_ref().await?;
     if !journal.complete() {
         bail!("chunk writer did not verify every requested index");
     }
