@@ -5,7 +5,7 @@ Verdict: **pending review**
 ## Automated checks
 - fmt/workspace clippy/workspace tests: PASS
 - desktop/CLI feature Clippy and library/launch contracts: PASS
-- simultaneous real peer and monitor channels on both transports: PASS
+- simultaneous real peer and monitor channels: Iroh PASS; Noq feature must be explicitly enabled for follow-up
 - release tab-state churn: 100 samples each for 1/4/8 open tabs
 - native UI, physical clipboard/input, GPU/memory soak and installed qualification: separate review required
 - retained impaired control RTT failure: OPEN; no threshold change

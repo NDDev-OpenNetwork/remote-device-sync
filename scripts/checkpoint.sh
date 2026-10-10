@@ -79,7 +79,7 @@ w6-tabbed-workspace)
     cargo clippy --locked -p rds-desktop -p rds-cli --all-targets --features rds-cli/desktop -- -D warnings || fail "workspace viewer feature clippy"
     cargo test --locked -p rds-desktop -p rds-cli --features rds-cli/desktop --lib || fail "workspace presentation and orchestration contracts"
     cargo test --locked -p rds-cli --features desktop --bin rds-viewer || fail "workspace launch compatibility"
-    cargo test --locked -p rds-client --test multiple_desktops || fail "simultaneous peer and monitor routing"
+    cargo test --locked -p rds-client --features transport-noq --test multiple_desktops || fail "simultaneous peer and monitor routing"
     cargo run --locked --release -p rds-bench --example workspace_churn -- \
         --json "$REPORTS/bench-w6-tabbed-workspace.json" \
         --md "$REPORTS/bench-w6-tabbed-workspace.md" || fail "bounded tab-state churn benchmark"
