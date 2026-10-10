@@ -24,6 +24,9 @@ use super::{
 };
 use crate::{DesktopError, RawFrame};
 
+mod workspace;
+pub use workspace::{WorkspaceEvent, WorkspaceHandle, WorkspaceUpdate};
+
 #[derive(Debug)]
 pub enum ViewerInput {
     Control(DesktopControl),
@@ -306,6 +309,7 @@ struct State {
     pending: Option<Pending>,
     submission_debt: SubmissionDebt,
     wake_pending: bool,
+    presenting: bool,
     status: String,
     label: String,
     extent: (u32, u32),
@@ -439,7 +443,9 @@ impl ViewerHandle {
         {
             state.report.frames_replaced += 1;
         }
-        self.wake(&mut state);
+        if state.presenting {
+            self.wake(&mut state);
+        }
     }
     pub fn status(&self, text: impl Into<String>) {
         let mut state = lock(&self.state);
@@ -701,6 +707,77 @@ impl Viewer {
     pub fn new(display: u32) -> Result<(Self, ViewerHandle, InputReceiver), DesktopError> {
         let event_loop =
             super::platform::event_loop().map_err(|e| DesktopError::Capture(e.to_string()))?;
+        let (session, handle, receiver) = SessionView::new(display, event_loop.create_proxy());
+        let app = App {
+            window: None,
+            gpu: None,
+            session,
+            error: None,
+            last_window_status: None,
+            workspace: None,
+            activity: None,
+            modifiers: Default::default(),
+        };
+        Ok((Self { event_loop, app }, handle, receiver))
+    }
+    pub fn run(mut self) -> Result<(), DesktopError> {
+        if self.app.workspace.is_none() {
+            self.app.activity = Some(super::platform::remote_activity());
+        }
+        self.event_loop
+            .run_app(&mut self.app)
+            .map_err(|e| DesktopError::Capture(e.to_string()))?;
+        match self.app.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Input ownership and one bounded image/clipboard mailbox belong to one
+/// session, independently of the native window used to present it.
+struct SessionView {
+    tab: Option<super::workspace::TabId>,
+    handle: ViewerHandle,
+    input: InputSender,
+    display: u32,
+    seq: u64,
+    keys: BTreeSet<u32>,
+    buttons: BTreeSet<i32>,
+    pointer: bool,
+    pointer_point: Option<(f64, f64)>,
+}
+impl SessionView {
+    fn clipboard_work(&mut self) -> Result<bool, DesktopError> {
+        if !lock(&self.handle.state).clipboard.needs_work() {
+            return Ok(false);
+        }
+        let Ok(generation) = super::platform::clipboard_generation() else {
+            return Ok(false);
+        };
+        let text = lock(&self.handle.state).clipboard.publish(generation);
+        let mut published = false;
+        if let Some(text) = text {
+            match super::platform::publish_text(&text) {
+                Ok(()) => published = true,
+                Err(error) => self
+                    .handle
+                    .status(format!("Clipboard unavailable: {error}")),
+            }
+        }
+        // Publication changes native ownership; observe it before the next request.
+        let Ok(generation) = super::platform::clipboard_generation() else {
+            return Ok(published);
+        };
+        let request = lock(&self.handle.state).clipboard.request(generation);
+        if let Some(control) = request {
+            self.input
+                .send(ViewerInput::Control(control))
+                .map_err(|_| DesktopError::Input("clipboard request queue full".into()))?;
+        }
+        Ok(published)
+    }
+    fn new(display: u32, proxy: EventLoopProxy<()>) -> (Self, ViewerHandle, InputReceiver) {
         let input_state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
             ready: Notify::new(),
@@ -717,6 +794,7 @@ impl Viewer {
                 pending: None,
                 submission_debt: SubmissionDebt::default(),
                 wake_pending: false,
+                presenting: true,
                 status: "Connecting".into(),
                 label: "RDS".into(),
                 extent: (0, 0),
@@ -739,98 +817,139 @@ impl Viewer {
                 session_span: tracing::Span::none(),
             })),
             input_state,
-            proxy: event_loop.create_proxy(),
+            proxy,
             started: Instant::now(),
         };
-        let app = App {
-            window: None,
-            gpu: None,
+        let session = Self {
+            tab: None,
             handle: handle.clone(),
             input,
             display,
             seq: 0,
-            modifiers: Default::default(),
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
             pointer: false,
             pointer_point: None,
-            error: None,
-            last_window_status: None,
         };
-        Ok((Self { event_loop, app }, handle, receiver))
-    }
-    pub fn run(mut self) -> Result<(), DesktopError> {
-        let _activity = super::platform::remote_activity();
-        self.event_loop
-            .run_app(&mut self.app)
-            .map_err(|e| DesktopError::Capture(e.to_string()))?;
-        match self.app.error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        (session, handle, receiver)
     }
 }
 
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
-    handle: ViewerHandle,
-    input: InputSender,
-    display: u32,
-    seq: u64,
-    modifiers: winit::event::Modifiers,
-    keys: BTreeSet<u32>,
-    buttons: BTreeSet<i32>,
-    pointer: bool,
-    pointer_point: Option<(f64, f64)>,
+    session: SessionView,
     error: Option<DesktopError>,
     last_window_status: Option<String>,
+    workspace: Option<workspace::Deck>,
+    activity: Option<super::platform::RemoteActivity>,
+    // Physical modifier flags belong to the window, not a replaceable tab.
+    modifiers: winit::event::Modifiers,
 }
 impl App {
     fn clipboard_work(&mut self, event_loop: &ActiveEventLoop) {
-        if !lock(&self.handle.state).clipboard.needs_work() {
+        if self.workspace_clipboard_work(event_loop) {
             return;
         }
-        let Ok(generation) = super::platform::clipboard_generation() else {
-            return;
-        };
-        let text = lock(&self.handle.state).clipboard.publish(generation);
-        if let Some(text) = text
-            && let Err(error) = super::platform::publish_text(&text)
-        {
-            self.handle
-                .status(format!("Clipboard unavailable: {error}"));
+        if let Err(error) = self.session.clipboard_work() {
+            self.fail_input(event_loop, error);
         }
-        // Publication changes the native generation. Read again before a new
-        // request so a completed transfer cannot invalidate its successor.
-        let Ok(generation) = super::platform::clipboard_generation() else {
-            return;
-        };
-        let request = lock(&self.handle.state).clipboard.request(generation);
-        if let Some(control) = request
-            && self.input.send(ViewerInput::Control(control)).is_err()
-        {
-            self.fail(
-                event_loop,
-                DesktopError::Input("clipboard request queue full".into()),
-            );
+    }
+    fn paste_text(&mut self, event_loop: &ActiveEventLoop, command_paste: bool) -> bool {
+        match super::platform::paste_text() {
+            Ok(Some(text)) => {
+                let id = rand::random();
+                let total = text.len() as u32;
+                lock(&self.session.handle.state).clipboard_latency.sent(
+                    id,
+                    total,
+                    self.session.handle.started.elapsed().as_millis() as u64,
+                );
+                tracing::info!(
+                    transfer_id = id,
+                    bytes = total,
+                    command_paste,
+                    "explicit local clipboard text queued"
+                );
+                let chunks = text.as_bytes().chunks(crate::clipboard::SEND_CHUNK_BYTES);
+                for (index, chunk) in chunks.enumerate() {
+                    if self
+                        .session
+                        .input
+                        .send(ViewerInput::Control(DesktopControl::ClipboardChunk {
+                            id,
+                            offset: (index * crate::clipboard::SEND_CHUNK_BYTES) as u32,
+                            total,
+                            data: chunk.to_vec(),
+                        }))
+                        .is_err()
+                    {
+                        self.fail_input(
+                            event_loop,
+                            DesktopError::Input("clipboard input queue full".into()),
+                        );
+                        return false;
+                    }
+                }
+                if total == 0
+                    && self
+                        .session
+                        .input
+                        .send(ViewerInput::Control(DesktopControl::ClipboardChunk {
+                            id,
+                            offset: 0,
+                            total,
+                            data: vec![],
+                        }))
+                        .is_err()
+                {
+                    self.fail_input(
+                        event_loop,
+                        DesktopError::Input("clipboard input queue full".into()),
+                    );
+                    return false;
+                }
+            }
+            Ok(None) if command_paste => {
+                tracing::info!("explicit local clipboard paste has no text");
+                return false;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.session
+                    .handle
+                    .status(format!("Clipboard unavailable: {error}"));
+                return false;
+            }
         }
+        true
     }
     fn sample_window(&self) {
         if let Some(window) = &self.window {
-            let elapsed = self.handle.started.elapsed().as_millis() as u64;
+            let elapsed = self.session.handle.started.elapsed().as_millis() as u64;
             let sample = super::platform::window_state(window, elapsed);
-            lock(&self.handle.state).native_window = sample;
+            lock(&self.session.handle.state).native_window = sample;
         }
     }
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: DesktopError) {
         self.error = Some(error);
-        let _ = self.input.send(ViewerInput::Close);
+        let _ = self.session.input.send(ViewerInput::Close);
         event_loop.exit();
     }
+    fn fail_input(&mut self, event_loop: &ActiveEventLoop, error: DesktopError) {
+        if self.session.tab.is_some() {
+            self.session
+                .handle
+                .status(format!("Input stopped: {error}"));
+            self.session.handle.close();
+            let _ = self.session.input.send(ViewerInput::Close);
+        } else {
+            self.fail(event_loop, error);
+        }
+    }
     fn sync_modifiers(&mut self, event_loop: &ActiveEventLoop) {
-        for (code, pressed) in modifier_changes(&self.keys, self.modifiers) {
-            if !key_transition(&mut self.keys, code, pressed) {
+        for (code, pressed) in modifier_changes(&self.session.keys, self.modifiers) {
+            if !key_transition(&mut self.session.keys, code, pressed) {
                 continue;
             }
             self.input(
@@ -844,17 +963,17 @@ impl App {
         }
     }
     fn input(&mut self, event_loop: &ActiveEventLoop, kind: InputKind) {
-        let Some(next) = self.seq.checked_add(1) else {
-            self.fail(
+        let Some(next) = self.session.seq.checked_add(1) else {
+            self.fail_input(
                 event_loop,
                 DesktopError::Input("input sequence exhausted".into()),
             );
             return;
         };
         let message = DesktopControl::Input(InputEvent {
-            seq: self.seq,
-            event_ts_ms: self.handle.started.elapsed().as_millis() as u64,
-            display_id: self.display,
+            seq: self.session.seq,
+            event_ts_ms: self.session.handle.started.elapsed().as_millis() as u64,
+            display_id: self.session.display,
             kind,
         });
         if matches!(
@@ -866,11 +985,11 @@ impl App {
                 },
                 ..
             })
-        ) && let Some(point) = self.pointer_point
-            && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+        ) && let Some(point) = self.session.pointer_point
+            && let Some(probe) = &mut lock(&self.session.handle.state).visual_probe
         {
             if self.modifiers.state().is_empty() {
-                probe.click(point, self.seq, Instant::now());
+                probe.click(point, self.session.seq, Instant::now());
             } else {
                 probe.modified_click(point);
             }
@@ -878,7 +997,7 @@ impl App {
         if matches!(&message, DesktopControl::Input(InputEvent {
             kind: InputKind::PointerButton { button, pressed: true }, ..
         }) if *button != 0x110)
-            && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+            && let Some(probe) = &mut lock(&self.session.handle.state).visual_probe
         {
             probe.keyboard_focus_lost();
         }
@@ -886,12 +1005,12 @@ impl App {
             kind: InputKind::KeyDown { code },
             ..
         }) = &message
-            && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+            && let Some(probe) = &mut lock(&self.session.handle.state).visual_probe
         {
             probe.key(
                 *code,
                 self.modifiers.state().is_empty(),
-                self.seq,
+                self.session.seq,
                 Instant::now(),
             );
         }
@@ -908,24 +1027,29 @@ impl App {
                     ..
                 })
             );
-            tracing::trace!(target: "rds_desktop::input_timing", input_seq=self.seq, modifier_code=*code, pressed,
+            tracing::trace!(target: "rds_desktop::input_timing", input_seq=self.session.seq, modifier_code=*code, pressed,
                 "native modifier transition queued");
         }
-        self.seq = next;
-        if self.input.send(ViewerInput::Control(message)).is_err() {
+        self.session.seq = next;
+        if self
+            .session
+            .input
+            .send(ViewerInput::Control(message))
+            .is_err()
+        {
             // Closing the remote session releases its held keys/buttons. Never
             // silently discard a key-up and leave a modifier stuck remotely.
-            self.fail(
+            self.fail_input(
                 event_loop,
                 DesktopError::Input("input channel unavailable".into()),
             );
         }
     }
     fn release(&mut self, event_loop: &ActiveEventLoop) {
-        for code in std::mem::take(&mut self.keys) {
+        for code in std::mem::take(&mut self.session.keys) {
             self.input(event_loop, InputKind::KeyUp { code });
         }
-        for button in std::mem::take(&mut self.buttons) {
+        for button in std::mem::take(&mut self.session.buttons) {
             self.input(
                 event_loop,
                 InputKind::PointerButton {
@@ -936,28 +1060,41 @@ impl App {
         }
     }
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        lock(&self.handle.state).report.redraws += 1;
-        let pending = lock(&self.handle.state).pending.take();
+        if let (Some(deck), Some(window)) = (&mut self.workspace, &self.window)
+            && let Some(chrome) = &mut deck.chrome
+        {
+            let status = lock(&self.session.handle.state).status.clone();
+            chrome.prepare(window, &deck.model, &deck.devices, &status);
+        }
+        self.workspace_actions(event_loop);
+        lock(&self.session.handle.state).report.redraws += 1;
+        let pending = lock(&self.session.handle.state).pending.take();
         let Some(gpu) = &mut self.gpu else {
             return;
         };
         {
-            let mut state = lock(&self.handle.state);
+            let mut state = lock(&self.session.handle.state);
             if pending.is_some() {
                 state
                     .submission_debt
-                    .queued(self.handle.started.elapsed().as_millis() as u64);
+                    .queued(self.session.handle.started.elapsed().as_millis() as u64);
             }
             state.render_stage = "acquiring surface".into();
         }
-        let result = gpu.draw(pending.as_ref().map(|frame| &frame.raw));
-        lock(&self.handle.state).report.gpu_uploads = gpu.uploads();
+        let ui = self
+            .workspace
+            .as_mut()
+            .and_then(|deck| deck.chrome.as_mut())
+            .map(|chrome| &mut chrome.frame);
+        let uploads_before = gpu.uploads();
+        let result = gpu.draw(pending.as_ref().map(|frame| &frame.raw), ui);
+        lock(&self.session.handle.state).report.gpu_uploads += gpu.uploads() - uploads_before;
         match result {
             Err(error) => self.fail(event_loop, error),
             Ok(DrawOutcome::Presented) => {
-                lock(&self.handle.state).render_stage = "presented".into();
+                lock(&self.session.handle.state).render_stage = "presented".into();
                 if let Some(frame) = pending {
-                    let mut state = lock(&self.handle.state);
+                    let mut state = lock(&self.session.handle.state);
                     let next_queued_ms = state.pending.as_ref().map(|next| next.queued_ms);
                     state.submission_debt.presented(next_queued_ms);
                     let parent = state.session_span.clone();
@@ -971,12 +1108,12 @@ impl App {
                     }
                     state.report.frames_submitted += 1;
                     state.report.last_submission_ms =
-                        Some(self.handle.started.elapsed().as_millis() as u64);
+                        Some(self.session.handle.started.elapsed().as_millis() as u64);
                     state.render_stage = "presented".into();
                     state
                         .report
                         .first_frame_ms
-                        .get_or_insert(self.handle.started.elapsed().as_millis() as u64);
+                        .get_or_insert(self.session.handle.started.elapsed().as_millis() as u64);
                     sample(
                         &mut state.delays,
                         frame.received.elapsed().as_secs_f64() * 1000.,
@@ -985,17 +1122,17 @@ impl App {
             }
             Ok(outcome) => {
                 if matches!(outcome, DrawOutcome::Occluded) {
-                    lock(&self.handle.state).submission_debt.hidden();
+                    lock(&self.session.handle.state).submission_debt.hidden();
                 }
                 if matches!(outcome, DrawOutcome::Occluded)
-                    && let Some(probe) = &mut lock(&self.handle.state).visual_probe
+                    && let Some(probe) = &mut lock(&self.session.handle.state).visual_probe
                 {
                     probe.unavailable();
                 }
-                lock(&self.handle.state).render_stage = outcome.stage().into();
-                lock(&self.handle.state).report.surface_skips += 1;
+                lock(&self.session.handle.state).render_stage = outcome.stage().into();
+                lock(&self.session.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
-                    let mut state = lock(&self.handle.state);
+                    let mut state = lock(&self.session.handle.state);
                     if state.pending.is_none() {
                         state.pending = Some(frame);
                     }
@@ -1006,6 +1143,9 @@ impl App {
 }
 
 impl ApplicationHandler<()> for App {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.workspace_paste_deadline(event_loop);
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -1039,22 +1179,44 @@ impl ApplicationHandler<()> for App {
                 super::platform::activate_application();
                 window.focus_window();
                 window.request_redraw();
+                if let Some(deck) = &mut self.workspace {
+                    deck.chrome = Some(super::workspace::chrome::Chrome::new(&window));
+                }
                 self.window = Some(window);
                 self.gpu = Some(gpu);
-                lock(&self.handle.state).clipboard.focus(true);
+                lock(&self.session.handle.state).clipboard.focus(true);
+                self.workspace_updates(event_loop);
             }
             Err(error) => self.fail(event_loop, error),
         }
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        if event_loop.exiting() {
+            return;
+        }
+        self.workspace_updates(event_loop);
+        // A queued workspace CloseWindow can exit during this same callback.
+        // It must take precedence over a clipboard reply and deferred paste.
+        if event_loop.exiting() {
+            return;
+        }
         self.sample_window();
-        let mut state = lock(&self.handle.state);
+        let mut state = lock(&self.session.handle.state);
         state.wake_pending = false;
         let close = state.close;
-        state.last_ui_ms = self.handle.started.elapsed().as_millis() as u64;
+        state.last_ui_ms = self.session.handle.started.elapsed().as_millis() as u64;
         let status = format!("{} — {}", state.label, state.status);
 
         drop(state);
+        if close {
+            if self.workspace.is_some() {
+                self.workspace_close_active(event_loop);
+            } else {
+                self.release(event_loop);
+                event_loop.exit();
+            }
+            return;
+        }
         self.clipboard_work(event_loop);
         if let Some(window) = &self.window {
             // Media wakeups do not change status. Avoid repeated AppKit title
@@ -1065,10 +1227,6 @@ impl ApplicationHandler<()> for App {
             }
             window.request_redraw();
         }
-        if close {
-            self.release(event_loop);
-            event_loop.exit();
-        }
     }
     fn window_event(
         &mut self,
@@ -1076,12 +1234,30 @@ impl ApplicationHandler<()> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if event_loop.exiting() {
+            return;
+        }
+        // Focus-generated key snapshots are not fresh user gestures. Held
+        // modifiers are reconciled when the next real input arrives.
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput {
+                is_synthetic: true,
+                ..
+            }
+        ) {
+            return;
+        }
         self.sample_window();
-        lock(&self.handle.state).last_ui_ms = self.handle.started.elapsed().as_millis() as u64;
+        lock(&self.session.handle.state).last_ui_ms =
+            self.session.handle.started.elapsed().as_millis() as u64;
+        if self.workspace_event(event_loop, &event) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.release(event_loop);
-                let _ = self.input.send(ViewerInput::Close);
+                let _ = self.session.input.send(ViewerInput::Close);
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -1094,21 +1270,22 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Focused(false) => {
-                lock(&self.handle.state).clipboard.focus(false);
-                if let Some(probe) = &mut lock(&self.handle.state).visual_probe {
+                self.modifiers = Default::default();
+                lock(&self.session.handle.state).clipboard.focus(false);
+                if let Some(probe) = &mut lock(&self.session.handle.state).visual_probe {
                     probe.keyboard_focus_lost();
                 }
                 self.release(event_loop);
             }
             WindowEvent::Occluded(hidden) => {
-                let mut state = lock(&self.handle.state);
+                let mut state = lock(&self.session.handle.state);
                 state.occluded = hidden;
                 if hidden {
                     state.submission_debt.hidden();
                 } else if state.pending.is_some() {
                     state
                         .submission_debt
-                        .queued(self.handle.started.elapsed().as_millis() as u64);
+                        .queued(self.session.handle.started.elapsed().as_millis() as u64);
                 }
                 if hidden && let Some(probe) = &mut state.visual_probe {
                     probe.unavailable();
@@ -1119,7 +1296,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::Focused(true) => {
-                lock(&self.handle.state).clipboard.focus(true);
+                lock(&self.session.handle.state).clipboard.focus(true);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -1136,7 +1313,7 @@ impl ApplicationHandler<()> for App {
                         // Repeat only a key actually forwarded and still held.
                         // Never re-run clipboard/local shortcut side effects.
                         if event.state == ElementState::Pressed
-                            && self.keys.contains(&code)
+                            && self.session.keys.contains(&code)
                             && !matches!(
                                 code,
                                 29 | 42 | 54 | 56 | 97 | 100 | 125 | 126 | 58 | 69 | 70
@@ -1150,126 +1327,86 @@ impl ApplicationHandler<()> for App {
                         self.sync_modifiers(event_loop);
                     }
                     if event.state == ElementState::Pressed {
-                        if self.keys.contains(&code) {
+                        if self.session.keys.contains(&code) {
                             return;
                         }
                         let command_paste = cfg!(target_os = "macos")
                             && code == 47
-                            && (self.keys.contains(&125) || self.keys.contains(&126));
+                            && (self.session.keys.contains(&125)
+                                || self.session.keys.contains(&126));
                         if code == 47
-                            && (command_paste || self.keys.contains(&29) || self.keys.contains(&97))
+                            && (command_paste
+                                || self.session.keys.contains(&29)
+                                || self.session.keys.contains(&97))
                         {
-                            match super::platform::paste_text() {
-                                Ok(Some(text)) => {
-                                    let id = rand::random();
-                                    let total = text.len() as u32;
-                                    lock(&self.handle.state).clipboard_latency.sent(
-                                        id,
-                                        total,
-                                        self.handle.started.elapsed().as_millis() as u64,
-                                    );
-                                    tracing::info!(
-                                        transfer_id = id,
-                                        bytes = total,
-                                        command_paste,
-                                        "explicit local clipboard text queued"
-                                    );
-                                    let chunks =
-                                        text.as_bytes().chunks(crate::clipboard::SEND_CHUNK_BYTES);
-                                    for (index, chunk) in chunks.enumerate() {
-                                        if self
-                                            .input
-                                            .send(ViewerInput::Control(
-                                                DesktopControl::ClipboardChunk {
-                                                    id,
-                                                    offset: (index
-                                                        * crate::clipboard::SEND_CHUNK_BYTES)
-                                                        as u32,
-                                                    total,
-                                                    data: chunk.to_vec(),
-                                                },
-                                            ))
-                                            .is_err()
-                                        {
-                                            self.fail(
-                                                event_loop,
-                                                DesktopError::Input(
-                                                    "clipboard input queue full".into(),
-                                                ),
-                                            );
-                                            return;
-                                        }
-                                    }
-                                    if total == 0
-                                        && self
-                                            .input
-                                            .send(ViewerInput::Control(
-                                                DesktopControl::ClipboardChunk {
-                                                    id,
-                                                    offset: 0,
-                                                    total,
-                                                    data: vec![],
-                                                },
-                                            ))
-                                            .is_err()
-                                    {
-                                        self.fail(
-                                            event_loop,
-                                            DesktopError::Input(
-                                                "clipboard input queue full".into(),
-                                            ),
-                                        );
-                                        return;
-                                    }
-                                }
-                                Ok(None) if command_paste => {
-                                    tracing::info!("explicit local clipboard paste has no text");
-                                    return;
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    self.handle
-                                        .status(format!("Clipboard unavailable: {error}"));
-                                    return;
-                                }
+                            if self.workspace_defer_paste(event_loop) {
+                                return;
                             }
+                            if self.workspace_clipboard_enabled()
+                                && !self.paste_text(event_loop, command_paste)
+                            {
+                                return;
+                            }
+                        }
+                        let command_copy = cfg!(target_os = "macos")
+                            && (self.session.keys.contains(&125)
+                                || self.session.keys.contains(&126));
+                        if matches!(code, 45 | 46)
+                            && (command_copy
+                                || self.session.keys.contains(&29)
+                                || self.session.keys.contains(&97))
+                            && self.workspace_clipboard_enabled()
+                        {
+                            self.workspace_copying();
                         }
                         if cfg!(target_os = "macos")
                             && matches!(code, 45 | 46)
-                            && (self.keys.contains(&125) || self.keys.contains(&126))
+                            && (self.session.keys.contains(&125)
+                                || self.session.keys.contains(&126))
                         {
-                            if let Ok(generation) = super::platform::clipboard_generation() {
-                                lock(&self.handle.state).clipboard.copying(generation);
-                            }
-                            for kind in super::input::command_chord(&self.keys, code) {
+                            for kind in super::input::command_chord(&self.session.keys, code) {
                                 self.input(event_loop, kind);
                             }
                             return;
                         }
                         if command_paste {
-                            for kind in super::input::command_paste_chord(&self.keys) {
+                            for kind in super::input::command_paste_chord(&self.session.keys) {
                                 self.input(event_loop, kind);
                             }
                             // The physical V is consumed locally: its release
                             // and OS repeats must not replay paste effects.
                             return;
                         }
-                        if key_transition(&mut self.keys, code, true) {
+                        if key_transition(&mut self.session.keys, code, true) {
                             self.input(event_loop, InputKind::KeyDown { code });
                         }
-                    } else if key_transition(&mut self.keys, code, false) {
+                    } else if key_transition(&mut self.session.keys, code, false) {
                         self.input(event_loop, InputKind::KeyUp { code });
                     }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let extent = lock(&self.handle.state).extent;
+                let extent = lock(&self.session.handle.state).extent;
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
-                    let point = Viewport::new(size.width, size.height, extent.0, extent.1)
-                        .pointer(position.x, position.y, extent.0, extent.1);
-                    self.pointer = point.is_some();
-                    self.pointer_point = point;
+                    let area = self
+                        .workspace
+                        .as_ref()
+                        .and_then(|deck| deck.chrome.as_ref())
+                        .map(|chrome| {
+                            let rect = chrome.frame.content;
+                            [
+                                f64::from(rect.left()),
+                                f64::from(rect.top()),
+                                f64::from(rect.width()),
+                                f64::from(rect.height()),
+                            ]
+                        });
+                    let viewport =
+                        Viewport::content(size.width, size.height, extent.0, extent.1, area);
+                    let point = viewport.pointer(position.x, position.y, extent.0, extent.1);
+                    self.session.pointer = point.is_some();
+                    self.session.pointer_point = point;
                     if let Some((x, y)) = point {
                         self.input(event_loop, InputKind::PointerMove { x, y });
                     }
@@ -1283,8 +1420,8 @@ impl ApplicationHandler<()> for App {
                     MouseButton::Middle => 0x112,
                     _ => return,
                 };
-                if state == ElementState::Pressed && self.pointer {
-                    self.buttons.insert(button);
+                if state == ElementState::Pressed && self.session.pointer {
+                    self.session.buttons.insert(button);
                     self.input(
                         event_loop,
                         InputKind::PointerButton {
@@ -1292,7 +1429,7 @@ impl ApplicationHandler<()> for App {
                             pressed: true,
                         },
                     );
-                } else if state == ElementState::Released && self.buttons.remove(&button) {
+                } else if state == ElementState::Released && self.session.buttons.remove(&button) {
                     self.input(
                         event_loop,
                         InputKind::PointerButton {
@@ -1302,7 +1439,7 @@ impl ApplicationHandler<()> for App {
                     );
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if self.pointer => {
+            WindowEvent::MouseWheel { delta, .. } if self.session.pointer => {
                 self.sync_modifiers(event_loop);
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (f64::from(x), f64::from(y)),

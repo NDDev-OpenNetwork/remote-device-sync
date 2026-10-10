@@ -33,9 +33,64 @@ pub(super) fn command_chord(held: &std::collections::BTreeSet<u32>, key: u32) ->
     chord
 }
 
+/// Replay only the original paste gesture after a clipboard handoff. Shift is
+/// captured at that gesture; the physical modifier state may since have changed.
+pub(super) fn deferred_paste_chord(
+    held: &std::collections::BTreeSet<u32>,
+    shift: bool,
+) -> Vec<InputKind> {
+    let mut effective = held.clone();
+    let mut before = vec![];
+    let mut after = vec![];
+    if shift && !held.contains(&42) && !held.contains(&54) {
+        effective.insert(42);
+        before.push(InputKind::KeyDown { code: 42 });
+        after.push(InputKind::KeyUp { code: 42 });
+    } else if !shift {
+        for code in [42, 54] {
+            if effective.remove(&code) {
+                before.push(InputKind::KeyUp { code });
+                after.push(InputKind::KeyDown { code });
+            }
+        }
+    }
+    before.extend(command_paste_chord(&effective));
+    before.extend(after);
+    before
+}
+
 #[cfg(test)]
 mod command_paste_tests {
     use super::*;
+    #[test]
+    fn delayed_paste_preserves_original_shift_and_restores_current_modifiers() {
+        for held in [vec![], vec![29], vec![125], vec![42, 54, 97, 126]] {
+            for shift in [false, true] {
+                let mut pressed: std::collections::BTreeSet<u32> = held.iter().copied().collect();
+                let original = pressed.clone();
+                let mut pastes = 0;
+                for event in deferred_paste_chord(&original, shift) {
+                    match event {
+                        InputKind::KeyDown { code } => {
+                            assert!(pressed.insert(code), "duplicate key press");
+                            if code == 47 {
+                                pastes += 1;
+                                assert!(pressed.contains(&29) || pressed.contains(&97));
+                                assert!(!pressed.contains(&125) && !pressed.contains(&126));
+                                assert_eq!(pressed.contains(&42) || pressed.contains(&54), shift);
+                            }
+                        }
+                        InputKind::KeyUp { code } => {
+                            assert!(pressed.remove(&code));
+                        }
+                        _ => panic!("unexpected pointer event"),
+                    }
+                }
+                assert_eq!(pastes, 1);
+                assert_eq!(pressed, original);
+            }
+        }
+    }
     #[test]
     fn command_paste_restores_held_modifiers_and_never_pastes_with_super_held() {
         for held in [vec![125], vec![126], vec![42, 125], vec![97, 125, 126]] {
@@ -75,6 +130,39 @@ pub(super) struct Viewport {
     pub height: f64,
 }
 impl Viewport {
+    /// One fitted content rectangle for both GPU presentation and hit testing.
+    /// Panels may consume the entire window at small sizes; then input and
+    /// remote presentation are empty rather than extending outside the surface.
+    pub fn content(
+        width: u32,
+        height: u32,
+        remote_width: u32,
+        remote_height: u32,
+        area: Option<[f64; 4]>,
+    ) -> Self {
+        let [x, y, w, h] = area.unwrap_or([0., 0., f64::from(width), f64::from(height)]);
+        if [x, y, w, h].iter().any(|v| !v.is_finite()) || remote_width == 0 || remote_height == 0 {
+            return Self {
+                x: 0.,
+                y: 0.,
+                width: 0.,
+                height: 0.,
+            };
+        }
+        let left = x.clamp(0., f64::from(width));
+        let top = y.clamp(0., f64::from(height));
+        let right = (x + w.max(0.)).clamp(left, f64::from(width));
+        let bottom = (y + h.max(0.)).clamp(top, f64::from(height));
+        let mut viewport = Self::new(
+            (right - left) as u32,
+            (bottom - top) as u32,
+            remote_width,
+            remote_height,
+        );
+        viewport.x += left;
+        viewport.y += top;
+        viewport
+    }
     pub fn new(width: u32, height: u32, remote_width: u32, remote_height: u32) -> Self {
         let scale = (f64::from(width) / f64::from(remote_width.max(1)))
             .min(f64::from(height) / f64::from(remote_height.max(1)));
@@ -298,6 +386,28 @@ pub(super) fn evdev(code: KeyCode) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_panels_and_tiny_windows_share_presentation_and_input_bounds() {
+        let view = Viewport::content(1200, 800, 1920, 1080, Some([0., 100., 1200., 680.]));
+        assert!(view.pointer(600., 50., 1920, 1080).is_none());
+        assert!(view.pointer(600., 790., 1920, 1080).is_none());
+        let center = view
+            .pointer(
+                view.x + view.width / 2.,
+                view.y + view.height / 2.,
+                1920,
+                1080,
+            )
+            .unwrap();
+        assert_eq!(center, (960., 540.));
+        assert!(view.x + view.width <= 1200. && view.y + view.height <= 800.);
+        let tiny = Viewport::content(30, 20, 1920, 1080, Some([0., 100., 30., 0.]));
+        assert_eq!(tiny.height, 0.);
+        assert!(tiny.pointer(10., 10., 1920, 1080).is_none());
+        let invalid = Viewport::content(1200, 800, 1920, 1080, Some([f64::NAN, 0., 10., 10.]));
+        assert!(invalid.pointer(1., 1., 1920, 1080).is_none());
+    }
     #[test]
     fn physical_and_flags_notifications_preserve_one_alt_shift_chord() {
         for physical_first in [false, true] {

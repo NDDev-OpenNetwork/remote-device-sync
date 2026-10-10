@@ -13,6 +13,12 @@ struct Cli {
     control_dir: Option<PathBuf>,
     #[arg(long)]
     grant_file: Option<PathBuf>,
+    /// Open displays in separate native windows instead of workspace tabs.
+    #[arg(long)]
+    separate_windows: bool,
+    /// Saved workspace preferences; an explicit path isolates this workspace.
+    #[arg(long)]
+    workspace_file: Option<PathBuf>,
     /// Open one independent window for every available monitor.
     #[arg(long, conflicts_with_all = ["headless", "report", "diagnostic_visual_probe"])]
     all_displays: bool,
@@ -83,6 +89,7 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
+    let explicit_targets = !cli.target.is_empty();
     let mut configured_resolution = None;
     let mut connections = Vec::new();
     let key_path = rds_net::default_key_path();
@@ -94,7 +101,9 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("no local agent configuration directory"))?,
         )?,
     };
-    if let Some(key_path) = key_path {
+    if let Some(key_path) = key_path
+        && cli.workspace_file.is_none()
+    {
         let config_path = key_path.with_file_name("viewer.json");
         let read = (|| -> std::io::Result<Vec<u8>> {
             use std::io::Read;
@@ -164,6 +173,94 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    if !cli.separate_windows
+        && !cli.options.headless
+        && !cli.list_displays
+        && cli.options.report.is_none()
+        && cli.options.diagnostic_visual_probe.is_none()
+    {
+        use rds_cli::desktop::workspace::{DeviceConfig, WorkspaceConfig};
+        use rds_desktop::render::workspace::{TabProfile, TabSpec, VideoSize};
+        if matches.value_source("resolution") != Some(ValueSource::CommandLine)
+            && let Some(resolution) = configured_resolution
+        {
+            cli.options.resolution = resolution;
+        }
+        let path = cli.workspace_file.clone().unwrap_or_else(|| {
+            directory
+                .parent()
+                .unwrap_or(&directory)
+                .join("viewer-workspace.json")
+        });
+        if !explicit_targets && let Some(saved) = WorkspaceConfig::load(path.clone()).await? {
+            return rds_cli::desktop::workspace::run(
+                Client::new(&directory),
+                saved,
+                path,
+                cli.options,
+                cli.all_displays,
+            )
+            .await;
+        }
+        if connections.is_empty() {
+            connections = cli
+                .target
+                .iter()
+                .map(|target| ConnectionConfig {
+                    target: target.clone(),
+                    displays: vec![cli.options.display],
+                    grant_file: cli.grant_file.clone(),
+                })
+                .collect();
+        }
+        let windows = window_plan(connections, cli.options.display)?;
+        let mut devices = Vec::<DeviceConfig>::new();
+        let mut tabs = vec![];
+        for window in windows {
+            let label = rds_net::parse_target(&window.target)
+                .map(|a| format!("Device {}", &a.id.to_string()[..8]))
+                .unwrap_or_else(|_| window.target.chars().take(64).collect());
+            if !devices.iter().any(|d| d.key == window.target) {
+                devices.push(DeviceConfig {
+                    key: window.target.clone(),
+                    target: window.target.clone(),
+                    label: label.clone(),
+                    grant_file: window.grant_file.or_else(|| cli.grant_file.clone()),
+                });
+            }
+            tabs.push(TabSpec {
+                device: window.target,
+                label,
+                display: window.display,
+                profile: TabProfile {
+                    video_size: match cli.options.resolution {
+                        rds_cli::desktop::Resolution::Hd => VideoSize::Hd,
+                        rds_cli::desktop::Resolution::FullHd => VideoSize::FullHd,
+                        rds_cli::desktop::Resolution::Native => VideoSize::Native,
+                    },
+                    max_fps: cli.options.max_fps.get(),
+                    clipboard: cli.options.clipboard,
+                    interactive: true,
+                    payload_receipts: cli.options.payload_receipts,
+                },
+            });
+        }
+        // An empty launch opens the connection picker; the local manager remains
+        // the only endpoint identity and connection owner.
+        let config = WorkspaceConfig {
+            schema_version: 1,
+            devices,
+            tabs,
+        };
+        return rds_cli::desktop::workspace::run(
+            Client::new(&directory),
+            config,
+            path,
+            cli.options,
+            cli.all_displays,
+        )
+        .await;
     }
     if !cli.list_displays && configure_resolution(&mut cli.options, matches, configured_resolution)
     {
@@ -338,6 +435,7 @@ fn launch_window(
     };
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
     command.stdin(std::process::Stdio::null());
+    command.arg("--separate-windows");
     command
         .arg(&window.target)
         .arg("--control-dir")

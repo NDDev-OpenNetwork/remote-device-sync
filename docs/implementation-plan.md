@@ -1,5 +1,11 @@
 # Implementation plan — owned connectivity core (v0.2) and beyond
 
+The registered `w6-tabbed-workspace` checkpoint covers device/display tab state,
+presentation/input bounds, peer binding, preferences and existing concurrent
+managed desktop routes, with local state-churn measurements. Native UI and
+actual installed multi-device acceptance remain separately evidenced in the
+[workspace report](reports/rds-tabbed-workspace-20261010.md).
+
 The registered `w1-sync-supervision` checkpoint covers terminal control on both
 wire profiles, data-phase timing and abandoned assembly, plus the journal
 preparation benchmark as a local regression measurement. It does not close

@@ -1,5 +1,8 @@
-//! Native window presentation. A single pending BGRA frame feeds a GPU surface;
+//! Native window presentation. Each session retains one newest BGRA frame;
+//! one GPU surface presents the active session.
 //! window/input handling stays on the OS main thread and networking stays async.
+
+pub mod workspace;
 
 #[cfg(feature = "viewer")]
 mod clipboard;
@@ -16,7 +19,10 @@ mod viewer;
 #[cfg(feature = "viewer")]
 mod visual_probe;
 #[cfg(feature = "viewer")]
-pub use viewer::{InputReceiver, Viewer, ViewerHandle, ViewerInput, ViewerReport, ViewerSnapshot};
+pub use viewer::{
+    InputReceiver, Viewer, ViewerHandle, ViewerInput, ViewerReport, ViewerSnapshot, WorkspaceEvent,
+    WorkspaceHandle, WorkspaceUpdate,
+};
 #[cfg(feature = "viewer")]
 pub use visual_probe::{VisualProbeReport, VisualProbeSpec};
 

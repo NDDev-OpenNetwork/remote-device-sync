@@ -26,6 +26,14 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# Embedded, unmodified UI fonts only. Their exact upstream notices are retained
+# under rds-desktop/assets/font-licenses, displayed in the workspace, and copied
+# into the native app bundle. Do not allow these licenses for unrelated crates.
+[[licenses.exceptions]]
+name = "epaint_default_fonts"
+version = "=0.36.2"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "warn"

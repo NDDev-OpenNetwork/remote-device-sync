@@ -68,11 +68,22 @@ initial observer-registration race, not a reason to raise its timeout.
 Integrate and qualify the combined source before advancing installed artifacts;
 the native acceptance rows below remain open.
 
+The owner's multi-device/multi-display workflow is now implemented as a native
+tabbed workspace, with per-display profiles and explicit session ownership.
+[The workspace report](reports/rds-tabbed-workspace-20261010.md) records the
+model/feature checks and real loopback manager/QUIC/H.264 native interaction.
+Finish the source-bound Linux/native artifacts and installed acceptance before
+calling that rollout complete. Physical clipboard handoff remains a separate row.
+
 The later main-branch CI run37999738254 retained a separate control RTT p95
 failure: 445 ms across 601 probes versus the unchanged 400 ms limit. The earlier
 cohort enlargement did not repair runtime latency. Diagnose this tail with the
 actual application/transport timing before declaring the combined native rollout
 qualified; keep the failing result even when other runs pass.
+The [codec-profile investigation](reports/rds-control-latency-tail-20261010.md)
+subsequently reproduced unintended repair traffic when synthetic transport bytes
+were decoded as H.264. The corrected header harness is feature-independent and
+retains the 400 ms gate; it is not a claimed production transport latency repair.
 
 1. Re-read current public/estate heads, open PRs and operation receipts. An
    expired plan or an earlier successful pin is not authorization to replay a

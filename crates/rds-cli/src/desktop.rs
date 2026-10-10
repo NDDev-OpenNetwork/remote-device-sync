@@ -106,6 +106,9 @@ mod diagnostics;
 mod diagnostic_storage;
 
 #[cfg(feature = "desktop")]
+pub mod workspace;
+
+#[cfg(feature = "desktop")]
 mod native {
     use super::*;
     use rds_client::local::ManagedMessage;
@@ -142,12 +145,36 @@ mod native {
             session: Option<SessionId>,
             peer: String,
             grant: Option<Box<rds_core::grant::Grant>>,
+            binding: PeerBinding,
         },
         Direct {
             endpoint: rds_net::Endpoint,
             target: rds_net::EndpointAddr,
             grant: Option<rds_core::grant::Grant>,
         },
+    }
+
+    /// Display settings must not resolve a mutable device name to a different
+    /// endpoint. All tabs for one saved computer share its authenticated binding.
+    #[derive(Clone, Default)]
+    pub(super) struct PeerBinding(Arc<std::sync::Mutex<Option<String>>>);
+    impl PeerBinding {
+        pub(super) fn target(&self, original: &str) -> String {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap_or_else(|| original.to_owned())
+        }
+        fn authenticated(&self, original: &str, peer: String) -> anyhow::Result<String> {
+            let mut binding = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let target = reconnect_target(binding.as_deref().unwrap_or(original), peer)?;
+            *binding = Some(target.clone());
+            Ok(target)
+        }
     }
     fn hello(options: &Options) -> DesktopHello {
         DesktopHello {
@@ -215,32 +242,13 @@ mod native {
         let diagnostic_view = handle.clone();
         let diagnostic_dir = options.diagnostics_dir.clone();
         let diagnostic_health = options.diagnostic_health.clone();
-        workers.spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(2));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut recorder = diagnostics::Recorder::default();
-            let mut storage = diagnostic_storage::Storage::new(diagnostic_dir);
-            loop {
-                tokio::select! {
-                    _ = diagnostic_stop.cancelled() => break,
-                    _ = tick.tick() => {
-                        diagnostic_view.heartbeat_ui();
-                        let snapshot = diagnostic_view.snapshot();
-                        let health = diagnostic_health.as_ref().and_then(rds_observe::HealthObserver::snapshot);
-                        let (value, incident) = recorder.observe_with_health(&snapshot, health, &storage.health());
-                        let json = serde_json::to_string(&value).ok();
-                        if let Some(json) = &json {
-                            tracing::info!(snapshot=%json, "viewer health");
-                        }
-                        storage.persist(json.map(String::into_bytes), incident, snapshot.elapsed_ms).await;
-                    },
-                }
-            }
-            storage.persist(None, recorder.finish(true), diagnostic_view.snapshot().elapsed_ms).await;
-            let remaining = storage.health().incident_queue_pending;
-            if remaining > 0 { tracing::warn!(remaining, "viewer shutdown retains unsaved incident windows in memory only"); }
-            Ok(())
-        });
+        workers.spawn(observe(
+            diagnostic_view,
+            diagnostic_dir,
+            diagnostic_health,
+            diagnostic_stop,
+            None,
+        ));
         workers.spawn(async move {
             let result = network(
                 source,
@@ -299,7 +307,59 @@ mod native {
         Ok(())
     }
 
-    async fn network(
+    pub(super) async fn observe(
+        diagnostic_view: ViewerHandle,
+        diagnostic_dir: Option<PathBuf>,
+        diagnostic_health: Option<rds_observe::HealthObserver>,
+        diagnostic_stop: CancellationToken,
+        scope: Option<(u64, u64)>,
+    ) -> anyhow::Result<()> {
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut recorder = diagnostics::Recorder::default();
+        let mut storage = match scope {
+            Some((tab, revision)) => {
+                diagnostic_storage::Storage::scoped(diagnostic_dir, tab, revision)
+            }
+            None => diagnostic_storage::Storage::new(diagnostic_dir),
+        };
+        loop {
+            tokio::select! {
+                _ = diagnostic_stop.cancelled() => break,
+                _ = tick.tick() => {
+                    diagnostic_view.heartbeat_ui();
+                    let snapshot = diagnostic_view.snapshot();
+                    let health = diagnostic_health.as_ref().and_then(rds_observe::HealthObserver::snapshot);
+                    let (value, incident) = recorder.observe_with_health(&snapshot, health, &storage.health());
+                    let json = serde_json::to_string(&value).ok();
+                    if let Some(json) = &json {
+                        tracing::info!(snapshot=%json, "viewer health");
+                    }
+                    storage.persist(json.map(String::into_bytes), incident, snapshot.elapsed_ms).await;
+                },
+            }
+        }
+        storage
+            .persist(
+                None,
+                recorder.finish(true),
+                diagnostic_view.snapshot().elapsed_ms,
+            )
+            .await;
+        let remaining = storage.health().incident_queue_pending;
+        if remaining > 0 {
+            tracing::warn!(
+                remaining,
+                "viewer shutdown retains unsaved incident windows in memory only"
+            );
+        }
+        if scope.is_some() {
+            storage.remove_snapshot().await;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn network(
         mut source: Source,
         options: &Options,
         view: &ViewerHandle,
@@ -320,7 +380,8 @@ mod native {
                 _ = stop.cancelled() => return Ok(()),
                 result = async {
                     match &mut source {
-                        Source::Managed { client,session,peer,grant } => {
+                        Source::Managed { client,session,peer,grant,binding } => {
+                            *peer = binding.target(peer);
                             view.stage("checking managed session");
                             if session.is_none() || client.selected(*session).await.is_err() {
                                 view.stage("connecting peer");
@@ -330,7 +391,7 @@ mod native {
                                 view.stage("verifying peer");
                                 let snapshot = client.snapshot().await?;
                                 let authenticated = snapshot.sessions.into_iter().find(|s| s.id == id).ok_or_else(|| anyhow::anyhow!("connected session disappeared"))?.peer;
-                                *peer = reconnect_target(peer,authenticated)?;
+                                *peer = binding.authenticated(peer,authenticated)?;
                                 *session = Some(id);
                             }
                             managed_session(client,session.ok_or_else(|| anyhow::anyhow!("no managed session"))?,options,view,input,&stop,&attempt).await
@@ -395,7 +456,10 @@ mod native {
         );
     }
 
-    fn reconnect_target(original: &str, authenticated: String) -> anyhow::Result<String> {
+    pub(super) fn reconnect_target(
+        original: &str,
+        authenticated: String,
+    ) -> anyhow::Result<String> {
         if let Ok(pinned) = rds_net::parse_target(original) {
             anyhow::ensure!(
                 pinned.id.to_string() == authenticated,
@@ -407,6 +471,30 @@ mod native {
             // A verified name freezes to its authenticated identity.
             Ok(authenticated)
         }
+    }
+
+    #[test]
+    fn tabs_share_authenticated_identity_across_settings_and_reconnects() {
+        let binding = PeerBinding::default();
+        let first = rds_net::SecretKey::generate().public().to_string();
+        let other = rds_net::SecretKey::generate().public().to_string();
+        let sibling = binding.clone();
+        assert_eq!(binding.target("mutable-name"), "mutable-name");
+        assert_eq!(
+            binding
+                .authenticated("mutable-name", first.clone())
+                .unwrap(),
+            first
+        );
+        assert_eq!(sibling.target("mutable-name"), first);
+        assert!(sibling.authenticated("mutable-name", other).is_err());
+        assert_eq!(binding.target("mutable-name"), first);
+        assert_eq!(
+            sibling
+                .authenticated("mutable-name", first.clone())
+                .unwrap(),
+            first
+        );
     }
 
     trait RetryInput: Send {
@@ -686,6 +774,7 @@ mod native {
                 session,
                 peer,
                 grant,
+                binding: _,
             } => {
                 let session = match session {
                     Some(session) => session,
@@ -837,6 +926,7 @@ pub async fn managed(
             session: Some(session),
             peer,
             grant,
+            binding: Default::default(),
         },
         options,
     )
@@ -858,6 +948,7 @@ pub async fn managed_target(
             session: None,
             peer: target,
             grant,
+            binding: Default::default(),
         },
         options,
     )

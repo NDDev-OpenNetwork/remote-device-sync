@@ -33,6 +33,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 rds-audio.workspace = true
+rds-desktop.workspace = true
 
 [lints]
 workspace = true

@@ -350,8 +350,16 @@ struct Harness {
     _server_ep: Endpoint,
     _client_ep: Endpoint,
     server_task: tokio::task::JoinHandle<()>,
+    _encoded_drain: EncodedDrain,
     /// Impairment counters (server-out, client-out) when impaired.
     impair: Option<(StatsHandle, StatsHandle)>,
+}
+
+struct EncodedDrain(tokio::task::JoinHandle<()>);
+impl Drop for EncodedDrain {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// A noq endpoint whose UDP socket is wrapped in `imp` impairment.
@@ -500,7 +508,7 @@ async fn harness_with_input(
     )
     .await;
     let conn = client_ep.connect(target, rds_core::ALPN).await.unwrap();
-    let session = DesktopSession::connect_opts(
+    let mut session = DesktopSession::connect_opts(
         &conn,
         DesktopHello {
             display: 0,
@@ -511,17 +519,29 @@ async fn harness_with_input(
         SessionOpts {
             clock: Some(clock.clone()),
             session: Some(next_session_id()),
+            // This harness measures protocol/header arrival, using fixed-size
+            // synthetic bytes rather than an H.264 bitstream. A viewer feature
+            // must not turn those bytes into decode failures and extra IDRs.
+            relay_encoded: true,
             ..Default::default()
         },
     )
     .await
     .unwrap();
+    let mut encoded = session
+        .encoded
+        .take()
+        .expect("opaque transport payload tap");
+    let encoded_drain = EncodedDrain(tokio::spawn(async move {
+        while encoded.recv().await.is_some() {}
+    }));
     Harness {
         session,
         clock,
         _server_ep: server_ep,
         _client_ep: client_ep,
         server_task,
+        _encoded_drain: encoded_drain,
         impair: impair_stats,
     }
 }
@@ -544,6 +564,27 @@ fn p95(v: Vec<u64>) -> u64 {
 
 fn p99(v: Vec<u64>) -> u64 {
     percentile(v, 99)
+}
+
+/// Header-arrival measurements must not manufacture recovery traffic merely
+/// because a build enables a codec for an unrelated native viewer feature.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synthetic_header_harness_does_not_request_codec_repairs() {
+    let _case = SESSION_CASE.lock().await;
+    let mut h = harness(60, 1024, 10_000, None, false).await;
+    let mut keys = 0;
+    for _ in 0..20 {
+        let header = tokio::time::timeout(Duration::from_secs(3), h.session.frame_headers.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        keys += u32::from(header.keyframe);
+    }
+    h.server_task.abort();
+    assert_eq!(
+        keys, 1,
+        "synthetic transport payloads caused unsolicited codec repair"
+    );
 }
 
 /// C5/G5: keyframe request round-trips — the next produced frame after
@@ -714,6 +755,19 @@ async fn view_only_and_failed_injection_never_ack_but_keep_control_alive() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn impaired_link_latency_gate() {
     let _case = SESSION_CASE.lock().await;
+    // Opt-in diagnostics expose the existing application timing probes without
+    // changing the workload, cohort, percentile calculation or latency budget.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter({
+            // Keep terminal diagnostics in failed CI output even when RUST_LOG
+            // is absent. Explicit profiling directives can add packet detail.
+            let directives = std::env::var("RUST_LOG").unwrap_or_default();
+            tracing_subscriber::EnvFilter::new(format!(
+                "warn,rds_desktop::session=debug,rds_desktop::client=debug,rds_desktop::control_timing=debug,rds_net::uni=debug,{directives}"
+            ))
+        })
+        .with_test_writer()
+        .try_init();
     // 60 fps of ~1 KB frames ≈ one datagram per frame — enough samples
     // to make percentiles meaningful without saturating the lossy link.
     let mut h = harness(60, 1024, 60, Some(Impairment::lossy()), true).await;
@@ -740,7 +794,12 @@ async fn impaired_link_latency_gate() {
                 offered += 1;
             }
             event = h.session.events.recv() => {
-                let event = event.expect("control reader ended under impairment");
+                let event = event.unwrap_or_else(|| panic!(
+                    "control reader ended under impairment: elapsed_ms={} offered={offered} completed={} pending={} frames={} last_seq={last_seq:?} server_finished={} encoded_drain_finished={} receive={:?}",
+                    h.clock.now_ms(), rtts.len(), outstanding.len(), latencies.len(),
+                    h.server_task.is_finished(), h._encoded_drain.0.is_finished(),
+                    h.session.receive_stats()
+                ));
                 if let DesktopEvent::Heartbeat { seq, ts_ms } = event {
                     // Every completed probe contributes one sample. Repeatedly
                     // sampling a cached RTT per media frame is biased and an
@@ -1259,7 +1318,7 @@ fn self_rss_kb() -> Option<u64> {
 /// `RelayDecoder` then rebuilds the chain and reports `NeedIdr` on a
 /// broken one — the caller forwards it over its own control path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn relay_mode_publishes_encoded_frames_and_viewer_decodes() {
+async fn relay_mode_preserves_payloads_and_defers_decode_to_consumer() {
     let _case = SESSION_CASE.lock().await;
     use rds_desktop::client::{RelayDecoder, RelayOutcome};
 

@@ -1,5 +1,78 @@
 # Native desktop viewer
 
+## Tabbed workspace
+
+The native application now opens a workspace with up to eight display tabs.
+Tabs can belong to several computers or different displays of the same computer.
+Use **Connect** to inspect a device through the local agent, then select a display
+or **Open all displays**. The inventory excludes a duplicated X11 root when
+physical monitor IDs are advertised. Existing connected computers also appear
+in the picker. A device without a usable desktop reports an error; the viewer
+does not create endpoint identities, issue grants or relax authorization.
+
+Click a tab or use Ctrl+Tab / Ctrl+Shift+Tab. Ordinary Tab belongs to the
+remote screen; local widgets receive keyboard presses only while their form or
+control owns input. Focus-generated synthetic keys never replay remote actions.
+Physical modifier flags belong to the window, so holding Control while cycling
+several tabs does not lose the shortcut after the first switch. Forwarded remote
+key/button ownership remains per tab and is released on selection changes.
+A tab's context menu moves it left or right. Closing a tab ends only its desktop channel; other tabs and unrelated
+SSH/sync streams remain owned by their existing sessions. Switching releases
+held input on the previous display. Hidden displays cannot initiate clipboard
+publication; a Copy or request already authorized while selected may finish its
+bounded handoff through the same native event loop.
+One native window/event loop/GPU presents the active mailbox; inactive displays
+retain one newest frame each. The old GPU texture is cleared before switching.
+
+**Settings** changes only the selected display: HD / Full HD / native geometry,
+1–240 FPS, local keyboard/mouse enablement, focused text clipboard and validated
+frame receipts. Apply restarts that desktop channel; other channels keep running.
+Local input settings never widen the remote grant. Reconnect retains the verified
+device identity across tabs and settings changes, even if its registry name changes.
+
+On the macOS viewer, Copy/Cut in a new tab supersedes older tab clipboard work.
+If Paste follows a tab switch before copied text arrives, one pending gesture
+waits up to five seconds. It retains the original Shift intent (including
+terminal paste), destination tab, settings revision and connection epoch.
+New input, focus loss, reconnect, closing either session, changed native
+clipboard ownership or expiry cancels it with a visible message. Closing the
+workspace cancels pending paste before processing a concurrent clipboard reply. No stale-text
+fallback or delayed paste into a different tab is permitted. Turning clipboard
+off leaves the remote computer's own paste shortcut available without reading
+the local clipboard. Linux native viewer clipboard publication remains unavailable;
+X11 server-side selection support does not imply that viewer capability.
+
+**Save workspace** writes bounded version-1 `viewer-workspace.json` preferences
+beside the default agent configuration. The file contains device references,
+tab order and per-display profiles, with optional paths to existing grant files;
+it contains no endpoint private key or embedded grant. The writer creates a
+private temporary file, syncs it, replaces the preference file and syncs its
+directory. A directory-sync failure after replacement reports an uncertain save.
+Unknown versions/fields, invalid references, oversized input and unsafe aliases
+are refused. Existing `viewer.json` is imported only when no saved workspace or
+explicit workspace file supersedes it, and is not rewritten.
+
+`--workspace-file PATH` selects an isolated workspace. Explicit command-line
+targets replace saved launch intent. `--all-displays` expands actual inventories
+within the eight-tab bound. `--separate-windows` retains independent native windows;
+headless, presentation-report and visual-probe modes retain their single-view
+contract. `--duration` bounds a workspace run as well as a separate window.
+The normal tabbed launch uses Full HD / 30 FPS defaults without a modal startup
+chooser; each tab's settings are available inside the window.
+An empty workspace reports Ready and holds no remote-session activity token;
+closing its last tab releases the macOS activity that otherwise prevents idle
+system sleep during a requested remote session.
+
+Workspace live diagnostics use a distinct tab/revision snapshot name; normal
+tab completion removes its live snapshot while bounded incidents remain in the
+existing private recorder. GPU uploads and frame/input state are counted for the
+owning tab. **About** contains the embedded fonts' unchanged copyright/license
+notices; native packaging includes the same notices.
+
+Current qualification and remaining platform/network boundaries are recorded in
+[the workspace report](reports/rds-tabbed-workspace-20261010.md). A synthetic
+native preview is not proof of multi-device network or installed acceptance.
+
 Automatic diagnostics also save `incident-<timestamp>-<pid>.json` windows in the
 private viewer log directory. Up to ten windows survive ordinary log rotation;
 each is capped at 256 KiB. They contain at most thirty prior snapshots and six
@@ -280,9 +353,10 @@ above media frames. TCP/sync bodies keep their existing priority. This local
 stream scheduling cannot overtake datagrams already emitted or bypass congestion
 and flow-control limits; complete mixed-load/renewal acceptance remains separate.
 
-The separate `rds-viewer` accepts `--control-dir` and `--grant-file`. When run
-without a target, it uses the selected managed session or an optional private
-`viewer.json` beside the endpoint key:
+The separate `rds-viewer` accepts `--control-dir` and `--grant-file`. The tabbed
+application uses saved workspace preferences or the optional legacy private
+`viewer.json` beside the endpoint key. The explicit separate-window mode retains
+the selected managed-session fallback:
 
 ```json
 {"schema_version":1,"target":"device-a","display":0,"max_fps":60}
@@ -356,8 +430,9 @@ contains no endpoint identity; the normal private viewer configuration applies.
 
 ## Quality selection
 
-The macOS application presents a native quality chooser when no explicit
-profile is configured. Full HD (1080p) is the default; HD (720p) and Original are
+The macOS separate-window application presents a native quality chooser when no
+explicit profile is configured. The workspace uses its in-window settings.
+Full HD (1080p) is the default; HD (720p) and Original are
 also available. `--resolution full-hd|hd|native` or a `resolution` value in
 `viewer.json` skips the chooser; the command-line value overrides the file.
 Headless runs never open the chooser. Output preserves aspect ratio and does not upscale a
