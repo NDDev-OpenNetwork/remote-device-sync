@@ -73,6 +73,23 @@ EOF
 }
 
 case "$GATE" in
+w1-sync-supervision)
+    note "gate w1-sync-supervision — terminal control and abandoned assembly"
+    green_bars
+    cargo test --locked -p rds-sync || fail "sync supervision contracts"
+    cargo run --locked --release -p rds-bench --example journal_preparation -- \
+        --json "$REPORTS/bench-w1-sync-supervision.json" \
+        --md "$REPORTS/bench-w1-sync-supervision.md" || fail "journal regression benchmark"
+    write_checkpoint "w1-sync-supervision" "pending review" \
+        "- fmt/workspace clippy/workspace tests: PASS
+- legacy refusal/FIN with receive half retained on Iroh and Noq: PASS
+- terminal refusal projection on both wire profiles: PASS
+- quiet control with paused time and abandoned queued assembly: PASS
+- existing v1/v2 completion, cancellation, journal and recovery contracts: PASS
+- local journal preparation regression benchmark: 100 samples/case
+- physical cancellation, power loss and installed qualification: NOT RUN" \
+        "$REPORTS/bench-w1-sync-supervision.json" "$REPORTS/bench-w1-sync-supervision.md"
+    ;;
 w8-journal-scope)
     note "gate w8-journal-scope — destination-bound resume and legacy attribution"
     green_bars
