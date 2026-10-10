@@ -115,3 +115,16 @@ rate/size/deadline combinations are refused before backend selection or endpoint
 creation. Regressions preserve bulk size, reject the original impossible budget
 before an invalid backend is reached, and cover invalid numeric inputs. The
 changed registered checkpoint must complete before a passing receipt is emitted.
+
+## Completed repaired checkpoint
+
+The registered C1 run at `120a2cf` completed: 1,265 test executions passed,
+zero failures, workspace/owned Clippy and deterministic simulation passed.
+The separate full engine suite passed 433 tests.
+[The repaired benchmark](bench-20261010-210055-noq.json) verified 4,194,304
+calibration bytes in 4.474s: 937,553B/s against 1,250,000B/s, ratio 0.750
+within the original 0.4–1.2 band and 15sec deadline. The ordinary bulk payload
+remains 32MiB. Receipt validation found 28 entries with an intact hash chain.
+The original failed calibration suite and original 521ms control failure remain
+retained; this checkpoint does not close physical acceptance or establish the
+original CI tail's cause.

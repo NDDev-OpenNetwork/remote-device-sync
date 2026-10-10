@@ -139,5 +139,18 @@
     "ideal_payload_minimum_s": 26.8435456,
     "cause": "physically impossible preexisting default budget",
     "repair": "independent calibration payload default4MiB; ordinary bulk payload32MiB, operation15sec and0.4..1.2 ratio retained; preflight before backend/world"
+  },
+  "completed_checkpoint": {
+    "source": "120a2cf69eeea90e75fc4925738bce49a3784e30",
+    "id": "c1",
+    "passed_executions": 1265,
+    "failed_executions": 0,
+    "bench_report": "bench-20261010-210055-noq.json",
+    "verified_calibration_bytes": 4194304,
+    "calibration_completion_ns": 4473668208,
+    "measured_bytes_s": 937553,
+    "expected_bytes_s": 1250000,
+    "ratio_milli": 750,
+    "receipt_count": 28
   }
 }
