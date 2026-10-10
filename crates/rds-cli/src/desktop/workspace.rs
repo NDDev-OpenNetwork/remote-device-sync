@@ -20,6 +20,14 @@ pub struct DeviceConfig {
     pub grant_file: Option<PathBuf>,
 }
 
+impl DeviceConfig {
+    fn targets_peer(&self, peer: &str) -> bool {
+        // A ticket and its manager session's bare identity name the same
+        // computer. Keep the saved routes, profile key and grant reference.
+        rds_net::parse_target(&self.target).is_ok_and(|target| target.id.to_string() == peer)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
@@ -252,7 +260,7 @@ async fn actor(
             if config
                 .devices
                 .iter()
-                .any(|device| device.target == session.peer)
+                .any(|device| device.targets_peer(&session.peer))
             {
                 continue;
             }
@@ -394,4 +402,48 @@ async fn actor(
         closing.spawn(session.finish());
     }
     while closing.join_next().await.is_some() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connected_peer_discovery_keeps_the_existing_ticket_profile() {
+        let peer = rds_net::SecretKey::from_bytes(&[41; 32]).public();
+        let other = rds_net::SecretKey::from_bytes(&[42; 32]).public();
+        let address =
+            rds_net::EndpointAddr::new(peer).with_ip_addr("127.0.0.1:9000".parse().unwrap());
+        let device = DeviceConfig {
+            key: "saved-profile".into(),
+            target: rds_net::Ticket(address.clone()).to_string(),
+            label: "Work computer".into(),
+            grant_file: Some("external-grant.json".into()),
+        };
+        assert!(device.targets_peer(&peer.to_string()));
+        assert!(!device.targets_peer(&other.to_string()));
+        assert_eq!(rds_net::parse_target(&device.target).unwrap(), address);
+        assert_eq!(device.grant_file, Some("external-grant.json".into()));
+
+        let alternate_route = DeviceConfig {
+            target: rds_net::Ticket(address.with_ip_addr("127.0.0.1:9001".parse().unwrap()))
+                .to_string(),
+            ..device.clone()
+        };
+        assert!(alternate_route.targets_peer(&peer.to_string()));
+
+        let bare = DeviceConfig {
+            target: peer.to_string(),
+            ..device.clone()
+        };
+        assert!(bare.targets_peer(&peer.to_string()));
+        assert!(!bare.targets_peer(&other.to_string()));
+        for target in ["named-computer", "rds1invalid-ticket", ""] {
+            let unresolved = DeviceConfig {
+                target: target.into(),
+                ..device.clone()
+            };
+            assert!(!unresolved.targets_peer(&peer.to_string()));
+        }
+    }
 }
