@@ -61,3 +61,7 @@ required-features = ["viewer"]
 [[example]]
 name = "workspace_preview"
 required-features = ["viewer"]
+
+[[example]]
+name = "synthetic_decode_probe"
+required-features = ["x11"]
