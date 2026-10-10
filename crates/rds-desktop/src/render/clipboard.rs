@@ -30,6 +30,30 @@ impl Clipboard {
                     .as_ref()
                     .is_none_or(|(_, _, at)| at.elapsed() > Duration::from_secs(30)))
     }
+    /// Only already authorized work or one explicit Copy can outlive selection.
+    /// Native ownership changes supersede both, without reading clipboard text.
+    pub(super) fn handoff_pending(&mut self, generation: i64) -> bool {
+        if let Some((before, at)) = self.copy_intent {
+            if before == generation && at.elapsed() < COPY_HANDOFF {
+                return true;
+            }
+            self.reset();
+            return false;
+        }
+        if !self.authorized {
+            return false;
+        }
+        let pending = self.generation == Some(generation)
+            && (self.complete.is_some()
+                || self
+                    .requested
+                    .as_ref()
+                    .is_some_and(|(_, _, at)| at.elapsed() < Duration::from_secs(30)));
+        if !pending {
+            self.reset();
+        }
+        pending
+    }
     pub(super) fn focus(&mut self, focused: bool) {
         self.focused = focused;
         if !focused && !self.copy_pending() {
@@ -149,6 +173,59 @@ impl Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hidden_tab_handoff_finishes_without_reselecting_and_never_rearms_itself() {
+        let mut old = Clipboard::default();
+        old.focus(true);
+        old.copying(17);
+        old.focus(false);
+        assert!(old.handoff_pending(17));
+        old.offer(1, ClipboardFormat::TextUtf8, 3);
+        assert!(old.request(17).is_some());
+        assert!(old.handoff_pending(17));
+        old.chunk(1, 0, 3, b"abc".to_vec()).unwrap();
+        assert!(old.handoff_pending(17));
+        assert_eq!(old.publish(17).as_deref(), Some("abc"));
+        assert!(!old.handoff_pending(18));
+        old.offer(2, ClipboardFormat::TextUtf8, 3);
+        assert!(!old.needs_work());
+    }
+    #[test]
+    fn superseded_native_or_remote_copy_cannot_publish_a_hidden_reply() {
+        for newer_local in [false, true] {
+            let mut old = Clipboard::default();
+            old.focus(true);
+            old.copying(17);
+            old.offer(1, ClipboardFormat::TextUtf8, 3);
+            assert!(old.request(17).is_some());
+            old.focus(false);
+            if newer_local {
+                assert!(!old.handoff_pending(18));
+            } else {
+                old.reset(); // New explicit Copy in another tab revokes the old lease.
+            }
+            old.chunk(1, 0, 3, b"old".to_vec()).unwrap();
+            assert!(old.publish(18).is_none());
+            assert!(!old.handoff_pending(18));
+        }
+    }
+    #[test]
+    fn handoff_expiry_releases_ownership_but_does_not_discard_a_fresh_focused_offer() {
+        let mut c = Clipboard::default();
+        c.focus(true);
+        c.offer(1, ClipboardFormat::TextUtf8, 3);
+        assert!(!c.handoff_pending(17));
+        assert!(c.request(17).is_some());
+        c.focus(false);
+        c.requested.as_mut().unwrap().2 = Instant::now() - Duration::from_secs(30);
+        assert!(!c.handoff_pending(17));
+        c.chunk(1, 0, 3, b"old".to_vec()).unwrap();
+        assert!(c.publish(17).is_none());
+        c.focus(true);
+        c.copying(17);
+        c.copy_intent.as_mut().unwrap().1 = Instant::now() - COPY_HANDOFF;
+        assert!(!c.handoff_pending(17));
+    }
     #[test]
     fn explicit_copy_accepts_one_delayed_offer_after_switching_apps() {
         let mut c = Clipboard::default();

@@ -1,6 +1,7 @@
 # Workspace clipboard handoff — 2026-10-10
 
-Status: reproduced by source review; correction and qualification in progress.
+Status: implementation, 43 render regressions and strict desktop/CLI Clippy pass;
+native handoff and complete combined checkpoint remain in progress.
 Milestone: W6/W9.2 native workspace input ownership.
 
 The workspace retains each hidden tab's clipboard mailbox, but only drains the
@@ -32,3 +33,25 @@ identifies changed ownership; [ICCCM selection transfer](https://xorg.freedeskto
 defines owner/requestor cooperation; [winit 0.30.13 events](https://docs.rs/winit/0.30.13/winit/event/enum.WindowEvent.html)
 separate focus, keyboard and occlusion. These contracts support explicit
 ownership and cancellation; they do not prove a particular latency bound.
+
+## Implemented boundary
+
+A single workspace clipboard owner drains the selected or authorized hidden
+mailbox. Explicit Control/Command Copy/Cut revokes other tabs' pending transfers.
+The AppKit generation check prevents an old result from replacing a newer local
+copy. The ordinary single-window path shares the same session work function.
+
+One deferred paste waits at most five seconds and is bound to destination tab,
+settings revision and live connection epoch. New input, focus loss, changed
+native ownership, closing/restarting a relevant tab and expiry cancel the
+gesture. Its original Shift intent is restored for the synthetic Control+V
+chord while every currently held modifier is retained afterwards. Physical V
+release/repeat cannot replay the consumed paste. Disabled workspace clipboard
+no longer reads or uploads native text; the remote paste shortcut still works.
+
+Deterministic checks cover the hidden authorized handoff, superseded replies,
+local ownership changes, expiry, preservation of fresh focused offers,
+destination/session staleness and delayed modifier transitions. Initial strict
+Clippy found a collapsible conditional; corrected code passes without a lint
+exception. These checks are not native cross-tab clipboard or installed
+qualification. Linux native clipboard publication remains explicitly unavailable.

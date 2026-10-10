@@ -33,9 +33,64 @@ pub(super) fn command_chord(held: &std::collections::BTreeSet<u32>, key: u32) ->
     chord
 }
 
+/// Replay only the original paste gesture after a clipboard handoff. Shift is
+/// captured at that gesture; the physical modifier state may since have changed.
+pub(super) fn deferred_paste_chord(
+    held: &std::collections::BTreeSet<u32>,
+    shift: bool,
+) -> Vec<InputKind> {
+    let mut effective = held.clone();
+    let mut before = vec![];
+    let mut after = vec![];
+    if shift && !held.contains(&42) && !held.contains(&54) {
+        effective.insert(42);
+        before.push(InputKind::KeyDown { code: 42 });
+        after.push(InputKind::KeyUp { code: 42 });
+    } else if !shift {
+        for code in [42, 54] {
+            if effective.remove(&code) {
+                before.push(InputKind::KeyUp { code });
+                after.push(InputKind::KeyDown { code });
+            }
+        }
+    }
+    before.extend(command_paste_chord(&effective));
+    before.extend(after);
+    before
+}
+
 #[cfg(test)]
 mod command_paste_tests {
     use super::*;
+    #[test]
+    fn delayed_paste_preserves_original_shift_and_restores_current_modifiers() {
+        for held in [vec![], vec![29], vec![125], vec![42, 54, 97, 126]] {
+            for shift in [false, true] {
+                let mut pressed: std::collections::BTreeSet<u32> = held.iter().copied().collect();
+                let original = pressed.clone();
+                let mut pastes = 0;
+                for event in deferred_paste_chord(&original, shift) {
+                    match event {
+                        InputKind::KeyDown { code } => {
+                            assert!(pressed.insert(code), "duplicate key press");
+                            if code == 47 {
+                                pastes += 1;
+                                assert!(pressed.contains(&29) || pressed.contains(&97));
+                                assert!(!pressed.contains(&125) && !pressed.contains(&126));
+                                assert_eq!(pressed.contains(&42) || pressed.contains(&54), shift);
+                            }
+                        }
+                        InputKind::KeyUp { code } => {
+                            assert!(pressed.remove(&code));
+                        }
+                        _ => panic!("unexpected pointer event"),
+                    }
+                }
+                assert_eq!(pastes, 1);
+                assert_eq!(pressed, original);
+            }
+        }
+    }
     #[test]
     fn command_paste_restores_held_modifiers_and_never_pastes_with_super_held() {
         for held in [vec![125], vec![126], vec![42, 125], vec![97, 125, 126]] {
