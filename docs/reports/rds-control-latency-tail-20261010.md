@@ -3,6 +3,32 @@
 Status: investigation open; no latency budget or production transport change.
 Scope: W0.1/W6 control measurement and the stability plan's native rollout gate.
 
+## October 10 macOS recurrence and next experiment
+
+[PR150 CI run 38015685163](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/38015685163)
+at `89db733` passed the default macOS workspace suite and later failed in the
+desktop-feature lane. The unchanged 601-probe cohort reported RTT p50 164 ms,
+p95 411 ms and p99 584 ms; 624 frame arrivals had p95 190 ms, p99 321 ms and
+queue p95 1 ms. The sync regressions, including the original failing scoped
+offer, passed. Source/native packages and supply-chain jobs also passed; this
+does not make the whole PR qualification green.
+
+Source review found a profile difference requiring verification before tuning
+transport: `SyntheticProducer` generates a sequence prefix plus zero bytes and
+labels them H.264. Without `x11`, nonempty bodies are consumed as buffered; with
+the feature, `Delivery::decode` invokes OpenH264 and may request repair on failure.
+This is a hypothesis about workload differences, not an established cause of
+the RTT failure. The investigation branch integrates the exact sync code head
+without changing production timing or the 400 ms limit.
+
+Next: probe those exact synthetic bytes against the compiled decoder, capture
+the failing feature profile's existing application/decode/transport timing, and
+separate decoder behavior, observed socket scheduling and ordered loss recovery.
+Keep normal and instrumented cohorts distinct. If the fixture differs by feature,
+document and test its intended contract before changing its workload; if no such
+difference is observed, retain that negative finding and continue delivery analysis.
+Neither an increased deadline nor a passing retry closes the original failure.
+
 [Main CI run 37999738254](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/37999738254)
 at `6825d5d` failed the Ubuntu impairment case with 601 completed probes:
 RTT p50 174 ms, p95 445 ms and p99 683 ms versus the unchanged 400 ms p95 budget.
