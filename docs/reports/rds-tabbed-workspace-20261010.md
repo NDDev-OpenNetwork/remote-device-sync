@@ -3,9 +3,9 @@
 Status: implementation and native preview verified; final integration and
 platform/network qualification in progress, W6/W9.2.
 
-The current viewer can launch up to eight independent processes for explicit
-device/display pairs, but has no tab bar, connection picker or in-window settings.
-The requested product is one convenient workspace with multiple devices and
+Before this wave, the viewer could launch up to eight independent processes for
+explicit device/display pairs, without a tab bar, picker or in-window settings.
+This wave implements one convenient workspace with multiple devices and
 multiple displays, independently configurable and switchable without disconnecting
 other sessions. Existing managed session identities, monitor inventory, bounded
 input/clipboard queues and per-session desktop routes remain the transport owners.
@@ -123,3 +123,18 @@ native execution, installed fleet acceptance, physical capture/input, cross-tab
 clipboard handoff and sustained resource/latency qualification remain separate.
 The later empty-workspace Ready/activity fixes also require the final artifact;
 an earlier compiled candidate is not relabeled as that source.
+
+## Combined source checkpoint
+
+The registered checkpoint on clean `f686ac2` passed 1,130 test executions,
+zero failed and two explicitly ignored native cases. It includes explicit
+Noq client-feature selection for the two-backend coexistence case. The
+18-record receipt chain verifies. The 100-sample 1/4/8-tab model benchmark
+measured batch p95 48.833/96.292/106.834 µs on this run; it remains a model
+measurement, not native GPU/network latency. The macOS production binaries
+also built successfully from exactly that source with Rust 1.98.1.
+
+Source review confirmed that an authorized Copy reply could remain queued in
+a hidden tab because only the active mailbox was drained. That correction
+is a separate source change, and this earlier checkpoint/build does not
+qualify it. Neither candidate has been described as installed acceptance.
