@@ -84,6 +84,7 @@ impl Viewer {
                 .map_err(|e| DesktopError::Input(e.to_string()))?;
         }
         let (mut viewer, _view, _input) = Self::new(0)?;
+        viewer.app.session.handle.status("Ready");
         let (updates, receive_updates) = std::sync::mpsc::sync_channel(64);
         let (events, receive_events) = tokio::sync::mpsc::channel(32);
         viewer.app.workspace = Some(Deck {
