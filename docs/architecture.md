@@ -755,6 +755,15 @@ retain their separate later requirements.
 
 ### Native viewer stability, video profile and text paste increment
 
+The optional native workspace adds an egui layer to the existing winit/wgpu
+presenter. `render::workspace` owns bounded tab intent and settings;
+`render::viewer::workspace` owns session mailboxes/input focus and the visible
+surface; `rds-cli::desktop::workspace` owns managed network workers and private
+preferences. Dependencies still point down the crate map. No new service or
+wire version is introduced. Each device's tabs retain a shared authenticated
+peer binding through settings/reconnect; only the focused tab routes input and
+publishes clipboard. See [native viewer](native-viewer.md#tabbed-workspace).
+
 The additive `DesktopV3` remote greeting and `DesktopProfile` local IPC command
 carry a per-session video-height choice while keeping prior tags and formats.
 See [the native contract](native-viewer.md) for default Full HD, bounds and
