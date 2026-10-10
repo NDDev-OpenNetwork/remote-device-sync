@@ -40,6 +40,9 @@ headless, presentation-report and visual-probe modes retain their single-view
 contract. `--duration` bounds a workspace run as well as a separate window.
 The normal tabbed launch uses Full HD / 30 FPS defaults without a modal startup
 chooser; each tab's settings are available inside the window.
+An empty workspace reports Ready and holds no remote-session activity token;
+closing its last tab releases the macOS activity that otherwise prevents idle
+system sleep during a requested remote session.
 
 Workspace live diagnostics use a distinct tab/revision snapshot name; normal
 tab completion removes its live snapshot while bounded incidents remain in the

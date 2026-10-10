@@ -70,3 +70,56 @@ the repository-wide license allowlist remains unchanged. Reviewed primary
 and the bundled Ubuntu font license, with the official
 [cargo-deny scoped-exception contract](https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html#exceptions).
 The fonts remain unmodified. Repeat the full all-feature dependency check.
+
+## Source-bound checkpoint and managed native sessions
+
+At clean `3fe2a49`, the first registered workspace checkpoint passed 1,129 test
+executions, zero failed and two explicitly ignored. The original command for
+`multiple_desktops` selected Iroh only: Noq is gated by the owning client's
+feature, not merely by a transitive transport feature. The gate and CI now
+explicitly enable `rds-client/transport-noq`; the follow-up passed both internal
+backend cases. The earlier generated report was corrected rather than claiming
+coverage it did not run. The all-feature dependency check also passed after
+the exact font-notice change.
+
+The release model benchmark used 100 samples of 1,024 selection/configuration/
+reorder/close/reopen transitions each at 1, 4 and 8 open tabs. Batch p95 was
+66.833, 84.250 and 95.333 µs. Every sample checked capacity, stale revisions,
+non-reused identity and empty final ownership. These are state-model timings,
+not GPU, network, input-to-pixel or memory-soak results.
+
+The `workspace_managed_preview` fixture at `7481fb4` then exercised the production
+workspace orchestrator through a real same-UID local manager, two loopback peers,
+three independently encoded H.264 displays and synthetic input sinks. It never
+captures an OS display or injects input into another application. Two fixture
+setup failures are retained: an overlong macOS temporary socket path and a
+dispatcher that initially handled V5 but omitted the correctly requested V4.
+Both were corrected before reporting successful qualification.
+
+| Backend | Display | Opens / closes | Requested FPS | Produced frames | Scoped input events |
+|---|---|---|---|---|---|
+| Noq | First peer, 0 | 1 / 1 | 10 | 2326 | 11 |
+| Noq | First peer, 1 | 2 / 2 | 10 → 20 | 2485 | 7 |
+| Noq | Second peer, 0 | 1 / 1 | 10 | 2327 | 7 |
+| Iroh | First peer, 0 | 1 / 1 | 10 | 2325 | 9 |
+| Iroh | First peer, 1 | 1 / 1 | 10 | 1148 | 7 |
+| Iroh | Second peer, 0 | 1 / 1 | 10 | 2326 | 31 |
+
+Both 240-second runs retained the manager's original endpoint identity and ended
+with matching open/close counts and no held synthetic keys. Native interaction
+changed only the selected Noq display to 20 FPS; its siblings were not reopened.
+On Iroh, closing one display left both remaining views/input paths functioning.
+Saving persisted exactly those two remaining tabs with mode 0600. A live Iroh
+observation recorded 1,649 received and 1,567 submitted frames on the visible
+second peer, zero pending input acknowledgements, and an actually visible native
+window. The hidden first peer continued receiving with no visible-submission
+claim. During the Noq run, macOS initially reported the window occluded despite
+fresh decoded frames; only after entering full screen were fresh presentation
+and matching tab colors verified. Cached screenshots were not treated as live
+presentation evidence.
+
+This qualifies the loopback native/manager/transport/codec path on macOS. Linux
+native execution, installed fleet acceptance, physical capture/input, cross-tab
+clipboard handoff and sustained resource/latency qualification remain separate.
+The later empty-workspace Ready/activity fixes also require the final artifact;
+an earlier compiled candidate is not relabeled as that source.
