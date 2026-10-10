@@ -95,3 +95,13 @@ frame cohort had 624 arrivals, p95 190 ms and queue p95 1 ms. This is a recurren
 of the separate latency investigation, not a successful overall CI run. No
 rerun, timeout increase or local passing result is used to retire that failure.
 Further platform results must be recorded before source/native promotion.
+
+The final documentation-head Ubuntu run
+[38017840332](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/38017840332)
+then exposed a separate fixture assumption: immediately reopening the journal
+after async cancellation occasionally returned `WouldBlock`. The production
+contract deliberately retains ownership until its blocking writer actually
+exits. The regression now observes that release under a separate five-second
+bound, retrying only `WouldBlock`; other filesystem errors still fail immediately.
+The original five-second control-termination bound and 60-second service budget
+are unchanged. This does not force-release locks or change the disk-work lifetime.

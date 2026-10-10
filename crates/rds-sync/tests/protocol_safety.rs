@@ -183,7 +183,24 @@ async fn legacy_receive_interrupted(fin: bool) {
             std::fs::read(tmp.0.join("data")).unwrap(),
             b"old destination"
         );
-        let resumed = rds_sync::journal::Journal::open(&tmp.0, "data", &manifest).unwrap();
+        // Returning the canceled async receive does not join an already-running
+        // blocking writer. Its ownership must remain real until that worker
+        // observes cancellation; wait for the documented lock-release boundary.
+        let resumed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rds_sync::journal::Journal::open(&tmp.0, "data", &manifest) {
+                    Ok(journal) => break journal,
+                    Err(rds_sync::SyncError::Io(error))
+                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("receive journal failed after cancellation: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("canceled receive did not release actual disk ownership");
         assert_eq!(
             resumed.need(),
             vec![0],
