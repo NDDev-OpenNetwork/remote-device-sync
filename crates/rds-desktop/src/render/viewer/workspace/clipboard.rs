@@ -109,6 +109,14 @@ impl App {
                     .clipboard_owner
                     .is_none_or(|id| Some(id) == deck.active),
         );
+        // The ordinary video tick must not poll the native pasteboard. AppKit
+        // ownership is needed only for an offer, completed text or a handoff.
+        if deck.clipboard_owner.is_none()
+            && !lock(&self.session.handle.state).clipboard.needs_work()
+        {
+            self.workspace = Some(deck);
+            return true;
+        }
         let Ok(generation) = super::super::super::platform::clipboard_generation() else {
             self.workspace = Some(deck);
             return true;

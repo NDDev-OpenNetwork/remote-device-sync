@@ -208,6 +208,7 @@ impl App {
                     ..
                 }
                 | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorMoved { .. }
         ) && deck.pending_paste.take().is_some()
         {
             deck.clipboard_message("Paste canceled by new interaction");
