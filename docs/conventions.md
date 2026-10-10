@@ -80,6 +80,17 @@ Rules every change follows. CI enforces what it can; the rest is review.
 - Benchmarks are acceptance gates for the transport and media work —
   numbers land in `docs/reports/` per roadmap.
 
+## Native build cache
+
+Native CMake dependencies use an out-of-source build directory and a local
+install prefix under the Cargo output. Reuse a configured native cache only
+with the same compiler/toolchain identity. If that identity changes, preserve
+the failed evidence and configure a fresh scoped build tree with all required
+flags together. An unexpected system install path is a configuration failure;
+do not elevate privileges or widen global directory permissions to finish it.
+See [CMake build trees](https://cmake.org/cmake/help/latest/manual/cmake.1.html)
+and [install prefix](https://cmake.org/cmake/help/latest/variable/CMAKE_INSTALL_PREFIX.html).
+
 ## Commits and docs
 
 - English only. Signed commits on `main` (ruleset enforced).
