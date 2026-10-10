@@ -219,13 +219,42 @@ fn serve(endpoint: Endpoint, computer: usize, stats: Stats) -> tokio::task::Join
                                 .unwrap();
                                 send.finish().unwrap();
                             }
-                            StreamHello::DesktopV5 {
-                                session,
-                                hello,
-                                payload_receipts,
-                                clipboard,
-                                ..
-                            } => {
+                            greeting @ (StreamHello::DesktopV2 { .. }
+                            | StreamHello::DesktopV3 { .. }
+                            | StreamHello::DesktopV4 { .. }
+                            | StreamHello::DesktopV5 { .. }) => {
+                                let (session, hello, payload_receipts, clipboard, ack) =
+                                    match greeting {
+                                        StreamHello::DesktopV5 {
+                                            session,
+                                            hello,
+                                            payload_receipts,
+                                            clipboard,
+                                            ..
+                                        } => (
+                                            session,
+                                            hello,
+                                            payload_receipts,
+                                            clipboard,
+                                            HelloAck::DesktopV5(caps(computer)),
+                                        ),
+                                        StreamHello::DesktopV4 { session, hello, .. } => (
+                                            session,
+                                            hello,
+                                            true,
+                                            false,
+                                            HelloAck::DesktopV4(caps(computer)),
+                                        ),
+                                        StreamHello::DesktopV2 { session, hello }
+                                        | StreamHello::DesktopV3 { session, hello, .. } => (
+                                            session,
+                                            hello,
+                                            false,
+                                            false,
+                                            HelloAck::Desktop(caps(computer)),
+                                        ),
+                                        _ => unreachable!("desktop greeting matched above"),
+                                    };
                                 assert!(
                                     caps(computer)
                                         .displays
@@ -238,9 +267,7 @@ fn serve(endpoint: Endpoint, computer: usize, stats: Stats) -> tokio::task::Join
                                     stats[index].opened += 1;
                                     stats[index].fps.push(hello.max_fps);
                                 }
-                                write_frame(&mut send, &HelloAck::DesktopV5(caps(computer)))
-                                    .await
-                                    .unwrap();
+                                write_frame(&mut send, &ack).await.unwrap();
                                 let config = SessionConfig {
                                     frame_route: Some(UniHello::DesktopFrames { id: session }),
                                     payload_receipts,
