@@ -1,10 +1,10 @@
-# Checkpoint W6-TABBED-WORKSPACE — 20261010-045544
+# Checkpoint W6-TABBED-WORKSPACE — 20261010-051706
 
 Verdict: **automated checkpoint PASS; native/installed acceptance remains open**
 
-Source: `f686ac215ad872a711360ad925ade96273ffb300`, clean before the gate.
-1,130 passing test executions, zero failed, two explicitly ignored native cases.
-Receipt chain: 18 records, verified intact.
+Source: clean `6008b424464f225e1bb2f6cd6e5cbb0fa72f0362`.
+1,135 passing test executions, zero failed, two explicit native ignores.
+Receipt chain: 19 records, verified intact.
 
 ## Automated checks
 - fmt/workspace clippy/workspace tests: PASS
@@ -20,13 +20,11 @@ Receipt chain: 18 records, verified intact.
 - [x] docs/ updated for anything this wave changed
 - [x] security/unsafe review done for new code paths
 
-Review scope: the workspace/feature suites and both-transport coexistence gate
-ran successfully. Existing native macOS synthetic interaction and managed
-loopback evidence are in [the workspace report](rds-tabbed-workspace-20261010.md).
-No new unsafe block, credential storage or wire authorization bypass is added
-by the tabbed workspace; UI/font license notices are retained. The separate
-clipboard-handoff review identified hidden-mailbox processing that needs its
-own correction and qualification. Physical clipboard/input, Linux native
-execution, sustained GPU/resource measurements and installed convergence are
-not marked complete. Historical failed control RTT cohorts remain evidence;
-this checkpoint does not establish every observed runtime latency cause.
+Review retains the previous private/native boundaries and historical failed
+RTT cohorts. Source `6008b42` includes the clipboard handoff, with 178 passing
+feature-library tests and a successful macOS production build. Native delayed
+Copy/switch/Paste counters confirmed transfer ownership, but the subsequent
+plain-Tab interaction exposed local-widget interception. Its later correction
+and native revalidation are separate from this successful earlier checkpoint.
+Neither source qualification nor a synthetic peer establishes installed fleet,
+physical capture/input, full native clipboard or long-duration resource acceptance.
