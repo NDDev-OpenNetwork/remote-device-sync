@@ -687,6 +687,7 @@ changed with this filesystem adapter.
   media backlog. Network recovery, shared-carrier congestion, control stream
   ordering and native scheduling can still introduce long latency tails;
   bounded queues do not establish an end-to-end latency guarantee.
+
 - Every handshake and stream stage is stall-bounded: agent stream hello
   15s, desktop session ack / frame stream header+body 30s, relay
   register 15s, uni-stream tag 10s, CLI acks 15s and connect 30s,
@@ -695,6 +696,13 @@ changed with this filesystem adapter.
 - Agent state mutexes recover from poisoning (`into_inner`) — one
   panicked holder cannot deny service forever, and request paths refuse
   explicitly instead of `unreachable!`.
+
+BBRv3 now replaces its nominal 1ms startup pacing rate once it has an actual
+tracked-packet RTT. The first sample uses packet departure/ACK time: Noq updates
+the transport RTT estimator after congestion callbacks. This keeps a sparse
+flow from retaining a rate derived from the nominal RTT throughout STARTUP.
+The shared engine applies the correction to Iroh and owned Noq; ordinary
+bandwidth growth, stream ordering and loss-detection thresholds are unchanged.
 
 ### Observability
 

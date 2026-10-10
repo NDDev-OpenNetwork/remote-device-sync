@@ -458,6 +458,10 @@ pub struct Bbr3 {
     /// equivalent to BBR.full_bw_reached: A boolean that records whether BBR estimates that it has
     /// ever fully utilized its available bandwidth over the lifetime of the connection.
     full_bw_reached: bool,
+    /// Whether the nominal 1ms startup pacing rate has been replaced using
+    /// this controller's first measured packet RTT. Application-limited
+    /// STARTUP otherwise only raises that nominal rate, potentially forever.
+    has_seen_rtt: bool,
     /// equivalent to BBR.full_bw_now: A boolean that records whether BBR estimates that it has
     /// fully utilized its available bandwidth since it most recetly started looking.
     full_bw_now: bool,
@@ -659,6 +663,7 @@ impl Bbr3 {
             extra_acked_delivered: 0,
             extra_acked_filter: MaxFilter::new(EXTRA_ACKED_FILTER_LEN as u64),
             full_bw_reached: false,
+            has_seen_rtt: false,
             full_bw_now: false,
             full_bw: 0.0,
             full_bw_count: 0,
@@ -1445,6 +1450,16 @@ impl Bbr3 {
 
     /// equivalent to BBRSetPacingRateWithGain <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.2-7>
     fn set_pacing_rate_with_gain(&mut self, gain: f64) {
+        if !self.has_seen_rtt && self.min_rtt != Duration::from_secs(u64::MAX) {
+            self.has_seen_rtt = true;
+            // Noq updates its transport RTT estimator after the ACK callbacks.
+            // BBR's tracked packet RTT is already measured here; an initial or
+            // validation estimate is not a substitute. Match Linux BBR's 1us
+            // floor for a zero sample, including fast loopback paths.
+            let rtt = Ord::max(self.min_rtt, Duration::from_micros(1));
+            self.pacing_rate =
+                self.startup_pacing_gain * self.initial_cwnd as f64 / rtt.as_secs_f64();
+        }
         let rate = gain * self.bw * (100.0 - self.pacing_margin_percent) / 100.0;
         if self.full_bw_reached || rate > self.pacing_rate {
             self.pacing_rate = rate;
@@ -1661,7 +1676,7 @@ impl Bbr3 {
         packet_number: u64,
         space: SpaceKind,
         _app_limited: bool,
-        rtt: &RttEstimator,
+        _rtt: &RttEstimator,
     ) {
         self.check_recovery_done(sent);
         self.delivered += bytes;
@@ -1701,7 +1716,7 @@ impl Bbr3 {
                 }
             } else {
                 let rate_sample = BbrRateSample {
-                    rtt: rtt.get(),
+                    rtt: now - p.send_time,
                     interval: Duration::ZERO,
                     delivery_rate: 0.0,
                     is_app_limited: p.is_app_limited,
@@ -2205,6 +2220,95 @@ mod test {
     }
 
     #[test]
+    fn startup_pacing_uses_its_first_packet_rtt_and_recalibrates_once() {
+        let now = Instant::now();
+        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), 1200);
+        let mut rtt = RttEstimator::new(Duration::from_millis(333));
+        let placeholder = bbr.pacing_rate;
+        // The transport estimator still has only an initial/validation
+        // estimate during the first ACK callback. Use the tracked packet's
+        // actual RTT instead, without treating that estimate as a sample.
+        rtt.reset_initial_rtt(Duration::from_millis(80));
+        bbr.on_packet_sent(now, 1200, 0, SpaceKind::Data);
+        assert_eq!(bbr.pacing_rate, placeholder);
+        bbr.on_ack(
+            now + Duration::from_millis(40),
+            now,
+            1200,
+            0,
+            SpaceKind::Data,
+            true,
+            &rtt,
+        );
+        let calibrated = bbr.startup_pacing_gain * bbr.initial_cwnd as f64 / 0.040;
+        assert!(
+            (bbr.pacing_rate - calibrated).abs() < 0.001,
+            "startup kept placeholder pacing: actual={} measured-RTT rate={calibrated}",
+            bbr.pacing_rate
+        );
+        assert_eq!(bbr.send_quantum, 2400);
+        assert_eq!(bbr.state, BbrState::Startup);
+        assert!(!bbr.full_bw_reached);
+
+        // Subsequent ACKs (including a controller clone) retain ordinary
+        // bandwidth-driven STARTUP growth; they cannot reset the rate again.
+        let mut bbr = bbr.clone();
+        rtt.update(Duration::ZERO, Duration::from_millis(400));
+        let sent = now + Duration::from_secs(1);
+        bbr.on_packet_sent(sent, 1200, 2, SpaceKind::Data);
+        bbr.on_ack(
+            sent + Duration::from_millis(400),
+            sent,
+            1200,
+            2,
+            SpaceKind::Data,
+            true,
+            &rtt,
+        );
+        assert!((bbr.pacing_rate - calibrated).abs() < 0.001);
+        bbr.bw = calibrated;
+        bbr.set_pacing_rate();
+        assert!(
+            bbr.pacing_rate > calibrated,
+            "normal STARTUP growth was disabled"
+        );
+    }
+
+    #[test]
+    fn startup_pacing_with_zero_measured_rtt_stays_finite() {
+        let now = Instant::now();
+        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), 1200);
+        let mut rtt = RttEstimator::new(Duration::from_millis(333));
+        rtt.update(Duration::ZERO, Duration::ZERO);
+        bbr.on_packet_sent(now, 1200, 0, SpaceKind::Data);
+        bbr.on_ack(now, now, 1200, 0, SpaceKind::Data, true, &rtt);
+        assert!(bbr.pacing_rate.is_finite());
+        assert_eq!(
+            bbr.pacing_rate,
+            bbr.startup_pacing_gain * bbr.initial_cwnd as f64 / 0.000_001
+        );
+    }
+
+    #[test]
+    fn startup_pacing_recalibrates_sub_millisecond_packet_rtt() {
+        let now = Instant::now();
+        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), 1200);
+        let rtt = RttEstimator::new(Duration::from_millis(333));
+        bbr.on_packet_sent(now, 1200, 0, SpaceKind::Data);
+        bbr.on_ack(
+            now + Duration::from_micros(200),
+            now,
+            1200,
+            0,
+            SpaceKind::Data,
+            true,
+            &rtt,
+        );
+        let expected = bbr.startup_pacing_gain * bbr.initial_cwnd as f64 / 0.000_2;
+        assert!((bbr.pacing_rate - expected).abs() < 0.001);
+    }
+
+    #[test]
     fn test_probe_rng() {
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let config = Bbr3Config {
@@ -2250,11 +2354,7 @@ mod test {
         const MSS: u64 = 1200;
         /// simulated bottleneck bandwidth: 100 Mbit/s in bytes/sec
         const BW: f64 = 12_500_000.0;
-        /// Simulated propagation RTT. Kept large (100ms) so the transient
-        /// ProbeRTT BBR enters on the first ack (its `probe_rtt_min_stamp`
-        /// starts unset, initializing `min_rtt`) spans fewer than
-        /// `MAX_FULL_BW_COUNT` rounds and cannot falsely complete the plateau
-        /// there; the flow bounces back to STARTUP and ramps cleanly.
+        /// Simulated propagation RTT, including the first measured packet.
         const RTT_NS: u64 = 100_000_000;
 
         // Drive the production default configuration.
@@ -2262,9 +2362,8 @@ mod test {
         assert_eq!(sim.bbr.state, BbrState::Startup);
 
         // captured on the STARTUP -> DRAIN edge (DRAIN is only ever entered from
-        // STARTUP, via check_startup_done). BBR dips through a transient ProbeRTT
-        // right after the first ack, so we run until DRAIN rather than breaking on
-        // the first non-STARTUP state.
+        // STARTUP, via check_startup_done). Run until DRAIN to observe the
+        // bandwidth-plateau decision separately from later ProbeRTT cycles.
         let mut transition: Option<(u64, bool, bool, f64)> = None;
         sim.run(
             1_000_000,

@@ -62,3 +62,21 @@ and continues the original bidirectional stream through the same connection.
 
 Sources: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.2.4
 and https://www.ietf.org/archive/id/draft-ietf-quic-multipath-21.html#section-3.1
+
+## BBRv3 startup pacing calibration
+
+The nominal startup pacing rate assumes a 1ms RTT. It now recalibrates once
+from the first acknowledged tracked packet's measured RTT, with a 1us zero
+floor. The first BBR rate sample uses packet departure/ACK time rather than
+Noq's transport estimator, which is updated after congestion callbacks.
+Subsequent bandwidth-driven STARTUP growth, clone state and send-quantum updates
+retain their existing owners. Both RDS backends use this same engine.
+
+This narrow adaptation follows [Google BBRv3's measured-RTT initialization](https://github.com/google/bbr/blob/v3/net/ipv4/tcp_bbr.c)
+and the reviewed [moq-dev/noq PR7](https://github.com/moq-dev/noq/pull/7), merged
+2026-09-25; it does not import that fork's broader feedback changes.
+[Noq PR802](https://github.com/n0-computer/noq/pull/802) records the original
+application-limited pacing defect. Deterministic tests fail on the published
+engine and cover measured vs initial RTT, one-time calibration, clone/growth,
+sub-millisecond and zero RTT. This corrects an independently reproduced defect;
+it does not establish the cause or closure of the retained 521ms CI control tail.
