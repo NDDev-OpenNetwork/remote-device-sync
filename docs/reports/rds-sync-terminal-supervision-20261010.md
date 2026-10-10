@@ -1,7 +1,7 @@
 # Receive control supervision — 2026-10-10
 
-Status: implementation and focused regressions passed; checkpoint/native
-qualification pending, W1.9/W8.1.
+Status: focused regressions and local checkpoint passed; overall platform
+qualification held by the retained control-latency failure, W1.9/W8.1.
 
 Main CI run 38006066964 failed the new path-scope regression while waiting for
 the server to stop, after its Need bitmap had arrived. The fixture writes a
@@ -73,3 +73,25 @@ and a rename/durability sequence that has begun may commit despite cancellation.
 The queued-assembly regression proves the destination and verified resume parts
 are retained and receive ownership is released before the replacement starts.
 Physical cancellation, power-loss behavior and installed acceptance remain open.
+
+## Checkpoint and platform review
+
+The registered `w1-sync-supervision` gate completed at clean `89db733`: fmt,
+workspace strict Clippy, workspace tests and focused sync checks passed, totaling
+1,072 test executions, zero failures and two explicit native-feature skips.
+The benchmark ran 100 samples per case: p95 verified 4 MiB resume 27.104 ms,
+equal-content alternate destination 18.075 ms, pre-canceled admission 8 µs and
+admission beside 8,192 retained foreign names 24.985 ms. These are local smoke
+measurements, not a comparative performance or power-loss claim. The generated
+checkpoint extended the existing intact receipt chain to 15 entries. An earlier
+attempt completed the same test count but was interrupted during benchmark
+compilation; it has no terminal gate-success receipt and is retained separately.
+
+[PR150 CI run 38015685163](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/38015685163)
+passed the default macOS workspace, including all sync regressions, then failed
+in the desktop-feature lane: 601 control probes yielded RTT p50 164 ms,
+p95 411 ms and p99 584 ms against the unchanged 400 ms p95 limit. The synthetic
+frame cohort had 624 arrivals, p95 190 ms and queue p95 1 ms. This is a recurrence
+of the separate latency investigation, not a successful overall CI run. No
+rerun, timeout increase or local passing result is used to retire that failure.
+Further platform results must be recorded before source/native promotion.
