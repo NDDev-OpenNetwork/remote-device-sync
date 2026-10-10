@@ -23,6 +23,29 @@ publication; a Copy or request already authorized while selected may finish its
 bounded handoff through the same native event loop.
 One native window/event loop/GPU presents the active mailbox; inactive displays
 retain one newest frame each. The old GPU texture is cleared before switching.
+Each session retains its newest CPU image by shared ownership, including after
+its first presentation. Returning to an idle tab restores those pixels without
+waiting for new network video or adding another frame-latency sample. The title
+and selection repaint immediately. A new session drops its predecessor's CPU
+image; closed tabs release the mailbox.
+
+The up arrow at the start of the toolbar hides both the toolbar and status bar.
+Only a small down arrow at the top center remains; click it to restore the bars.
+Ctrl+Shift+H also toggles the panels when no local form owns the keyboard.
+Ctrl+Tab still switches displays while compact. The image fits the whole window
+with its aspect ratio preserved; only the arrow's rectangle intercepts local
+pointer input. Collapse state lasts for the current window and does not change
+saved connection profiles. The empty workspace always shows its controls.
+
+Presentation selects tear-free Mailbox when supported, otherwise Fifo, with
+the existing one-frame latency request. Fifo can wait for the next display
+refresh; this is not a glass-to-glass latency guarantee. Suboptimal surfaces
+reconfigure before the next acquisition, and recovered surfaces repaint even
+without incoming video. Local UI repaint deadlines share the event loop with
+clipboard deadlines instead of depending on a changing remote picture. A native
+RedrawRequested paints once; it never feeds itself into another redraw request. See
+[the chrome follow-up](reports/rds-workspace-chrome-20261010.md) for evidence and
+the remaining intermittent-artifact diagnosis boundary.
 
 **Settings** changes only the selected display: HD / Full HD / native geometry,
 1–240 FPS, local keyboard/mouse enablement, focused text clipboard and validated

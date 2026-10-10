@@ -1,10 +1,11 @@
-# Checkpoint W6-TABBED-WORKSPACE — 20261010-072802
+# Checkpoint W6-TABBED-WORKSPACE — 20261010-130947
 
-Verdict: **implementation checkpoint PASS; native synthetic clipboard/input acceptance PASS**
+Verdict: **implementation checkpoint PASS; native synthetic chrome acceptance PASS**
 
-Source: clean `94260b1d41b994861eaed5b5564728b84010cd29`.
-1,136 passing test executions, zero failed, two explicit native ignores.
-Receipt chain: 22 records, verified intact.
+Code source: `a9515128f0fdfdba0b045b17d9a77bf9ff51db86`.
+1,142 passing test executions, zero failed, two explicit native ignores.
+The release benchmark observed the clean source tree. Native checks are scoped
+in [the chrome report](rds-workspace-chrome-20261010.md).
 
 ## Automated checks
 - fmt/workspace clippy/workspace tests: PASS
@@ -16,18 +17,19 @@ Receipt chain: 22 records, verified intact.
 
 ## Manual checklist (fill before merge)
 - [x] All "not run" items above explained
-- [x] Reports committed: bench-*.json, bench-*.md, this file
+- [x] Reports included: bench-*.json, bench-*.md, this file
 - [x] docs/ updated for anything this wave changed
 - [x] security/unsafe review done for new code paths
 
-Review: native A/B evidence reproduces and repairs the close/reply ordering
-defect; the first paste succeeds and the pending second paste is not admitted
-after closure. Other native runs verify ordinary Tab, Shift+Paste, local-form
-input, per-tab clipboard ownership and clean teardown with no held input.
-The isolated managed fixture covers two peers and three encoded displays on
-Iroh and Noq; its Linux Xvfb supplemental runs also completed cleanly. These
-platform observations retain their exact source boundaries in the detailed
-reports. No new unsafe block, credential authority or wire layout is introduced.
-Physical applications/networks, hardware acceleration, sustained resource/latency
-soak and installed fleet convergence remain separate from this implementation
-checkpoint. Historical failed latency cohorts remain recorded.
+Review: native macOS still-picture checks cover panel hiding/restoration,
+ordinary/fullscreen geometry and two complete cycles over three displays from
+two synthetic devices. Idle CPU image restoration does not re-admit frame
+timing. The redraw self-loop was reproduced with the optional fixture reporter
+and eliminated. Pointer ownership and DPI/resize geometry have regression
+coverage. No unsafe code, dependency, credential authority or wire change.
+
+Physical input/clipboard, long-duration GPU/resource soak, glass-to-glass
+latency and installed fleet adoption remain separate. The reported intermittent
+black specks were not reproduced; the established integration defects and the
+idle-tab black screen have scoped evidence. The retained impaired control-reader
+incident remains open despite this passing checkpoint.

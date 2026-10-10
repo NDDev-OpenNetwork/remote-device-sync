@@ -1,4 +1,6 @@
 //! Local workspace widgets; they never send remote input or perform network I/O.
+mod pointer;
+
 use super::{TabId, TabProfile, TabSpec, VideoSize, WorkspaceModel};
 
 #[derive(Clone)]
@@ -50,6 +52,20 @@ pub(crate) struct UiFrame {
     pub pixels_per_point: f32,
     /// Physical-pixel desktop content area, shared with pointer mapping.
     pub content: egui::Rect,
+    /// Physical-pixel local overlay; it does not shrink the video viewport.
+    pub restore: egui::Rect,
+}
+
+impl UiFrame {
+    fn empty(pixels_per_point: f32) -> Self {
+        Self {
+            primitives: vec![],
+            textures: Default::default(),
+            pixels_per_point,
+            content: egui::Rect::NOTHING,
+            restore: egui::Rect::NOTHING,
+        }
+    }
 }
 
 impl Drop for UiFrame {
@@ -72,9 +88,22 @@ pub(crate) struct Chrome {
     grant_file: String,
     settings: Option<(TabId, TabProfile)>,
     about: bool,
+    collapsed: bool,
+    pointer: pointer::LocalPointer,
+    repaint_at: Option<std::time::Instant>,
 }
 
 impl Chrome {
+    pub fn toggle_panels(&mut self, window: &winit::window::Window) {
+        self.collapsed = !self.collapsed;
+        self.context.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+        window.request_redraw();
+    }
+
     pub fn connected(&mut self) {
         self.connect_open = false;
     }
@@ -96,12 +125,7 @@ impl Chrome {
         Self {
             context,
             input,
-            frame: UiFrame {
-                primitives: vec![],
-                textures: Default::default(),
-                pixels_per_point: window.scale_factor() as f32,
-                content: egui::Rect::NOTHING,
-            },
+            frame: UiFrame::empty(window.scale_factor() as f32),
             actions: vec![],
             message: String::new(),
             connect_open: false,
@@ -109,6 +133,9 @@ impl Chrome {
             grant_file: String::new(),
             settings: None,
             about: false,
+            collapsed: false,
+            pointer: Default::default(),
+            repaint_at: None,
         }
     }
 
@@ -117,6 +144,7 @@ impl Chrome {
         window: &winit::window::Window,
         event: &winit::event::WindowEvent,
     ) -> bool {
+        let local_pointer = self.pointer.event(event, &self.frame);
         let keyboard = matches!(event, winit::event::WindowEvent::KeyboardInput { .. });
         let local_keyboard = self.editing();
         // egui-winit consumes Tab unconditionally and reads native Paste before
@@ -130,10 +158,27 @@ impl Chrome {
         // Releases still clear egui's previous held-key state after a dialog
         // closes, but cannot consume the remote tab's matching key release.
         let response = self.input.on_window_event(window, event);
-        if response.repaint {
+        // RedrawRequested already causes this paint. egui-winit marks it as
+        // needing repaint; feeding that back into winit creates an idle loop.
+        if response.repaint && !matches!(event, winit::event::WindowEvent::RedrawRequested) {
             window.request_redraw();
         }
-        response.consumed && (!keyboard || local_keyboard)
+        local_pointer || (response.consumed && (!keyboard || local_keyboard))
+    }
+
+    /// Consume an elapsed UI deadline once; the next paint supplies a new one.
+    pub fn repaint_deadline(
+        &mut self,
+        window: &winit::window::Window,
+    ) -> Option<std::time::Instant> {
+        if self
+            .repaint_at
+            .is_some_and(|at| at <= std::time::Instant::now())
+        {
+            self.repaint_at = None;
+            window.request_redraw();
+        }
+        self.repaint_at
     }
 
     pub fn editing(&self) -> bool {
@@ -151,9 +196,17 @@ impl Chrome {
         status: &str,
     ) {
         let context = self.context.clone();
+        // Keep every pass of this frame on one layout. Apply a click only after
+        // tessellation, then repaint independently of incoming remote frames.
+        let collapsed = self.collapsed && !model.tabs().is_empty();
+        let mut toggle = false;
+        self.frame.restore = egui::Rect::NOTHING;
         let output = context.run_ui(self.input.take_egui_input(window), |root| {
-            egui::Panel::top("workspace-tabs").show(root, |ui| {
+            if !collapsed {
+            egui::Panel::top("workspace-tabs").resizable(false).show(root, |ui| {
                 ui.horizontal(|ui| {
+                    if ui.add_enabled_ui(!model.tabs().is_empty(), |ui| panel_arrow(ui, false))
+                        .inner.clicked() { toggle = true; }
                     ui.label(egui::RichText::new("RDS").strong().size(20.));
                     ui.separator();
                     egui::ScrollArea::horizontal().id_salt("tab-scroll").show(ui, |ui| {
@@ -198,12 +251,17 @@ impl Chrome {
                     });
                 });
             });
-            egui::Panel::bottom("workspace-status").show(root, |ui| {
+            egui::Panel::bottom("workspace-status").resizable(false).show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(status);
                     if !self.message.is_empty() { ui.separator(); ui.label(&self.message); }
                 });
             });
+            } else {
+                let response = restore_button(&context);
+                self.frame.restore = response.rect * context.pixels_per_point();
+                toggle |= response.clicked();
+            }
             let content = root.available_rect_before_wrap();
             self.frame.content = egui::Rect::from_min_max(
                 content.min * context.pixels_per_point(), content.max * context.pixels_per_point());
@@ -305,12 +363,59 @@ impl Chrome {
                 });
             }
         });
+        self.repaint_at = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .and_then(|viewport| std::time::Instant::now().checked_add(viewport.repaint_delay));
         self.input
             .handle_platform_output(window, output.platform_output);
         self.frame.pixels_per_point = output.pixels_per_point;
         self.frame.textures.append(output.textures_delta);
         self.frame.primitives = context.tessellate(output.shapes, output.pixels_per_point);
+        if toggle {
+            self.toggle_panels(window);
+        }
     }
+}
+
+fn restore_button(context: &egui::Context) -> egui::Response {
+    egui::Area::new(egui::Id::new("restore-workspace-panels"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_TOP, egui::Vec2::ZERO)
+        .movable(false)
+        .default_size([36., 26.])
+        .fade_in(false)
+        .show(context, |ui| panel_arrow(ui, true))
+        .inner
+}
+
+fn panel_arrow(ui: &mut egui::Ui, restore: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(36., 26.), egui::Sense::click());
+    let label = if restore {
+        "Show panels"
+    } else {
+        "Hide panels"
+    };
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let visuals = ui.style().interact(&response);
+    ui.painter().rect(
+        rect,
+        visuals.corner_radius,
+        visuals.bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let center = rect.center();
+    let direction = if restore { 1. } else { -1. };
+    ui.painter().add(egui::Shape::line(
+        vec![
+            center + egui::vec2(-5., -2.5 * direction),
+            center + egui::vec2(0., 2.5 * direction),
+            center + egui::vec2(5., -2.5 * direction),
+        ],
+        egui::Stroke::new(1.5, visuals.fg_stroke.color),
+    ));
+    response.on_hover_text(format!("{label} (Ctrl+Shift+H)"))
 }
 
 const FONT_NOTICES: &[(&str, &str)] = &[
@@ -343,6 +448,53 @@ fn video_label(size: VideoSize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_overlay_never_reserves_desktop_space_after_resize_or_dpi_change() {
+        let context = egui::Context::default();
+        for (width, height, scale) in [(1000., 700., 1.), (1440., 900., 2.), (640., 480., 1.5)] {
+            let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+            // An Area's first frame measures it. Subsequent passes must use the
+            // same small rectangle, centered in the resized logical window.
+            for _ in 0..3 {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(bounds),
+                    ..Default::default()
+                };
+                input
+                    .viewports
+                    .get_mut(&egui::ViewportId::ROOT)
+                    .unwrap()
+                    .native_pixels_per_point = Some(scale);
+                let mut output = context.run_ui(input, |root| {
+                    let response = restore_button(&context);
+                    assert_eq!(root.available_rect_before_wrap(), bounds);
+                    assert_eq!(response.rect.size(), egui::vec2(36., 26.));
+                    assert!((response.rect.center().x - bounds.center().x).abs() <= 1.);
+                    assert_eq!(response.rect.top(), bounds.top());
+                    let content = bounds * scale;
+                    let viewport = crate::render::input::Viewport::content(
+                        (width * scale) as u32,
+                        (height * scale) as u32,
+                        width as u32,
+                        height as u32,
+                        Some([
+                            0.,
+                            0.,
+                            f64::from(content.width()),
+                            f64::from(content.height()),
+                        ]),
+                    );
+                    assert_eq!(viewport.x, 0.);
+                    assert_eq!(viewport.y, 0.);
+                    assert_eq!(viewport.width, f64::from(content.width()));
+                    assert_eq!(viewport.height, f64::from(content.height()));
+                });
+                output.textures_delta.clear();
+            }
+        }
+    }
+
     #[test]
     fn closing_without_another_paint_discards_pending_texture_commands() {
         let mut textures = egui::TexturesDelta::default();
@@ -352,6 +504,7 @@ mod tests {
             textures,
             pixels_per_point: 1.,
             content: egui::Rect::NOTHING,
+            restore: egui::Rect::NOTHING,
         };
         // A minimized/closing window can own one final unpainted UI update.
         // Its GPU is being destroyed, so it must not require another paint.

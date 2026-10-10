@@ -1,5 +1,10 @@
 # Implementation plan — owned connectivity core (v0.2) and beyond
 
+The [chrome follow-up](reports/rds-workspace-chrome-20261010.md) adds collapsible
+panels, local overlay pointer ownership, tear-free presentation and idle-tab
+restoration. The same registered W6 checkpoint and scoped native fixture cover
+these implementation contracts; physical latency and long GPU soak remain open.
+
 The registered `w6-tabbed-workspace` checkpoint covers device/display tab state,
 presentation/input bounds, peer binding, preferences and existing concurrent
 managed desktop routes, with local state-churn measurements. Native UI and

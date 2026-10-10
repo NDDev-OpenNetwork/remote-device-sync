@@ -26,6 +26,19 @@ struct ClipboardProbe {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let still_flag = args.first().is_some_and(|arg| arg == "--still");
+    if still_flag {
+        args.remove(0);
+    }
+    // LaunchServices cannot pass CLI arguments. Its per-bundle LSEnvironment
+    // can enable this same isolated still-picture probe without a wrapper.
+    let still = still_flag || std::env::var_os("RDS_PREVIEW_STILL").is_some();
+    let report_dir = std::env::var_os("RDS_PREVIEW_REPORT_DIR").map(std::path::PathBuf::from);
+    if report_dir.as_ref().is_some_and(|dir| {
+        !dir.is_dir() || (1..=3).any(|id| dir.join(format!("tab-{id}.log")).exists())
+    }) {
+        return Err("preview report directory must exist with no tab reports".into());
+    }
     let close_with_reply = args.last().is_some_and(|arg| arg == "--close-with-reply");
     if close_with_reply {
         args.pop();
@@ -40,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: workspace_preview [--clipboard-report NEW_PATH [--close-with-reply]]"
+                "usage: workspace_preview [--still] [--clipboard-report NEW_PATH [--close-with-reply]]"
                     .into(),
             );
         }
@@ -75,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     let (viewer, workspace, mut events) = Viewer::workspace(tabs, devices)?;
-    if clipboard_probe {
+    if clipboard_probe || report_dir.is_some() {
         let workspace = workspace.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(180)).await;
@@ -97,6 +110,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let id = tab.id.value();
                     let probe = probe.clone();
                     let workspace = workspace.clone();
+                    let mut report = report_dir.as_ref().map(|dir| {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(dir.join(format!("tab-{id}.log")))
+                            .expect("fixture report creation")
+                    });
                     sessions.insert(id, tokio::spawn(async move {
                         view.status("Connected · isolated preview");
                         view.display_extent(960, 540);
@@ -105,6 +125,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut keys = BTreeSet::new();
                         let mut buttons = BTreeSet::new();
                         let mut controls = 0u64;
+                        let mut painted = false;
+                        let mut ticks = 0;
                         let mut pending_offer: Option<(u64, String, Instant)> = None;
                         let mut pending_reply: Option<(u64, String, Instant)> = None;
                         let mut offered: Option<(u64, String)> = None;
@@ -113,6 +135,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         loop {
                             tokio::select! {
                                 _ = tick.tick() => {
+                                    ticks += 1;
+                                    if ticks % 10 == 0 && let Some(report) = &mut report {
+                                        use std::io::Write;
+                                        let snapshot = view.snapshot();
+                                        writeln!(report, "tab={id} stage={} occluded={} {:?}", snapshot.render_stage,
+                                            snapshot.occluded, snapshot.report).expect("fixture report write");
+                                        report.flush().expect("fixture report flush");
+                                    }
                                     if pending_offer.as_ref().is_some_and(|(_,_,at)| Instant::now() >= *at) {
                                         let (transfer, text, _) = pending_offer.take().unwrap();
                                         view.clipboard_event(DesktopEvent::ClipboardOffer { id: transfer,
@@ -128,6 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             workspace.update(WorkspaceUpdate::CloseWindow).expect("close probe queue");
                                         }
                                     }
+                                    if still && painted { continue; }
                                     let color = match id % 3 { 0 => [86, 106, 33], 1 => [137, 75, 37], _ => [72, 50, 128] };
                                     let mut data = vec![0; 960 * 540 * 4];
                                     for (index, pixel) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -135,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         pixel.copy_from_slice(&[color[0] + bright, color[1] + bright, color[2] + bright, 255]);
                                     }
                                     view.frame(RawFrame { width: 960, height: 540, stride: 3840, data: data.into() }, Instant::now());
+                                    painted = true;
                                 }
                                 event = input.recv() => match event {
                                     Some(ViewerInput::Control(DesktopControl::Input(event))) => {
