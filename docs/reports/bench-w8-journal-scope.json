@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "source_commit": "7cb209677f2f9f4d759314c76b19f19882af8943",
+  "source_tree": "c0d98b530df19e0204fa1971e001d354d9e7f7bb",
+  "worktree_clean": true,
+  "binary_digest": "d49b399129052bfa2f57a15ebbb10f6403efbf16f1dccdc5b82dfcf86dad25eb",
+  "lockfile_digest": "c6c6a5b7b8fba544f3624310a238eca332dc8900eaaee1ebcde7c19f52957549",
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
+  "os": "macos",
+  "architecture": "aarch64",
+  "debug_assertions": false,
+  "bytes": 4194304,
+  "chunks": 16,
+  "content_digest": "a4da377b5bf0a3b16e5584e90a3b7b6a3668885b1916ea901cc19f16e84d5642",
+  "foreign_entries": 8192,
+  "failures": 0,
+  "skips": 0,
+  "rows": [
+    {
+      "case": "verified-resume-4MiB",
+      "samples": 100,
+      "p50_us": 25308,
+      "p95_us": 28965,
+      "p99_us": 30180,
+      "max_us": 30652
+    },
+    {
+      "case": "equal-content-other-destination",
+      "samples": 100,
+      "p50_us": 18853,
+      "p95_us": 20905,
+      "p99_us": 22091,
+      "max_us": 22964
+    },
+    {
+      "case": "pre-canceled-admission",
+      "samples": 100,
+      "p50_us": 5,
+      "p95_us": 6,
+      "p99_us": 7,
+      "max_us": 8
+    },
+    {
+      "case": "admit-beside-8192-foreign-entries",
+      "samples": 100,
+      "p50_us": 25926,
+      "p95_us": 31109,
+      "p99_us": 32039,
+      "max_us": 33083
+    }
+  ],
+  "limitations": "Synthetic local filesystem, warmed cache and debug/release profile determined by invocation. No before/after speed claim, process kill, real disk full, native power loss, network, quota or fair-GC acceptance. Every reported sample passed its content/admission checks; failure aborts report generation."
+}

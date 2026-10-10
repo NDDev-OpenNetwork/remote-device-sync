@@ -76,7 +76,7 @@ async fn scoped_offer_cannot_reuse_another_destinations_cached_payload() {
         assert!(!access.permits_path(std::path::Path::new("private/file")));
         let peer = tokio::spawn(async move {
             let (send, recv) = server.accept_bi().await.unwrap();
-            engine::serve_with_access(server, send, recv, path, access, Duration::from_secs(5))
+            engine::serve_with_access(server, send, recv, path, access, Duration::from_secs(60))
                 .await
         });
         let (mut send, mut recv) = client.open_bi().await.unwrap();
@@ -96,8 +96,8 @@ async fn scoped_offer_cannot_reuse_another_destinations_cached_payload() {
         // its own payload; possession of the manifest cannot import private state.
         write_frame(
             &mut send,
-            &SyncMsg::Cancel {
-                reason: "probe complete".into(),
+            &SyncMsg::Refuse {
+                reason: "transfer aborted: probe complete".into(),
             },
         )
         .await
@@ -121,6 +121,85 @@ async fn scoped_offer_cannot_reuse_another_destinations_cached_payload() {
                 .complete()
         );
     }
+}
+
+async fn legacy_receive_interrupted(fin: bool) {
+    for backend in [Backend::Iroh, Backend::Noq] {
+        let tmp = Temp::new();
+        std::fs::write(tmp.0.join("data"), b"old destination").unwrap();
+        let manifest = manifest_of(b"replacement requiring a chunk");
+        let (a, b, client, server) = pair(backend).await;
+        let path = tmp.0.clone();
+        let mut peer = tokio::spawn(async move {
+            let (send, recv) = server.accept_bi().await.unwrap();
+            engine::serve_with_access(
+                server,
+                send,
+                recv,
+                path,
+                engine::Access::READ_WRITE,
+                Duration::from_secs(60),
+            )
+            .await
+        });
+        let (mut send, mut recv) = client.open_bi().await.unwrap();
+        offered(&mut send, "data", &manifest).await;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), read_frame(&mut recv))
+                .await
+                .unwrap()
+                .unwrap(),
+            SyncMsg::Need { .. }
+        ));
+        if fin {
+            send.finish().unwrap();
+        } else {
+            write_frame(
+                &mut send,
+                &SyncMsg::Refuse {
+                    reason: "transfer aborted: no payload follows".into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // Keep the receive half alive: STOP_SENDING must not mask missing
+        // supervision of the peer's independently closed/refused send half.
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut peer).await;
+        peer.abort();
+        a.close().await;
+        b.close().await;
+        let error = result
+            .expect("control termination did not wake receive")
+            .unwrap()
+            .unwrap_err();
+        if !fin {
+            assert!(
+                error.to_string().contains("no payload follows"),
+                "{error:#}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(tmp.0.join("data")).unwrap(),
+            b"old destination"
+        );
+        let resumed = rds_sync::journal::Journal::open(&tmp.0, "data", &manifest).unwrap();
+        assert_eq!(
+            resumed.need(),
+            vec![0],
+            "{backend:?} retained receive ownership"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_refusal_wakes_receive_without_chunk_or_transport_stop() {
+    legacy_receive_interrupted(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_control_fin_wakes_receive_without_chunk_or_transport_stop() {
+    legacy_receive_interrupted(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

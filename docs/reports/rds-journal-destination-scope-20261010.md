@@ -1,7 +1,7 @@
 # Destination-bound receive journals — 2026-10-10
 
-Status: implemented; all 121 sync test executions passed at `29bcfd6`.
-The registered full checkpoint and final cross-platform qualification are pending.
+Status: implemented; the registered checkpoint passed at clean `7cb2096`.
+Final cross-platform/native qualification and broader stability remain open.
 Milestone: W1.10/W8.2, preserving W4 signed path-scope boundaries.
 
 ## Source finding
@@ -14,7 +14,7 @@ from A's cached part. The destination check in `engine::serve_inner` covers B;
 it does not authorize reuse of A. Knowledge of content hashes is insufficient
 authority to transfer cached content across destinations.
 
-## Selected change
+## Implemented change
 
 1. Bind new journal directory names to the normalized relative destination and
    content root. Keep chunk hashes, wire frames, receive locks and atomic part
@@ -33,6 +33,38 @@ authority to transfer cached content across destinations.
    alias refusal, fault injection, cancellation and work bounds effective.
 6. Run all sync checks and workspace gates, a registered checkpoint and the
    existing release journal benchmark. Qualify Linux and macOS before rollout.
+
+## Verification
+
+The baseline probe against `618685e` reused one cached part for the other
+destination, requested no payload and assembled that destination; its isolation
+assertion failed. At `29bcfd6`, all 121 sync test executions passed, including
+five new journal cases and the path-scoped real-stream case on both Iroh and
+Noq. The cases cover independent equal-content destinations, verified legacy
+resume, missing/torn/mismatched/linked legacy metadata, new-layout torn metadata,
+and collection that preserves other destinations. Existing alias refusal,
+returned-error and process-exit recovery checks remain effective.
+
+After integrating PR147's reviewed evidence without changing these production
+sources, clean `7cb209677f2f9f4d759314c76b19f19882af8943` passed
+`scripts/checkpoint.sh w8-journal-scope`: formatting, strict workspace Clippy,
+workspace tests and the separate sync suite. There were 1,062 passing test
+executions, zero failures and two existing ignored checks. The receipt chain
+extends the combined admission history; no prior receipt hashes were rewritten.
+
+The [release benchmark](bench-w8-journal-scope.md) and
+[source/digest-bound JSON](bench-w8-journal-scope.json) record 100 samples per
+case on macOS arm64: verified 4 MiB resume p95 28.965 ms, equal-content admission
+for another destination p95 20.905 ms, pre-cancellation p95 6 µs, and admission
+beside 8,192 retained foreign names p95 31.109 ms. Every second-destination
+sample requested all chunks while preserving the original destination's reuse.
+These are local warmed-cache measurements, not a before/after speed claim or
+physical-durability evidence. PR149's CodeQL analysis completed with zero open
+alerts; scanner coverage and policy are unchanged.
+
+The separate main-branch control RTT failure (445 ms p95 versus 400 ms across
+601 probes) remains part of the [stability plan](../stability-plan-20261009.md).
+This successful storage checkpoint does not resolve that transport/service tail.
 
 ## Research and limits
 

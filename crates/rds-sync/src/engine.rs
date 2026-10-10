@@ -691,7 +691,7 @@ impl Drop for CancelFlagWatcher {
 /// Cancellation is scoped to this transfer; other services keep their streams.
 /// One owned reader on the control receive half, shared by every phase
 /// of a transfer. Frames reach consumers through `next` in arrival
-/// order, while a `Cancel` frame, a decode violation, or a dead stream
+/// order, while a `Cancel`/`Refuse` frame, a decode violation, or a dead stream
 /// flips `stop` immediately — including while a
 /// blocking filesystem phase is running and nothing is polling the
 /// queue. A peer abort therefore reaches `manifest_from_file`,
@@ -701,8 +701,9 @@ impl Drop for CancelFlagWatcher {
 /// typed `Cancel`.
 ///
 /// The reader's frame read carries no stall bound: legitimate phase
-/// gaps (manifest builds, journal walks) outlive `READ_STALL`, so every
-/// wait lives in `next` where the caller chooses the bound.
+/// gaps (manifest builds, journal walks) outlive `READ_STALL`. Expected
+/// phase messages use `next`; data-phase supervision uses `during_data`,
+/// bounded by the data I/O deadlines and the absolute session budget.
 struct ControlFrames {
     rx: mpsc::Receiver<SyncMsg>,
     stop: Arc<AtomicBool>,
@@ -749,8 +750,8 @@ impl ControlFrames {
                     match frame {
                         Ok(raw) => match wire.decode(raw) {
                             Ok(msg) => {
-                                // `Cancel` is terminal for the transfer
-                                // but still lands in the queue so the
+                                // `Cancel` and `Refuse` are terminal for the transfer
+                                // but still land in the queue so the
                                 // waiting phase sees its reason in
                                 // order. A full queue means the peer
                                 // flooded us with frames no phase
@@ -760,6 +761,11 @@ impl ControlFrames {
                                     SyncMsg::Cancel { reason } => {
                                         record(format!("peer canceled: {reason}"));
                                         let _ = tx.try_send(SyncMsg::Cancel { reason });
+                                        break;
+                                    }
+                                    SyncMsg::Refuse { reason } => {
+                                        record(format!("peer refused: {reason}"));
+                                        let _ = tx.try_send(SyncMsg::Refuse { reason });
                                         break;
                                     }
                                     _ => {
@@ -795,7 +801,7 @@ impl ControlFrames {
         }
     }
 
-    /// The shared stop flag — set on a peer `Cancel`, a decode
+    /// The shared stop flag — set on a peer `Cancel`/`Refuse`, a decode
     /// violation, stream death, or our own `close`. Blocking work
     /// checks it between chunks.
     fn stop_flag(&self) -> Arc<AtomicBool> {
@@ -835,6 +841,13 @@ impl ControlFrames {
             Ok(None) => bail!("sync control stream closed"),
             Err(_) => bail!("sync control frame stalled"),
         }
+    }
+
+    /// Control can legitimately stay quiet while independent data streams
+    /// progress. Collection/production retain their own I/O bounds, and the
+    /// owning session retains its absolute deadline. This wait is cancel-safe.
+    async fn during_data(&mut self) -> anyhow::Result<SyncMsg> {
+        self.rx.recv().await.context("sync control stream closed")
     }
 
     /// Wait until the reader exits — the `read_to_end` equivalent for
@@ -1458,9 +1471,8 @@ impl JournalSink {
 /// Receiver half, shared by push and pull: journal the offer, answer
 /// `Need`, collect chunk streams until complete, assemble, `Done`.
 /// Returns the destination's informational path; I/O stays on held handles.
-/// v2 additionally watches the control stream for a typed `Cancel`, so a
-/// peer's deliberate abort stops collection deterministically rather than
-/// waiting for chunk-stream errors.
+/// Both wire profiles watch terminal control traffic, so a peer's refusal,
+/// cancellation or disconnect stops collection without waiting for chunk I/O.
 #[allow(clippy::too_many_arguments)]
 async fn receive(
     conn: &Connection,
@@ -1492,34 +1504,21 @@ async fn receive(
     let bits = need_bits(journal.total(), journal.have_set());
     wire.send(send, &SyncMsg::Need { bits }).await?;
 
-    // Shared stop for the blocking assembly inside `receive_chunks`: set by
-    // the peer's typed Cancel or a dead control stream here and by the
-    // shared control reader (`peer_stop`, which fires the moment the
-    // reader sees either even before a phase consumes the frame), and by
-    // the caller's cancellation token through `cancel_flag`. A canceled
-    // receive must never publish the destination after reporting the abort.
-    let assemble_stop = Arc::new(AtomicBool::new(false));
+    // The reader projects terminal control into blocking work even before a
+    // phase consumes the frame. Assembly also owns a drop guard: every exit
+    // from this select, including dropping the whole receive future, stops
+    // abandoned disk work at its next cooperative cancellation barrier.
     let peer_stop = frames.stop_flag();
-    // v2 control read: only Cancel is valid mid-receive; any other frame
-    // is a protocol violation.
-    let cancelled = async {
-        if wire.is_v2() {
-            frames.next(READ_STALL).await
-        } else {
-            std::future::pending().await
-        }
-    };
     let result = tokio::select! {
-        result = receive_chunks(uni, journal, manifest, wire, cancel_flag, assemble_stop.clone(), peer_stop) => result?,
+        result = receive_chunks(uni, journal, manifest, wire, cancel_flag, peer_stop) => result?,
         _ = send.stopped() => {
-            assemble_stop.store(true, Ordering::Release);
             bail!("{}", frames.abort_cause("sync control stream closed during receive").await)
         }
-        msg = cancelled => match msg {
+        msg = frames.during_data() => match msg {
             Ok(SyncMsg::Cancel { reason }) => {
-                assemble_stop.store(true, Ordering::Release);
                 bail!("peer canceled transfer: {reason}")
             }
+            Ok(SyncMsg::Refuse { reason }) => bail!("peer refused transfer: {reason}"),
             Ok(other) => bail!("unexpected control frame during receive: {other:?}"),
             Err(e) => return Err(e).context("sync control read during receive"),
         },
@@ -1534,11 +1533,11 @@ async fn receive(
     Ok(result)
 }
 
-/// Dropping the async waiter must also stop preparation that is already on
+/// Dropping the async waiter must also stop disk work that is already on
 /// the blocking pool, including a job queued behind a long-running syscall.
-struct PreparationCancellation(Arc<AtomicBool>);
+struct DiskWorkCancellation(Arc<AtomicBool>);
 
-impl Drop for PreparationCancellation {
+impl Drop for DiskWorkCancellation {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
     }
@@ -1552,7 +1551,7 @@ async fn prepare_journal(
     caller_stop: Option<Arc<AtomicBool>>,
 ) -> Result<Result<Journal, crate::SyncError>, tokio::task::JoinError> {
     let abandoned = Arc::new(AtomicBool::new(false));
-    let _cancel = PreparationCancellation(abandoned.clone());
+    let _cancel = DiskWorkCancellation(abandoned.clone());
     let (dir, rel, manifest) = (dir.to_path_buf(), rel.to_string(), manifest.clone());
     disk_job(move || {
         Journal::open_cancellable(&dir, &rel, &manifest, &|| {
@@ -1572,7 +1571,6 @@ async fn receive_chunks(
     manifest: &Manifest,
     wire: Wire,
     cancel_flag: Option<Arc<AtomicBool>>,
-    assemble_stop: Arc<AtomicBool>,
     peer_stop: Arc<AtomicBool>,
 ) -> anyhow::Result<(PathBuf, Stats)> {
     let total = journal.total() as u64;
@@ -1673,22 +1671,14 @@ async fn receive_chunks(
         bail!("chunk writer did not verify every requested index");
     }
     let fetched = journal.fetched();
-    // Assembly concatenates and rehashes every part — blocking pool. Either
-    // cancel source stops it at the next chunk boundary instead of letting
-    // a canceled transfer publish the destination in the background.
+    // Assembly concatenates and rehashes every part on the blocking pool.
+    // Every cancellation source is checked between chunks and before commit;
+    // cancellation racing an already-started rename remains uncertain.
     let dest = {
-        disk_job(move || {
-            journal.assemble_cancellable(&move || {
-                assemble_stop.load(Ordering::Acquire)
-                    || peer_stop.load(Ordering::Acquire)
-                    || cancel_flag
-                        .as_ref()
-                        .is_some_and(|f| f.load(Ordering::Acquire))
-            })
-        })
-        .await
-        .context("assemble task")?
-        .map_err(|e| anyhow::anyhow!("{e}"))?
+        assemble_journal(journal, peer_stop, cancel_flag)
+            .await
+            .context("assemble task")?
+            .map_err(|e| anyhow::anyhow!("{e}"))?
     };
     tracing::debug!(?dest, "sync file assembled");
     Ok((
@@ -1699,6 +1689,25 @@ async fn receive_chunks(
             bytes: fetched_bytes,
         },
     ))
+}
+
+async fn assemble_journal(
+    journal: Journal,
+    peer_stop: Arc<AtomicBool>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<Result<PathBuf, crate::SyncError>, tokio::task::JoinError> {
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let _cancel = DiskWorkCancellation(abandoned.clone());
+    disk_job(move || {
+        journal.assemble_cancellable(&move || {
+            abandoned.load(Ordering::Acquire)
+                || peer_stop.load(Ordering::Acquire)
+                || cancel_flag
+                    .as_ref()
+                    .is_some_and(|f| f.load(Ordering::Acquire))
+        })
+    })
+    .await
 }
 
 /// Final `Done` read after a chunk push. `early` is the root the push
@@ -1726,8 +1735,8 @@ async fn recv_done(
 
 /// Holder half: open the negotiated number of uni streams (v1 uses
 /// [`FETCH_STREAMS`]), each walking an interleaved share of `indices` in
-/// `CHUNKSET_BATCH` batches. v2 watches the control stream so a typed
-/// `Cancel` stops chunk production immediately instead of surfacing as
+/// `CHUNKSET_BATCH` batches. Both profiles watch terminal control traffic
+/// so peer abort stops chunk production immediately instead of surfacing as
 /// write errors on half-closed streams. Returns the receiver's `Done`
 /// root when it was consumed while chunk tasks were still draining.
 async fn push_chunks(
@@ -1799,13 +1808,7 @@ async fn push_chunks(
             Ok(())
         });
     }
-    let mut cancelled = std::pin::pin!(async {
-        if wire.is_v2() {
-            frames.next(READ_STALL).await
-        } else {
-            std::future::pending().await
-        }
-    });
+    let mut cancelled = std::pin::pin!(frames.during_data());
     // The receiver's `Done` can legitimately arrive while our last chunk
     // streams are still finishing: its reads complete on stream FIN, not
     // on this task draining. An early Done is consumed here and returned
@@ -1823,7 +1826,7 @@ async fn push_chunks(
                     Ok(SyncMsg::Done { root }) => {
                         early_done = Some(root);
                     }
-                    Ok(SyncMsg::Cancel { reason }) => {
+                    Ok(SyncMsg::Cancel { reason } | SyncMsg::Refuse { reason }) => {
                         tasks.abort_all();
                         return Err(anyhow::anyhow!("receiver aborted chunk push: {reason}"));
                     }

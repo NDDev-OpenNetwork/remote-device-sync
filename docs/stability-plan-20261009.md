@@ -107,6 +107,10 @@ The follow-up [destination-binding audit](reports/rds-journal-destination-scope-
 confirmed that content-only journal selection could reuse another destination's
 cached bytes. Bind new state to the normalized destination, retain only verified
 same-destination legacy resume, and qualify both formats before native rollout.
+Main CI then exposed missing legacy data-phase control supervision; the
+[terminal-supervision follow-up](reports/rds-sync-terminal-supervision-20261010.md)
+covers refusal/EOF, quiet control during active data and dropped queued assembly.
+This correction must qualify before any native candidate is promoted.
 Quota admission, fair background reclamation and destination overwrite policy
 remain separate unfinished changes. This does not close native Wave 2 acceptance.
 

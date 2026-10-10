@@ -1,5 +1,11 @@
 # Implementation plan — owned connectivity core (v0.2) and beyond
 
+The registered `w1-sync-supervision` checkpoint covers terminal control on both
+wire profiles, data-phase timing and abandoned assembly, plus the journal
+preparation benchmark as a local regression measurement. It does not close
+physical cancellation, power-loss or installed qualification. See
+[the follow-up report](reports/rds-sync-terminal-supervision-20261010.md).
+
 The registered `w9-audio-foundation` checkpoint covers packet validation,
 fixed-duration libopus codec and bounded reorder/loss contracts, with a synthetic
 codec benchmark. It does not qualify an audio service, native device I/O or
