@@ -1,9 +1,11 @@
 # remote-device-sync architecture
 
-Read this design together with the [2026-09-24 implementation audit](reports/rds-audit-20260924.md)
-and [remediation plan](remediation-plan.md). They distinguish implemented
-behavior, known defects and planned capabilities; design claims below are
-not a substitute for the current acceptance evidence.
+Current behavior is recorded in the [capability matrix](capability-matrix.md)
+and the owning code/contracts; unfinished work is ordered by the
+[stability plan](stability-plan-20261009.md). The
+[September 24 audit](reports/rds-audit-20260924.md) is historical defect evidence,
+and the [remediation plan](remediation-plan.md) retains acceptance requirements.
+Design goals and dated receipts do not establish current product acceptance.
 
 Remote access for GDS devices: SSH reachability and remote desktop sessions
 between any two enrolled devices, assisted by a GDS-operated server.

@@ -1,6 +1,11 @@
 # Desktop feature execution plan — 2026-10-09
 
-Scope: existing Linux X11 serving and macOS native viewing. Finish bidirectional
+Historical feature checklist for PR139. The default application is now the
+[tabbed workspace](native-viewer.md#tabbed-workspace); this checklist retains
+its original clipboard, monitor and independent-session acceptance. Current
+remaining work follows the [stability plan](stability-plan-20261009.md).
+
+Original scope: existing Linux X11 serving and macOS native viewing. Finish bidirectional
 UTF-8 text clipboard, simultaneous monitors, and simultaneous device windows.
 Code, native fixtures and installed observations are separate facts.
 [PR #139](https://github.com/NDDev-OpenNetwork/remote-device-sync/pull/139) follows
@@ -48,7 +53,7 @@ records native proof and remaining installed observations.
    tests and scoped performance observations. Repair failures; no skip-to-green.
    Update current contracts/plan/report, signed atomic commits and PR checks.
    Pin the reviewed immutable RDS source through GDS only after feature
-   acceptance. Any protected Herdr/Xorg lifecycle requires explicit current
+   acceptance. Any lifecycle change to protected desktop services requires explicit current
    permission; prepare installation and inspect PID/cgroup/API health first.
 
 References checked against official documentation on 2026-10-09:

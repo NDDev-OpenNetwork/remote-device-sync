@@ -38,9 +38,10 @@ is not an operator-user broker: run the operator's own user agent. Do not loosen
 socket permissions to bridge that boundary.
 
 Explicit `rds --direct --key-file ~/.config/remote-device-sync/cli.key …` retains
-independent operation for diagnostics and the unfinished desktop/sync manager
-APIs. Give it a separate authorized key. Updated agent, direct CLI and owned
-relay binaries refuse a seed inode already in use before binding. Upgrade all
+independent operation for explicit diagnostics. Managed desktop and single-file
+sync APIs are implemented; direct mode is not their default or an implicit
+fallback. Give the direct endpoint a separate authorized key. Updated agent, direct
+CLI and owned relay binaries refuse a seed inode already in use before binding. Upgrade all
 local binaries together; old binaries and copied/manual-replaced keys are outside
 this cooperative guarantee. See [migration and ownership](local-sessions.md).
 The relay's `--allow` covers every endpoint that may use the relay. Both
@@ -79,19 +80,26 @@ table inet rds {
 accepts direct paths opportunistically (hole-punched or via the
 endpoint's discovered addresses).
 
-**Relay redundancy.** `--relay` is repeatable on both `rds` and
-`rds-agent`; iroh probes all configured relays, homes on the
-lowest-latency one, and fails over automatically. Production should run
-≥2 `rds-relay`/`rds-server` instances in different failure domains and
-list all their URLs — no LB or failover plumbing is needed on the relay
-side, since every endpoint carries the full list.
+**Relay redundancy.** Configure authorized relay origins on both devices
+through the agent's endpoint settings or repeated `--relay` options. An
+explicit direct CLI has its own settings; the normal managed CLI cannot
+rewrite its running agent's endpoint policy. A relay list alone does not prove independent warm inbound
+reachability or a bounded failover time. Iroh's default home registration and
+optional bounded persistent registrations have different readiness contracts;
+see [endpoint reachability settings](endpoint-configuration.md#reachability-presets).
+Deployment owns relay roles, certificates and authorized endpoint lists.
+Actual registration, advertised addresses, validated paths and application
+recovery must be observed separately; a new origin is not automatically a
+qualified reserve or a second directory authority.
 
 **TLS on the relay.** `rds-server` serves the iroh relay protocol
 (WebSocket over HTTP) on 3340 in plaintext: relayed payloads are
 end-to-end-encrypted QUIC the relay cannot read, and relay admission is
-keyed by `EndpointId` signature challenge, so a network MITM can only
-disrupt, not decrypt. For defence-in-depth on a public IP the relay
-supports native TLS in two modes:
+keyed by `EndpointId` signature challenge. Plain HTTP still exposes transport
+metadata and does not authenticate the relay origin to the same level as TLS.
+Use configured certificate validation for origin authentication and metadata
+confidentiality; encrypted application payloads do not provide those properties
+by themselves. The relay supports native TLS in two modes:
 
 ```bash
 # manual PEM (certbot, internal CA, any provider)

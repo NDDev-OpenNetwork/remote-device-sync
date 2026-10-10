@@ -1,4 +1,4 @@
-# Current implementation continuation — 2026-10-07
+# Historical implementation continuation — 2026-10-07
 
 Execution order is now maintained in the [October 9 stability
 plan](stability-plan-20261009.md). This dated continuation retains the
@@ -7,7 +7,7 @@ retain their original acceptance requirements. Source, tests and live artifact
 observations decide status. A historical receipt, successful build or sampled
 RTT does not establish installed interactive stability.
 
-## Current desktop feature wave — clipboard, monitors, sessions
+## Desktop feature snapshot — clipboard, monitors, sessions
 
 The source now contains three bounded, independently negotiated increments:
 
@@ -39,7 +39,7 @@ Public source began at `8002c11`, including the qualified persistent-relay
 increment from PR #116. The estate checkout and installed viewer can consume
 older revisions independently; neither is silently assumed to equal main.
 
-## Findings verified in current code
+## Findings verified at the original baseline
 
 | ID | Finding | Implementation boundary | Required next evidence |
 |---|---|---|---|

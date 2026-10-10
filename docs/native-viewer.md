@@ -292,10 +292,11 @@ moves on the same display collapse; motion before a button, key or scroll remain
 a position barrier. Full-queue rejection leaves the accepted prefix intact and
 records overflow before closing. It never evicts an earlier click's position.
 
-Only one pending decoded frame is retained for presentation. The GPU surface
-requests `AutoNoVsync` and one frame of latency, with the backend's supported
-fallback. Submission timing does not prove when a physical pixel becomes
-visible. Completed encoded frames are briefly ordered before decode so a delta
+One pending decoded frame per session is retained for presentation, sharing
+its allocation with that session's newest image for idle-tab restoration. The
+GPU surface selects supported `Mailbox`, otherwise `Fifo`, and requests one
+frame of latency. Submission timing does not prove when a physical pixel
+becomes visible. Completed encoded frames are briefly ordered before decode so a delta
 that finishes first cannot discard its in-flight reference keyframe. Ordering
 retains at most three successor bodies. The missing-reference timer uses two measured control RTTs, bounded to
 100–1000 ms (250 ms before measurement). It requests IDR recovery only after

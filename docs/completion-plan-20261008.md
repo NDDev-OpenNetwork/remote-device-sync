@@ -4,10 +4,12 @@ Current execution order is in [stability-plan-20261009.md](stability-plan-202610
 This dated plan retains the follow-up requirements to `continuation-plan.md`. It was
 initially audited against `9bd1840e`; directory foundation contracts were then
 reviewed after `cc7cc8cc`. Current behavior is described in
-[`directory-sync.md`](directory-sync.md). A capability changes state only after its code,
-wire/authz path, platform probe, tests, and installed qualification all pass.
+[`directory-sync.md`](directory-sync.md). Current claims follow the [capability matrix](capability-matrix.md), which
+distinguishes code/test implementation from platform and installed acceptance.
+The snapshot and ordered steps below describe the original plan; subsequent
+completed increments must be checked in the current contracts before reuse.
 
-## Current truth
+## Initial planning snapshot (historical)
 
 - Connectivity, signed discovery, grants v2/v3, managed local sessions,
   single-file resumable sync, Linux X11 desktop, and the default Iroh lane are

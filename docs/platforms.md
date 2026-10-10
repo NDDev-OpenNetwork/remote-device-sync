@@ -22,12 +22,18 @@ function; a fixed preference order per platform picks the first usable
 one at runtime — never compile-time alone. Probing logs the demotion
 reason so "silently on the slow path" is impossible.
 
+The orders below are the intended probe hierarchy. Only X11 capture/XTEST
+input, OpenH264 software codecs and the native wgpu viewer are implemented.
+Unavailable probes return no backend; the listed future protocols and drivers
+do not imply supported hardware, consent or unattended access. Consult the
+[capability matrix](capability-matrix.md) for current state.
+
 ## Capture order
 
 | Linux x86_64 | macOS arm64 |
 | --- | --- |
-| 1. `ext-image-copy-capture-v1` — privileged compositor protocol, dmabuf + damage, no consent dialog | 1. `ScreenCaptureKit` — display streams, IOSurface → VideoToolbox |
-| 2. DRM/KMS scanout (`drm`+`gbm`) — unattended, headless, login screen; needs CAP_SYS_ADMIN or DRM master | |
+| 1. `ext-image-copy-capture-v1` — planned compositor protocol adapter, dmabuf + damage; compositor policy applies | 1. `ScreenCaptureKit` — display streams, IOSurface → VideoToolbox |
+| 2. DRM/KMS scanout (`drm`+`gbm`) — unattended, headless, login screen; planned; device/seat/DRM-master access required | |
 | 3. XDG portal + PipeWire — consented sessions, dmabuf-first, persist tokens for re-use | |
 | 4. X11 RandR + `GetImage`/MIT-SHM — compatibility baseline (implemented) | |
 
@@ -35,13 +41,13 @@ reason so "silently on the slow path" is impossible.
 
 | Linux | macOS |
 | --- | --- |
-| 1. Vulkan Video (`ash`) — H.264 enc/dec, all GPU vendors, one implementation | 1. VideoToolbox — H.264/HEVC hw |
+| 1. Vulkan Video (`ash`) — H.264 enc/dec, planned adapter; GPU/driver support must be probed | 1. VideoToolbox — H.264/HEVC hw |
 | 2. VA-API (`libva`) — Intel/AMD where Vulkan Video gaps | |
 | 3. V4L2 mem2mem — embedded/ARM | |
-| 4. OpenH264 (sw, implemented) → rav1e AV1 tier | 2. OpenH264 sw floor |
+| 4. OpenH264 (sw, implemented); AV1 remains planned | 2. OpenH264 sw floor |
 
 H.264 constrained-baseline is the mandatory interoperable codec; HEVC/AV1
-negotiate only after both endpoints probe them.
+remain future codecs; their negotiation and backend acceptance are not implemented.
 
 ## Input order
 
