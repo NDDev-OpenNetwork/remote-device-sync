@@ -24,6 +24,9 @@ use super::{
 };
 use crate::{DesktopError, RawFrame};
 
+mod frame;
+use frame::{FrameMailbox, Pending};
+
 mod workspace;
 pub use workspace::{WorkspaceEvent, WorkspaceHandle, WorkspaceUpdate};
 
@@ -198,13 +201,6 @@ pub struct ViewerSnapshot {
     pub report: ViewerReport,
 }
 
-struct Pending {
-    raw: RawFrame,
-    received: Instant,
-    frame_seq: Option<u64>,
-    queued_ms: u64,
-}
-
 #[derive(Default)]
 struct SubmissionDebt(Option<u64>);
 impl SubmissionDebt {
@@ -306,7 +302,7 @@ impl InputLatency {
 }
 
 struct State {
-    pending: Option<Pending>,
+    frames: FrameMailbox,
     submission_debt: SubmissionDebt,
     wake_pending: bool,
     presenting: bool,
@@ -395,7 +391,11 @@ impl ViewerHandle {
                 .map(|v| elapsed.saturating_sub(v)),
             submission_age_ms: report.last_submission_ms.map(|v| elapsed.saturating_sub(v)),
             unpresented_frame_age_ms: state.submission_debt.age(elapsed),
-            pending_frame_bytes: state.pending.as_ref().map_or(0, |p| p.raw.data.len()),
+            pending_frame_bytes: state
+                .frames
+                .pending
+                .as_ref()
+                .map_or(0, |p| p.raw.data.len()),
             occluded: state.occluded,
             native_window: state.native_window,
             native_window_sample_age_ms: state
@@ -431,16 +431,12 @@ impl ViewerHandle {
             state.report.last_recovery_ms = Some(interrupted.elapsed().as_millis() as u64);
         }
         state.status = "Connected".into();
-        if state
-            .pending
-            .replace(Pending {
-                raw,
-                received,
-                frame_seq,
-                queued_ms,
-            })
-            .is_some()
-        {
+        if state.frames.queue(Pending {
+            raw: Arc::new(raw),
+            received,
+            frame_seq,
+            queued_ms,
+        }) {
             state.report.frames_replaced += 1;
         }
         if state.presenting {
@@ -502,6 +498,8 @@ impl ViewerHandle {
     pub fn begin_session(&self, span: tracing::Span) {
         let mut state = lock(&self.state);
         state.clipboard.reset();
+        state.frames = FrameMailbox::default();
+        state.submission_debt.hidden();
         state.session_span = span;
         state.report.session_epoch = state.report.session_epoch.saturating_add(1);
         tracing::info!(parent: &state.session_span,
@@ -791,7 +789,7 @@ impl SessionView {
         );
         let handle = ViewerHandle {
             state: Arc::new(Mutex::new(State {
-                pending: None,
+                frames: FrameMailbox::default(),
                 submission_debt: SubmissionDebt::default(),
                 wake_pending: false,
                 presenting: true,
@@ -1059,6 +1057,17 @@ impl App {
             );
         }
     }
+    fn update_window_title(&mut self) {
+        let state = lock(&self.session.handle.state);
+        let status = format!("{} — {}", state.label, state.status);
+        drop(state);
+        if self.last_window_status.as_deref() != Some(status.as_str())
+            && let Some(window) = &self.window
+        {
+            window.set_title(&status);
+            self.last_window_status = Some(status);
+        }
+    }
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         if let (Some(deck), Some(window)) = (&mut self.workspace, &self.window)
             && let Some(chrome) = &mut deck.chrome
@@ -1067,11 +1076,14 @@ impl App {
             chrome.prepare(window, &deck.model, &deck.devices, &status);
         }
         self.workspace_actions(event_loop);
+        self.update_window_title();
         lock(&self.session.handle.state).report.redraws += 1;
-        let pending = lock(&self.session.handle.state).pending.take();
         let Some(gpu) = &mut self.gpu else {
             return;
         };
+        let (pending, restore) = lock(&self.session.handle.state)
+            .frames
+            .take(gpu.has_picture());
         {
             let mut state = lock(&self.session.handle.state);
             if pending.is_some() {
@@ -1087,7 +1099,13 @@ impl App {
             .and_then(|deck| deck.chrome.as_mut())
             .map(|chrome| &mut chrome.frame);
         let uploads_before = gpu.uploads();
-        let result = gpu.draw(pending.as_ref().map(|frame| &frame.raw), ui);
+        let result = gpu.draw(
+            pending
+                .as_ref()
+                .map(|frame| frame.raw.as_ref())
+                .or(restore.as_deref()),
+            ui,
+        );
         lock(&self.session.handle.state).report.gpu_uploads += gpu.uploads() - uploads_before;
         match result {
             Err(error) => self.fail(event_loop, error),
@@ -1095,7 +1113,7 @@ impl App {
                 lock(&self.session.handle.state).render_stage = "presented".into();
                 if let Some(frame) = pending {
                     let mut state = lock(&self.session.handle.state);
-                    let next_queued_ms = state.pending.as_ref().map(|next| next.queued_ms);
+                    let next_queued_ms = state.frames.pending.as_ref().map(|next| next.queued_ms);
                     state.submission_debt.presented(next_queued_ms);
                     let parent = state.session_span.clone();
                     tracing::trace!(target:"rds_desktop::frame_timing", parent:&parent, frame_seq=frame.frame_seq,
@@ -1133,8 +1151,8 @@ impl App {
                 lock(&self.session.handle.state).report.surface_skips += 1;
                 if let Some(frame) = pending {
                     let mut state = lock(&self.session.handle.state);
-                    if state.pending.is_none() {
-                        state.pending = Some(frame);
+                    if state.frames.pending.is_none() {
+                        state.frames.pending = Some(frame);
                     }
                 }
             }
@@ -1144,7 +1162,17 @@ impl App {
 
 impl ApplicationHandler<()> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.workspace_paste_deadline(event_loop);
+        let paste_deadline = self.workspace_paste_deadline();
+        let ui_deadline = self
+            .workspace
+            .as_mut()
+            .and_then(|deck| deck.chrome.as_mut())
+            .zip(self.window.as_ref())
+            .and_then(|(chrome, window)| chrome.repaint_deadline(window));
+        event_loop.set_control_flow(paste_deadline.into_iter().chain(ui_deadline).min().map_or(
+            winit::event_loop::ControlFlow::Wait,
+            winit::event_loop::ControlFlow::WaitUntil,
+        ));
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -1205,8 +1233,6 @@ impl ApplicationHandler<()> for App {
         state.wake_pending = false;
         let close = state.close;
         state.last_ui_ms = self.session.handle.started.elapsed().as_millis() as u64;
-        let status = format!("{} — {}", state.label, state.status);
-
         drop(state);
         if close {
             if self.workspace.is_some() {
@@ -1218,13 +1244,8 @@ impl ApplicationHandler<()> for App {
             return;
         }
         self.clipboard_work(event_loop);
+        self.update_window_title();
         if let Some(window) = &self.window {
-            // Media wakeups do not change status. Avoid repeated AppKit title
-            // allocations/notifications on the latency-sensitive UI thread.
-            if self.last_window_status.as_deref() != Some(status.as_str()) {
-                window.set_title(&status);
-                self.last_window_status = Some(status);
-            }
             window.request_redraw();
         }
     }
@@ -1282,7 +1303,7 @@ impl ApplicationHandler<()> for App {
                 state.occluded = hidden;
                 if hidden {
                     state.submission_debt.hidden();
-                } else if state.pending.is_some() {
+                } else if state.frames.pending.is_some() {
                     state
                         .submission_debt
                         .queued(self.session.handle.started.elapsed().as_millis() as u64);

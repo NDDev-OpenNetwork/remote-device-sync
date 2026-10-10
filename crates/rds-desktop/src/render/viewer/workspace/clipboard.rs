@@ -207,10 +207,8 @@ impl App {
         }
         true
     }
-    pub(in super::super) fn workspace_paste_deadline(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(deck) = &mut self.workspace else {
-            return;
-        };
+    pub(in super::super) fn workspace_paste_deadline(&mut self) -> Option<Instant> {
+        let deck = self.workspace.as_mut()?;
         if deck
             .pending_paste
             .as_ref()
@@ -222,13 +220,7 @@ impl App {
                 window.request_redraw();
             }
         }
-        event_loop.set_control_flow(
-            deck.pending_paste
-                .as_ref()
-                .map_or(winit::event_loop::ControlFlow::Wait, |p| {
-                    winit::event_loop::ControlFlow::WaitUntil(p.deadline)
-                }),
-        );
+        deck.pending_paste.as_ref().map(|p| p.deadline)
     }
 }
 

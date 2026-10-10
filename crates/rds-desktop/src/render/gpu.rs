@@ -59,6 +59,7 @@ pub(super) struct Gpu {
     picture: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
     uploads: u64,
     chrome: Option<egui_wgpu::Renderer>,
+    reconfigure: bool,
 }
 
 impl Gpu {
@@ -84,7 +85,11 @@ impl Gpu {
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| error("no supported surface configuration"))?;
-        config.present_mode = wgpu::PresentMode::AutoNoVsync;
+        // AutoNoVsync prefers Immediate and AutoVsync may use FifoRelaxed;
+        // both allow tearing through the local UI as video arrives. Mailbox
+        // retains the newest frame without tearing; Fifo is the portable floor.
+        config.present_mode =
+            coherent_present_mode(&surface.get_capabilities(&adapter).present_modes);
         config.desired_maximum_frame_latency = 1;
         if let Some(format) = surface
             .get_capabilities(&adapter)
@@ -130,7 +135,8 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        tracing::info!(backend = ?adapter.get_info().backend, "native desktop renderer ready");
+        tracing::info!(backend = ?adapter.get_info().backend, present_mode = ?config.present_mode,
+            "native desktop renderer ready");
         Ok(Self {
             instance,
             window,
@@ -143,6 +149,7 @@ impl Gpu {
             picture: None,
             uploads: 0,
             chrome: None,
+            reconfigure: false,
         })
     }
 
@@ -153,6 +160,7 @@ impl Gpu {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
+        self.reconfigure = false;
     }
 
     fn upload(&mut self, frame: &RawFrame) -> Result<(), DesktopError> {
@@ -242,24 +250,38 @@ impl Gpu {
         self.picture = None;
     }
 
+    pub(super) fn has_picture(&self) -> bool {
+        self.picture.is_some()
+    }
+
     pub(super) fn draw(
         &mut self,
         frame: Option<&RawFrame>,
         mut ui: Option<&mut UiFrame>,
     ) -> Result<DrawOutcome, DesktopError> {
+        // A suboptimal surface remains usable for this frame, but its backing
+        // must be refreshed before acquiring another image (e.g. a DPI move).
+        if self.reconfigure {
+            self.resize(self.window.inner_size());
+        }
         let surface = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                self.reconfigure = true;
+                frame
+            }
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface = self
                     .instance
                     .create_surface(self.window.clone())
                     .map_err(error)?;
                 self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
                 return Ok(DrawOutcome::Reconfigured);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
                 return Ok(DrawOutcome::Reconfigured);
             }
             wgpu::CurrentSurfaceTexture::Timeout => return Ok(DrawOutcome::TimedOut),
@@ -376,11 +398,37 @@ impl Gpu {
                 renderer.free_texture(&id);
             }
         }
+        self.window.pre_present_notify();
         self.queue.present(surface);
+        if self.reconfigure {
+            self.window.request_redraw();
+        }
         Ok(if picture_presented {
             DrawOutcome::Presented
         } else {
             DrawOutcome::Empty
         })
+    }
+}
+
+fn coherent_present_mode(supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    if supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presentation_never_chooses_a_tearing_mode() {
+        use wgpu::PresentMode::{AutoNoVsync, AutoVsync, Fifo, FifoRelaxed, Immediate, Mailbox};
+        assert_eq!(coherent_present_mode(&[Immediate, Fifo]), Fifo);
+        assert_eq!(coherent_present_mode(&[FifoRelaxed, Fifo]), Fifo);
+        assert_eq!(coherent_present_mode(&[Fifo, Mailbox, Immediate]), Mailbox);
+        assert_eq!(coherent_present_mode(&[AutoNoVsync, AutoVsync, Fifo]), Fifo);
     }
 }

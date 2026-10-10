@@ -220,6 +220,21 @@ impl App {
         if let WindowEvent::KeyboardInput { event, .. } = event
             && event.state == ElementState::Pressed
             && !event.repeat
+            && event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyH)
+            && self.modifiers.state().control_key()
+            && self.modifiers.state().shift_key()
+            && !self.modifiers.state().alt_key()
+            && !self.modifiers.state().super_key()
+            && !deck.model.tabs().is_empty()
+            && let (Some(chrome), Some(window)) = (&mut deck.chrome, &self.window)
+            && !chrome.editing()
+        {
+            chrome.toggle_panels(window);
+            consumed = true;
+        }
+        if let WindowEvent::KeyboardInput { event, .. } = event
+            && event.state == ElementState::Pressed
+            && !event.repeat
             && event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::Tab)
             && self.modifiers.state().control_key()
         {
@@ -310,6 +325,9 @@ impl App {
             gpu.clear_picture();
         }
         self.last_window_status = None;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     fn workspace_open(&mut self, deck: &mut Deck, spec: TabSpec, event_loop: &ActiveEventLoop) {

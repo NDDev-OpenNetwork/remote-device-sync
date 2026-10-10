@@ -157,7 +157,9 @@ The [desktop client boundary](desktop-client-lifecycle.md) owns its control,
 event and bounded frame-reader tasks. Native decoding uses globally limited
 blocking work with retained cancellation budgets. The optional
 [native viewer](native-viewer.md) owns a winit event loop on the OS main thread,
-a wgpu surface and one pending BGRA image. The CLI owns the cancelable network
+a wgpu surface and one newest shared BGRA image per session. Pending measurement
+and idle-tab restoration share that allocation; repainting retained pixels does
+not admit another frame timing sample. The CLI owns the cancelable network
 worker and reopens a desktop session on the same authenticated peer after loss.
 Per-session wire routing and broader native media acceptance remain separate.
 
@@ -762,7 +764,11 @@ surface; `rds-cli::desktop::workspace` owns managed network workers and private
 preferences. Dependencies still point down the crate map. No new service or
 wire version is introduced. Each device's tabs retain a shared authenticated
 peer binding through settings/reconnect; only the focused tab routes input and
-publishes clipboard. See [native viewer](native-viewer.md#tabbed-workspace).
+publishes clipboard. The workspace can collapse its panels to one local restore
+arrow without reserving viewport height. Pointer ownership uses the same painted
+physical geometry; UI and clipboard deadlines share the native event loop.
+Presentation selects tear-free Mailbox or portable Fifo, and an existing native
+redraw never schedules itself again. See [native viewer](native-viewer.md#tabbed-workspace).
 
 The additive `DesktopV3` remote greeting and `DesktopProfile` local IPC command
 carry a per-session video-height choice while keeping prior tags and formats.
