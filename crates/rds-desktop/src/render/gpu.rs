@@ -5,6 +5,7 @@ use winit::{dpi::PhysicalSize, window::Window};
 use crate::{DesktopError, RawFrame};
 
 use super::input::Viewport;
+use super::workspace::chrome::UiFrame;
 
 const SHADER: &str = r#"
 struct Vertex { @builtin(position) position: vec4f, @location(0) uv: vec2f }
@@ -57,6 +58,7 @@ pub(super) struct Gpu {
     sampler: wgpu::Sampler,
     picture: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
     uploads: u64,
+    chrome: Option<egui_wgpu::Renderer>,
 }
 
 impl Gpu {
@@ -140,6 +142,7 @@ impl Gpu {
             sampler,
             picture: None,
             uploads: 0,
+            chrome: None,
         })
     }
 
@@ -235,7 +238,15 @@ impl Gpu {
         self.uploads
     }
 
-    pub(super) fn draw(&mut self, frame: Option<&RawFrame>) -> Result<DrawOutcome, DesktopError> {
+    pub(super) fn clear_picture(&mut self) {
+        self.picture = None;
+    }
+
+    pub(super) fn draw(
+        &mut self,
+        frame: Option<&RawFrame>,
+        mut ui: Option<&mut UiFrame>,
+    ) -> Result<DrawOutcome, DesktopError> {
         let surface = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -265,6 +276,34 @@ impl Gpu {
         }
         let view = surface.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        let screen = ui.as_ref().map(|ui| egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: ui.pixels_per_point,
+        });
+        let mut commands = vec![];
+        if let (Some(ui), Some(screen)) = (ui.as_mut(), screen.as_ref()) {
+            let renderer = self.chrome.get_or_insert_with(|| {
+                egui_wgpu::Renderer::new(
+                    &self.device,
+                    self.config.format,
+                    egui_wgpu::RendererOptions::default(),
+                )
+            });
+            for (id, deltas) in &ui.textures.set {
+                for delta in deltas {
+                    renderer.update_texture(&self.device, &self.queue, *id, delta);
+                }
+            }
+            ui.textures.set.clear();
+            commands = renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &ui.primitives,
+                screen,
+            );
+        }
+        let mut picture_presented = false;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("RDS screen"),
@@ -283,24 +322,62 @@ impl Gpu {
                 multiview_mask: None,
             });
             if let Some((_, group, width, height)) = &self.picture {
+                let area = ui.as_ref().map(|ui| {
+                    [
+                        f64::from(ui.content.left()),
+                        f64::from(ui.content.top()),
+                        f64::from(ui.content.width()),
+                        f64::from(ui.content.height()),
+                    ]
+                });
                 let viewport =
-                    Viewport::new(self.config.width, self.config.height, *width, *height);
-                pass.set_viewport(
-                    viewport.x as f32,
-                    viewport.y as f32,
-                    viewport.width as f32,
-                    viewport.height as f32,
-                    0.,
-                    1.,
-                );
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, group, &[]);
-                pass.draw(0..3, 0..1);
+                    Viewport::content(self.config.width, self.config.height, *width, *height, area);
+                if viewport.width > 0. && viewport.height > 0. {
+                    pass.set_viewport(
+                        viewport.x as f32,
+                        viewport.y as f32,
+                        viewport.width as f32,
+                        viewport.height as f32,
+                        0.,
+                        1.,
+                    );
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_bind_group(0, group, &[]);
+                    pass.draw(0..3, 0..1);
+                    picture_presented = true;
+                }
             }
         }
-        self.queue.submit([encoder.finish()]);
+        if let (Some(renderer), Some(ui), Some(screen)) =
+            (&self.chrome, ui.as_ref(), screen.as_ref())
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("RDS workspace"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            renderer.render(&mut pass.forget_lifetime(), &ui.primitives, screen);
+        }
+        commands.push(encoder.finish());
+        self.queue.submit(commands);
+        if let (Some(renderer), Some(ui)) = (&mut self.chrome, ui.as_mut()) {
+            for id in ui.textures.free.drain() {
+                renderer.free_texture(&id);
+            }
+        }
         self.queue.present(surface);
-        Ok(if self.picture.is_some() {
+        Ok(if picture_presented {
             DrawOutcome::Presented
         } else {
             DrawOutcome::Empty

@@ -27,6 +27,8 @@ def main():
     resources.mkdir()
     icon = pathlib.Path(__file__).resolve().parent.parent / "crates/rds-desktop/assets/app-icon.icns"
     shutil.copy2(icon, resources / "RDS.icns")
+    notices = pathlib.Path(__file__).resolve().parent.parent / "crates/rds-desktop/assets/font-licenses"
+    shutil.copytree(notices, resources / "Font-Licenses")
     info = {
         "CFBundleName": "RDS",
         "CFBundleDisplayName": "RDS",

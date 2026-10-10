@@ -9,7 +9,7 @@ repository.workspace = true
 [features]
 default = []
 x11 = ["dep:x11rb", "dep:openh264", "dep:openh264-sys2", "dep:memmap2", "dep:rustix"]
-viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
 blake3.workspace = true
@@ -31,6 +31,9 @@ wgpu = { version = "30.0.1", default-features = false, features = ["std", "parki
 # font parsers into the desktop client. Use the window system's decorations.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"], optional = true }
 pollster = { version = "1.0", optional = true }
+egui = { version = "0.36.2", default-features = false, features = ["default_fonts"], optional = true }
+egui-wgpu = { version = "0.36.2", default-features = false, optional = true }
+egui-winit = { version = "0.36.2", default-features = false, features = ["clipboard", "x11", "wayland"], optional = true }
 serde.workspace = true
 rustix = { workspace = true, features = ["event", "time"], optional = true }
 
@@ -53,4 +56,8 @@ workspace = true
 
 [[example]]
 name = "native_clipboard"
+required-features = ["viewer"]
+
+[[example]]
+name = "workspace_preview"
 required-features = ["viewer"]

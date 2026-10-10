@@ -18,7 +18,10 @@ mod viewer;
 #[cfg(feature = "viewer")]
 mod visual_probe;
 #[cfg(feature = "viewer")]
-pub use viewer::{InputReceiver, Viewer, ViewerHandle, ViewerInput, ViewerReport, ViewerSnapshot};
+pub use viewer::{
+    InputReceiver, Viewer, ViewerHandle, ViewerInput, ViewerReport, ViewerSnapshot, WorkspaceEvent,
+    WorkspaceHandle, WorkspaceUpdate,
+};
 #[cfg(feature = "viewer")]
 pub use visual_probe::{VisualProbeReport, VisualProbeSpec};
 

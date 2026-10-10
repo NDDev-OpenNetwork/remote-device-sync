@@ -1,6 +1,11 @@
 //! Bounded native workspace intent. Transport and credentials remain caller-owned.
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "viewer")]
+pub(crate) mod chrome;
+#[cfg(feature = "viewer")]
+pub use chrome::DeviceView;
+
 pub const MAX_TABS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -114,7 +119,7 @@ pub struct Tab {
     pub revision: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct WorkspaceModel {
     tabs: Vec<Tab>,
     active: Option<TabId>,
