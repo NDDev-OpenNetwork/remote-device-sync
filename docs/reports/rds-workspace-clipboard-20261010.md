@@ -55,3 +55,22 @@ destination/session staleness and delayed modifier transitions. Initial strict
 Clippy found a collapsible conditional; corrected code passes without a lint
 exception. These checks are not native cross-tab clipboard or installed
 qualification. Linux native clipboard publication remains explicitly unavailable.
+
+## Native integration review
+
+The native three-tab preview on production source `6008b42` accepted two delayed
+Copy→switch→Paste gestures with exact synthetic text, including a newer Copy
+superseding the first transfer. A later pending paste canceled on Escape.
+The preview's macOS Quit action exited before its final report writer, so these
+observations are retained as live counter/UI evidence, not final shutdown proof.
+
+The same run reproduced an input-routing defect: ordinary Tab moved focus to
+the local tab button and produced no remote input transition. Pinned
+[egui-winit 0.36.2](https://docs.rs/egui-winit/0.36.2/src/egui_winit/lib.rs.html)
+processes keyboard side effects before reporting consumption, always consumes
+Tab and reads native Paste even when no local text widget owns the keyboard.
+The integration now bypasses local key-press handling while the remote view
+owns input. Releases still clear old widget state after a local dialog closes;
+they cannot consume the remote release. Winit focus-generated synthetic keys
+are ignored before either local or remote gesture routing. Native revalidation
+and the new source's complete checks remain required.

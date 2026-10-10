@@ -108,11 +108,23 @@ impl Chrome {
         window: &winit::window::Window,
         event: &winit::event::WindowEvent,
     ) -> bool {
+        let keyboard = matches!(event, winit::event::WindowEvent::KeyboardInput { .. });
+        let local_keyboard = self.editing();
+        // egui-winit consumes Tab unconditionally and reads native Paste before
+        // reporting consumption. Remote key presses must bypass those effects.
+        if !local_keyboard
+            && let winit::event::WindowEvent::KeyboardInput { event, .. } = event
+            && event.state == winit::event::ElementState::Pressed
+        {
+            return false;
+        }
+        // Releases still clear egui's previous held-key state after a dialog
+        // closes, but cannot consume the remote tab's matching key release.
         let response = self.input.on_window_event(window, event);
         if response.repaint {
             window.request_redraw();
         }
-        response.consumed
+        response.consumed && (!keyboard || local_keyboard)
     }
 
     pub fn editing(&self) -> bool {

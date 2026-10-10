@@ -1224,6 +1224,17 @@ impl ApplicationHandler<()> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Focus-generated key snapshots are not fresh user gestures. Held
+        // modifiers are reconciled when the next real input arrives.
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput {
+                is_synthetic: true,
+                ..
+            }
+        ) {
+            return;
+        }
         self.sample_window();
         lock(&self.session.handle.state).last_ui_ms =
             self.session.handle.started.elapsed().as_millis() as u64;
