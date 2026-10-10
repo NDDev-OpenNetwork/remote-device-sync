@@ -17,6 +17,7 @@ struct ClipboardProbe {
     pastes: u64,
     valid_pastes: u64,
     shifted_pastes: u64,
+    tab_presses: u64,
     unexpected_text: u64,
 }
 
@@ -122,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         match event.kind {
                                             InputKind::KeyDown { code } => {
                                                 keys.insert(code);
+                                                if clipboard_probe && code == 15 { probe.lock().unwrap().tab_presses += 1; }
                                                 if clipboard_probe && (keys.contains(&29) || keys.contains(&97)) {
                                                     if matches!(code,45|46) {
                                                         let mut state = probe.lock().unwrap();
@@ -208,13 +210,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .open(report)?;
         writeln!(
             file,
-            "{{\"copies\":{},\"transfers\":{},\"pastes\":{},\"valid_pastes\":{},\"unexpected_text\":{},\"shifted_pastes\":{}}}",
+            "{{\"copies\":{},\"transfers\":{},\"pastes\":{},\"valid_pastes\":{},\"unexpected_text\":{},\"shifted_pastes\":{},\"tab_presses\":{}}}",
             state.copies,
             state.transfers,
             state.pastes,
             state.valid_pastes,
             state.unexpected_text,
-            state.shifted_pastes
+            state.shifted_pastes,
+            state.tab_presses
         )?;
         if state.valid_pastes == 0
             || state.pastes != state.valid_pastes
