@@ -92,3 +92,16 @@ The flags now belong to the native window and clear on actual window focus loss.
 Only forwarded remote key/button ownership is released or replaced per tab.
 This also preserves physical modifiers across settings/reconnect replacement,
 without forwarding a new remote key until real input requires reconciliation.
+
+Closing a window or observing a closed active session now takes precedence over
+clipboard work in that callback. In particular, a queued timed CloseWindow and
+a completed clipboard reply cannot replay a pending paste while the event loop
+is exiting. Further window/user callbacks ignore new work after exit is marked.
+
+The dedicated native `--close-with-reply` fixture reproduced the ordering defect
+on the pre-fix viewer: one normal paste followed by a second reply queued with
+CloseWindow still admitted and delivered the second paste. It recorded two
+attempts, two transfers and two valid synthetic pastes, then failed its expected
+one-paste shutdown contract. This is a retained negative result, not a successful
+qualification. The fixed callback ordering and the same fixture are qualified
+separately below.
