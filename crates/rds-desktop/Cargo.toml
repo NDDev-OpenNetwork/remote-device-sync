@@ -54,3 +54,7 @@ workspace = true
 [[example]]
 name = "native_clipboard"
 required-features = ["viewer"]
+
+[[example]]
+name = "synthetic_decode_probe"
+required-features = ["x11"]
