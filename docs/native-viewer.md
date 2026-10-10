@@ -13,7 +13,9 @@ does not create endpoint identities, issue grants or relax authorization.
 Click a tab or use Ctrl+Tab / Ctrl+Shift+Tab. A tab's context menu moves it left
 or right. Closing a tab ends only its desktop channel; other tabs and unrelated
 SSH/sync streams remain owned by their existing sessions. Switching releases
-held input on the previous display and disables its clipboard publication.
+held input on the previous display. Hidden displays cannot initiate clipboard
+publication; a Copy or request already authorized while selected may finish its
+bounded handoff through the same native event loop.
 One native window/event loop/GPU presents the active mailbox; inactive displays
 retain one newest frame each. The old GPU texture is cleared before switching.
 
@@ -22,6 +24,17 @@ retain one newest frame each. The old GPU texture is cleared before switching.
 frame receipts. Apply restarts that desktop channel; other channels keep running.
 Local input settings never widen the remote grant. Reconnect retains the verified
 device identity across tabs and settings changes, even if its registry name changes.
+
+On the macOS viewer, Copy/Cut in a new tab supersedes older tab clipboard work.
+If Paste follows a tab switch before copied text arrives, one pending gesture
+waits up to five seconds. It retains the original Shift intent (including
+terminal paste), destination tab, settings revision and connection epoch.
+New input, focus loss, reconnect, closing either session, changed native
+clipboard ownership or expiry cancels it with a visible message. No stale-text
+fallback or delayed paste into a different tab is permitted. Turning clipboard
+off leaves the remote computer's own paste shortcut available without reading
+the local clipboard. Linux native viewer clipboard publication remains unavailable;
+X11 server-side selection support does not imply that viewer capability.
 
 **Save workspace** writes bounded version-1 `viewer-workspace.json` preferences
 beside the default agent configuration. The file contains device references,

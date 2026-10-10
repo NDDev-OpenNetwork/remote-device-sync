@@ -1,4 +1,5 @@
 //! The native workspace owns tab presentation; the caller owns network tasks.
+mod clipboard;
 use super::*;
 use crate::render::workspace::chrome::{Action, Chrome};
 use crate::render::workspace::{DeviceView, Tab, TabId, TabSpec, WorkspaceModel};
@@ -52,6 +53,8 @@ pub(super) struct Deck {
     updates: std::sync::mpsc::Receiver<WorkspaceUpdate>,
     events: tokio::sync::mpsc::Sender<WorkspaceEvent>,
     pub message: String,
+    clipboard_owner: Option<TabId>,
+    pending_paste: Option<clipboard::PendingPaste>,
 }
 
 impl Viewer {
@@ -96,6 +99,8 @@ impl Viewer {
             updates: receive_updates,
             events,
             message: String::new(),
+            clipboard_owner: None,
+            pending_paste: None,
         });
         let handle = WorkspaceHandle {
             updates,
@@ -185,6 +190,29 @@ impl App {
         if let WindowEvent::ModifiersChanged(modifiers) = event {
             self.session.modifiers = *modifiers;
         }
+        // A delayed paste is a single gesture, never a queued macro. New input
+        // cancels it; modifier/key releases alone preserve the original Shift.
+        if matches!(
+            event,
+            WindowEvent::Focused(false)
+                | WindowEvent::KeyboardInput {
+                    event: winit::event::KeyEvent {
+                        state: ElementState::Pressed,
+                        repeat: false,
+                        ..
+                    },
+                    ..
+                }
+                | WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    ..
+                }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorMoved { .. }
+        ) && deck.pending_paste.take().is_some()
+        {
+            deck.clipboard_message("Paste canceled by new interaction");
+        }
         let mut consumed = false;
         if let (Some(chrome), Some(window)) = (&mut deck.chrome, &self.window) {
             consumed = chrome.event(window, event);
@@ -238,6 +266,15 @@ impl App {
     fn workspace_select(&mut self, deck: &mut Deck, id: TabId, event_loop: &ActiveEventLoop) {
         if deck.active == Some(id) {
             return;
+        }
+        deck.pending_paste = None;
+        if deck.clipboard_owner.is_none()
+            && let Ok(generation) = super::super::platform::clipboard_generation()
+            && lock(&self.session.handle.state)
+                .clipboard
+                .handoff_pending(generation)
+        {
+            deck.clipboard_owner = deck.active;
         }
         let Some(next) = deck.inactive.remove(&id) else {
             return;
@@ -317,6 +354,7 @@ impl App {
     }
 
     fn workspace_close(&mut self, deck: &mut Deck, id: TabId, event_loop: &ActiveEventLoop) {
+        deck.cancel_clipboard_tab(id);
         if deck.active == Some(id) {
             self.release(event_loop);
         }
@@ -411,6 +449,7 @@ impl App {
     }
 
     fn workspace_restart(&mut self, deck: &mut Deck, id: TabId, event_loop: &ActiveEventLoop) {
+        deck.cancel_clipboard_tab(id);
         let Some(tab) = deck.model.tab(id).cloned() else {
             return;
         };

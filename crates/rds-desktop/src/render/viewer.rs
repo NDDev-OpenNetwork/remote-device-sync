@@ -748,6 +748,35 @@ struct SessionView {
     pointer_point: Option<(f64, f64)>,
 }
 impl SessionView {
+    fn clipboard_work(&mut self) -> Result<bool, DesktopError> {
+        if !lock(&self.handle.state).clipboard.needs_work() {
+            return Ok(false);
+        }
+        let Ok(generation) = super::platform::clipboard_generation() else {
+            return Ok(false);
+        };
+        let text = lock(&self.handle.state).clipboard.publish(generation);
+        let mut published = false;
+        if let Some(text) = text {
+            match super::platform::publish_text(&text) {
+                Ok(()) => published = true,
+                Err(error) => self
+                    .handle
+                    .status(format!("Clipboard unavailable: {error}")),
+            }
+        }
+        // Publication changes native ownership; observe it before the next request.
+        let Ok(generation) = super::platform::clipboard_generation() else {
+            return Ok(published);
+        };
+        let request = lock(&self.handle.state).clipboard.request(generation);
+        if let Some(control) = request {
+            self.input
+                .send(ViewerInput::Control(control))
+                .map_err(|_| DesktopError::Input("clipboard request queue full".into()))?;
+        }
+        Ok(published)
+    }
     fn new(display: u32, proxy: EventLoopProxy<()>) -> (Self, ViewerHandle, InputReceiver) {
         let input_state = Arc::new(InputState {
             queue: Mutex::new(VecDeque::new()),
@@ -818,57 +847,81 @@ struct App {
 }
 impl App {
     fn clipboard_work(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(deck) = &self.workspace {
-            let enabled = deck
-                .active
-                .and_then(|id| deck.model.tab(id))
-                .is_some_and(|tab| tab.spec.profile.clipboard)
-                && !deck
-                    .chrome
-                    .as_ref()
-                    .is_some_and(super::workspace::chrome::Chrome::editing)
-                && self
-                    .window
-                    .as_ref()
-                    .is_some_and(|window| window.has_focus());
-            lock(&self.session.handle.state).clipboard.focus(enabled);
-        }
-        if !lock(&self.session.handle.state).clipboard.needs_work() {
+        if self.workspace_clipboard_work(event_loop) {
             return;
         }
-        let Ok(generation) = super::platform::clipboard_generation() else {
-            return;
-        };
-        let text = lock(&self.session.handle.state)
-            .clipboard
-            .publish(generation);
-        if let Some(text) = text
-            && let Err(error) = super::platform::publish_text(&text)
-        {
-            self.session
-                .handle
-                .status(format!("Clipboard unavailable: {error}"));
+        if let Err(error) = self.session.clipboard_work() {
+            self.fail_input(event_loop, error);
         }
-        // Publication changes the native generation. Read again before a new
-        // request so a completed transfer cannot invalidate its successor.
-        let Ok(generation) = super::platform::clipboard_generation() else {
-            return;
-        };
-        let request = lock(&self.session.handle.state)
-            .clipboard
-            .request(generation);
-        if let Some(control) = request
-            && self
-                .session
-                .input
-                .send(ViewerInput::Control(control))
-                .is_err()
-        {
-            self.fail_input(
-                event_loop,
-                DesktopError::Input("clipboard request queue full".into()),
-            );
+    }
+    fn paste_text(&mut self, event_loop: &ActiveEventLoop, command_paste: bool) -> bool {
+        match super::platform::paste_text() {
+            Ok(Some(text)) => {
+                let id = rand::random();
+                let total = text.len() as u32;
+                lock(&self.session.handle.state).clipboard_latency.sent(
+                    id,
+                    total,
+                    self.session.handle.started.elapsed().as_millis() as u64,
+                );
+                tracing::info!(
+                    transfer_id = id,
+                    bytes = total,
+                    command_paste,
+                    "explicit local clipboard text queued"
+                );
+                let chunks = text.as_bytes().chunks(crate::clipboard::SEND_CHUNK_BYTES);
+                for (index, chunk) in chunks.enumerate() {
+                    if self
+                        .session
+                        .input
+                        .send(ViewerInput::Control(DesktopControl::ClipboardChunk {
+                            id,
+                            offset: (index * crate::clipboard::SEND_CHUNK_BYTES) as u32,
+                            total,
+                            data: chunk.to_vec(),
+                        }))
+                        .is_err()
+                    {
+                        self.fail_input(
+                            event_loop,
+                            DesktopError::Input("clipboard input queue full".into()),
+                        );
+                        return false;
+                    }
+                }
+                if total == 0
+                    && self
+                        .session
+                        .input
+                        .send(ViewerInput::Control(DesktopControl::ClipboardChunk {
+                            id,
+                            offset: 0,
+                            total,
+                            data: vec![],
+                        }))
+                        .is_err()
+                {
+                    self.fail_input(
+                        event_loop,
+                        DesktopError::Input("clipboard input queue full".into()),
+                    );
+                    return false;
+                }
+            }
+            Ok(None) if command_paste => {
+                tracing::info!("explicit local clipboard paste has no text");
+                return false;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.session
+                    .handle
+                    .status(format!("Clipboard unavailable: {error}"));
+                return false;
+            }
         }
+        true
     }
     fn sample_window(&self) {
         if let Some(window) = &self.window {
@@ -1089,6 +1142,9 @@ impl App {
 }
 
 impl ApplicationHandler<()> for App {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.workspace_paste_deadline(event_loop);
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -1258,94 +1314,31 @@ impl ApplicationHandler<()> for App {
                                 || self.session.keys.contains(&29)
                                 || self.session.keys.contains(&97))
                         {
-                            match super::platform::paste_text() {
-                                Ok(Some(text)) => {
-                                    let id = rand::random();
-                                    let total = text.len() as u32;
-                                    lock(&self.session.handle.state).clipboard_latency.sent(
-                                        id,
-                                        total,
-                                        self.session.handle.started.elapsed().as_millis() as u64,
-                                    );
-                                    tracing::info!(
-                                        transfer_id = id,
-                                        bytes = total,
-                                        command_paste,
-                                        "explicit local clipboard text queued"
-                                    );
-                                    let chunks =
-                                        text.as_bytes().chunks(crate::clipboard::SEND_CHUNK_BYTES);
-                                    for (index, chunk) in chunks.enumerate() {
-                                        if self
-                                            .session
-                                            .input
-                                            .send(ViewerInput::Control(
-                                                DesktopControl::ClipboardChunk {
-                                                    id,
-                                                    offset: (index
-                                                        * crate::clipboard::SEND_CHUNK_BYTES)
-                                                        as u32,
-                                                    total,
-                                                    data: chunk.to_vec(),
-                                                },
-                                            ))
-                                            .is_err()
-                                        {
-                                            self.fail_input(
-                                                event_loop,
-                                                DesktopError::Input(
-                                                    "clipboard input queue full".into(),
-                                                ),
-                                            );
-                                            return;
-                                        }
-                                    }
-                                    if total == 0
-                                        && self
-                                            .session
-                                            .input
-                                            .send(ViewerInput::Control(
-                                                DesktopControl::ClipboardChunk {
-                                                    id,
-                                                    offset: 0,
-                                                    total,
-                                                    data: vec![],
-                                                },
-                                            ))
-                                            .is_err()
-                                    {
-                                        self.fail_input(
-                                            event_loop,
-                                            DesktopError::Input(
-                                                "clipboard input queue full".into(),
-                                            ),
-                                        );
-                                        return;
-                                    }
-                                }
-                                Ok(None) if command_paste => {
-                                    tracing::info!("explicit local clipboard paste has no text");
-                                    return;
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    self.session
-                                        .handle
-                                        .status(format!("Clipboard unavailable: {error}"));
-                                    return;
-                                }
+                            if self.workspace_defer_paste(event_loop) {
+                                return;
                             }
+                            if self.workspace_clipboard_enabled()
+                                && !self.paste_text(event_loop, command_paste)
+                            {
+                                return;
+                            }
+                        }
+                        let command_copy = cfg!(target_os = "macos")
+                            && (self.session.keys.contains(&125)
+                                || self.session.keys.contains(&126));
+                        if matches!(code, 45 | 46)
+                            && (command_copy
+                                || self.session.keys.contains(&29)
+                                || self.session.keys.contains(&97))
+                            && self.workspace_clipboard_enabled()
+                        {
+                            self.workspace_copying();
                         }
                         if cfg!(target_os = "macos")
                             && matches!(code, 45 | 46)
                             && (self.session.keys.contains(&125)
                                 || self.session.keys.contains(&126))
                         {
-                            if let Ok(generation) = super::platform::clipboard_generation() {
-                                lock(&self.session.handle.state)
-                                    .clipboard
-                                    .copying(generation);
-                            }
                             for kind in super::input::command_chord(&self.session.keys, code) {
                                 self.input(event_loop, kind);
                             }
