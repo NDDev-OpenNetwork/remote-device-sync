@@ -40,6 +40,22 @@ subscribes to Response before sending. Timeout/drop cleanup closes that Request
 before Session and its unique bus peer; setup failures join the close owner.
 An abandoned request must not leave a stale permission dialog.
 
+`open_with_cancel` gives local preparation an explicit cancellation future.
+The agent and attended example use their retained SIGINT/SIGTERM listener during
+consent, then join the pending request, session and unique bus cleanup before
+returning. Cancellation also joins file work before releasing its state lock;
+native readiness failures join source cleanup. Aborting the preparation task or
+terminating the process forcibly cannot synchronously provide these guarantees.
+
+Select the monitor tiles as well as permitting remote interaction. In GNOME 50,
+interaction alone enables the dialog's accept button, but an empty monitor
+selection can create a screen-cast session with no stream-ready signal. This is
+an inference from the [dialog](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/remotedesktopdialog.c),
+[selection widget](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/screencastwidget.c)
+and [combined session](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/remotedesktop.c)
+code. RDS cannot select monitors or bypass consent on the user's behalf; an
+explicit local cancellation closes a stuck request, without restarting GNOME.
+
 One RemoteDesktop session selects input and multiple monitor sources, starts
 once and connects one PipeWire remote and one EIS peer. Combined persistence is
 requested only through RemoteDesktop. Start consumes the previous restore token;

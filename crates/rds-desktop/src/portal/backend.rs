@@ -26,6 +26,16 @@ fn error() -> DesktopError {
 impl WaylandDesktop {
     /// Store lives in a private 0700 directory; tokens are never logged.
     pub async fn open(path: &Path) -> Result<Self, DesktopError> {
+        Self::open_with_cancel(path, std::future::pending()).await
+    }
+    /// Local preparation cancellation joins portal cleanup before returning.
+    /// The caller must keep polling this future until it returns; aborting its
+    /// task cannot synchronously join native or D-Bus cleanup.
+    pub async fn open_with_cancel(
+        path: &Path,
+        cancelled: impl Future<Output = ()>,
+    ) -> Result<Self, DesktopError> {
+        tokio::pin!(cancelled);
         let path = path.to_owned();
         static FILE_WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let permit = FILE_WORKERS
@@ -33,13 +43,21 @@ impl WaylandDesktop {
             .clone()
             .try_acquire_owned()
             .map_err(|_| error())?;
-        let mut store = tokio::task::spawn_blocking(move || {
+        let mut opening = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             state::Store::open(&path)
-        })
-        .await
-        .map_err(|_| error())??;
-        let granted = session::open(store.token()).await?;
+        });
+        let mut store = tokio::select! {
+            biased;
+            _ = &mut cancelled => {
+                // A started file worker cannot be aborted. Join it and drop
+                // its private lock before returning from local cancellation.
+                let _ = opening.await;
+                return Err(error());
+            },
+            result = &mut opening => result.map_err(|_| error())??,
+        };
+        let granted = session::open(store.token(), &mut cancelled).await?;
         let mut sources = Vec::with_capacity(granted.monitors.len());
         let mut ids = BTreeMap::new();
         for monitor in &granted.monitors {
@@ -114,7 +132,7 @@ impl WaylandDesktop {
             close: Mutex::new(Some(close)),
             finished,
         };
-        tokio::time::timeout(Duration::from_secs(10), async {
+        let ready = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if *backend.closed.borrow() {
                     return Err(error());
@@ -132,10 +150,16 @@ impl WaylandDesktop {
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        })
-        .await
-        .map_err(|_| error())??;
-        backend.capabilities()?;
+        });
+        let result = tokio::select! {
+            ready = ready => ready.map_err(|_| error()).and_then(|result| result),
+            _ = &mut cancelled => Err(error()),
+        }
+        .and_then(|()| backend.capabilities().map(|_| ()));
+        if let Err(error) = result {
+            backend.close().await;
+            return Err(error);
+        }
         Ok(backend)
     }
     pub async fn close(&self) {
@@ -217,5 +241,32 @@ impl DesktopSource for WaylandDesktop {
             return Err(error());
         }
         self.input.sink(display, extent)
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_local_preparation_joins_file_worker_before_lock_reopen() {
+        let directory = Directory(
+            std::env::temp_dir().join(format!("rds-portal-cancel-{:032x}", rand::random::<u128>())),
+        );
+        std::fs::create_dir(&directory.0).unwrap();
+        std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.0.join("permission.json");
+        let result = WaylandDesktop::open_with_cancel(&path, std::future::ready(())).await;
+        assert!(result.is_err());
+        // No ambient portal is contacted. File work has actually returned,
+        // rather than leaving a detached lock owner requiring polling/retry.
+        let state = state::Store::open(&path).unwrap();
+        assert!(state.token().is_none());
     }
 }

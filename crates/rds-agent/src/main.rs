@@ -382,10 +382,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     } else {
         None
     };
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     #[cfg(all(target_os = "linux", feature = "portal"))]
     let portal = match cli.wayland_state.as_ref() {
         Some(path) => Some(std::sync::Arc::new(
-            rds_desktop::WaylandDesktop::open(path).await?,
+            rds_desktop::WaylandDesktop::open_with_cancel(path, &mut shutdown).await?,
         )),
         None => None,
     };
@@ -483,7 +485,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 None => std::future::pending().await,
             }
         } => res.map_err(Into::into),
-        _ = shutdown_signal() => Ok(()),
+        _ = &mut shutdown => Ok(()),
     };
     drop(announce);
     // Close the endpoint so peers get CONNECTION_CLOSE instead of an

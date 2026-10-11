@@ -70,3 +70,14 @@ available for cleanup. Together with actual Request.Close dispatch, all four
 D-Bus cases passed. Strict Linux Clippy with both portal and owned transport
 also passed. This isolates response handling from an installed GNOME dialog;
 it does not establish attended native capture or explain a missing live response.
+
+The local stop listener now participates during preparation. Explicit
+cancellation joins Request.Close, Session.Close and unique connection close;
+admission releases only after that owner returns. A private-bus test verifies
+that order and connection/permit completion. A pre-cancelled file-preparation
+case verifies immediate state-lock reopening without a retry or ambient portal.
+Native readiness errors join source cleanup before returning. All 17 portal
+cases and strict Linux portal/owned-transport and macOS desktop/owned-transport
+Clippy passed. Process death and externally aborting an opening task retain
+their separate limitations; SIGINT/SIGTERM callers use the explicit cancellation
+future rather than dropping the preparation future at runtime exit.

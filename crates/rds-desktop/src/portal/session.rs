@@ -80,92 +80,82 @@ async fn rpc<T>(
         .map_err(|_| error(stage))
 }
 
-pub(super) async fn open(restore_token: Option<&str>) -> Result<Granted, DesktopError> {
+pub(super) async fn open(
+    restore_token: Option<&str>,
+    cancelled: impl Future<Output = ()>,
+) -> Result<Granted, DesktopError> {
+    tokio::pin!(cancelled);
     static SESSIONS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let permit = tokio::time::timeout(
+    let admission = tokio::time::timeout(
         RPC_TIMEOUT,
         SESSIONS
             .get_or_init(|| Arc::new(Semaphore::new(4)))
             .clone()
             .acquire_owned(),
-    )
-    .await
-    .map_err(|_| error("admission"))?
-    .map_err(|_| error("admission"))?;
+    );
+    let permit = tokio::select! {
+        biased;
+        _ = &mut cancelled => return Err(error("preparation cancelled")),
+        permit = admission => permit.map_err(|_| error("admission"))?.map_err(|_| error("admission"))?,
+    };
     // This connection is exclusively ours. Cancellation before CreateSession
     // returns drops it, rather than leaving a process-global portal peer alive.
-    let connection = tokio::time::timeout(RPC_TIMEOUT, ashpd::zbus::Connection::session())
-        .await
-        .map_err(|_| error("bus connection"))?
-        .map_err(|_| error("bus connection"))?;
-    rpc(
-        "application registration",
-        ashpd::register_host_app_with_connection(
-            connection.clone(),
-            APP_ID.parse().map_err(|_| error("application identity"))?,
-        ),
-    )
-    .await?;
-    let remote = rpc(
-        "remote-desktop proxy",
-        RemoteDesktop::with_connection(connection.clone()),
-    )
-    .await?;
-    let screencast = rpc(
-        "screencast proxy",
-        Screencast::with_connection(connection.clone()),
-    )
-    .await?;
-    if remote.version() < 2 || screencast.version() < 5 {
-        return Err(error("required EIS/mapping protocol"));
-    }
-    let devices = DeviceType::Keyboard | DeviceType::Pointer;
-    let available = rpc("input capabilities", remote.available_device_types()).await?;
-    let cursors = rpc("cursor capabilities", screencast.available_cursor_modes()).await?;
-    if !available.contains(devices) || !cursors.contains(CursorMode::Embedded) {
-        return Err(error("required input/cursor capabilities"));
-    }
-    let session = Arc::new(
-        rpc(
-            "session creation",
-            remote.create_session(Default::default()),
-        )
-        .await?,
-    );
-    let (close, stop) = oneshot::channel();
-    let (closed_tx, closed) = watch::channel(false);
-    let connection_for_start = connection.clone();
-    let closing_session: Arc<Session<RemoteDesktop>> = session.clone();
-    let pending = Arc::new(Mutex::new(None));
-    let closing_pending = pending.clone();
-    let task = tokio::spawn(async move {
-        let _permit = permit;
-        let signals = tokio::time::timeout(RPC_TIMEOUT, closing_session.receive_closed()).await;
-        if let Ok(Ok(signals)) = signals {
-            tokio::pin!(signals);
-            tokio::select! {
-                _ = stop => {},
-                _ = signals.next() => {},
-            }
-        }
-        closed_tx.send_replace(true);
-        let pending = closing_pending
-            .lock()
-            .ok()
-            .and_then(|mut value| value.take());
-        if let Some(path) = pending {
-            close_request(&connection, path).await;
-        }
-        let _ = tokio::time::timeout(Duration::from_secs(5), closing_session.close()).await;
-        // Explicitly close the unique peer even if the portal didn't answer Close.
-        let _ = tokio::time::timeout(Duration::from_secs(2), connection.close()).await;
-    });
-    let mut owner = Owner {
-        pending,
-        close: Some(close),
-        task: Some(task),
-        closed,
+    let connection = tokio::select! {
+        _ = &mut cancelled => return Err(error("preparation cancelled")),
+        connection = tokio::time::timeout(RPC_TIMEOUT, ashpd::zbus::Connection::session()) => {
+            connection.map_err(|_| error("bus connection"))?.map_err(|_| error("bus connection"))?
+        },
     };
+    let devices = DeviceType::Keyboard | DeviceType::Pointer;
+    let creating = async {
+        rpc(
+            "application registration",
+            ashpd::register_host_app_with_connection(
+                connection.clone(),
+                APP_ID.parse().map_err(|_| error("application identity"))?,
+            ),
+        )
+        .await?;
+        let remote = rpc(
+            "remote-desktop proxy",
+            RemoteDesktop::with_connection(connection.clone()),
+        )
+        .await?;
+        let screencast = rpc(
+            "screencast proxy",
+            Screencast::with_connection(connection.clone()),
+        )
+        .await?;
+        if remote.version() < 2 || screencast.version() < 5 {
+            return Err(error("required EIS/mapping protocol"));
+        }
+        let available = rpc("input capabilities", remote.available_device_types()).await?;
+        let cursors = rpc("cursor capabilities", screencast.available_cursor_modes()).await?;
+        if !available.contains(devices) || !cursors.contains(CursorMode::Embedded) {
+            return Err(error("required input/cursor capabilities"));
+        }
+        let session = Arc::new(
+            rpc(
+                "session creation",
+                remote.create_session(Default::default()),
+            )
+            .await?,
+        );
+        Ok::<_, DesktopError>((remote, screencast, session))
+    };
+    let created = tokio::select! {
+        result = creating => result,
+        _ = &mut cancelled => Err(error("preparation cancelled")),
+    };
+    let (remote, screencast, session) = match created {
+        Ok(parts) => parts,
+        Err(error) => {
+            let _ = tokio::time::timeout(Duration::from_secs(2), connection.close()).await;
+            return Err(error);
+        }
+    };
+    let connection_for_start = connection.clone();
+    let mut owner = own_session(session.clone(), connection, permit);
     let configured = async {
         rpc(
             "input selection",
@@ -244,8 +234,11 @@ pub(super) async fn open(restore_token: Option<&str>) -> Result<Granted, Desktop
         )
         .await?;
         Ok::<_, DesktopError>((monitors, video, input, restore_token))
-    }
-    .await;
+    };
+    let configured = tokio::select! {
+        result = configured => result,
+        _ = &mut cancelled => Err(error("preparation cancelled")),
+    };
     let (monitors, video, input, restore_token) = match configured {
         Ok(parts) => parts,
         Err(error) => {
@@ -260,6 +253,45 @@ pub(super) async fn open(restore_token: Option<&str>) -> Result<Granted, Desktop
         input,
         restore_token,
     })
+}
+
+fn own_session(
+    closing_session: Arc<Session<RemoteDesktop>>,
+    connection: ashpd::zbus::Connection,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Owner {
+    let (close, stop) = oneshot::channel();
+    let (closed_tx, closed) = watch::channel(false);
+    let pending = Arc::new(Mutex::new(None));
+    let closing_pending = pending.clone();
+    let task = tokio::spawn(async move {
+        let _permit = permit;
+        let signals = tokio::time::timeout(RPC_TIMEOUT, closing_session.receive_closed()).await;
+        if let Ok(Ok(signals)) = signals {
+            tokio::pin!(signals);
+            tokio::select! {
+                _ = stop => {},
+                _ = signals.next() => {},
+            }
+        }
+        closed_tx.send_replace(true);
+        let pending = closing_pending
+            .lock()
+            .ok()
+            .and_then(|mut value| value.take());
+        if let Some(path) = pending {
+            close_request(&connection, path).await;
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), closing_session.close()).await;
+        // Explicitly close the unique peer even if the portal didn't answer Close.
+        let _ = tokio::time::timeout(Duration::from_secs(2), connection.close()).await;
+    });
+    Owner {
+        pending,
+        close: Some(close),
+        task: Some(task),
+        closed,
+    }
 }
 
 // ashpd's convenience Start awaits user Response before returning its Request,
@@ -565,6 +597,102 @@ mod request_tests {
         async fn close(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    struct OrderedRequest(Arc<Mutex<Vec<&'static str>>>);
+    #[zbus::interface(name = "org.freedesktop.portal.Request", crate = "ashpd::zbus")]
+    impl OrderedRequest {
+        fn close(&self) {
+            self.0.lock().unwrap().push("request");
+        }
+    }
+    struct OrderedSession(Arc<Mutex<Vec<&'static str>>>);
+    #[zbus::interface(name = "org.freedesktop.portal.Session", crate = "ashpd::zbus")]
+    impl OrderedSession {
+        fn close(&self) {
+            self.0.lock().unwrap().push("session");
+        }
+    }
+
+    #[tokio::test]
+    async fn local_stop_joins_request_session_connection_and_admission_cleanup() {
+        let mut bus = tokio::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(bus.stdout.take().unwrap()).lines();
+        let address = tokio::time::timeout(Duration::from_secs(3), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let server = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .name("org.freedesktop.portal.Desktop")
+            .unwrap()
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                EarlyResponsePortal {
+                    response: 0,
+                    wrong_path: false,
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let remote = RemoteDesktop::with_connection(client.clone())
+            .await
+            .unwrap();
+        let session = Arc::new(remote.create_session(Default::default()).await.unwrap());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        // CreateSession returned this exact SDK-owned path on our private bus.
+        let session_path = serde_json::to_value(&*session).unwrap();
+        let session_path =
+            OwnedObjectPath::try_from(session_path.as_str().unwrap().to_owned()).unwrap();
+        server
+            .object_server()
+            .at(session_path, OrderedSession(events.clone()))
+            .await
+            .unwrap();
+        let sender = client
+            .unique_name()
+            .unwrap()
+            .as_str()
+            .trim_start_matches(':')
+            .replace('.', "_");
+        let request_path = OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/portal/desktop/request/{sender}/pending"
+        ))
+        .unwrap();
+        server
+            .object_server()
+            .at(request_path.clone(), OrderedRequest(events.clone()))
+            .await
+            .unwrap();
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = admission.clone().acquire_owned().await.unwrap();
+        let mut owner = own_session(session, client.clone(), permit);
+        *owner.pending.lock().unwrap() = Some(request_path);
+        assert_eq!(admission.available_permits(), 0);
+        tokio::time::timeout(Duration::from_secs(3), owner.close())
+            .await
+            .unwrap();
+        assert_eq!(*events.lock().unwrap(), ["request", "session"]);
+        assert!(client.is_closed());
+        assert!(*owner.closed.borrow());
+        assert_eq!(admission.available_permits(), 1);
+        server.close().await.unwrap();
+        bus.kill().await.unwrap();
+        bus.wait().await.unwrap();
     }
 
     #[tokio::test]

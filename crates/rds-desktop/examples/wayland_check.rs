@@ -17,7 +17,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: wayland_check ABSOLUTE_PRIVATE_STATE_FILE")?;
     eprintln!("Waiting for the local portal permission; select the monitors to share.");
-    let source = Arc::new(WaylandDesktop::open(std::path::Path::new(&state)).await?);
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let cancelled = async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = term.recv() => {},
+        }
+    };
+    let source =
+        Arc::new(WaylandDesktop::open_with_cancel(std::path::Path::new(&state), cancelled).await?);
     let result = async {
         let caps = source.capabilities()?;
         for display in caps.displays {
