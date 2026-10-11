@@ -61,3 +61,12 @@ preserving its original policy and workload. Both control/media priority cases
 and strict workspace Clippy with the combined owned-transport/desktop features
 passed locally. The original hosted compilation failure remains in
 [job 114366444967](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/38104312491/job/114366444967).
+
+Three additional private-bus cases exercise the production Start handler with
+an SDK-created session. A directed Response emitted before the Start method
+reply is received and decoded; early consent denial returns without reopening;
+a mismatched returned request path is refused while the owned path remains
+available for cleanup. Together with actual Request.Close dispatch, all four
+D-Bus cases passed. Strict Linux Clippy with both portal and owned transport
+also passed. This isolates response handling from an installed GNOME dialog;
+it does not establish attended native capture or explain a missing live response.

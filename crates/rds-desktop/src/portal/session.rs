@@ -371,6 +371,194 @@ mod request_tests {
     use ashpd::zbus;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, BufReader};
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+
+    struct EarlyResponsePortal {
+        response: u32,
+        wrong_path: bool,
+    }
+
+    fn fixture_path(
+        header: &zbus::message::Header<'_>,
+        options: &std::collections::HashMap<String, OwnedValue>,
+        segment: &str,
+        token_key: &str,
+    ) -> OwnedObjectPath {
+        let sender = header
+            .sender()
+            .unwrap()
+            .as_str()
+            .trim_start_matches(':')
+            .replace('.', "_");
+        let token = <&str>::try_from(options.get(token_key).unwrap()).unwrap();
+        OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/portal/desktop/{segment}/{sender}/{token}"
+        ))
+        .unwrap()
+    }
+
+    #[zbus::interface(name = "org.freedesktop.portal.RemoteDesktop", crate = "ashpd::zbus")]
+    impl EarlyResponsePortal {
+        #[zbus(property)]
+        fn version(&self) -> u32 {
+            2
+        }
+
+        async fn create_session(
+            &self,
+            options: std::collections::HashMap<String, OwnedValue>,
+            #[zbus(connection)] connection: &zbus::Connection,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+        ) -> zbus::fdo::Result<OwnedObjectPath> {
+            let request = fixture_path(&header, &options, "request", "handle_token");
+            let session = fixture_path(&header, &options, "session", "session_handle_token");
+            connection
+                .emit_signal(
+                    header.sender().cloned(),
+                    request.clone(),
+                    "org.freedesktop.portal.Request",
+                    "Response",
+                    &(
+                        0_u32,
+                        std::collections::HashMap::from([(
+                            "session_handle",
+                            OwnedValue::from(session.into_inner()),
+                        )]),
+                    ),
+                )
+                .await?;
+            Ok(request)
+        }
+
+        async fn start(
+            &self,
+            _session: OwnedObjectPath,
+            _parent: &str,
+            options: std::collections::HashMap<String, OwnedValue>,
+            #[zbus(connection)] connection: &zbus::Connection,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+        ) -> zbus::fdo::Result<OwnedObjectPath> {
+            let path = fixture_path(&header, &options, "request", "handle_token");
+            // Deliberately precede the method reply. There is no user pacing,
+            // helper task or sleep which could hide a subscription race.
+            connection
+                .emit_signal(
+                    header.sender().cloned(),
+                    path.clone(),
+                    "org.freedesktop.portal.Request",
+                    "Response",
+                    &(
+                        self.response,
+                        std::collections::HashMap::from([("devices", OwnedValue::from(3_u32))]),
+                    ),
+                )
+                .await?;
+            Ok(if self.wrong_path {
+                OwnedObjectPath::try_from("/org/freedesktop/portal/desktop/request/wrong").unwrap()
+            } else {
+                path
+            })
+        }
+    }
+
+    async fn check_early_response(response: u32, wrong_path: bool) {
+        let mut bus = tokio::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(bus.stdout.take().unwrap()).lines();
+        let address = tokio::time::timeout(Duration::from_secs(3), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let server = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .name("org.freedesktop.portal.Desktop")
+            .unwrap()
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                EarlyResponsePortal {
+                    response,
+                    wrong_path,
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let remote = RemoteDesktop::with_connection(client.clone())
+            .await
+            .unwrap();
+        let session = tokio::time::timeout(
+            Duration::from_secs(3),
+            remote.create_session(Default::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_closed, closed) = watch::channel(false);
+        let owner = Owner {
+            pending: Arc::new(Mutex::new(None)),
+            close: None,
+            task: None,
+            closed,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            start(&remote, &session, &owner, &client),
+        )
+        .await
+        .expect("an early directed Response must not be lost");
+        if wrong_path {
+            assert!(
+                matches!(result, Err(DesktopError::Capture(ref message)) if message.contains("request identity mismatch"))
+            );
+            assert!(owner.pending.lock().unwrap().is_some());
+        } else {
+            assert!(owner.pending.lock().unwrap().is_none());
+            if response == 0 {
+                assert!(
+                    result
+                        .unwrap()
+                        .devices()
+                        .contains(DeviceType::Keyboard | DeviceType::Pointer)
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(DesktopError::Capture(ref message)) if message.contains("consent response"))
+                );
+            }
+        }
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+        bus.kill().await.unwrap();
+        bus.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn directed_consent_response_before_start_reply_is_received() {
+        check_early_response(0, false).await;
+    }
+
+    #[tokio::test]
+    async fn early_consent_denial_does_not_wait_or_reopen() {
+        check_early_response(1, false).await;
+    }
+
+    #[tokio::test]
+    async fn returned_request_identity_cannot_replace_the_owned_path() {
+        check_early_response(0, true).await;
+    }
+
     struct Request(Arc<AtomicUsize>);
     #[zbus::interface(name = "org.freedesktop.portal.Request", crate = "ashpd::zbus")]
     impl Request {
@@ -395,10 +583,9 @@ mod request_tests {
             .unwrap()
             .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
-        let path = zbus::zvariant::OwnedObjectPath::try_from(
-            "/org/freedesktop/portal/desktop/request/1_0/rds_test",
-        )
-        .unwrap();
+        let path =
+            OwnedObjectPath::try_from("/org/freedesktop/portal/desktop/request/1_0/rds_test")
+                .unwrap();
         let server = zbus::connection::Builder::address(address.as_str())
             .unwrap()
             .name("org.freedesktop.portal.Desktop")
