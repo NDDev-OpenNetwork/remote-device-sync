@@ -14,3 +14,15 @@ A deterministic regression holds a real locked Journal inside an already-running
 This is a store-worker completion boundary. Async-waiter drop, abandoned assembly and a stuck filesystem syscall still cannot promise immediate physical cancellation or unconditional lock release. The existing cooperative barriers retain safe ownership until their actual work ends; no lock is forcibly deleted or reused.
 
 Primary references: [Tokio spawn_blocking](https://docs.rs/tokio/1.48.0/tokio/task/fn.spawn_blocking.html) documents non-abortable started work; [JoinHandle](https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html) documents detachment, cancel-safe mutable awaiting and destructor completion before a joined result. Current contracts: [sync journal](../sync-journal.md#receive-cancellation), [sync protocol](../sync-protocol.md).
+
+Registered w1-sync-supervision completed at signed 04ce32d: fmt, strict
+workspace Clippy, workspace and sync tests (1084 passed executions,
+zero failures), plus 100 samples in each of four journal preparation cases.
+[Benchmark](bench-w1-sync-supervision.md) and [checkpoint](checkpoint-w1-sync-supervision.md)
+retain source/tree/toolchain and the hash-chained receipt. An initial local
+qualification attempt failed at native Opus build because a reused CMake cache
+changed compiler and discarded its Cargo-local install prefix. The failed output
+was preserved and only that output tree was regenerated; no elevated install,
+test skip or threshold change was used. PR156 Linux/macOS CI at 04ce32d also
+passed. This increment is qualified at its test boundary, not physical power
+loss or installed fleet acceptance.
