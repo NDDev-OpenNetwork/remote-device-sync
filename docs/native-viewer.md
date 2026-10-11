@@ -948,3 +948,5 @@ this mode uses their window manager's fullscreen behavior, not macOS Spaces.
 
 Primary contracts: [winit fullscreen](https://docs.rs/winit/0.30.13/winit/window/enum.Fullscreen.html)
 and [Apple Spaces](https://support.apple.com/guide/mac-help/work-in-multiple-spaces-mh14112/mac).
+
+The [October 11 increment report](reports/rds-clipboard-lan-spaces-20261011.md) separates completed checks from native/installed acceptance and retained control-tail failures.
