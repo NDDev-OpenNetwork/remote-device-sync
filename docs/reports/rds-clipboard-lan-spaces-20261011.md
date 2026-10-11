@@ -53,7 +53,46 @@ regressions. Source `9c56c95` completed registered W4 and an immutable portal-ag
 release build. A later `fcec25e` resource-bound full qualification timed out
 while compiling the agent tests, after 21 portal tests passed; it is a failed
 qualification attempt, not a completed gate. The latest owner-snapshot correction
-is undergoing a separate bounded Linux qualification with retained prior output.
+completed its separate resource-bound Linux qualification at `3abc1ee`: registered
+W4, strict viewer-feature Clippy, matched agent/CLI/viewer release and fresh-consent
+helper all passed with the pinned Rust 1.98.1 toolchain. Prior failed output is
+retained. These artifacts are not installed acceptance.
+
+The subsequent audit added real directory/transport coverage and reproduced a
+previously untested wrong-key hint failure. Iroh retained the hint across dials:
+the fallback Initial raced the wrong peer again, whose TLS refusal beat the valid
+relay. The new explicit actor-acknowledged cleanup removes only the specified
+Unknown/Unusable IP hints before fallback; Open/Inactive path history and other
+peers/transports survive. No key or admission check changes. The new integration
+test verifies dead, wrong-key and previously authenticated/reassigned hints,
+one signed-directory fetch and the pinned
+peer: Iroh uses a real isolated relay; Noq uses isolated direct transport because
+its relays use a different owned protocol. The earlier Noq fixture attempted an
+Iroh URL and correctly failed configuration validation; that fixture was corrected.
+The initial pre-sample metrics assertion was also corrected to await the existing
+one-second manager sampler, with a bounded deadline and unchanged payload check.
+The reused-address case reproduced failure after the first correction: historical
+Open/Inactive state alone cannot establish current validity. Cleanup now observes
+ready closures and protects only paths validated by live authenticated connections.
+Both manager tests, all six directory cases, the live-path preservation unit and
+strict changed-crate desktop/Noq Clippy pass. Standalone vendor testing uses the
+existing owned Noq patches explicitly; its generated lock changes were restored.
+
+The first subsequent Mac W6 run failed in the direct metrics fixture after a
+30-second dial timeout. The hint-cleanup operation is not used by that fixture.
+Diagnostic observation showed that the fixture advertised ambient LAN/VPN
+interfaces; a later diagnostic run passed, which does not explain or erase the
+failure. The fixture now binds loopback explicitly, preserving its real UDP
+payload/counter assertions while removing network-roaming dependence. Both
+direct and relay metrics cases pass after this fixture correction. A new full
+checkpoint is required; the failed attempt is retained.
+
+The published `888cba0` source CI has 17 successful checks and two policy skips
+(workflow-dispatch MSRV and branch release publication). This is separate from
+the earlier retained latency failure below. The cache correction changes Mac
+and Linux production inputs: earlier `fcec25e`/`3abc1ee` artifacts and their source
+equivalence cannot be used as qualification for this correction. Fresh checks,
+artifacts and native acceptance are required before deploying it.
 
 ## Open acceptance
 

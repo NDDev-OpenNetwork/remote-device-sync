@@ -84,8 +84,9 @@ endpoint allowlists, X11/OpenH264 desktop skeleton, workspace structure.
   RandR-backed X11 monitor selection and per-session concurrent viewers are
   implemented behind their platform qualification gates. The optional explicit
   consented Wayland capture/EI increment has deterministic boundary coverage;
-  native acceptance is separate. Wayland portal clipboard, stable hotplug identities and rich/file formats remain later
-  capabilities.
+  native acceptance is separate. Optional consented Wayland text clipboard is
+  implemented; native Copy/Paste acceptance remains open. Stable hotplug
+  identities and rich/file formats remain later capabilities.
 - **Gates**: glass-to-glass ≤20 ms LAN / ≤80 ms WAN at 1080p60
   measured end-to-end; input-to-visible-pixel budget tracked.
 
