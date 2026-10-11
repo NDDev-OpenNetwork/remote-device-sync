@@ -4,6 +4,51 @@ use super::*;
 // must not reserve permits against each other while waiting for their workers.
 static DISK_POOL_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+async fn cancel_join_waits_for_the_running_worker_and_disposes_its_locked_output() {
+    let root = Scratch::new();
+    let manifest = crate::manifest_of(b"held native store");
+    let journal = Journal::open(&root.0, "data.bin", &manifest).unwrap();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (jobs, receiver) = mpsc::channel(1);
+    // Model an already-running uninterruptible filesystem operation. Its
+    // returned Journal also holds the root lock until the join output drops.
+    let task = tokio::task::spawn_blocking(move || {
+        started.send(()).unwrap();
+        blocked.recv().unwrap();
+        drop(receiver);
+        Ok(journal)
+    });
+    let mut sink = JournalSink {
+        cancel: StoreCancellation {
+            canceled: Arc::new(AtomicBool::new(false)),
+            task: task.abort_handle(),
+        },
+        jobs: Some(jobs),
+        error: Arc::new(std::sync::Mutex::new(None)),
+        task: Some(task),
+    };
+    ready.await.unwrap();
+    let mut cleanup = Box::pin(sink.cancel_and_join());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut cleanup)
+            .await
+            .is_err()
+    );
+    let error = Journal::open(&root.0, "data.bin", &manifest).err().unwrap();
+    assert!(
+        matches!(error, crate::SyncError::Io(ref error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), cleanup)
+        .await
+        .unwrap()
+        .unwrap();
+    // No polling/retry: completed cleanup itself guarantees release.
+    assert!(Journal::open(&root.0, "data.bin", &manifest).is_ok());
+}
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {

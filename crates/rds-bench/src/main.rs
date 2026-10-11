@@ -56,6 +56,9 @@ enum Cmd {
         /// MiB moved by the `transfer` scenario.
         #[arg(long, default_value_t = 32)]
         transfer_mib: u64,
+        /// MiB moved by the known-rate calibration scenario.
+        #[arg(long, default_value_t = 4)]
+        calibration_mib: u64,
         /// Per-attempt timeout, seconds.
         #[arg(long, default_value_t = 15)]
         timeout_s: u64,
@@ -181,6 +184,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             scenario,
             iterations,
             transfer_mib,
+            calibration_mib,
             timeout_s,
             loss,
             delay_ms,
@@ -194,6 +198,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let params = Params {
                 iterations,
                 transfer_mib,
+                calibration_mib,
                 timeout: std::time::Duration::from_secs(timeout_s),
                 impairment: Impairment {
                     loss,

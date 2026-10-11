@@ -38,6 +38,24 @@ struct Schedule {
     seq: AtomicU64,
 }
 
+#[derive(Default)]
+struct Timing {
+    max_queue_depth: AtomicU64,
+    max_release_lateness_us: AtomicU64,
+    max_inner_send_us: AtomicU64,
+}
+
+/// Passive maxima from the impairment pump, distinct from sampled link delay.
+/// Rate-limit waits contribute to release lateness; inner socket waits are
+/// measured separately. Maxima may describe different packets and must not be
+/// added. These observations do not measure the QUIC receiver's scheduling.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SocketTimingStats {
+    pub max_queue_depth: u64,
+    pub max_release_lateness_us: u64,
+    pub max_inner_send_us: u64,
+}
+
 /// An [`AsyncUdpSocket`] that impairs every outbound datagram.
 ///
 /// `poll_send` enqueues the datagram with a sampled release time and
@@ -49,6 +67,7 @@ pub struct ImpairingSocket {
     pipe: Arc<Pipe>,
     schedule: Arc<Schedule>,
     counters: Arc<Counters>,
+    timing: Arc<Timing>,
     pump: JoinHandle<()>,
 }
 
@@ -58,6 +77,7 @@ pub struct ImpairingSocket {
 pub struct StatsHandle {
     counters: Arc<Counters>,
     cfg: Arc<Mutex<Impairment>>,
+    timing: Arc<Timing>,
 }
 
 impl StatsHandle {
@@ -68,6 +88,15 @@ impl StatsHandle {
             forwarded: self.counters.forwarded.load(Ordering::Relaxed),
             dropped: self.counters.dropped.load(Ordering::Relaxed),
             bytes: self.counters.bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Bounded metadata only; no packet payload or new timer/task is retained.
+    pub fn timing(&self) -> SocketTimingStats {
+        SocketTimingStats {
+            max_queue_depth: self.timing.max_queue_depth.load(Ordering::Relaxed),
+            max_release_lateness_us: self.timing.max_release_lateness_us.load(Ordering::Relaxed),
+            max_inner_send_us: self.timing.max_inner_send_us.load(Ordering::Relaxed),
         }
     }
 
@@ -84,6 +113,7 @@ impl ImpairingSocket {
     pub fn wrap(inner: Box<dyn AsyncUdpSocket>, cfg: Impairment) -> (Self, StatsHandle) {
         let pipe = Arc::new(Pipe::new());
         let counters = Arc::new(Counters::default());
+        let timing = Arc::new(Timing::default());
         let schedule = Arc::new(Schedule {
             cfg: Arc::new(Mutex::new(cfg)),
             rng: Mutex::new(Rng(cfg.seed)),
@@ -94,10 +124,12 @@ impl ImpairingSocket {
             pipe.clone(),
             schedule.clone(),
             counters.clone(),
+            timing.clone(),
         ));
         let stats = StatsHandle {
             counters: counters.clone(),
             cfg: schedule.cfg.clone(),
+            timing: timing.clone(),
         };
         (
             Self {
@@ -105,6 +137,7 @@ impl ImpairingSocket {
                 pipe,
                 schedule,
                 counters,
+                timing,
                 pump,
             },
             stats,
@@ -132,6 +165,7 @@ impl AsyncUdpSocket for ImpairingSocket {
             pipe: self.pipe.clone(),
             schedule: self.schedule.clone(),
             counters: self.counters.clone(),
+            timing: self.timing.clone(),
         })
     }
 
@@ -163,6 +197,7 @@ struct ImpairingSender {
     pipe: Arc<Pipe>,
     schedule: Arc<Schedule>,
     counters: Arc<Counters>,
+    timing: Arc<Timing>,
 }
 
 impl fmt::Debug for ImpairingSender {
@@ -191,12 +226,18 @@ impl UdpSender for ImpairingSender {
         };
         drop(rng);
         let seq = sched.seq.fetch_add(1, Ordering::Relaxed);
-        self.pipe.heap.lock().unwrap().push(Queued {
+        let mut heap = self.pipe.heap.lock().unwrap();
+        heap.push(Queued {
             release: Instant::now() + Duration::from_millis(cfg.delay_ms) + extra,
             seq,
             dest: transmit.destination,
             data: transmit.contents.to_vec(),
         });
+        let depth = heap.len() as u64;
+        drop(heap);
+        self.timing
+            .max_queue_depth
+            .fetch_max(depth, Ordering::Relaxed);
         self.pipe.notify.notify_one();
         Poll::Ready(Ok(()))
     }
@@ -215,6 +256,7 @@ async fn dispatch(
     pipe: Arc<Pipe>,
     schedule: Arc<Schedule>,
     counters: Arc<Counters>,
+    timing: Arc<Timing>,
 ) {
     let mut sender = sender;
     loop {
@@ -261,14 +303,95 @@ async fn dispatch(
             segment_size: None,
             src_ip: None,
         };
-        if std::future::poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx))
-            .await
-            .is_ok()
-        {
+        let started = Instant::now();
+        timing.max_release_lateness_us.fetch_max(
+            micros(started.saturating_duration_since(q.release)),
+            Ordering::Relaxed,
+        );
+        let sent = std::future::poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx)).await;
+        timing
+            .max_inner_send_us
+            .fetch_max(micros(started.elapsed()), Ordering::Relaxed);
+        if sent.is_ok() {
             counters.forwarded.fetch_add(1, Ordering::Relaxed);
             counters
                 .bytes
                 .fetch_add(q.data.len() as u64, Ordering::Relaxed);
         }
+    }
+}
+
+fn micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timing_observes_the_pump_without_changing_drop_or_payload_delivery() {
+        let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let inner = noq::Runtime::wrap_udp_socket(
+            &noq::TokioRuntime,
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+        )
+        .unwrap();
+        let (socket, stats) = ImpairingSocket::wrap(
+            inner,
+            Impairment {
+                loss: 1.0,
+                ..Default::default()
+            },
+        );
+        let mut sender = socket.create_sender();
+        for byte in 0..5 {
+            let contents = [byte];
+            let transmit = Transmit {
+                destination: sink.local_addr().unwrap(),
+                ecn: None,
+                contents: &contents,
+                segment_size: None,
+                src_ip: None,
+            };
+            std::future::poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx))
+                .await
+                .unwrap();
+        }
+        assert_eq!(stats.get().dropped, 5);
+        assert_eq!(stats.get().forwarded, 0);
+        assert_eq!(stats.timing().max_queue_depth, 0);
+
+        stats.set_impairment(Impairment {
+            delay_ms: 25,
+            ..Default::default()
+        });
+        for byte in 0..5 {
+            let contents = [byte];
+            let transmit = Transmit {
+                destination: sink.local_addr().unwrap(),
+                ecn: None,
+                contents: &contents,
+                segment_size: None,
+                src_ip: None,
+            };
+            std::future::poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx))
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for byte in 0..5 {
+                let mut contents = [0; 2];
+                let (size, _) = sink.recv_from(&mut contents).await.unwrap();
+                assert_eq!(&contents[..size], &[byte]);
+            }
+            while stats.get().forwarded != 5 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(stats.get().dropped, 5);
+        assert!((1..=5).contains(&stats.timing().max_queue_depth));
     }
 }

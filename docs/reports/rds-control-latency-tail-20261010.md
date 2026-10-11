@@ -1,6 +1,9 @@
 # Retained control-latency failure — 2026-10-10
 
-Status: investigation open; no latency budget or production transport change.
+Status: investigation open. The [October 11 follow-up](rds-control-startup-pacing-20261011.md)
+fixes an independently reproduced BBR startup-pacing defect and adds passive
+scheduler evidence; it does not establish closure of this retained latency tail.
+The latency budget remains unchanged.
 Scope: W0.1/W6 control measurement and the stability plan's native rollout gate.
 
 ## October 10 macOS recurrence and next experiment

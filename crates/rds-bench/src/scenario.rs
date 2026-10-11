@@ -21,6 +21,8 @@ pub struct Params {
     pub iterations: usize,
     /// Payload size for `transfer`, MiB.
     pub transfer_mib: u64,
+    /// Known-rate calibration payload, independent of the bulk transfer size.
+    pub calibration_mib: u64,
     /// Per-attempt timeout; an attempt exceeding it counts as failed.
     pub timeout: Duration,
     /// Impairment applied to `*-impaired` scenarios.
@@ -49,6 +51,9 @@ impl Default for Params {
         Self {
             iterations: 100,
             transfer_mib: 32,
+            // 4 MiB / 10 Mbps is ~3.36s ideally, or ~8.39s at the
+            // calibration's 40% goodput floor, within its 15s deadline.
+            calibration_mib: 4,
             timeout: Duration::from_secs(15),
             impairment: Impairment::lossy(),
             backend: "iroh".into(),
@@ -840,11 +845,16 @@ async fn migration_one(p: &Params, graceful: bool) -> anyhow::Result<BenchReport
 /// is fabricating throughput.
 async fn calibration(p: &Params) -> anyhow::Result<BenchReport> {
     let rate_mbps = p.impairment.rate_mbps.unwrap_or(10.0);
+    calibration_budget(p.calibration_mib, rate_mbps, p.timeout)?;
     let imp = Impairment {
         rate_mbps: Some(rate_mbps),
         ..Impairment::clean()
     };
-    let (mut report, measurement) = transfer_on(p, Path::DirectImpaired(imp)).await?;
+    let calibration = Params {
+        transfer_mib: p.calibration_mib,
+        ..p.clone()
+    };
+    let (mut report, measurement) = transfer_on(&calibration, Path::DirectImpaired(imp)).await?;
     let expected_bps = rate_mbps * 1e6 / 8.0;
     let measured_bps = measurement.bytes as f64 / measurement.elapsed.as_secs_f64();
     let ratio = measured_bps / expected_bps;
@@ -867,6 +877,32 @@ async fn calibration(p: &Params) -> anyhow::Result<BenchReport> {
         "calibration out of band: measured {measured_bps:.0} B/s vs cap {expected_bps:.0} B/s (ratio {ratio:.3}; expected 0.4..=1.2)"
     );
     Ok(report)
+}
+
+/// Refuse a physically impossible payload/rate/deadline before creating peers.
+fn calibration_budget(mib: u64, rate_mbps: f64, timeout: Duration) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        rate_mbps.is_finite() && rate_mbps > 0.0,
+        "calibration rate must be finite and positive"
+    );
+    anyhow::ensure!(
+        (rate_mbps * 1e6).is_finite(),
+        "calibration rate exceeds the representable limiter range"
+    );
+    let bytes = mib
+        .checked_mul(1024 * 1024)
+        .context("calibration size overflow")?;
+    anyhow::ensure!(
+        bytes > 0 && !timeout.is_zero(),
+        "calibration size and deadline must be positive"
+    );
+    let minimum = bytes as f64 * 8.0 / (rate_mbps * 1e6);
+    anyhow::ensure!(
+        minimum < timeout.as_secs_f64(),
+        "calibration payload needs at least {minimum:.3}s at {rate_mbps} Mbps; deadline is {:.3}s (use --calibration-mib to select a feasible payload)",
+        timeout.as_secs_f64()
+    );
+    Ok(())
 }
 
 /// Path-loss mid-transfer (W0.3): the upload starts on a clean
@@ -1010,6 +1046,40 @@ async fn recovery(p: &Params) -> anyhow::Result<BenchReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibration_default_has_room_at_the_goodput_floor_without_shrinking_bulk_transfer() {
+        let p = Params::default();
+        assert_eq!(p.transfer_mib, 32);
+        calibration_budget(p.calibration_mib, 10.0, p.timeout).unwrap();
+        let at_floor = p.calibration_mib as f64 * 1024.0 * 1024.0 / (1_250_000.0 * 0.4);
+        assert!(at_floor < p.timeout.as_secs_f64());
+    }
+
+    #[tokio::test]
+    async fn impossible_calibration_is_refused_before_backend_selection() {
+        let p = Params {
+            calibration_mib: 32,
+            backend: "unavailable".into(),
+            ..Params::default()
+        };
+        let error = calibration(&p).await.unwrap_err().to_string();
+        assert!(error.contains("26.844s"), "{error}");
+        assert!(
+            !error.contains("backend"),
+            "backend was opened before budget validation: {error}"
+        );
+    }
+
+    #[test]
+    fn calibration_refuses_invalid_rates_sizes_and_deadlines() {
+        for rate in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+            assert!(calibration_budget(4, rate, Duration::from_secs(15)).is_err());
+        }
+        assert!(calibration_budget(0, 10.0, Duration::from_secs(15)).is_err());
+        assert!(calibration_budget(u64::MAX, 10.0, Duration::from_secs(15)).is_err());
+        assert!(calibration_budget(4, 10.0, Duration::ZERO).is_err());
+    }
 
     async fn verified_transfer(backend: &str) {
         let p = Params {

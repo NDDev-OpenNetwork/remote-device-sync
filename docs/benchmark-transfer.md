@@ -41,6 +41,16 @@ the limiter or the measurement is fabricating throughput. The report
 records `calibration_expected_bytes_s`, `calibration_measured_bytes_s`
 and `calibration_ratio_milli`.
 
+Calibration has its own `--calibration-mib` payload (default 4 MiB), independent
+of `--transfer-mib` (default 32 MiB). At the default 10 Mbps cap, 4 MiB needs
+3.36 seconds ideally and 8.39 seconds at the 40% goodput floor, leaving room
+inside the unchanged 15-second operation deadline. The former shared 32 MiB
+default required at least 26.84 seconds and could never qualify that deadline.
+Impossible payload/rate/deadline combinations and nonpositive/nonfinite rates
+are refused before creating endpoints. A feasible budget does not assert that
+the transfer will pass; measured goodput, receipt verification and the original
+ratio/deadline checks still decide acceptance.
+
 `--scenario recovery` (noq only) starts a verified upload on a clean
 socket-impaired path, then at ~⅓ payload imposes a ~1.5 s loss+delay
 burst on the client's live socket (loss floored at 15%) and lifts it.

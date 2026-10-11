@@ -5,6 +5,29 @@ claims follow the code, [capability matrix](capability-matrix.md) and owning
 contracts; current execution follows the [stability plan](stability-plan-20261009.md).
 An older stack survey or proposed backend here is not implemented support.
 
+## 2026-10-11 BBR startup pacing and ordered control recovery
+
+[BBR draft-06 §5.6.2](https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2)
+uses the measured RTT to initialize startup pacing. Before bandwidth is fully
+utilized, ordinary updates only increase that rate. A nominal 1ms value can
+therefore survive indefinitely on an application-limited flow. [Google BBRv3](https://github.com/google/bbr/blob/v3/net/ipv4/tcp_bbr.c)
+recalibrates once a real RTT exists. [Noq PR802](https://github.com/n0-computer/noq/pull/802)
+reports this defect; the reviewed [moq-dev/noq PR7](https://github.com/moq-dev/noq/pull/7)
+merged on September 25 uses its tracked packet RTT because Noq updates the
+transport estimator after ACK callbacks. These sources were available by the
+requested September 26 cutoff. RDS adopts that narrow correction with a 1us
+zero floor and deterministic pre-fix failures, without importing broader fork
+feedback changes or changing its transport defaults.
+
+This finding is separate from QUIC's ordered delivery requirement
+([RFC9000 §2.2](https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2)) and
+loss recovery ([RFC9002 §6](https://www.rfc-editor.org/rfc/rfc9002.html#section-6)).
+Losing an earlier range can delay several later control messages even when
+their own packets have arrived. A passing impairment cohort, a priority change
+or correction of startup pacing does not alone prove closure of the retained
+521ms CI percentile. Keep per-cohort failures, packet correlation and passive
+scheduler observations separate from physical input/presentation acceptance.
+
 
 ## 2026-10-07 contemporaneous replacement proof
 
