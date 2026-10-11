@@ -34,8 +34,17 @@ impl DeviceConfig {
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
     pub schema_version: u32,
+    #[serde(default)]
+    pub presentation: Presentation,
     pub devices: Vec<DeviceConfig>,
     pub tabs: Vec<TabSpec>,
+}
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Presentation {
+    #[default]
+    Tabs,
+    Spaces,
 }
 impl WorkspaceConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -171,7 +180,10 @@ pub async fn run(
             displays: vec![],
         })
         .collect();
-    let (viewer, handle, events) = Viewer::workspace(config.tabs.clone(), devices)?;
+    let (viewer, handle, events) = match config.presentation {
+        Presentation::Tabs => Viewer::workspace(config.tabs.clone(), devices)?,
+        Presentation::Spaces => Viewer::spaces(config.tabs.clone(), devices)?,
+    };
     let stop = CancellationToken::new();
     let actor_stop = stop.clone();
     let task = tokio::spawn(async move {

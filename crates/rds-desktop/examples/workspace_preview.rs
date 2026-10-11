@@ -26,6 +26,12 @@ struct ClipboardProbe {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let spaces = if let Some(index) = args.iter().position(|arg| arg == "--spaces") {
+        args.remove(index);
+        true
+    } else {
+        std::env::var_os("RDS_PREVIEW_SPACES").is_some()
+    };
     let still_flag = args.first().is_some_and(|arg| arg == "--still");
     if still_flag {
         args.remove(0);
@@ -87,7 +93,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect();
-    let (viewer, workspace, mut events) = Viewer::workspace(tabs, devices)?;
+    let (viewer, workspace, mut events) = if spaces {
+        Viewer::spaces(tabs, devices)?
+    } else {
+        Viewer::workspace(tabs, devices)?
+    };
     if clipboard_probe || report_dir.is_some() {
         let workspace = workspace.clone();
         tokio::spawn(async move {

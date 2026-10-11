@@ -34,6 +34,12 @@ pub struct WorkspaceHandle {
     proxy: EventLoopProxy<()>,
 }
 impl WorkspaceHandle {
+    pub(super) fn new(
+        updates: std::sync::mpsc::SyncSender<WorkspaceUpdate>,
+        proxy: EventLoopProxy<()>,
+    ) -> Self {
+        Self { updates, proxy }
+    }
     pub fn update(&self, update: WorkspaceUpdate) -> Result<(), DesktopError> {
         self.updates
             .try_send(update)
@@ -55,6 +61,32 @@ pub(super) struct Deck {
     pub message: String,
     clipboard_owner: Option<TabId>,
     pending_paste: Option<clipboard::PendingPaste>,
+    space_actions: Option<std::sync::mpsc::SyncSender<Action>>,
+}
+
+impl Deck {
+    pub(super) fn for_space(
+        model: WorkspaceModel,
+        active: Option<TabId>,
+        devices: Vec<DeviceView>,
+        events: tokio::sync::mpsc::Sender<WorkspaceEvent>,
+        actions: std::sync::mpsc::SyncSender<Action>,
+    ) -> Self {
+        let (_, updates) = std::sync::mpsc::sync_channel(1);
+        Self {
+            model,
+            active,
+            devices,
+            events,
+            updates,
+            inactive: BTreeMap::new(),
+            chrome: None,
+            message: String::new(),
+            clipboard_owner: None,
+            pending_paste: None,
+            space_actions: Some(actions),
+        }
+    }
 }
 
 impl Viewer {
@@ -101,6 +133,7 @@ impl Viewer {
             message: String::new(),
             clipboard_owner: None,
             pending_paste: None,
+            space_actions: None,
         });
         let handle = WorkspaceHandle {
             updates,
@@ -279,6 +312,12 @@ impl App {
     }
 
     fn workspace_select(&mut self, deck: &mut Deck, id: TabId, event_loop: &ActiveEventLoop) {
+        if let Some(actions) = &deck.space_actions {
+            if actions.try_send(Action::Select(id)).is_err() {
+                deck.message = "Window action queue is full".into();
+            }
+            return;
+        }
         if deck.active == Some(id) {
             return;
         }
@@ -371,6 +410,12 @@ impl App {
     }
 
     fn workspace_close(&mut self, deck: &mut Deck, id: TabId, event_loop: &ActiveEventLoop) {
+        if let Some(actions) = &deck.space_actions {
+            if actions.try_send(Action::Close(id)).is_err() {
+                deck.message = "Window action queue is full".into();
+            }
+            return;
+        }
         deck.cancel_clipboard_tab(id);
         if deck.active == Some(id) {
             self.release(event_loop);
@@ -406,6 +451,12 @@ impl App {
             .map(|c| std::mem::take(&mut c.actions))
             .unwrap_or_default();
         for action in actions {
+            if let Some(actions) = &deck.space_actions {
+                if actions.try_send(action).is_err() {
+                    deck.message = "Window action queue is full".into();
+                }
+                continue;
+            }
             match action {
                 Action::Select(id) => self.workspace_select(&mut deck, id, event_loop),
                 Action::Close(id) => self.workspace_close(&mut deck, id, event_loop),

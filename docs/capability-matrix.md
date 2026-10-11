@@ -65,12 +65,13 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 
 | Capability | State | Runtime prerequisites | Evidence |
 |---|---|---|---|
-| desktop:clipboard-text-reverse | experimental | `DesktopV5`; X11 serving clipboard and AppKit viewer clipboard; text only; Linux viewer publication unavailable | bounded offer/request/chunk tests; native Xvfb and isolated AppKit probe; installed qualification separate |
+| desktop:clipboard-text-reverse | experimental | `DesktopV5`; X11 or consented Clipboard v1 Wayland serving, AppKit viewer; UTF-8 text only; Linux viewer publication unavailable | bounded offer/request/chunk and portal FD tests; native Xvfb/AppKit probes; installed portal qualification separate |
 | desktop:multi-monitor-x11 | experimental | RandR monitor objects or multi-root X server; fresh session after layout changes | native RandR known-pixel/input/removal fixture; physical desktop qualification separate |
 | desktop:multi-session | implemented | per-session route IDs; local manager ≤32 sessions; agent connection/service limits | session routing and managed-channel tests |
 | desktop:workspace-tabs | implemented | native `viewer` surface; up to eight tabs across actual device/display inventories; each remote needs its own authorization | workspace model, managed native routing and idle-frame restoration tests; physical multi-PC acceptance separate |
 | desktop:workspace-profiles | implemented | version-1 `viewer-workspace.json`; per-display geometry/FPS/input/clipboard/receipt settings; existing grant paths only | bounded preference/launch tests; [viewer contract](native-viewer.md#tabbed-workspace) |
 | desktop:workspace-panels | implemented | local up/down arrows or Ctrl+Shift+H; window-scoped state and full-window aspect-preserving mapping | layout/HiDPI/pointer ownership tests and native still-image fixture |
+| desktop:workspace-spaces | experimental | saved `presentation: spaces` or `--spaces`; one fullscreen window/surface per monitor in one process, up to eight; macOS native Spaces swipe | common profile/model and copy-fence tests; native ordering/closure qualification separate |
 
 ## Codecs and presentation
 

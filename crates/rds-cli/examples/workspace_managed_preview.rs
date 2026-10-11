@@ -360,6 +360,7 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     let config = WorkspaceConfig {
         schema_version: 1,
+        presentation: Default::default(),
         devices,
         tabs,
     };

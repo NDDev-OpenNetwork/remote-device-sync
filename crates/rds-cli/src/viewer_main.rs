@@ -16,6 +16,12 @@ struct Cli {
     /// Open displays in separate native windows instead of workspace tabs.
     #[arg(long)]
     separate_windows: bool,
+    /// One native fullscreen window per monitor; macOS three-finger Spaces swipe.
+    #[arg(long, conflicts_with = "separate_windows")]
+    spaces: bool,
+    /// Use a single window with tabs, overriding the saved presentation.
+    #[arg(long, conflicts_with_all = ["spaces", "separate_windows"])]
+    tabs: bool,
     /// Saved workspace preferences; an explicit path isolates this workspace.
     #[arg(long)]
     workspace_file: Option<PathBuf>,
@@ -180,7 +186,7 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
         && cli.options.report.is_none()
         && cli.options.diagnostic_visual_probe.is_none()
     {
-        use rds_cli::desktop::workspace::{DeviceConfig, WorkspaceConfig};
+        use rds_cli::desktop::workspace::{DeviceConfig, Presentation, WorkspaceConfig};
         use rds_desktop::render::workspace::{TabProfile, TabSpec, VideoSize};
         if matches.value_source("resolution") != Some(ValueSource::CommandLine)
             && let Some(resolution) = configured_resolution
@@ -193,7 +199,13 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                 .unwrap_or(&directory)
                 .join("viewer-workspace.json")
         });
-        if !explicit_targets && let Some(saved) = WorkspaceConfig::load(path.clone()).await? {
+        if !explicit_targets && let Some(mut saved) = WorkspaceConfig::load(path.clone()).await? {
+            if cli.spaces {
+                saved.presentation = Presentation::Spaces;
+            }
+            if cli.tabs {
+                saved.presentation = Presentation::Tabs;
+            }
             return rds_cli::desktop::workspace::run(
                 Client::new(&directory),
                 saved,
@@ -251,6 +263,11 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
         // the only endpoint identity and connection owner.
         let config = WorkspaceConfig {
             schema_version: 1,
+            presentation: if cli.spaces {
+                Presentation::Spaces
+            } else {
+                Presentation::Tabs
+            },
             devices,
             tabs,
         };

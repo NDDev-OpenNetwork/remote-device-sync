@@ -489,6 +489,14 @@ mod tests {
             })
         };
         for (command, tag) in [
+            (
+                Command::ConnectPreferred {
+                    target: "fixture-key".into(),
+                    grant: None,
+                    local_addresses: vec!["127.0.0.1:1234".parse().unwrap()],
+                },
+                17,
+            ),
             (Command::Ticket, 7),
             (
                 Command::Desktop {

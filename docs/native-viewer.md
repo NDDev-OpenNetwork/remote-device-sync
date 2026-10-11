@@ -911,3 +911,40 @@ display inspection, settings changes and reconnect. Local dialing has one
 one-second budget before normal same-key directory/transport fallback; it does
 not change authorization or create routes/firewall rules. The matching local
 agent must support the additive `ConnectPreferred` command.
+
+## Fullscreen monitor Spaces
+
+`--spaces` or saved `presentation: "spaces"` opens each remote monitor in its
+own native fullscreen window, inside one viewer process/event loop. macOS
+Borderless fullscreen creates a separate Space; three-finger fullscreen-app
+swipe moves between the local desktop and remote screens. `--tabs` overrides
+this saved mode for a launch. Existing preferences without `presentation` remain
+in tabbed mode. Save retains the selected presentation, complete device list,
+monitor order and profiles.
+
+One authoritative bounded workspace allocates monitor IDs and owns actions.
+Window events route only to their actual native WindowId; each monitor retains
+its own GPU surface, input holds, mailbox and reconnection task. Closing one
+window releases only its remote session; quitting releases every window.
+Connection/profile/panel controls remain available in each window, including
+the full-window remote view and small restore arrow. Settings and reconnect do
+not recreate or focus another window. New Open actions create additional windows
+within the same eight-monitor bound. Selecting a monitor focuses its window.
+
+A shared copy-intent fence prevents an older window's delayed reply from
+replacing a newer Copy, even before native pasteboard ownership changes. One
+pending cross-window Paste waits at most five seconds and is bound to the exact
+destination monitor, settings revision, connection epoch and original Shift
+intent. New interaction, source/destination closure, replacement copy, focus
+loss, native ownership changes and expiry cancel it without stale-text fallback.
+
+macOS owns Space placement. Windows are created in saved monitor order; disable
+Mission Control's automatic recent-use rearrangement for a stable order. Native
+fullscreen transitions and actual right-side ordering require a native check;
+RDS neither calls private Space-number APIs nor modifies other applications'
+Spaces. Changing monitor order in the controls changes saved creation order;
+existing Space order can be rearranged in Mission Control. On other platforms,
+this mode uses their window manager's fullscreen behavior, not macOS Spaces.
+
+Primary contracts: [winit fullscreen](https://docs.rs/winit/0.30.13/winit/window/enum.Fullscreen.html)
+and [Apple Spaces](https://support.apple.com/guide/mac-help/work-in-multiple-spaces-mh14112/mac).
