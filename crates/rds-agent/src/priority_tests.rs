@@ -155,7 +155,7 @@ async fn compete(client_direction: bool, info: bool) {
             recv,
             Arc::new(super::AgentPolicy::ssh_only(("127.0.0.1".into(), 9))),
             Arc::new(super::ConnAuthz::new(false, audience, 4)),
-            false,
+            super::DesktopBackend::default(),
         )
         .await
         .unwrap();

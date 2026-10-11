@@ -54,3 +54,10 @@ The first published CI workflow failed validation before creating jobs:
 identified an unquoted `portal::` test filter in YAML. A folded command scalar
 preserves the exact test invocation. YAML parsing and actionlint passed after
 the correction; the failed run remains evidence, not completed Rust validation.
+
+The subsequent Noq Clippy lane found a priority fixture still passing the old
+boolean desktop argument. The fixture now uses a disabled `DesktopBackend`,
+preserving its original policy and workload. Both control/media priority cases
+and strict workspace Clippy with the combined owned-transport/desktop features
+passed locally. The original hosted compilation failure remains in
+[job 114366444967](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/38104312491/job/114366444967).
