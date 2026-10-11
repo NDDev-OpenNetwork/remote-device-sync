@@ -141,3 +141,21 @@ Primary contracts: [RemoteDesktop](https://flatpak.github.io/xdg-desktop-portal/
 [ScreenCast](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html),
 [PipeWire capture](https://docs.pipewire.org/page_tutorial5.html),
 [libei sender](https://libinput.pages.freedesktop.org/libei/api/group__libei-sender.html).
+
+## Refreshing an older clipboard permission
+
+GNOME restores the saved clipboard grant independently of a new
+RequestClipboard call. A token created before RDS requested clipboard may
+therefore restore video/input while returning `clipboard_enabled=false`.
+Use the explicit local agent flag `--wayland-refresh-permission` with
+`--wayland-state PATH` once to request fresh consent for both monitors and
+clipboard. It bypasses restoration for that preparation, retains existing state
+and display history until Start succeeds, and then saves the replacement token
+atomically. Cancelled preparation retains the previous state. Revalidate the
+fresh display inventory before opening old monitor profiles.
+
+Do not keep this flag in ordinary service startup: subsequent starts should
+restore the newly granted token, and no remote request may trigger a new dialog.
+The preparation diagnostic records only the clipboard-ready boolean, never
+permission tokens or selection contents. GNOME's behavior is visible in its
+[restore path](https://github.com/GNOME/xdg-desktop-portal-gnome/blob/50.0/src/remotedesktop.c).
