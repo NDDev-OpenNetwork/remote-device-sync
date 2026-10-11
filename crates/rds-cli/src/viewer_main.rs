@@ -227,6 +227,7 @@ async fn run(mut cli: Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
                     target: window.target.clone(),
                     label: label.clone(),
                     grant_file: window.grant_file.or_else(|| cli.grant_file.clone()),
+                    local_addresses: vec![],
                 });
             }
             tabs.push(TabSpec {

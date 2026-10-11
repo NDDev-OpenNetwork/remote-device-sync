@@ -186,6 +186,34 @@ pub enum Command {
         payload_receipts: bool,
         clipboard: bool,
     },
+    /// Bounded direct-address preference for an explicitly pinned peer.
+    /// Authenticate its key before service admission; failed dialing falls
+    /// back to ordinary resolution. Older managers refuse this extension.
+    ConnectPreferred {
+        target: String,
+        grant: Option<Box<crate::grant::Grant>>,
+        local_addresses: Vec<std::net::SocketAddr>,
+    },
+}
+
+/// Address hints are reachability candidates, never an identity authority.
+pub fn validate_local_addresses(addresses: &[std::net::SocketAddr]) -> Result<(), ErrorCode> {
+    if addresses.len() > 4 {
+        return Err(ErrorCode::InvalidRequest);
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    for address in addresses {
+        let ip = address.ip();
+        if address.port() == 0
+            || ip.is_unspecified()
+            || ip.is_multicast()
+            || matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
+            || !unique.insert(*address)
+        {
+            return Err(ErrorCode::InvalidRequest);
+        }
+    }
+    Ok(())
 }
 
 /// Never Debug: paths may contain private information.
@@ -303,6 +331,31 @@ pub enum ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preferred_address_hints_are_bounded_and_unicast() {
+        for invalid in [
+            "0.0.0.0:1",
+            "127.0.0.1:0",
+            "255.255.255.255:1",
+            "224.0.0.1:1",
+            "[::]:1",
+            "[ff02::1]:1",
+        ] {
+            assert!(validate_local_addresses(&[invalid.parse().unwrap()]).is_err());
+        }
+        let valid = "127.0.0.1:1234".parse().unwrap();
+        assert!(validate_local_addresses(&[valid]).is_ok());
+        assert!(validate_local_addresses(&[valid, valid]).is_err());
+        assert!(
+            validate_local_addresses(
+                &(1..=5)
+                    .map(|port| std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn handles_and_validated_tcp_targets_round_trip() {

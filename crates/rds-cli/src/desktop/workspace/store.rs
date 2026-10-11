@@ -116,6 +116,7 @@ mod tests {
                 target: "alpha".into(),
                 label: "Work computer".into(),
                 grant_file: None,
+                local_addresses: vec![],
             }],
             tabs: vec![TabSpec {
                 device: "alpha".into(),

@@ -338,6 +338,7 @@ async fn main() -> anyhow::Result<()> {
             target: rds_net::Ticket::of(endpoint).to_string(),
             label: if index == 0 { "Studio PC" } else { "Build PC" }.into(),
             grant_file: None,
+            local_addresses: vec![],
         })
         .collect::<Vec<_>>();
     let tabs = devices

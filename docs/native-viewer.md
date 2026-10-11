@@ -904,3 +904,10 @@ producing the record; a server TX counter does not establish viewer TX loss.
 Snapshot age, evictions, coverage and truncation remain explicit. These are
 transport observations, not exact packet-to-input attribution, capacity or
 optical response measurements.
+
+Device profiles accept optional `local_addresses` (up to four distinct unicast
+socket addresses) only with a pinned key/ticket target. They survive Save,
+display inspection, settings changes and reconnect. Local dialing has one
+one-second budget before normal same-key directory/transport fallback; it does
+not change authorization or create routes/firewall rules. The matching local
+agent must support the additive `ConnectPreferred` command.

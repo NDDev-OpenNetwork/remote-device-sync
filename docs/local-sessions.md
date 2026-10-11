@@ -99,6 +99,18 @@ TCP listener. Existing SSH/TCP port forwarding remains `forward`; its listeners
 reject non-loopback addresses. Other local users can reach a forwarded TCP port:
 Unix control-socket UID checks do not authenticate those TCP clients.
 
+Saved viewer device profiles may include up to four distinct unicast
+`local_addresses` with nonzero ports. `ConnectPreferred` is an additive IPC v5
+command and requires a ticket or pinned endpoint key. The manager reserves the
+peer before dialing, attempts the direct candidates within one shared second,
+and falls back to ordinary verified resolution of the same identity on dial
+failure. QUIC authenticates the pinned key; a successful dial followed by service
+or grant refusal is final and never replays admission through another route.
+Transport cache/discovery can supplement candidates; latency path policy still
+selects among established paths. No ping result or IP address establishes trust.
+Older managers refuse this command; empty hints retain the existing Connect
+command. All monitor reconnections and saved-profile inspections retain hints.
+
 ## Consistency and lifetime
 
 - At most 32 sessions, including pending dials. Random 128-bit handles are

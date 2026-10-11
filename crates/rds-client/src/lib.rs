@@ -51,6 +51,15 @@ pub async fn connect_authorized(
     grant: &rds_core::grant::Grant,
 ) -> anyhow::Result<Connection> {
     let conn = connect(endpoint, target).await?;
+    authorize_connection(conn, grant).await
+}
+
+/// Admit the chosen authenticated transport once. Service refusal must not
+/// trigger another dial or replay authorization through a fallback route.
+pub(crate) async fn authorize_connection(
+    conn: Connection,
+    grant: &rds_core::grant::Grant,
+) -> anyhow::Result<Connection> {
     let mut authorization = Authorization::new(&conn);
     rds_observe::observe(
         rds_observe::Operation::GrantAuthorize,

@@ -1,5 +1,6 @@
 //! Agent-owned outgoing sessions, accessed through a same-UID Unix socket.
 //! The manager borrows the agent endpoint; it never reads identity material.
+mod connect;
 mod socket;
 mod state;
 mod sync;
@@ -346,79 +347,22 @@ async fn execute(
             state::lock(shared)?.snapshot(),
         ))),
         Command::Connect { target, grant } => {
-            if target.len() > 8192 {
-                return Err(ErrorCode::InvalidRequest);
-            }
-            let credential = grant
-                .as_ref()
-                .map(|g| postcard::to_stdvec(g).map(|b| *blake3::hash(&b).as_bytes()))
-                .transpose()
-                .map_err(|_| ErrorCode::InvalidRequest)?;
-            // A pinned peer's live/pending authenticated association does not
-            // need another directory lookup. Names still resolve through their
-            // verified registry boundary before any identity is reused.
-            if let Ok(pinned) = rds_net::parse_target(&target)
-                && let Some(existing) = state::existing(shared, pinned.id, credential)?
-            {
-                return match existing {
-                    state::Reserved::Existing(id) => Ok(Output::reply(Reply::Connected(id))),
-                    state::Reserved::Pending(pending) => {
-                        Ok(Output::reply(Reply::Connected(pending.wait(shared).await?)))
-                    }
-                    state::Reserved::New(_) => Err(ErrorCode::Internal),
-                };
-            }
-            let addr = rds_net::resolve_target(directory, &target)
-                .await
-                .map_err(|_| ErrorCode::Resolve)?;
-            if addr.id == endpoint.id() {
-                return Err(ErrorCode::InvalidRequest);
-            }
-            let reservation = match state::reserve(shared, addr.id, credential)? {
-                state::Reserved::Existing(id) => return Ok(Output::reply(Reply::Connected(id))),
-                state::Reserved::Pending(pending) => {
-                    return Ok(Output::reply(Reply::Connected(pending.wait(shared).await?)));
-                }
-                state::Reserved::New(reservation) => reservation,
-            };
-            let conn = tokio::select! {
-                biased;
-                _ = reservation.cancel.cancelled() => return Err(ErrorCode::NotFound),
-                result = async {
-                    let conn = match grant {
-                        Some(grant) => crate::connect_authorized(endpoint, addr, &grant).await,
-                        None => crate::connect(endpoint, addr).await,
-                    }.map_err(|_| ErrorCode::Connect)?;
-                    let guard = DialGuard(Some(conn));
-                    // Authz validates managed admission; plain allowlist mode
-                    // needs one service reply to establish application readiness.
-                    if credential.is_none() {
-                        crate::ping(guard.0.as_ref().ok_or(ErrorCode::Internal)?, rand::random()).await.map_err(|_| ErrorCode::Connect)?;
-                    }
-                    Ok::<_, ErrorCode>(guard)
-                } => result?,
-            };
-            let mut guard = conn;
-            let mut state = state::lock(shared)?;
-            let entry = state
-                .entries
-                .get_mut(&reservation.id)
-                .ok_or(ErrorCode::NotFound)?;
-            let conn = guard.0.take().ok_or(ErrorCode::Internal)?;
-            entry.sampler = Some(endpoint.metrics().sampler(conn.clone()));
-            entry.conn = Some(conn);
-            if state.selected.is_none() {
-                state.selected = Some(reservation.id);
-            }
-            state.changed();
-            drop(state);
-            Ok(Output {
-                reply: Reply::Connected(reservation.id),
-                reservation: Some(reservation),
-                tcp: None,
-                desktop: None,
-                events: None,
-            })
+            connect::run(shared, endpoint, directory, target, grant, None).await
+        }
+        Command::ConnectPreferred {
+            target,
+            grant,
+            local_addresses,
+        } => {
+            connect::run(
+                shared,
+                endpoint,
+                directory,
+                target,
+                grant,
+                Some(local_addresses),
+            )
+            .await
         }
         Command::Renew { session, grant } => {
             let credential =
