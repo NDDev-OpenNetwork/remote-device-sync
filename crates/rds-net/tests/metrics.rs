@@ -61,7 +61,12 @@ fn counter(reg: &Registry, name: &str) -> u64 {
 /// Direct path only: ticket carries just the agent's UDP address.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_traffic_counts_direct_not_relay() {
-    let cfg = || EndpointConfig::default().without_discovery();
+    // Keep this transport-accounting fixture independent of LAN/VPN roaming.
+    // It measures real local UDP payload, not interface discovery or NAT.
+    let cfg = || EndpointConfig {
+        bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+        ..EndpointConfig::default().without_discovery()
+    };
     let server = bind_endpoint(cfg()).await.unwrap();
     let client = bind_endpoint(cfg()).await.unwrap();
 
