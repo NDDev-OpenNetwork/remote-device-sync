@@ -417,7 +417,7 @@ impl Endpoint {
         Ok(conn)
     }
 
-    /// Discard failed local hints without removing authenticated path history.
+    /// Discard failed local hints without removing live authenticated paths.
     /// Iroh retains caller candidates across dials; owned Noq races only the
     /// current target and has no corresponding candidate cache to clear.
     pub async fn discard_unvalidated_local_addresses(

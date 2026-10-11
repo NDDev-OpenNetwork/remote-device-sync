@@ -1,7 +1,7 @@
 //! The state kept for each network path to a remote endpoint.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -183,13 +183,22 @@ impl RemotePathState {
         self.paths.keys()
     }
 
-    /// Forget failed caller hints which have never carried an authenticated
-    /// path. Previously established paths and other transports remain intact.
-    pub(super) fn forget_unvalidated_ip_addrs(&mut self, addrs: &[std::net::SocketAddr]) -> usize {
+    /// Forget failed caller hints unless a live authenticated connection still
+    /// validates them. Historical status alone cannot survive address reuse.
+    pub(super) fn forget_unvalidated_ip_addrs(
+        &mut self,
+        addrs: &[std::net::SocketAddr],
+        active: &BTreeSet<std::net::SocketAddr>,
+    ) -> usize {
         let before = self.paths.len();
+        let metrics = &self.metrics;
         self.paths.retain(|addr, state| {
-            !matches!(addr, transports::Addr::Ip(ip) if addrs.contains(ip)
-                && matches!(state.status, PathStatus::Unknown | PathStatus::Unusable))
+            let remove = matches!(addr, transports::Addr::Ip(ip)
+                if addrs.contains(ip) && !active.contains(ip));
+            if remove && matches!(state.status, PathStatus::Open) {
+                metrics.transport_ip_paths_removed.inc();
+            }
+            !remove
         });
         before - self.paths.len()
     }
@@ -353,28 +362,34 @@ mod tests {
     }
 
     #[test]
-    fn failed_hints_preserve_authenticated_and_unrelated_addresses() {
+    fn failed_hints_preserve_live_authenticated_and_unrelated_addresses() {
         let mut paths = RemotePathState::new(Arc::new(SocketMetrics::default()));
         paths.insert_multiple((1..=5).map(ip_addr), Source::App);
         paths.paths.get_mut(&ip_addr(2)).unwrap().status = PathStatus::Unusable;
         paths.insert_open_path(ip_addr(3), Source::Connection);
         paths.insert_open_path(ip_addr(4), Source::Connection);
         paths.abandoned_path(&ip_addr(4));
+        // A closed connection can leave Open history until its events drain.
+        paths.insert_open_path(ip_addr(6), Source::Connection);
         let relay = transports::Addr::Relay(
             "http://localhost:1234".parse().unwrap(),
             SecretKey::from_bytes(&[91; 32]).public(),
         );
         paths.insert_multiple(std::iter::once(relay.clone()), Source::App);
         let candidates = (1..=4)
+            .chain(std::iter::once(6))
             .map(|port| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into())
             .collect::<Vec<_>>();
-        assert_eq!(paths.forget_unvalidated_ip_addrs(&candidates), 2);
+        let active = BTreeSet::from([SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3).into()]);
+        assert_eq!(paths.forget_unvalidated_ip_addrs(&candidates, &active), 4);
         assert!(!paths.paths.contains_key(&ip_addr(1)));
         assert!(!paths.paths.contains_key(&ip_addr(2)));
-        for addr in [ip_addr(3), ip_addr(4), ip_addr(5), relay] {
+        assert!(!paths.paths.contains_key(&ip_addr(4)));
+        assert!(!paths.paths.contains_key(&ip_addr(6)));
+        for addr in [ip_addr(3), ip_addr(5), relay] {
             assert!(paths.paths.contains_key(&addr));
         }
-        assert_eq!(paths.forget_unvalidated_ip_addrs(&candidates), 0);
+        assert_eq!(paths.forget_unvalidated_ip_addrs(&candidates, &active), 0);
     }
 
     #[test]

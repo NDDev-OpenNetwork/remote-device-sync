@@ -59,12 +59,17 @@ publish connected registrations while home status remains distinct; explicit
 close synchronously seals readiness while retaining the engine's normal drain.
 
 The explicit `Endpoint::forget_unvalidated_ip_addrs` operation removes only the
-specified IP hints in Unknown/Unusable state through the owning remote actor.
-It acknowledges removal before another dial, preserves Open/Inactive paths,
+specified failed IP hints without a live authenticated path through the owning
+remote actor. It processes ready connection closures before deriving protected
+paths from live connections. Open/Inactive cache history alone cannot preserve
+an address after DHCP reuse. Obsolete selected/retry candidates are also removed.
+It acknowledges removal before another dial, preserves live authenticated paths,
 other peers and relay/custom addresses, and starts no new actor. Without this,
 a wrong-key application hint remains cached: the fallback Initial races it
 again and its fast TLS refusal wins over a valid relay. Ordinary connecting is
 unchanged; RDS invokes this only after its bounded preferred attempt fails.
 No key check, TLS, admission or wire rule changes. The manager integration test
-uses a real signed directory and isolated relay with dead and wrong-key hints;
-the path-state regression covers authenticated/unrelated cache preservation.
+uses a real signed directory and isolated relay with dead, wrong-key and
+previously authenticated/reassigned hints; the path-state regression covers
+live-authenticated/unrelated cache preservation. Owned Noq's address-reuse
+fixture awaits its asynchronous UDP-driver close before binding the replacement.

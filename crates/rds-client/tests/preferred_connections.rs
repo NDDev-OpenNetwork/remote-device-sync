@@ -4,7 +4,9 @@ use rds_core::{
     HelloAck, StreamHello,
     local::{Command, ErrorCode, Reply},
 };
-use rds_net::{Backend, Endpoint, EndpointConfig, TransportAddr, read_frame, write_frame};
+use rds_net::{
+    Backend, Endpoint, EndpointAddr, EndpointConfig, TransportAddr, read_frame, write_frame,
+};
 use std::{
     os::unix::fs::DirBuilderExt,
     sync::{
@@ -179,8 +181,10 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
         #[cfg(feature = "transport-noq")]
         Backend::Noq,
     ] {
-        for wrong_key in [false, true] {
-            eprintln!("preferred fallback case: backend={backend:?} wrong_key={wrong_key}");
+        for (wrong_key, previous_auth) in [(false, false), (true, false), (true, true)] {
+            eprintln!(
+                "preferred fallback case: backend={backend:?} wrong_key={wrong_key} previous_auth={previous_auth}"
+            );
             let (relay, urls) = if matches!(backend, Backend::Iroh) {
                 let mut config = iroh_relay::server::ServerConfig::default();
                 config.relay = Some(iroh_relay::server::RelayConfig::new(
@@ -206,12 +210,17 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
                 config
             };
             let local = rds_net::bind_endpoint(config()).await.unwrap();
-            let remote = rds_net::bind_endpoint(EndpointConfig {
+            let final_transport = if matches!(backend, Backend::Iroh) {
+                rds_net::Transports::RelayOnly
+            } else {
+                rds_net::Transports::DirectOnly
+            };
+            let mut remote = rds_net::bind_endpoint(EndpointConfig {
                 secret_key: Some(key.clone()),
-                transports: if matches!(backend, Backend::Iroh) {
-                    rds_net::Transports::RelayOnly
+                transports: if previous_auth {
+                    rds_net::Transports::All
                 } else {
-                    rds_net::Transports::DirectOnly
+                    final_transport
                 },
                 ..config()
             })
@@ -222,6 +231,44 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
             })
             .await
             .expect("isolated relay registration");
+            let reused_address = if previous_auth {
+                let address = remote
+                    .addr()
+                    .addrs
+                    .into_iter()
+                    .find_map(|addr| match addr {
+                        TransportAddr::Ip(addr) => Some(addr),
+                        _ => None,
+                    })
+                    .unwrap();
+                let warming = serve(remote.clone(), false, Arc::new(AtomicUsize::new(0)));
+                let connection = local
+                    .connect(
+                        EndpointAddr::from_parts(remote.id(), [TransportAddr::Ip(address)]),
+                        rds_core::ALPN,
+                    )
+                    .await
+                    .unwrap();
+                rds_client::ping(&connection, 91).await.unwrap();
+                connection.close(0u32.into(), b"fixture address reuse");
+                remote.close().await;
+                warming.await.unwrap();
+                drop(connection);
+                drop(remote);
+                remote = rds_net::bind_endpoint(EndpointConfig {
+                    secret_key: Some(key.clone()),
+                    transports: final_transport,
+                    ..config()
+                })
+                .await
+                .unwrap();
+                tokio::time::timeout(Duration::from_secs(10), remote.online())
+                    .await
+                    .unwrap();
+                Some(address)
+            } else {
+                None
+            };
             let directory = service::serve(
                 "127.0.0.1:0".parse().unwrap(),
                 Arc::new(MemoryStore::default()),
@@ -250,7 +297,38 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
             records.publish(&record).await.unwrap();
             let expected_accepts = Arc::new(AtomicUsize::new(0));
             let expected_server = serve(remote.clone(), false, expected_accepts.clone());
-            let other = endpoint(backend).await;
+            let other = if let Some(address) = reused_address {
+                // Owned Noq closes its UDP driver asynchronously. Address reuse
+                // begins only once the old fixture has released the socket.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        match rds_net::bind_endpoint(EndpointConfig {
+                            backend,
+                            discovery: false,
+                            bind_addrs: vec![address],
+                            ..Default::default()
+                        })
+                        .await
+                        {
+                            Ok(endpoint) => break endpoint,
+                            Err(error)
+                                if error.chain().any(|cause| {
+                                    cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                                        error.kind() == std::io::ErrorKind::AddrInUse
+                                    })
+                                }) =>
+                            {
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                            }
+                            Err(error) => panic!("address-reuse fixture bind: {error:#}"),
+                        }
+                    }
+                })
+                .await
+                .expect("old fixture UDP driver must release its address")
+            } else {
+                endpoint(backend).await
+            };
             let other_accepts = Arc::new(AtomicUsize::new(0));
             let other_server = serve(other.clone(), false, other_accepts.clone());
             let unused = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -293,7 +371,7 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
             .expect("bounded hint and directory/relay fallback")
             .unwrap_or_else(|error| {
                 panic!(
-                    "backend={backend:?} wrong_key={wrong_key}: {error}; expected_accepts={}, other_accepts={}, directory_gets={}",
+                    "backend={backend:?} wrong_key={wrong_key} previous_auth={previous_auth}: {error}; expected_accepts={}, other_accepts={}, directory_gets={}",
                     expected_accepts.load(Ordering::SeqCst),
                     other_accepts.load(Ordering::SeqCst),
                     directory.metrics().snapshot()["rds_directory_gets_total"],

@@ -1662,10 +1662,10 @@ impl Endpoint {
         self.inner.remote_info(endpoint_id).await
     }
 
-    /// Forget failed IP hints which have never carried an authenticated path.
+    /// Forget failed IP hints without a live authenticated path.
     ///
     /// Await this before a new dial so stale hints cannot race fresh addresses.
-    /// Active and previously established paths, relay/custom candidates and
+    /// Live authenticated paths, relay/custom candidates and
     /// other peers are preserved. A stopped actor has no cached hints to remove.
     /// This is an explicit local cache operation, not a peer revocation.
     pub async fn forget_unvalidated_ip_addrs(
