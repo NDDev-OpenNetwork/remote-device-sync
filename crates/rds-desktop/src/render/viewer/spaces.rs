@@ -391,6 +391,10 @@ impl ApplicationHandler<()> for Screens {
         self.check_paste(event_loop);
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if event_loop.exiting() {
+            self.pending_paste = None;
+            return;
+        }
         if self.paste_event(event_loop, id, &event) {
             return;
         }
@@ -404,6 +408,10 @@ impl ApplicationHandler<()> for Screens {
         self.process(event_loop);
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if event_loop.exiting() {
+            self.pending_paste = None;
+            return;
+        }
         self.check_paste(event_loop);
         let deadline = self
             .panes
