@@ -182,6 +182,21 @@ async fn two_monitor_regions_shared_key_holds_and_pause_invalidate_old_leases() 
             ))
             .is_err()
     );
+    // A fresh, unowned key release must send only native sync, never alter a
+    // physical/foreign application's key state. The fixture records all EI keys.
+    first
+        .inject(&event(10, InputKind::KeyUp { code: 28 }))
+        .unwrap();
+    second
+        .inject(&event(20, InputKind::KeyUp { code: 28 }))
+        .unwrap();
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|seen| matches!(seen, Seen::Key(..)))
+    );
     first
         .inject(&event(10, InputKind::KeyDown { code: 30 }))
         .unwrap();

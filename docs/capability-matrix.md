@@ -57,7 +57,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | desktop-backend:x11 | experimental | `x11` feature; X11 display socket; x11rb connect ok | xvfb contract tests; CI x11 lane |
 | desktop-backend:image-copy | stub | ext-image-copy-capture-v1 compositor; backend unwritten | `probe()` returns `Ok(None)` |
 | desktop-backend:kms | stub | DRM/KMS seat; backend unwritten | `probe()` returns `Ok(None)` |
-| desktop-backend:pipewire | experimental | Linux `portal` feature; explicitly prepared local RemoteDesktop/ScreenCast permission; mapped BGRA/BGRx floor | [Wayland contract](wayland-portal.md); EI socket, file and geometry regressions; native acceptance separate |
+| desktop-backend:pipewire | experimental | Linux `portal` feature; explicitly prepared local RemoteDesktop/ScreenCast permission; mapped BGRA/BGRx floor | [Wayland contract](wayland-portal.md); [native two-monitor capture, restore and EI sync](reports/rds-wayland-native-20261011.md); physical input, revocation and installed acceptance separate |
 | desktop-backend:screencapturekit | stub | macOS 12.3+, screen-record permission; backend unwritten | `probe()` returns `Ok(None)` |
 | desktop-backend:dxgi | unavailable | Windows host; no module | roadmap only |
 

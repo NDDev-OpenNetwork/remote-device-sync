@@ -6,6 +6,10 @@ RemoteDesktop v2, ScreenCast v5, embedded cursors, keyboard/pointer grants,
 monitor stream IDs and current EIS region mappings. It does not authorize an
 unattended login screen, privileged scanout or hardware codecs.
 
+The [native functional receipt](reports/rds-wayland-native-20261011.md) records
+two-monitor capture/decode, restored permission and non-mutating EI sync ACKs.
+Physical input/presentation, revocation and installed acceptance remain separate.
+
 Build with PipeWire/SPA development headers and libclang installed:
 
 ```sh
@@ -16,7 +20,10 @@ cargo run --locked -p rds-desktop --features portal --example wayland_check -- /
 Local consent has a one-hour bound; ordinary portal RPCs have ten-second
 bounds. The qualification example opens a local permission dialog, captures and decodes
 frames for every selected monitor and closes its own session. It injects no
-input. The directory must be owned by the serving user and mode 0700. State and
+input. Optional `--verify-input-sync` checks each new lease's native EI sync ACK
+with an unowned key release which the RDS hold aggregator suppresses; no keyboard
+or pointer event is emitted. This is an ACK-plumbing check, not physical input or
+input-to-visible-pixel acceptance. The directory must be owned by the serving user and mode 0700. State and
 its lock must be ordinary, single-link, owned 0600 files; symlink components,
 changed state, duplicate IDs and competing writers are refused.
 
