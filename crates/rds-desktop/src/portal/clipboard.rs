@@ -374,11 +374,11 @@ impl ClipboardBackend for Lease {
                 if snapshot.closed {
                     return None;
                 }
-                if snapshot.generation != self.seen {
-                    if let Some(text) = snapshot.text {
-                        self.seen = snapshot.generation;
-                        return Some(text.to_string());
-                    }
+                if snapshot.generation != self.seen
+                    && let Some(text) = snapshot.text
+                {
+                    self.seen = snapshot.generation;
+                    return Some(text.to_string());
                 }
             }
         })
