@@ -183,6 +183,17 @@ impl RemotePathState {
         self.paths.keys()
     }
 
+    /// Forget failed caller hints which have never carried an authenticated
+    /// path. Previously established paths and other transports remain intact.
+    pub(super) fn forget_unvalidated_ip_addrs(&mut self, addrs: &[std::net::SocketAddr]) -> usize {
+        let before = self.paths.len();
+        self.paths.retain(|addr, state| {
+            !matches!(addr, transports::Addr::Ip(ip) if addrs.contains(ip)
+                && matches!(state.status, PathStatus::Unknown | PathStatus::Unusable))
+        });
+        before - self.paths.len()
+    }
+
     /// Returns whether this stores any addresses.
     pub(super) fn is_empty(&self) -> bool {
         self.paths.is_empty()
@@ -339,6 +350,31 @@ mod tests {
             sources: HashMap::new(),
             status: PathStatus::Unusable,
         }
+    }
+
+    #[test]
+    fn failed_hints_preserve_authenticated_and_unrelated_addresses() {
+        let mut paths = RemotePathState::new(Arc::new(SocketMetrics::default()));
+        paths.insert_multiple((1..=5).map(ip_addr), Source::App);
+        paths.paths.get_mut(&ip_addr(2)).unwrap().status = PathStatus::Unusable;
+        paths.insert_open_path(ip_addr(3), Source::Connection);
+        paths.insert_open_path(ip_addr(4), Source::Connection);
+        paths.abandoned_path(&ip_addr(4));
+        let relay = transports::Addr::Relay(
+            "http://localhost:1234".parse().unwrap(),
+            SecretKey::from_bytes(&[91; 32]).public(),
+        );
+        paths.insert_multiple(std::iter::once(relay.clone()), Source::App);
+        let candidates = (1..=4)
+            .map(|port| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into())
+            .collect::<Vec<_>>();
+        assert_eq!(paths.forget_unvalidated_ip_addrs(&candidates), 2);
+        assert!(!paths.paths.contains_key(&ip_addr(1)));
+        assert!(!paths.paths.contains_key(&ip_addr(2)));
+        for addr in [ip_addr(3), ip_addr(4), ip_addr(5), relay] {
+            assert!(paths.paths.contains_key(&addr));
+        }
+        assert_eq!(paths.forget_unvalidated_ip_addrs(&candidates), 0);
     }
 
     #[test]

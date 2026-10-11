@@ -1349,6 +1349,26 @@ impl EndpointInner {
         rx.await.ok()
     }
 
+    pub(crate) async fn forget_unvalidated_ip_addrs(
+        &self,
+        id: EndpointId,
+        addrs: Vec<SocketAddr>,
+    ) -> usize {
+        let Some(sender) = self.remote_actors.get(&id) else {
+            return 0;
+        };
+        let (tx, rx) = oneshot::channel();
+        if sender
+            .send(RemoteStateMessage::ForgetUnvalidatedIpAddrs(addrs, tx))
+            .await
+            .is_err()
+        {
+            return 0;
+        }
+        // An actor that stops before acknowledging also drops its path cache.
+        rx.await.unwrap_or(0)
+    }
+
     /// Registers the connection in the `RemoteStateActor`.
     ///
     /// The actor is responsible for holepunching and opening additional paths to this

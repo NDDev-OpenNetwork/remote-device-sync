@@ -61,10 +61,18 @@ pub(super) async fn run(
         _ = reservation.cancel.cancelled() => return Err(ErrorCode::NotFound),
         result = async {
             let direct = if let Some(addresses) = local_addresses.filter(|v| !v.is_empty()) {
-                let addr = EndpointAddr::from_parts(peer, addresses.into_iter().map(rds_net::TransportAddr::Ip));
+                let addr = EndpointAddr::from_parts(peer, addresses.iter().copied().map(rds_net::TransportAddr::Ip));
                 // One budget for the entire candidate set, not one per address.
-                tokio::time::timeout(Duration::from_secs(1), endpoint.connect(addr, rds_core::ALPN))
-                    .await.ok().and_then(Result::ok)
+                let connected = tokio::time::timeout(Duration::from_secs(1), endpoint.connect(addr, rds_core::ALPN))
+                    .await.ok().and_then(Result::ok);
+                if connected.is_none() {
+                    // A wrong-key hint must not remain in Iroh's shared cache
+                    // and win the next handshake against the directory route.
+                    tokio::time::timeout(Duration::from_secs(1),
+                        endpoint.discard_unvalidated_local_addresses(peer, addresses))
+                        .await.map_err(|_| ErrorCode::Connect)?;
+                }
+                connected
             } else { None };
             let conn = match direct {
                 Some(conn) => conn,

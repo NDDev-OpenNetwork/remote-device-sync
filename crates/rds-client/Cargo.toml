@@ -27,5 +27,9 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+ed25519-dalek.workspace = true
+iroh-relay = { workspace = true, features = ["server"] }
+
 [lints]
 workspace = true

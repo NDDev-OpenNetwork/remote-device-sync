@@ -57,3 +57,14 @@ relay-only connection can restore its explicitly known relay alternatives. No
 new route is inferred from local relay configuration. Endpoint address watchers
 publish connected registrations while home status remains distinct; explicit
 close synchronously seals readiness while retaining the engine's normal drain.
+
+The explicit `Endpoint::forget_unvalidated_ip_addrs` operation removes only the
+specified IP hints in Unknown/Unusable state through the owning remote actor.
+It acknowledges removal before another dial, preserves Open/Inactive paths,
+other peers and relay/custom addresses, and starts no new actor. Without this,
+a wrong-key application hint remains cached: the fallback Initial races it
+again and its fast TLS refusal wins over a valid relay. Ordinary connecting is
+unchanged; RDS invokes this only after its bounded preferred attempt fails.
+No key check, TLS, admission or wire rule changes. The manager integration test
+uses a real signed directory and isolated relay with dead and wrong-key hints;
+the path-state regression covers authenticated/unrelated cache preservation.

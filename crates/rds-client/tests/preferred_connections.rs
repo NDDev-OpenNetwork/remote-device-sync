@@ -165,3 +165,175 @@ async fn preferred_dial_is_pinned_deduplicated_and_admission_is_not_replayed() {
         }
     }
 }
+
+/// A stale LAN hint must not become identity, and fallback must actually use
+/// a verified directory record, rather than a cached direct ticket. Iroh uses
+/// an isolated relay; owned Noq uses its isolated direct transport.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
+    use rds_discovery::{EndpointRecord, MemoryStore, Service, client, service};
+    let _telemetry = std::env::var_os("RUST_LOG")
+        .map(|_| rds_observe::init(rds_observe::Service::Bench, "warn").unwrap());
+    for backend in [
+        Backend::Iroh,
+        #[cfg(feature = "transport-noq")]
+        Backend::Noq,
+    ] {
+        for wrong_key in [false, true] {
+            eprintln!("preferred fallback case: backend={backend:?} wrong_key={wrong_key}");
+            let (relay, urls) = if matches!(backend, Backend::Iroh) {
+                let mut config = iroh_relay::server::ServerConfig::default();
+                config.relay = Some(iroh_relay::server::RelayConfig::new(
+                    "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+                ));
+                let relay = iroh_relay::server::Server::spawn(config).await.unwrap();
+                let url = format!("http://{}", relay.http_addr().unwrap());
+                (Some(relay), vec![url])
+            } else {
+                (None, vec![])
+            };
+            let key = rds_net::SecretKey::from_bytes(&[91; 32]);
+            let config = || {
+                let mut config = EndpointConfig {
+                    backend,
+                    discovery: false,
+                    bind_addrs: vec!["127.0.0.1:0".parse().unwrap()],
+                    ..Default::default()
+                };
+                if let Some(url) = urls.first() {
+                    config = config.with_relay(url).unwrap();
+                }
+                config
+            };
+            let local = rds_net::bind_endpoint(config()).await.unwrap();
+            let remote = rds_net::bind_endpoint(EndpointConfig {
+                secret_key: Some(key.clone()),
+                transports: if matches!(backend, Backend::Iroh) {
+                    rds_net::Transports::RelayOnly
+                } else {
+                    rds_net::Transports::DirectOnly
+                },
+                ..config()
+            })
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(local.online(), remote.online());
+            })
+            .await
+            .expect("isolated relay registration");
+            let directory = service::serve(
+                "127.0.0.1:0".parse().unwrap(),
+                Arc::new(MemoryStore::default()),
+                service::ServiceConfig::open_ephemeral(),
+            )
+            .await
+            .unwrap();
+            let records = client::Client::new(directory.addr());
+            let record = EndpointRecord::publish(
+                &ed25519_dalek::SigningKey::from_bytes(&key.to_bytes()),
+                1,
+                remote
+                    .addr()
+                    .addrs
+                    .into_iter()
+                    .filter_map(|addr| match addr {
+                        TransportAddr::Ip(addr) => Some(addr),
+                        _ => None,
+                    })
+                    .collect(),
+                urls.clone(),
+                vec![Service::Ping],
+                Duration::from_secs(120),
+            )
+            .unwrap();
+            records.publish(&record).await.unwrap();
+            let expected_accepts = Arc::new(AtomicUsize::new(0));
+            let expected_server = serve(remote.clone(), false, expected_accepts.clone());
+            let other = endpoint(backend).await;
+            let other_accepts = Arc::new(AtomicUsize::new(0));
+            let other_server = serve(other.clone(), false, other_accepts.clone());
+            let unused = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let hint = if wrong_key {
+                other
+                    .addr()
+                    .addrs
+                    .into_iter()
+                    .find_map(|addr| match addr {
+                        TransportAddr::Ip(addr) => Some(addr),
+                        _ => None,
+                    })
+                    .unwrap()
+            } else {
+                unused.local_addr().unwrap()
+            };
+            let root = std::path::Path::new("/tmp")
+                .canonicalize()
+                .unwrap()
+                .join(format!("rds-pref-relay-{:032x}", rand::random::<u128>()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let mut manager = Server::start(
+                Some(Prepared::bind(&root).await.unwrap()),
+                local.clone(),
+                Some(records),
+            );
+            let client = Client::new(&root);
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                client.request(Command::ConnectPreferred {
+                    target: remote.id().to_string(),
+                    grant: None,
+                    local_addresses: vec![hint],
+                }),
+            )
+            .await
+            .expect("bounded hint and directory/relay fallback")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "backend={backend:?} wrong_key={wrong_key}: {error}; expected_accepts={}, other_accepts={}, directory_gets={}",
+                    expected_accepts.load(Ordering::SeqCst),
+                    other_accepts.load(Ordering::SeqCst),
+                    directory.metrics().snapshot()["rds_directory_gets_total"],
+                )
+            });
+            assert!(matches!(result, Reply::Connected(_)));
+            let snapshot = client.snapshot().await.unwrap();
+            assert_eq!(snapshot.sessions.len(), 1);
+            assert_eq!(snapshot.sessions[0].peer, remote.id().to_string());
+            assert_eq!(expected_accepts.load(Ordering::SeqCst), 1);
+            assert_eq!(other_accepts.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                directory.metrics().snapshot()["rds_directory_gets_total"],
+                1
+            );
+            // The manager samples its connection once a second. Await that
+            // observation, rather than treating the pre-sample zero as a path.
+            let counter = if matches!(backend, Backend::Iroh) {
+                "rds_net_bytes_received_total{via=\"relay\"}"
+            } else {
+                "rds_net_bytes_received_total{via=\"direct\"}"
+            };
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while local.metrics().snapshot()[counter] == 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("fallback payload must be observed by the manager sampler");
+            manager.close().await.unwrap();
+            local.close().await;
+            remote.close().await;
+            other.close().await;
+            expected_server.await.unwrap();
+            other_server.await.unwrap();
+            directory.close().await.unwrap();
+            if let Some(relay) = relay {
+                relay.shutdown().await.unwrap();
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+}

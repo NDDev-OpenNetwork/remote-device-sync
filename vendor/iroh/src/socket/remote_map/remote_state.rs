@@ -389,6 +389,10 @@ impl RemoteStateActor {
                 };
                 tx.send(info).ok();
             }
+            RemoteStateMessage::ForgetUnvalidatedIpAddrs(addrs, tx) => {
+                let forgotten = self.state.paths.forget_unvalidated_ip_addrs(&addrs);
+                tx.send(forgotten).ok();
+            }
             RemoteStateMessage::NetworkChange { is_major } => {
                 self.handle_msg_network_change(is_major);
             }
@@ -1268,6 +1272,9 @@ pub(crate) enum RemoteStateMessage {
     ///
     /// This currently only includes a list of all known transport addresses for the remote.
     RemoteInfo(oneshot::Sender<RemoteInfo>),
+    /// Remove caller-supplied IP candidates with no authenticated path history.
+    #[debug("ForgetUnvalidatedIpAddrs(..)")]
+    ForgetUnvalidatedIpAddrs(Vec<SocketAddr>, oneshot::Sender<usize>),
     /// The network status has changed in some way
     NetworkChange { is_major: bool },
 }
