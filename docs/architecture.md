@@ -761,8 +761,9 @@ requires a new run for qualification.
 The code supplies a shared endpoint/session manager, signed discovery and
 grants, native russh client access through a scoped TCP adapter, durable
 resumable single-file transfer, and an experimental X11/OpenH264/native viewer.
-Audio, recursive/two-way synchronization and native macOS/Wayland serving
-remain unfinished. Hardware codecs, RDP/browser interop and Windows support
+Audio, recursive/two-way synchronization and native macOS serving remain
+unfinished. Optional consented Wayland serving has a prepared backend and
+deterministic boundary tests, with native acceptance still separate. Hardware codecs, RDP/browser interop and Windows support
 retain their separate later requirements.
 
 ### Native viewer stability, video profile and text paste increment
@@ -871,3 +872,11 @@ replace the engine's validation or packet scheduling decisions.
 
 See [patch provenance](../vendor/noq-proto/RDS-PATCH.md) and
 [failure/qualification evidence](reports/rds-warm-standby-20261006.md).
+
+### Prepared consented Wayland serving
+
+The optional Linux portal feature adds an agent-owned DesktopSource seam and a
+consented multi-monitor PipeWire/EI backend. Native types remain below serving
+policy; local preparation precedes remote admission and revocation seals leases.
+See [the Wayland contract](wayland-portal.md) for requirements, identity, cleanup,
+fixture coverage and separate native acceptance.

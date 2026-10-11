@@ -1,13 +1,11 @@
-//! XDG portal + PipeWire capture — planned.
-//!
-//! The consented Wayland path: `ashpd` ScreenCast/RemoteDesktop portal
-//! (persist-mode restore tokens for non-interactive re-use) hands us a
-//! PipeWire node; `pipewire`/`libspa` run the stream with dmabuf-first
-//! buffer negotiation, damage rects and a cursor sub-stream.
+//! Ambient capture probing never opens a local consent dialog. Prepared
+//! serving uses the optional Linux `WaylandDesktop::open` backend instead.
+//! That owner selects monitors, holds the portal session and lends bounded
+//! mapped BGRA/BGRx subscriptions to independently admitted serving sessions.
 
 use crate::{Capturer, DesktopError};
 
-/// Returns `Ok(None)` until the backend lands.
+/// A prepared permission owner is required; ambient probing is unavailable.
 pub fn probe(_screen: u32) -> Result<Option<Box<dyn Capturer>>, DesktopError> {
     Ok(None)
 }

@@ -73,6 +73,27 @@ EOF
 }
 
 case "$GATE" in
+w4-wayland-portal)
+    [ "$(uname -s)" = "Linux" ] || fail "portal gate requires Linux"
+    note "gate w4-wayland-portal — prepared consented backend boundaries"
+    green_bars
+    cargo clippy --locked -p rds-agent -p rds-desktop --all-targets --features rds-agent/portal -- -D warnings || fail "portal feature clippy"
+    cargo test --locked -p rds-desktop --features portal --lib portal:: -- --test-threads=1 || fail "EI, token and mapped-buffer contracts"
+    cargo test --locked -p rds-agent --features portal --lib || fail "portal agent admission regressions"
+    cargo run --locked --release -p rds-bench -- run --scenario handshake \
+        --iterations 100 --json "$REPORTS/bench-w4-wayland-portal.json" \
+        --md "$REPORTS/bench-w4-wayland-portal.md" || fail "shared endpoint regression measurement"
+    write_checkpoint "w4-wayland-portal" "pending native qualification" \
+        "- fmt/workspace clippy/workspace tests: PASS
+- strict portal desktop/agent feature Clippy: PASS
+- real EI socket pair: two monitor regions, shared key holds, pause invalidation and silent peer timeout: PASS
+- private token rotation, display numbering, exclusive state and unsafe aliases: PASS
+- mapped BGRA/BGRx bounds and region geometry: PASS
+- agent admission library with portal build: PASS
+- 100 shared loopback handshakes: regression measurement only, not native Wayland latency
+- attended capture/decode, permission revoke/restore and physical input: separate native report required" \
+        "$REPORTS/bench-w4-wayland-portal.json" "$REPORTS/bench-w4-wayland-portal.md"
+    ;;
 w6-tabbed-workspace)
     note "gate w6-tabbed-workspace — independent device/display tabs"
     green_bars

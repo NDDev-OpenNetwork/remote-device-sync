@@ -143,3 +143,12 @@ timeouts spelled out explicitly. A sync-only deployment looks like:
 
 which is equivalent to `rds-agent --role sync --sync-dir /srv/sync --allow
 <endpoint-id> --handshake-timeout 10`.
+
+## Consented Wayland preparation
+
+The optional Linux portal build accepts `--wayland-state` with an absolute
+private permission-state file. This explicit local preparation may present
+a one-hour bounded consent dialog before endpoint binding. A build without
+portal support or a disabled desktop role refuses the option before creating
+identity, local sockets or permission state. Remote requests cannot trigger it.
+See [Wayland serving](wayland-portal.md) for persistence and native limits.

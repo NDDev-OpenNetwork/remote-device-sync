@@ -236,7 +236,9 @@ The `desktop` CLI feature builds a native winit window with a wgpu surface:
 Metal on macOS and supported native GPU backends on Linux. Software H.264
 decoding stays on bounded blocking workers. The serving device needs a real
 capture/input backend; the current Linux implementation uses X11/XTEST.
-macOS capture, VideoToolbox and Wayland serving remain separate work.
+macOS capture and VideoToolbox remain separate work. Optional prepared Wayland
+serving has deterministic boundary coverage; [native portal acceptance](wayland-portal.md)
+remains separate from native viewer support.
 
 Managed native dispatch and acknowledgement observation use separate retained
 async legs from ordered receive/decode. The agent's separated local extension

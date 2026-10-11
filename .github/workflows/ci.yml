@@ -57,3 +57,29 @@ jobs:
         && cargo clippy --locked --workspace --all-targets --features rds-desktop/x11 -- -D warnings
         && cargo clippy --locked --workspace --all-targets --features rds-agent/desktop,rds-cli/desktop -- -D warnings
       timeout_minutes: 45
+
+  portal:
+    name: Wayland portal boundaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: "1.98.1"
+          components: clippy
+          cache: false
+      - name: Install PipeWire ABI and bindgen headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev libclang-dev dbus-daemon
+      - name: Check portal and agent ownership
+        run: cargo clippy --locked -p rds-agent -p rds-desktop --all-targets --features rds-agent/portal -- -D warnings
+      - name: Exercise EI socket and filesystem boundaries
+        run: cargo test --locked -p rds-desktop --features portal --lib portal:: -- --test-threads=1
+      - name: Exercise serving regressions with the portal build
+        run: cargo test --locked -p rds-agent --features portal --lib

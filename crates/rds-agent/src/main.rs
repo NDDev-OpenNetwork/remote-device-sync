@@ -15,6 +15,10 @@ use rds_net::{
     about = "RDS agent: serve SSH and desktop sessions to allowed peers"
 )]
 struct Cli {
+    /// Prepare a consented Wayland desktop using this private token state file.
+    /// Requires Linux and the portal feature; may show a local permission dialog.
+    #[arg(long)]
+    wayland_state: Option<std::path::PathBuf>,
     /// Local session directory; default is <key-file>.control.
     #[arg(long, conflicts_with = "no_control")]
     control_dir: Option<std::path::PathBuf>,
@@ -165,10 +169,16 @@ struct Cli {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+
     rds_observe::run_main(rds_observe::Service::Agent, "info", run(cli)).await
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    #[cfg(not(all(target_os = "linux", feature = "portal")))]
+    if cli.wayland_state.is_some() {
+        anyhow::bail!("--wayland-state requires a Linux build with the portal feature");
+    }
+
     let prepared_admin = cli.admin.bind().await?;
     let mut config = cli
         .endpoint_config
@@ -269,6 +279,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     policy
         .validate()
         .map_err(|why| anyhow::anyhow!("invalid agent policy: {why}"))?;
+    if cli.wayland_state.is_some()
+        && !policy
+            .effective_services()
+            .contains(&rds_core::ServiceKind::Desktop)
+    {
+        anyhow::bail!("--wayland-state requires the desktop service");
+    }
 
     let key_path = cli
         .key_file
@@ -365,6 +382,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     } else {
         None
     };
+    #[cfg(all(target_os = "linux", feature = "portal"))]
+    let portal = match cli.wayland_state.as_ref() {
+        Some(path) => Some(std::sync::Arc::new(
+            rds_desktop::WaylandDesktop::open(path).await?,
+        )),
+        None => None,
+    };
     let endpoint = bind_endpoint(config).await?;
     // Binding starts local service. iroh's online() waits indefinitely for a
     // relay, including when relays are disabled or unreachable. Reachability
@@ -408,20 +432,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         None
     };
 
-    let agent = std::sync::Arc::new(
-        Agent::new(endpoint, policy).with_limits(
-            AgentLimits::new(
-                resolved
-                    .max_connections
-                    .unwrap_or(std::num::NonZeroU16::new(32).expect("positive limit")),
-                max_streams,
-            )
-            .with_process_budget(
-                resolved.max_fds.map(std::num::NonZeroU64::get),
-                resolved.max_rss_mb.map(std::num::NonZeroU64::get),
-            ),
+    let agent = Agent::new(endpoint, policy).with_limits(
+        AgentLimits::new(
+            resolved
+                .max_connections
+                .unwrap_or(std::num::NonZeroU16::new(32).expect("positive limit")),
+            max_streams,
+        )
+        .with_process_budget(
+            resolved.max_fds.map(std::num::NonZeroU64::get),
+            resolved.max_rss_mb.map(std::num::NonZeroU64::get),
         ),
     );
+    #[cfg(all(target_os = "linux", feature = "portal"))]
+    let agent = match &portal {
+        Some(portal) => agent.with_desktop_source(portal.clone()),
+        None => agent,
+    };
+    let agent = std::sync::Arc::new(agent);
     let metrics = agent.metrics();
     let mut control =
         rds_client::local::Server::start(prepared_control, agent.endpoint.clone(), directory);
@@ -462,6 +490,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // abrupt socket death (and iroh does not log an ungraceful drop).
     let ((), admin_result, control_result) =
         tokio::join!(agent.endpoint.close(), admin.close(), control.close());
+    #[cfg(all(target_os = "linux", feature = "portal"))]
+    if let Some(portal) = portal {
+        portal.close().await;
+    }
     let result = finish_admin(result, admin_result);
     match (result, control_result) {
         (result, Ok(())) => result,

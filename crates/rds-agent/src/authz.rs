@@ -677,7 +677,7 @@ mod tests {
             request,
             policy.clone(),
             authz.clone(),
-            false,
+            crate::DesktopBackend::default(),
         ));
         let ack = rds_net::read_frame::<_, HelloAck>(&mut recv);
         tokio::pin!(ack);

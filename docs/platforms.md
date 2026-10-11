@@ -8,7 +8,9 @@ nothing in the design blocks it.
 The capture/codec/input preference tables below include planned backends.
 Currently usable implementations are Linux X11 capture/XTEST input and the
 OpenH264 software codec. The native wgpu viewer is implemented for Linux and macOS;
-macOS capture/input, Wayland capture/input and hardware codecs remain stubs.
+macOS capture/input and hardware codecs remain stubs. The optional consented
+Wayland portal backend is implemented behind separate native qualification; see
+[the portal contract](wayland-portal.md).
 Build support is distinct from serving capability and native acceptance; see
 [the capability matrix](capability-matrix.md).
 
@@ -22,8 +24,8 @@ function; a fixed preference order per platform picks the first usable
 one at runtime — never compile-time alone. Probing logs the demotion
 reason so "silently on the slow path" is impossible.
 
-The orders below are the intended probe hierarchy. Only X11 capture/XTEST
-input, OpenH264 software codecs and the native wgpu viewer are implemented.
+The orders below are the intended probe hierarchy. X11 capture/XTEST input, the explicit consented portal software backend, OpenH264
+and the native wgpu viewer are implemented.
 Unavailable probes return no backend; the listed future protocols and drivers
 do not imply supported hardware, consent or unattended access. Consult the
 [capability matrix](capability-matrix.md) for current state.
@@ -34,7 +36,7 @@ do not imply supported hardware, consent or unattended access. Consult the
 | --- | --- |
 | 1. `ext-image-copy-capture-v1` — planned compositor protocol adapter, dmabuf + damage; compositor policy applies | 1. `ScreenCaptureKit` — display streams, IOSurface → VideoToolbox |
 | 2. DRM/KMS scanout (`drm`+`gbm`) — unattended, headless, login screen; planned; device/seat/DRM-master access required | |
-| 3. XDG portal + PipeWire — consented sessions, dmabuf-first, persist tokens for re-use | |
+| 3. XDG portal + PipeWire — explicit consent, mapped BGRA/BGRx software floor; bounded restore tokens | |
 | 4. X11 RandR + `GetImage`/MIT-SHM — compatibility baseline (implemented) | |
 
 ## Codec order

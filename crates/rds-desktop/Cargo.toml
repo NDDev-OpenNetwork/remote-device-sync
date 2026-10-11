@@ -9,6 +9,7 @@ repository.workspace = true
 [features]
 default = []
 x11 = ["dep:x11rb", "dep:openh264", "dep:openh264-sys2", "dep:memmap2", "dep:rustix"]
+portal = ["x11", "dep:ashpd", "dep:pipewire", "dep:reis", "dep:futures-util", "dep:serde_json"]
 viewer = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
@@ -35,7 +36,14 @@ egui = { version = "0.36.2", default-features = false, features = ["default_font
 egui-wgpu = { version = "0.36.2", default-features = false, optional = true }
 egui-winit = { version = "0.36.2", default-features = false, features = ["clipboard", "x11", "wayland"], optional = true }
 serde.workspace = true
-rustix = { workspace = true, features = ["event", "time"], optional = true }
+rustix = { workspace = true, features = ["event", "time", "process"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "remote_desktop", "screencast"], optional = true }
+pipewire = { version = "=0.10.0", optional = true }
+reis = { version = "=0.7.1", features = ["tokio"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+serde_json = { workspace = true, optional = true }
 
 # Thin AppKit bindings for the native viewer's window, clipboard and activity
 # lifetime. Explicit superclass features are required by the 0.3 bindings.
@@ -65,3 +73,7 @@ required-features = ["viewer"]
 [[example]]
 name = "synthetic_decode_probe"
 required-features = ["x11"]
+
+[[example]]
+name = "wayland_check"
+required-features = ["portal"]

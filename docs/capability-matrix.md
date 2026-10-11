@@ -40,7 +40,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | service:sync-read | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
 | service:sync-write | implemented | grant scope on sync root; optional grant `sync_paths` subtree | grant/scope tests |
 | service:desktop-view | implemented | grant scope; usable capture backend | view/control scope separation and desktop contract tests |
-| service:desktop-control | experimental | desktop-view + control scope; X11 input sink | native Xvfb input/lifecycle tests; installed causal pixels retain a separate gate |
+| service:desktop-control | experimental | desktop-view + control scope; X11 or explicitly consented EI sink | native Xvfb input/lifecycle tests; installed causal pixels retain a separate gate |
 
 ## Transports
 
@@ -57,7 +57,7 @@ only what is actually served. `ping`/`info` are the always-on control plane.
 | desktop-backend:x11 | experimental | `x11` feature; X11 display socket; x11rb connect ok | xvfb contract tests; CI x11 lane |
 | desktop-backend:image-copy | stub | ext-image-copy-capture-v1 compositor; backend unwritten | `probe()` returns `Ok(None)` |
 | desktop-backend:kms | stub | DRM/KMS seat; backend unwritten | `probe()` returns `Ok(None)` |
-| desktop-backend:pipewire | stub | XDG portal consent; backend unwritten | `probe()` returns `Ok(None)` |
+| desktop-backend:pipewire | experimental | Linux `portal` feature; explicitly prepared local RemoteDesktop/ScreenCast permission; mapped BGRA/BGRx floor | [Wayland contract](wayland-portal.md); EI socket, file and geometry regressions; native acceptance separate |
 | desktop-backend:screencapturekit | stub | macOS 12.3+, screen-record permission; backend unwritten | `probe()` returns `Ok(None)` |
 | desktop-backend:dxgi | unavailable | Windows host; no module | roadmap only |
 

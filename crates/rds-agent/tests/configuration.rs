@@ -108,3 +108,26 @@ fn role_and_service_flags_conflict() {
     );
     assert!(!output.status.success());
 }
+
+#[test]
+fn wayland_with_disabled_desktop_fails_before_identity_socket_or_permission_state() {
+    let dir = Scratch::new();
+    let state = dir.0.join("portal").join("permission.json");
+    // Even a future preflight regression must not reach an ambient portal.
+    let output = Command::new(BINARY)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", dir.0.join("no-session-bus").display()),
+        )
+        .args(["--no-relay", "--role", "access", "--key-file"])
+        .arg(dir.0.join("endpoint.key"))
+        .arg("--wayland-state")
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--wayland-state requires"));
+    assert!(!dir.0.join("endpoint.key").exists());
+    assert!(!dir.0.join("endpoint.key.control").exists());
+    assert!(!state.parent().unwrap().exists());
+}
