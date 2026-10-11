@@ -149,6 +149,13 @@ impl Screens {
             fullscreen: tab.is_some(),
         };
         app.resumed(event_loop);
+        if tab.is_some()
+            && let (Some(deck), Some(window)) = (&mut app.workspace, &app.window)
+            && let Some(chrome) = &mut deck.chrome
+        {
+            chrome.connected();
+            chrome.toggle_panels(window);
+        }
         if app.window_closed {
             if self.error.is_none() {
                 self.error = app.error.take();
