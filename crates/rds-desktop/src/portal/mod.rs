@@ -2,6 +2,8 @@
 
 #[cfg(all(target_os = "linux", feature = "portal"))]
 mod capture;
+#[cfg(all(target_os = "linux", feature = "portal"))]
+mod clipboard;
 mod frame;
 mod geometry;
 #[cfg(all(target_os = "linux", feature = "portal"))]

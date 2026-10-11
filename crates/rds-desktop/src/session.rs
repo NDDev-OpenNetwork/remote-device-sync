@@ -1292,7 +1292,9 @@ pub async fn serve_desktop_with(
         });
         let mut assembly = crate::clipboard::Assembly::default();
         let mut watching = config.reverse_clipboard && !config.view_only && clipboard_supported;
-        let mut clipboard = watching.then(|| crate::clipboard::Worker::watch(session_display));
+        let mut clipboard = watching.then(|| {
+            crate::clipboard::Worker::for_source(config.source.as_deref(), session_display, true)
+        });
         let mut reverse = crate::clipboard::ReverseSender::default();
         loop {
             let read_started = Instant::now();
@@ -1518,7 +1520,11 @@ pub async fn serve_desktop_with(
                                 Duration::from_secs(2),
                                 clipboard
                                     .get_or_insert_with(|| {
-                                        crate::clipboard::Worker::new(session_display)
+                                        crate::clipboard::Worker::for_source(
+                                            config.source.as_deref(),
+                                            session_display,
+                                            false,
+                                        )
                                     })
                                     .publish(text),
                             )

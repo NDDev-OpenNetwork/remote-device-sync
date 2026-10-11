@@ -15,6 +15,7 @@ use tokio::sync::{Semaphore, oneshot, watch};
 pub struct WaylandDesktop {
     slots: Vec<Arc<capture::Slot>>,
     input: Arc<input::Group>,
+    clipboard: Option<Arc<super::clipboard::Group>>,
     producers: Arc<Semaphore>,
     closed: watch::Receiver<bool>,
     close: Mutex<Option<oneshot::Sender<()>>>,
@@ -58,6 +59,8 @@ impl WaylandDesktop {
             result = &mut opening => result.map_err(|_| error())??,
         };
         let granted = session::open(store.token(), &mut cancelled).await?;
+        let clipboard = granted.clipboard.clone();
+        let closing_clipboard = clipboard.clone();
         let mut sources = Vec::with_capacity(granted.monitors.len());
         let mut ids = BTreeMap::new();
         for monitor in &granted.monitors {
@@ -111,6 +114,9 @@ impl WaylandDesktop {
             capture.stop();
             closing_input.stop();
             let (video, input) = tokio::join!(capture.close(), closing_input.close());
+            if let Some(clipboard) = closing_clipboard {
+                clipboard.close().await;
+            }
             // Let our native peers drop before closing the portal normally.
             // A bounded join timeout still proceeds to portal revocation.
             owner.close().await;
@@ -127,6 +133,7 @@ impl WaylandDesktop {
         let backend = Self {
             slots,
             input,
+            clipboard,
             producers: Arc::new(Semaphore::new(8)),
             closed,
             close: Mutex::new(Some(close)),
@@ -241,6 +248,21 @@ impl DesktopSource for WaylandDesktop {
             return Err(error());
         }
         self.input.sink(display, extent)
+    }
+    fn clipboard_supported(&self) -> bool {
+        !*self.closed.borrow()
+            && self
+                .clipboard
+                .as_ref()
+                .is_some_and(|group| group.available())
+    }
+    fn clipboard(
+        &self,
+        display: u32,
+        watching: bool,
+    ) -> Result<Box<dyn crate::clipboard::ClipboardBackend>, DesktopError> {
+        self.slot(display)?;
+        self.clipboard.as_ref().ok_or_else(error)?.worker(watching)
     }
 }
 

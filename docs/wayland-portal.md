@@ -105,8 +105,17 @@ Requests have a two-second deadline and no retry/replay. An EI sync response
 establishes processing through the native protocol peer, not an application
 response or painted pixels. Pause/removal invalidates old leases. Relative
 pointer input is refused because this implementation scopes absolute regions.
-Clipboard integration is not yet implemented for this backend: clipboard
-requests return Unavailable and never probe Xwayland's clipboard.
+Optional Clipboard v1 access is requested on this same session before Start.
+Only a granted session advertises clipboard support; unsupported, refused or
+failed clipboard setup leaves capture/input usable and never probes Xwayland.
+One source-owned actor filters session signals and lends at most eight leases.
+It reads changes only while a controlling reverse-clipboard lease exists, skips
+its own selection ownership, retains the newest external owner and serves up to
+four simultaneous selection writes. UTF-8 text uses a 1 MiB bound and two-second
+nonblocking descriptor deadlines. Each transfer serial is acknowledged; source
+shutdown cancels and joins descriptor work before closing the portal peer.
+See [the clipboard contract](clipboard.md). Native clipboard consent and
+installed cross-device behavior require separate qualification.
 
 Worker exit guards also seal retained pixels and input readiness during Rust
 unwinding, so a panicked worker cannot leave an apparently live frozen backend.

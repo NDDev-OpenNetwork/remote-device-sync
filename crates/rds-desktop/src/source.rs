@@ -21,4 +21,13 @@ pub trait DesktopSource: Send + Sync + 'static {
     fn clipboard_supported(&self) -> bool {
         false
     }
+    /// Create an in-memory clipboard lease; never opens consent or a different
+    /// platform backend. Watching starts after this lease's initial snapshot.
+    fn clipboard(
+        &self,
+        _display: u32,
+        _watching: bool,
+    ) -> Result<Box<dyn crate::clipboard::ClipboardBackend>, DesktopError> {
+        Err(DesktopError::Input("clipboard backend unavailable".into()))
+    }
 }
