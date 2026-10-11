@@ -80,6 +80,7 @@ jobs:
       - name: Check portal and agent ownership
         run: cargo clippy --locked -p rds-agent -p rds-desktop --all-targets --features rds-agent/portal -- -D warnings
       - name: Exercise EI socket and filesystem boundaries
-        run: cargo test --locked -p rds-desktop --features portal --lib portal:: -- --test-threads=1
+        run: >-
+          cargo test --locked -p rds-desktop --features portal --lib portal:: -- --test-threads=1
       - name: Exercise serving regressions with the portal build
         run: cargo test --locked -p rds-agent --features portal --lib

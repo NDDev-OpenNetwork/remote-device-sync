@@ -48,3 +48,9 @@ and unique bus shutdown. A private D-Bus fixture verifies actual Close dispatch
 without a user response. This repairs cancellation ownership; it does not prove
 why a particular installed request failed to return its Response. Token-bearing
 responses are never logged. Local consent is user-paced with a one-hour bound.
+
+The first published CI workflow failed validation before creating jobs:
+[run 38103876464](https://github.com/NDDev-OpenNetwork/remote-device-sync/actions/runs/38103876464)
+identified an unquoted `portal::` test filter in YAML. A folded command scalar
+preserves the exact test invocation. YAML parsing and actionlint passed after
+the correction; the failed run remains evidence, not completed Rust validation.
