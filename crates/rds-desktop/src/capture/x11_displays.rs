@@ -49,6 +49,17 @@ fn monitor_id(screen: u32, name: &[u8]) -> u32 {
             & !MONITOR_BIT)
 }
 pub(crate) fn catalog(conn: &RustConnection) -> Result<Vec<Display>, DesktopError> {
+    // Check the server itself: SSH/service environments may omit Wayland vars.
+    // Xwayland's root is not the compositor's complete display or input seat.
+    if conn
+        .extension_information("XWAYLAND")
+        .map_err(error)?
+        .is_some()
+    {
+        return Err(error(
+            "Xwayland requires the prepared Wayland portal backend",
+        ));
+    }
     let roots = &conn.setup().roots;
     if roots.is_empty() || roots.len() > MAX_DISPLAYS {
         return Err(error("root count outside bound"));

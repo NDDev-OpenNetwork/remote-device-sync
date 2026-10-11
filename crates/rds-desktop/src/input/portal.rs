@@ -1,11 +1,8 @@
-//! Portal/libei input injection — planned.
-//!
-//! `ashpd` RemoteDesktop → `ConnectToEIS` hands us the EIS socket; `reis`
-//! (pure-Rust libei/libeis) speaks the wire protocol. The portal drops
-//! out of the data path after setup — events go straight to the
-//! compositor with per-session scoping.
+//! Ambient input probing cannot acquire local consent. The optional Linux
+//! `WaylandDesktop` owner prepares RemoteDesktop/ConnectToEIS once and lends
+//! scoped input leases. It never installs a global fallback input registry.
 
-/// Always `false` until implemented.
+/// No ambient portal input exists without the explicit prepared owner.
 pub fn available() -> bool {
     false
 }

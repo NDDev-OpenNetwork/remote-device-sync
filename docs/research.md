@@ -986,3 +986,11 @@ does not remove congestion/flow-control or application-reader delays. Existing
 RDS desktop control priority, isolated media streams, bounded input queues and
 validated payload receipts remain. A fast write means local admission, not
 remote receipt. Installed burst/idle and network-change acceptance remains open.
+
+## 2026-10-11 consented Wayland implementation
+
+The prepared portal backend uses the exact ashpd 0.13.13, pipewire 0.10.0 and
+reis 0.7.1 primitives; it imports no external remote desktop framework. The
+combined-session, persistence, stable-ID/current-region and worker ownership
+decisions are recorded in [the Wayland contract](wayland-portal.md). Native
+compositor qualification is separate from deterministic EI/geometry/file checks.

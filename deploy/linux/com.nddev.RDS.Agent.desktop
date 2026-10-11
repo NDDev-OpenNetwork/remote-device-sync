@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=RDS Agent
+Comment=Consented remote desktop agent
+Exec=rds-agent
+NoDisplay=true
+Terminal=false

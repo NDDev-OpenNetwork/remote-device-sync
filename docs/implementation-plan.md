@@ -551,3 +551,16 @@ Rules:
   delegation is needed).
 - Whether `rds-server` discovery API is on the same port as relay or
   separate (default: separate port, same process).
+
+## Consented Wayland increment
+
+The Linux portal feature belongs to native desktop backend work. Execution order:
+prepared agent-owned source; bounded PipeWire/EI and token state; deterministic
+EI/file/geometry regressions and strict feature CI; attended native two-monitor
+capture/decode; permission restore/revoke; scoped input fixture; only then
+deployment/enrollment. [Wayland contract](wayland-portal.md) owns these limits.
+Unrun native steps remain open; a successful feature build is not acceptance.
+
+Registered `w4-wayland-portal` closes the deterministic feature boundary wave
+on Linux and records 100 shared endpoint handshakes as a regression measurement.
+It never opens a portal or claims native capture/input acceptance.

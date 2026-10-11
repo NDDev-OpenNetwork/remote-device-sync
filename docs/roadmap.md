@@ -82,8 +82,9 @@ endpoint allowlists, X11/OpenH264 desktop skeleton, workspace structure.
 - Input: portal EIS (`reis`) on Wayland; `CGEvent` on macOS.
 - Text clipboard now has a bounded negotiated reverse path on X11/AppKit;
   RandR-backed X11 monitor selection and per-session concurrent viewers are
-  implemented behind their platform qualification gates. Wayland portal
-  clipboard, stable hotplug identities and rich/file formats remain later
+  implemented behind their platform qualification gates. The optional explicit
+  consented Wayland capture/EI increment has deterministic boundary coverage;
+  native acceptance is separate. Wayland portal clipboard, stable hotplug identities and rich/file formats remain later
   capabilities.
 - **Gates**: glass-to-glass ≤20 ms LAN / ≤80 ms WAN at 1080p60
   measured end-to-end; input-to-visible-pixel budget tracked.

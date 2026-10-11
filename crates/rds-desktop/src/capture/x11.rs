@@ -93,6 +93,7 @@ impl X11Capturer {
     /// Select an X root by its legacy index or a RandR logical monitor by its
     /// high-bit ID from `capabilities()`. IDs never depend on list ordering.
     pub fn new(display_index: u32) -> Result<Self, DesktopError> {
+        reject_wayland()?;
         let (conn, _) =
             RustConnection::connect(None).map_err(|e| DesktopError::Capture(e.to_string()))?;
         let displays = super::x11_displays::catalog(&conn)?;
@@ -330,6 +331,7 @@ impl Drop for X11Capturer {
 
 /// Displays visible over X11.
 pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
+    reject_wayland()?;
     // Inventory must not allocate a full capture mapping or DAMAGE object.
     // Validate the same pixel/memory contract, then let the requested session
     // own its native capture resources once.
@@ -356,6 +358,17 @@ pub fn capabilities() -> Result<DesktopCaps, DesktopError> {
         displays,
         codecs: vec![rds_core::Codec::H264],
     })
+}
+
+fn reject_wayland() -> Result<(), DesktopError> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t.eq_ignore_ascii_case("wayland"))
+    {
+        return Err(DesktopError::Capture(
+            "Wayland requires an explicitly prepared portal backend".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

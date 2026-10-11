@@ -32,11 +32,17 @@ pub mod input;
 pub mod mailbox;
 mod media_repair;
 mod order;
+#[cfg(any(test, all(target_os = "linux", feature = "portal")))]
+mod portal;
 mod receipts;
 pub mod render;
 #[cfg(any(all(target_os = "linux", feature = "x11"), test))]
 mod scaling;
 mod session;
+mod source;
+#[cfg(all(target_os = "linux", feature = "portal"))]
+pub use portal::WaylandDesktop;
+pub use source::DesktopSource;
 
 #[cfg(feature = "x11")]
 pub use codec::openh264::{H264Decoder, H264Encoder};

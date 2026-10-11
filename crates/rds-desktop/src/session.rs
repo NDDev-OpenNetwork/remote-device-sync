@@ -285,7 +285,8 @@ pub struct ProducerControls {
 }
 
 impl ProducerControls {
-    fn new(initial_bps: u64) -> Self {
+    /// Initial steering state for a standalone or serving frame producer.
+    pub fn new(initial_bps: u64) -> Self {
         Self {
             bitrate: Arc::new(AtomicU64::new(initial_bps)),
             idr: Arc::new(AtomicBool::new(true)),
@@ -338,6 +339,8 @@ pub trait FrameProducer: Send + 'static {
 /// Everything `serve_desktop` needs beyond the negotiated hello.
 #[derive(Default)]
 pub struct SessionConfig {
+    /// Prepared, agent-owned backend; native types do not enter the wire.
+    pub source: Option<Arc<dyn crate::DesktopSource>>,
     /// Explicit DesktopV4 payload proofs; legacy sessions keep FIN receipts.
     pub payload_receipts: bool,
     /// Explicit per-session height overrides the deployment fallback. Zero
@@ -684,7 +687,24 @@ pub async fn serve_desktop_with(
     // No backend is opened for a view-only session. Blocking platform calls
     // run on one bounded, session-owned worker, outside the async executor.
     let mut input = None;
+    let clipboard_supported = config
+        .source
+        .as_ref()
+        .is_none_or(|source| source.clipboard_supported());
     let mut input_sink = config.input_sink;
+    if !config.view_only
+        && input_sink.is_none()
+        && let Some(source) = config.source.as_ref()
+    {
+        input_sink = Some(
+            source.input(
+                hello.display,
+                config
+                    .source_extent
+                    .ok_or_else(|| DesktopError::Input("missing admitted source extent".into()))?,
+            )?,
+        );
+    }
 
     // Capture+encode runs on a blocking thread; frames flow to the writer.
     let (tx, mut rx) = mpsc::channel::<AdmittedFrame>(2);
@@ -706,6 +726,7 @@ pub async fn serve_desktop_with(
         let input_refresh_until_ms = Arc::clone(&controls.input_refresh_until_ms);
         let input_refresh_pending = Arc::clone(&controls.input_refresh_pending);
         let mut producer = config.producer;
+        let backend = config.source.clone();
         let repair = media_repair.clone();
         let latest_key_seq = latest_key_seq.clone();
         let capture_admission = capture_admission.clone();
@@ -726,7 +747,13 @@ pub async fn serve_desktop_with(
             };
             let mut source = match producer.take() {
                 Some(p) => p,
-                None => platform_producer(hello.display, frame_interval, config.output_height, config.source_extent),
+                None => match backend {
+                    Some(backend) => match backend.producer(hello.display, frame_interval, config.output_height, config.source_extent) {
+                        Ok(producer) => producer,
+                        Err(error) => { tracing::warn!(%error, "desktop source unavailable"); return; }
+                    },
+                    None => platform_producer(hello.display, frame_interval, config.output_height, config.source_extent),
+                },
             };
             let mut seq = 0u64;
             let mut generation = 0;
@@ -1264,7 +1291,7 @@ pub async fn serve_desktop_with(
             }
         });
         let mut assembly = crate::clipboard::Assembly::default();
-        let mut watching = config.reverse_clipboard && !config.view_only;
+        let mut watching = config.reverse_clipboard && !config.view_only && clipboard_supported;
         let mut clipboard = watching.then(|| crate::clipboard::Worker::watch(session_display));
         let mut reverse = crate::clipboard::ReverseSender::default();
         loop {
@@ -1458,6 +1485,21 @@ pub async fn serve_desktop_with(
                             tracing::warn!("view-only clipboard refused");
                             break;
                         }
+                        if !clipboard_supported {
+                            if write_control_reply(
+                                &mut send.0,
+                                &DesktopEvent::ClipboardError {
+                                    id,
+                                    code: ClipboardErrorCode::Unavailable,
+                                },
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
                         let text = match assembly.push(id, offset, total, data) {
                             Ok(text) => text,
                             Err(error) => {
@@ -1635,7 +1677,7 @@ impl SyntheticProducer {
 
 /// Idle wakeups start a new slot immediately. Scheduler jitter smaller than a
 /// whole slot is not encoder starvation and must not reduce the bitrate.
-fn advance_cadence(
+pub(crate) fn advance_cadence(
     next_due: &mut Instant,
     interval: Duration,
     now: Instant,
@@ -1657,7 +1699,7 @@ fn advance_cadence(
     false
 }
 
-fn resume_cadence(next_due: &mut Instant, interval: Duration, now: Instant) {
+pub(crate) fn resume_cadence(next_due: &mut Instant, interval: Duration, now: Instant) {
     *next_due = (*next_due).max(now.checked_sub(interval).unwrap_or(now));
 }
 

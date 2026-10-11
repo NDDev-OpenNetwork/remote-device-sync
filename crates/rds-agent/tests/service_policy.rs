@@ -212,3 +212,81 @@ async fn hello_deadline_comes_from_policy() {
         hello_deadline_is_policy(backend).await;
     }
 }
+
+#[cfg(feature = "desktop")]
+struct PreparedSource(std::sync::atomic::AtomicUsize);
+#[cfg(feature = "desktop")]
+impl rds_desktop::DesktopSource for PreparedSource {
+    fn capabilities(&self) -> Result<rds_core::DesktopCaps, rds_desktop::DesktopError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(rds_core::DesktopCaps {
+            displays: vec![rds_core::DisplayInfo {
+                index: 10,
+                width: 640,
+                height: 480,
+                primary: true,
+            }],
+            codecs: vec![rds_core::Codec::H264],
+        })
+    }
+    fn producer(
+        &self,
+        _: u32,
+        _: Duration,
+        _: Option<u32>,
+        _: Option<(u32, u32)>,
+    ) -> Result<Box<dyn rds_desktop::FrameProducer>, rds_desktop::DesktopError> {
+        Err(rds_desktop::DesktopError::Capture(
+            "fixture has no pixels".into(),
+        ))
+    }
+    fn input(
+        &self,
+        _: u32,
+        _: (u32, u32),
+    ) -> Result<Box<dyn rds_desktop::InputSink>, rds_desktop::DesktopError> {
+        Err(rds_desktop::DesktopError::Input(
+            "fixture has no seat".into(),
+        ))
+    }
+}
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn prepared_inventory_is_used_only_when_desktop_service_is_enabled() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for enabled in [false, true] {
+            let client = endpoint(Backend::Iroh).await;
+            let server = endpoint(Backend::Iroh).await;
+            let mut policy = AgentPolicy::ssh_only(("127.0.0.1".into(), 22));
+            policy.allow.insert(client.id());
+            policy.services = Some(if enabled {
+                BTreeSet::from([ServiceKind::Desktop])
+            } else {
+                BTreeSet::from([ServiceKind::Tcp])
+            });
+            let source = Arc::new(PreparedSource(std::sync::atomic::AtomicUsize::new(0)));
+            let agent =
+                Arc::new(Agent::new(server.clone(), policy).with_desktop_source(source.clone()));
+            let runner = agent.clone();
+            let _task = Runner(tokio::spawn(async move {
+                runner.run().await.unwrap();
+            }));
+            let conn = rds_client::connect(&client, server.addr()).await.unwrap();
+            let info = rds_client::info(&conn).await.unwrap();
+            assert_eq!(info.services.contains(&ServiceKind::Desktop), enabled);
+            assert_eq!(info.desktop.is_some(), enabled);
+            assert_eq!(
+                source.0.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(enabled)
+            );
+            if let Some(caps) = info.desktop {
+                assert_eq!(caps.displays[0].index, 10);
+            }
+            conn.close(0u32.into(), b"fixture done");
+            client.close().await;
+            server.close().await;
+        }
+    })
+    .await
+    .unwrap();
+}

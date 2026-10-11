@@ -321,11 +321,41 @@ impl AgentPolicy {
     }
 }
 
+#[derive(Clone, Default)]
+struct DesktopBackend {
+    enabled: bool,
+    #[cfg(feature = "desktop")]
+    source: Option<Arc<dyn rds_desktop::DesktopSource>>,
+}
+impl DesktopBackend {
+    #[cfg(feature = "desktop")]
+    fn compiled() -> Self {
+        Self {
+            enabled: true,
+            source: None,
+        }
+    }
+    #[cfg(not(feature = "desktop"))]
+    fn compiled() -> Self {
+        Self { enabled: false }
+    }
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+    #[cfg(feature = "desktop")]
+    async fn capabilities(&self) -> Result<rds_core::DesktopCaps, rds_desktop::DesktopError> {
+        match &self.source {
+            Some(source) => source.capabilities(),
+            None => rds_desktop::capabilities_bounded().await,
+        }
+    }
+}
+
 /// A bound agent: endpoint plus policy, ready to `run`.
 pub struct Agent {
     pub endpoint: Endpoint,
     pub policy: Arc<AgentPolicy>,
-    desktop: bool,
+    desktop: DesktopBackend,
     limits: AgentLimits,
     admission: Arc<Semaphore>,
     stream_counter: limits::StreamCounter,
@@ -396,12 +426,20 @@ impl Agent {
         Self {
             endpoint,
             policy: Arc::new(policy),
-            desktop: cfg!(feature = "desktop"),
+            desktop: DesktopBackend::compiled(),
             limits,
             admission: Arc::new(Semaphore::new(limits.connections())),
             stream_counter: Default::default(),
             gate: limits::ResourceGate::new(limits),
         }
+    }
+
+    /// Select an already-consented backend before serving. The agent owns the
+    /// source; no process-global native registry or remote consent request.
+    #[cfg(feature = "desktop")]
+    pub fn with_desktop_source(mut self, source: Arc<dyn rds_desktop::DesktopSource>) -> Self {
+        self.desktop.source = Some(source);
+        self
     }
 
     /// Select budgets before starting the agent. Consuming self prevents
@@ -469,7 +507,7 @@ impl Agent {
                     };
                     let audience = *self.endpoint.id().as_bytes();
                     let policy = self.policy.clone();
-                    let desktop = self.desktop;
+                    let desktop = self.desktop.clone();
                     let metrics = self.endpoint.metrics();
                     let limits = self.limits;
                     let stream_counter = self.stream_counter.clone();
@@ -543,7 +581,7 @@ impl Agent {
             conn,
             *self.endpoint.id().as_bytes(),
             self.policy.clone(),
-            self.desktop,
+            self.desktop.clone(),
             self.endpoint.metrics(),
             self.limits,
             self.stream_counter.clone(),
@@ -557,7 +595,7 @@ async fn serve_connection(
     conn: Connection,
     audience: [u8; 32],
     policy: Arc<AgentPolicy>,
-    desktop: bool,
+    desktop: DesktopBackend,
     metrics: rds_net::metrics::Registry,
     limits: AgentLimits,
     stream_counter: limits::StreamCounter,
@@ -626,6 +664,7 @@ async fn serve_connection(
                 let authz = authz.clone();
                 let span = tracing::Span::current();
                 let active = stream_counter.enter();
+                let desktop = desktop.clone();
                 streams.spawn(async move {
                     let _active = active;
                     if let Err(error) = rds_observe::observe(
@@ -652,7 +691,7 @@ async fn serve_stream(
     mut recv: rds_net::RecvStream,
     policy: Arc<AgentPolicy>,
     authz: Arc<ConnAuthz>,
-    desktop: bool,
+    desktop: DesktopBackend,
 ) -> anyhow::Result<()> {
     let hello: StreamHello =
         match tokio::time::timeout(policy.timeouts.hello, read_frame(&mut recv)).await {
@@ -855,10 +894,16 @@ async fn serve_stream(
                             ServiceKind::Sync,
                         ]
                         .into_iter()
-                        .filter(|k| enabled.contains(k) && (*k != ServiceKind::Desktop || desktop))
+                        .filter(|k| {
+                            enabled.contains(k) && (*k != ServiceKind::Desktop || desktop.enabled())
+                        })
                         .collect()
                     },
-                    desktop: desktop_caps(desktop).await,
+                    desktop: if policy.effective_services().contains(&ServiceKind::Desktop) {
+                        desktop_caps(&desktop).await
+                    } else {
+                        None
+                    },
                 };
                 write_frame(&mut send, &HelloAck::Info(info)).await?;
                 send.finish()?;
@@ -914,9 +959,9 @@ async fn serve_stream(
             | StreamHello::DesktopV3 { hello, .. }
             | StreamHello::DesktopV4 { hello, .. }
             | StreamHello::DesktopV5 { hello, .. } => {
-                if desktop {
+                if desktop.enabled() {
                     #[cfg(feature = "desktop")]
-                    match rds_desktop::capabilities_bounded().await {
+                    match desktop.capabilities().await {
                         Ok(caps) => {
                             if !caps
                                 .displays
@@ -962,6 +1007,7 @@ async fn serve_stream(
                                 recv,
                                 hello,
                                 rds_desktop::SessionConfig {
+                                    source: desktop.source.clone(),
                                     bitrate_ceiling: max_bps,
                                     view_only: grant
                                         .as_ref()
@@ -1171,12 +1217,12 @@ fn scope_check(grant: &VerifiedGrant, hello: &StreamHello) -> Result<(), String>
     Ok(())
 }
 
-async fn desktop_caps(enabled: bool) -> Option<rds_core::DesktopCaps> {
+async fn desktop_caps(backend: &DesktopBackend) -> Option<rds_core::DesktopCaps> {
     #[cfg(feature = "desktop")]
-    if enabled {
-        return rds_desktop::capabilities_bounded().await.ok();
+    if backend.enabled() {
+        return backend.capabilities().await.ok();
     }
-    let _ = enabled;
+    let _ = backend;
     None
 }
 
