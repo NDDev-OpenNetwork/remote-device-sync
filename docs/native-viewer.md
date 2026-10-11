@@ -912,7 +912,7 @@ one-second budget before normal same-key directory/transport fallback; it does
 not change authorization or create routes/firewall rules. The matching local
 agent must support the additive `ConnectPreferred` command.
 Failed hints with no live authenticated path are removed before fallback;
-this cache acknowledgement has a separate one-second bound. Previously
+this cache acknowledgement has a separate one-second bound. Other
 live authenticated paths remain eligible. See [the manager contract](local-sessions.md).
 
 ## Fullscreen monitor Spaces

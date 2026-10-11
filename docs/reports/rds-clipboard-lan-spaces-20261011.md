@@ -61,9 +61,10 @@ retained. These artifacts are not installed acceptance.
 The subsequent audit added real directory/transport coverage and reproduced a
 previously untested wrong-key hint failure. Iroh retained the hint across dials:
 the fallback Initial raced the wrong peer again, whose TLS refusal beat the valid
-relay. The new explicit actor-acknowledged cleanup removes only the specified
-Unknown/Unusable IP hints before fallback; Open/Inactive path history and other
-peers/transports survive. No key or admission check changes. The new integration
+relay. The first explicit actor-acknowledged correction removed specified
+Unknown/Unusable IP hints before fallback and retained Open/Inactive history.
+The expanded reused-address correction below supersedes that rule. No key or
+admission check changes. The new integration
 test verifies dead, wrong-key and previously authenticated/reassigned hints,
 one signed-directory fetch and the pinned
 peer: Iroh uses a real isolated relay; Noq uses isolated direct transport because
