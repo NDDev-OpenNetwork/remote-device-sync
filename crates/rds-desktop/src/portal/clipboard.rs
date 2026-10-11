@@ -38,7 +38,7 @@ fn mime(types: &[String]) -> Option<&str> {
         .into_iter()
         .find(|wanted| types.iter().any(|s| s == wanted))
 }
-async fn bounded<T>(future: impl Future<Output = ashpd::Result<T>>) -> Result<T, DesktopError> {
+async fn bounded<T, E>(future: impl Future<Output = Result<T, E>>) -> Result<T, DesktopError> {
     tokio::time::timeout(TIMEOUT, future)
         .await
         .map_err(|_| error())?
