@@ -108,6 +108,15 @@ struct Snapshot {
     generation: u64,
     closed: bool,
 }
+fn invalidate_selection(changes: &watch::Sender<Snapshot>, generation: &mut u64) {
+    *generation = generation.wrapping_add(1);
+    // A lease which has not consumed the previous value must not receive it
+    // after ownership moves, including after our own remote paste.
+    changes.send_replace(Snapshot {
+        generation: *generation,
+        ..Default::default()
+    });
+}
 struct Job {
     text: String,
     reply: oneshot::Sender<Result<(), DesktopError>>,
@@ -202,7 +211,7 @@ impl Group {
                         let Some(message) = message else { break; };
                         let Ok((path, selection)) = message.body().deserialize::<(OwnedObjectPath, SelectionOwnerChanged)>() else { continue; };
                         if path.as_str() != session_path { continue; }
-                        generation = generation.wrapping_add(1);
+                        invalidate_selection(&changes, &mut generation);
                         wanted = None;
                         if selection.session_is_owner() == Some(true) { continue; }
                         // An external owner invalidates our advertised bytes.
@@ -366,8 +375,8 @@ impl ClipboardBackend for Lease {
                     return None;
                 }
                 if snapshot.generation != self.seen {
-                    self.seen = snapshot.generation;
                     if let Some(text) = snapshot.text {
+                        self.seen = snapshot.generation;
                         return Some(text.to_string());
                     }
                 }
@@ -379,6 +388,41 @@ impl ClipboardBackend for Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn ownership_change_discards_unread_text_but_delivers_its_later_read() {
+        let (jobs, _) = mpsc::channel(4);
+        let (changes, receiver) = watch::channel(Snapshot::default());
+        let (finished, joined) = watch::channel(false);
+        let group = Group {
+            jobs,
+            changes: receiver,
+            leases: Arc::new(Semaphore::new(8)),
+            live: Arc::new(AtomicBool::new(true)),
+            watchers: Arc::new(AtomicUsize::new(0)),
+            stop: Mutex::new(None),
+            finished: joined,
+        };
+        let mut lease = group.worker(true).unwrap();
+        changes.send_replace(Snapshot {
+            text: Some(Arc::from("old")),
+            generation: 1,
+            closed: false,
+        });
+        let mut generation = 1;
+        invalidate_selection(&changes, &mut generation);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), lease.next_change())
+                .await
+                .is_err()
+        );
+        changes.send_replace(Snapshot {
+            text: Some(Arc::from("new")),
+            generation,
+            closed: false,
+        });
+        assert_eq!(lease.next_change().await.as_deref(), Some("new"));
+        drop(finished);
+    }
     #[tokio::test]
     async fn pipe_utf8_is_bounded_and_no_blocking_task_survives_timeout() {
         let (read, write) = std::os::unix::net::UnixStream::pair().unwrap();
