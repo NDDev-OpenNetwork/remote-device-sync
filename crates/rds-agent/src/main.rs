@@ -551,6 +551,24 @@ mod config_tests {
     use super::*;
 
     #[test]
+    fn fresh_wayland_permission_is_an_explicit_local_state_operation() {
+        assert!(Cli::try_parse_from(["rds-agent", "--wayland-refresh-permission"]).is_err());
+        let cli = Cli::try_parse_from([
+            "rds-agent",
+            "--wayland-state",
+            "/private/fixture/permission.json",
+            "--wayland-refresh-permission",
+        ])
+        .unwrap();
+        assert!(cli.wayland_refresh_permission);
+        assert!(
+            !Cli::try_parse_from(["rds-agent"])
+                .unwrap()
+                .wayland_refresh_permission
+        );
+    }
+
+    #[test]
     fn tcp_target_flags_reject_invalid_destinations() {
         for target in [":22", "host:0", "host:nope", "::1:22", "[::1]22"] {
             assert!(
