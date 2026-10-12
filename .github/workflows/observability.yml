@@ -28,7 +28,7 @@ jobs:
   pipeline:
     permissions:
       contents: read
-    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-ci.yml@d92026cf31a10a0eeaa532e1f323c7cfdfbfac5b # 0.1.29
+    uses: NDDev-Technocracy-Sandbox/ci-workflows/.github/workflows/rust-ci.yml@d92026cf31a10a0eeaa532e1f323c7cfdfbfac5b # 0.1.29
     with:
       runner: ubuntu-latest
       toolchain: "1.98.1"
