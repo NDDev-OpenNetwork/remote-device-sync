@@ -23,7 +23,7 @@ jobs:
     name: rust supply chain
     permissions:
       contents: read
-    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-supply-chain.yml@f81098b50c5b8fea9dd270f365125deafcdaca80 # commit:f81098b50c5b8fea9dd270f365125deafcdaca80
+    uses: NDDev-Technocracy-Sandbox/ci-workflows/.github/workflows/rust-supply-chain.yml@f81098b50c5b8fea9dd270f365125deafcdaca80 # commit:f81098b50c5b8fea9dd270f365125deafcdaca80
     with:
       runner: ubuntu-latest
       toolchain: "1.98.1"

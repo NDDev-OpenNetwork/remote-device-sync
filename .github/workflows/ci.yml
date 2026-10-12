@@ -9,7 +9,7 @@ on:
 # GitHub-hosted runners only — this is a public module.
 #
 # The build/test/lint jobs are the pinned `rust-ci` reusable from
-# NDDev-OpenNetwork/ci-workflows; one pin per repository (see
+# NDDev-Technocracy-Sandbox/ci-workflows; one pin per repository (see
 # supply-chain.yml and codeql.yml — same SHA). Native release packaging
 # runs separately in release.yml using pinned official actions.
 
@@ -24,7 +24,7 @@ jobs:
     name: rust
     permissions:
       contents: read
-    uses: NDDev-OpenNetwork/ci-workflows/.github/workflows/rust-ci.yml@f81098b50c5b8fea9dd270f365125deafcdaca80 # commit:f81098b50c5b8fea9dd270f365125deafcdaca80
+    uses: NDDev-Technocracy-Sandbox/ci-workflows/.github/workflows/rust-ci.yml@f81098b50c5b8fea9dd270f365125deafcdaca80 # commit:f81098b50c5b8fea9dd270f365125deafcdaca80
     with:
       runner: ubuntu-latest
       toolchain: "1.98.1"
