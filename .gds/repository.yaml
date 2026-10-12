@@ -14,7 +14,7 @@ provider:
   name: "remote-device-sync"
 
 classification:
-  portfolios: ["portfolio:nddev-opennetwork"]
+  portfolios: ["portfolio:nddev-technocracy-sandbox"]
   visibility_contract: "public"
   data_classification: "public"
 
