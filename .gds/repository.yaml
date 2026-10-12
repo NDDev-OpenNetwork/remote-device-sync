@@ -8,9 +8,9 @@ repository:
 
 provider:
   type: "github"
-  installation: "installation:github-opennetwork"
+  installation: "installation:github-nddev-technocracy-sandbox"
   repository_id: 1380014631
-  owner: "NDDev-OpenNetwork"
+  owner: "NDDev-Technocracy-Sandbox"
   name: "remote-device-sync"
 
 classification:
