@@ -249,7 +249,7 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
                     )
                     .await
                     .unwrap();
-                rds_client::ping(&connection, 91).await.unwrap();
+                rds_client::ping(&connection, rand::random()).await.unwrap();
                 connection.close(0u32.into(), b"fixture address reuse");
                 remote.close().await;
                 warming.await.unwrap();
