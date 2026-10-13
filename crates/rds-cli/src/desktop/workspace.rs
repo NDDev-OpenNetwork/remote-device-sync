@@ -18,6 +18,8 @@ pub struct DeviceConfig {
     pub target: String,
     pub label: String,
     pub grant_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_addresses: Vec<std::net::SocketAddr>,
 }
 
 impl DeviceConfig {
@@ -32,8 +34,17 @@ impl DeviceConfig {
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
     pub schema_version: u32,
+    #[serde(default)]
+    pub presentation: Presentation,
     pub devices: Vec<DeviceConfig>,
     pub tabs: Vec<TabSpec>,
+}
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Presentation {
+    #[default]
+    Tabs,
+    Spaces,
 }
 impl WorkspaceConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -44,6 +55,11 @@ impl WorkspaceConfig {
         );
         let mut keys = std::collections::HashSet::new();
         for device in &self.devices {
+            rds_core::local::validate_local_addresses(&device.local_addresses)?;
+            anyhow::ensure!(
+                device.local_addresses.is_empty() || rds_net::parse_target(&device.target).is_ok(),
+                "local address preference requires a pinned peer"
+            );
             anyhow::ensure!(keys.insert(&device.key), "duplicate workspace device");
             for value in [&device.key, &device.target] {
                 anyhow::ensure!(
@@ -118,13 +134,19 @@ pub async fn run(
                 target: peer,
                 label: "Selected computer".into(),
                 grant_file: None,
+                local_addresses: vec![],
             });
         }
         let mut tabs = vec![];
         for device in &config.devices {
             let (_, inventory) = tokio::time::timeout(
                 Duration::from_secs(20),
-                inspect(&client, device.target.clone(), device.grant_file.clone()),
+                inspect(
+                    &client,
+                    device.target.clone(),
+                    device.grant_file.clone(),
+                    device.local_addresses.clone(),
+                ),
             )
             .await
             .context("display lookup timed out")??;
@@ -158,7 +180,10 @@ pub async fn run(
             displays: vec![],
         })
         .collect();
-    let (viewer, handle, events) = Viewer::workspace(config.tabs.clone(), devices)?;
+    let (viewer, handle, events) = match config.presentation {
+        Presentation::Tabs => Viewer::workspace(config.tabs.clone(), devices)?,
+        Presentation::Spaces => Viewer::spaces(config.tabs.clone(), devices)?,
+    };
     let stop = CancellationToken::new();
     let actor_stop = stop.clone();
     let task = tokio::spawn(async move {
@@ -182,13 +207,15 @@ async fn inspect(
     client: &Client,
     target: String,
     grant_file: Option<PathBuf>,
+    local_addresses: Vec<std::net::SocketAddr>,
 ) -> anyhow::Result<(DeviceConfig, DeviceView)> {
     let grant = read_grant(grant_file.clone()).await?;
     let Reply::Connected(session) = client
-        .request(Command::Connect {
-            target: target.clone(),
+        .request(native::connect_command(
+            target.clone(),
             grant,
-        })
+            local_addresses.clone(),
+        ))
         .await?
     else {
         anyhow::bail!("unexpected connection response");
@@ -228,6 +255,7 @@ async fn inspect(
         target: pinned,
         label: label.clone(),
         grant_file,
+        local_addresses,
     };
     Ok((
         device,
@@ -273,6 +301,7 @@ async fn actor(
                 target: session.peer,
                 label: label.clone(),
                 grant_file: None,
+                local_addresses: vec![],
             };
             let _ = view.update(WorkspaceUpdate::Device(DeviceView {
                 key: device.key.clone(),
@@ -341,7 +370,7 @@ async fn actor(
                                 let result = async {
                                 let grant = read_grant(device.grant_file).await?;
                                 native::network(native::Source::Managed { client: peer_client, session: None,
-                                    peer: device.target, grant, binding }, &selected, &display, &mut input, worker_stop).await
+                                    peer: device.target, grant, binding, local_addresses: device.local_addresses }, &selected, &display, &mut input, worker_stop).await
                                 }.await;
                                 if let Err(error) = &result { display.status(format!("Disconnected: {error}")); }
                                 diagnostic_stop.cancel();
@@ -367,8 +396,10 @@ async fn actor(
                         let original = config.devices.iter().find(|device| device.key == key)
                             .map_or(target.as_str(), |device| device.target.as_str());
                         let target = bindings.get(&key).map_or_else(|| original.to_owned(), |binding| binding.target(original));
+                        let local_addresses = config.devices.iter().find(|device| device.key == key)
+                            .map(|device| device.local_addresses.clone()).unwrap_or_default();
                         inspections.spawn(async move {
-                            let (mut device, mut inventory) = tokio::time::timeout(Duration::from_secs(20), inspect(&client, target, grant_file)).await
+                            let (mut device, mut inventory) = tokio::time::timeout(Duration::from_secs(20), inspect(&client, target, grant_file, local_addresses)).await
                                 .context("display lookup timed out")??;
                             device.key = key.clone(); inventory.key = key;
                             Ok((device, inventory))
@@ -419,6 +450,7 @@ mod tests {
             target: rds_net::Ticket(address.clone()).to_string(),
             label: "Work computer".into(),
             grant_file: Some("external-grant.json".into()),
+            local_addresses: vec![],
         };
         assert!(device.targets_peer(&peer.to_string()));
         assert!(!device.targets_peer(&other.to_string()));

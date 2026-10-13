@@ -19,6 +19,10 @@ struct Cli {
     /// Requires Linux and the portal feature; may show a local permission dialog.
     #[arg(long)]
     wayland_state: Option<std::path::PathBuf>,
+    /// Request fresh local Wayland consent once, preserving display history.
+    /// Use when an existing restored permission did not allow clipboard access.
+    #[arg(long, requires = "wayland_state")]
+    wayland_refresh_permission: bool,
     /// Local session directory; default is <key-file>.control.
     #[arg(long, conflicts_with = "no_control")]
     control_dir: Option<std::path::PathBuf>,
@@ -386,9 +390,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     tokio::pin!(shutdown);
     #[cfg(all(target_os = "linux", feature = "portal"))]
     let portal = match cli.wayland_state.as_ref() {
-        Some(path) => Some(std::sync::Arc::new(
-            rds_desktop::WaylandDesktop::open_with_cancel(path, &mut shutdown).await?,
-        )),
+        Some(path) => {
+            let source = if cli.wayland_refresh_permission {
+                rds_desktop::WaylandDesktop::request_permission(path, &mut shutdown).await?
+            } else {
+                rds_desktop::WaylandDesktop::open_with_cancel(path, &mut shutdown).await?
+            };
+            Some(std::sync::Arc::new(source))
+        }
         None => None,
     };
     let endpoint = bind_endpoint(config).await?;
@@ -540,6 +549,24 @@ fn finish_admin(
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn fresh_wayland_permission_is_an_explicit_local_state_operation() {
+        assert!(Cli::try_parse_from(["rds-agent", "--wayland-refresh-permission"]).is_err());
+        let cli = Cli::try_parse_from([
+            "rds-agent",
+            "--wayland-state",
+            "/private/fixture/permission.json",
+            "--wayland-refresh-permission",
+        ])
+        .unwrap();
+        assert!(cli.wayland_refresh_permission);
+        assert!(
+            !Cli::try_parse_from(["rds-agent"])
+                .unwrap()
+                .wayland_refresh_permission
+        );
+    }
 
     #[test]
     fn tcp_target_flags_reject_invalid_destinations() {

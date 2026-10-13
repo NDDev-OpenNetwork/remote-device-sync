@@ -16,13 +16,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = std::env::args_os()
         .nth(1)
         .ok_or("usage: wayland_check ABSOLUTE_PRIVATE_STATE_FILE")?;
-    let verify_sync = match std::env::args().nth(2).as_deref() {
-        None => false,
-        Some("--verify-input-sync") => true,
-        Some(_) => return Err("unknown qualification option".into()),
-    };
-    if std::env::args_os().nth(3).is_some() {
-        return Err("too many qualification arguments".into());
+    let mut verify_sync = false;
+    let mut refresh = false;
+    for option in std::env::args().skip(2) {
+        match option.as_str() {
+            "--verify-input-sync" if !verify_sync => verify_sync = true,
+            "--refresh-permission" if !refresh => refresh = true,
+            _ => return Err("unknown or duplicate qualification option".into()),
+        }
     }
     eprintln!("Waiting for the local portal permission; select the monitors to share.");
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -32,8 +33,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = term.recv() => {},
         }
     };
-    let source =
-        Arc::new(WaylandDesktop::open_with_cancel(std::path::Path::new(&state), cancelled).await?);
+    let source = Arc::new(if refresh {
+        WaylandDesktop::request_permission(std::path::Path::new(&state), cancelled).await?
+    } else {
+        WaylandDesktop::open_with_cancel(std::path::Path::new(&state), cancelled).await?
+    });
+    println!("clipboard_ready={}", source.clipboard_supported());
     let result = async {
         let caps = source.capabilities()?;
         for display in caps.displays {

@@ -46,8 +46,20 @@ The native macOS viewer publishes a completed reverse transfer through
 still explicit. Cmd+C/Cmd+X translate to remote Ctrl+C/Ctrl+X and retain Shift
 for terminal Ctrl+Shift+C. AppKit's isolated named-pasteboard probe qualifies
 native publication; ordinary installed cross-device use remains a separate
-observation. Linux Wayland portal clipboard remains a platform gate.
+observation. Linux Wayland uses an optional Clipboard v1 request in the already
+prepared RemoteDesktop session. Granted-state gating, source-owned signals and
+bounded nonblocking selection descriptors stay below `DesktopSource`; remote
+requests cannot open consent. Unsupported/denied access leaves video/input
+usable. Installed compositor and cross-device qualification remain separate.
+
+The [portal Clipboard contract](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Clipboard.html)
+requires RequestClipboard before Start, SelectionWriteDone for every handled
+transfer serial, and granted access before selection reads/writes. RDS supports
+only UTF-8 text MIME types, including `text/plain`; it does not turn file-transfer
+or rich selection formats into text.
 
 `DesktopV5` is additive and has no silent downgrade. A caller that needs the
 legacy peer contract sets `SessionOpts::reverse_clipboard` to `false`; the
 older V2/V3/V4 greetings then retain their existing wire layouts.
+
+The [October 11 increment report](reports/rds-clipboard-lan-spaces-20261011.md) separates completed checks from native/installed acceptance and retained control-tail failures.

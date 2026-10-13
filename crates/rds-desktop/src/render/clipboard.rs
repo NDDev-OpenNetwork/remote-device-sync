@@ -5,9 +5,50 @@ use crate::{
     clipboard::{Assembly, MAX_TEXT_BYTES},
 };
 use rds_core::{ClipboardFormat, DesktopControl};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 const COPY_HANDOFF: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+pub(super) struct CopySnapshot {
+    pub epoch: u64,
+    pub pending: bool,
+    pub published_generation: Option<i64>,
+}
+#[derive(Default)]
+pub(super) struct CopyFence {
+    epoch: AtomicU64,
+    status: Mutex<Option<CopySnapshot>>,
+}
+impl CopyFence {
+    pub(super) fn snapshot(&self) -> Option<CopySnapshot> {
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn set(&self, claim: Option<u64>, pending: bool, published_generation: Option<i64>) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(epoch) = claim
+            && epoch == self.epoch.load(Ordering::Acquire)
+        {
+            *status = Some(CopySnapshot {
+                epoch,
+                pending,
+                published_generation,
+            });
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct Clipboard {
@@ -19,8 +60,35 @@ pub(super) struct Clipboard {
     generation: Option<i64>,
     authorized: bool,
     copy_intent: Option<(i64, Instant)>,
+    arbiter: Arc<CopyFence>,
+    claim: Option<u64>,
 }
 impl Clipboard {
+    pub(super) fn with_arbiter(arbiter: Arc<CopyFence>) -> Self {
+        Self {
+            arbiter,
+            ..Default::default()
+        }
+    }
+    fn current(&self) -> bool {
+        self.claim
+            .is_none_or(|claim| claim == self.arbiter.epoch.load(Ordering::Acquire))
+    }
+    fn claim(&mut self) {
+        self.claim = Some(
+            self.arbiter
+                .epoch
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1),
+        );
+        self.arbiter.set(self.claim, true, None);
+    }
+    pub(super) fn published(&self, generation: i64) {
+        self.arbiter.set(self.claim, false, Some(generation));
+    }
+    pub(super) fn publication_failed(&self) {
+        self.arbiter.set(self.claim, false, None);
+    }
     pub(super) fn needs_work(&self) -> bool {
         self.complete.is_some()
             || ((self.focused || self.copy_pending())
@@ -33,6 +101,10 @@ impl Clipboard {
     /// Only already authorized work or one explicit Copy can outlive selection.
     /// Native ownership changes supersede both, without reading clipboard text.
     pub(super) fn handoff_pending(&mut self, generation: i64) -> bool {
+        if !self.current() {
+            self.reset();
+            return false;
+        }
         if let Some((before, at)) = self.copy_intent {
             if before == generation && at.elapsed() < COPY_HANDOFF {
                 return true;
@@ -61,18 +133,22 @@ impl Clipboard {
         }
     }
     fn copy_pending(&self) -> bool {
-        self.copy_intent
-            .is_some_and(|(_, at)| at.elapsed() < COPY_HANDOFF)
+        self.current()
+            && self
+                .copy_intent
+                .is_some_and(|(_, at)| at.elapsed() < COPY_HANDOFF)
     }
     pub(super) fn copying(&mut self, generation: i64) {
         if self.focused {
+            self.claim();
             self.offered = None;
             self.copy_intent = Some((generation, Instant::now()));
         }
     }
     pub(super) fn reset(&mut self) {
         let focused = self.focused;
-        *self = Self::default();
+        self.publication_failed();
+        *self = Self::with_arbiter(self.arbiter.clone());
         self.focused = focused;
     }
     pub(super) fn offer(&mut self, id: u64, format: ClipboardFormat, bytes: u32) {
@@ -84,10 +160,15 @@ impl Clipboard {
         }
     }
     pub(super) fn request(&mut self, generation: i64) -> Option<DesktopControl> {
+        if !self.current() {
+            self.reset();
+            return None;
+        }
         if self
             .copy_intent
             .is_some_and(|(before, at)| before != generation || at.elapsed() >= COPY_HANDOFF)
         {
+            self.publication_failed();
             self.copy_intent = None;
             self.offered = None;
             return None;
@@ -107,6 +188,9 @@ impl Clipboard {
             return None;
         }
         let (id, bytes) = self.offered.take()?;
+        if self.copy_intent.is_none() {
+            self.claim();
+        }
         self.copy_intent = None;
         self.requested = Some((id, bytes, Instant::now()));
         self.generation = Some(generation);
@@ -152,6 +236,7 @@ impl Clipboard {
             .as_ref()
             .is_some_and(|(expected, _, _)| *expected == id)
         {
+            self.publication_failed();
             self.requested = None;
             self.assembly = Assembly::default();
             self.generation = None;
@@ -162,8 +247,10 @@ impl Clipboard {
         let value = self.complete.take()?;
         // A newer explicit Copy/Cut supersedes this in-flight snapshot. Drain
         // it without changing the pasteboard, then request the latest offer.
-        let permitted =
-            self.authorized && self.generation == Some(generation) && self.copy_intent.is_none();
+        let permitted = self.authorized
+            && self.current()
+            && self.generation == Some(generation)
+            && self.copy_intent.is_none();
         self.authorized = false;
         self.generation = None;
         permitted.then_some(value)
@@ -173,6 +260,34 @@ impl Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn copy_in_another_window_supersedes_a_pending_reply_without_native_change() {
+        let arbiter = Arc::new(CopyFence::default());
+        let mut old = Clipboard::with_arbiter(arbiter.clone());
+        let mut new = Clipboard::with_arbiter(arbiter);
+        old.focus(true);
+        old.copying(17);
+        old.offer(1, ClipboardFormat::TextUtf8, 3);
+        assert!(old.request(17).is_some());
+        old.focus(false);
+        new.focus(true);
+        new.copying(17);
+        old.chunk(1, 0, 3, b"old".to_vec()).unwrap();
+        assert!(old.publish(17).is_none());
+        new.offer(2, ClipboardFormat::TextUtf8, 3);
+        assert!(new.request(17).is_some());
+        new.chunk(2, 0, 3, b"new".to_vec()).unwrap();
+        assert_eq!(new.publish(17).as_deref(), Some("new"));
+        new.reset();
+        new.focus(true);
+        new.copying(18);
+        old.reset();
+        old.focus(true);
+        old.copying(18);
+        old.focus(false);
+        new.copying(18);
+        assert!(!old.handoff_pending(18));
+    }
     #[test]
     fn hidden_tab_handoff_finishes_without_reselecting_and_never_rearms_itself() {
         let mut old = Clipboard::default();

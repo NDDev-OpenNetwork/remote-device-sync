@@ -111,11 +111,13 @@ mod tests {
     fn config() -> WorkspaceConfig {
         WorkspaceConfig {
             schema_version: 1,
+            presentation: Default::default(),
             devices: vec![DeviceConfig {
                 key: "alpha".into(),
                 target: "alpha".into(),
                 label: "Work computer".into(),
                 grant_file: None,
+                local_addresses: vec![],
             }],
             tabs: vec![TabSpec {
                 device: "alpha".into(),
@@ -136,8 +138,10 @@ mod tests {
         let mut old = std::fs::File::open(&path).unwrap();
         let mut updated = config();
         updated.tabs[0].profile.max_fps = 60;
+        updated.presentation = super::super::Presentation::Spaces;
         save(&path, &updated).unwrap();
         assert_eq!(load(&path).unwrap().unwrap().tabs[0].profile.max_fps, 60);
+        assert!(load(&path).unwrap().unwrap().presentation == super::super::Presentation::Spaces);
         let mut bytes = vec![];
         old.read_to_end(&mut bytes).unwrap();
         assert_eq!(

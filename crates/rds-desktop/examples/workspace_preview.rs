@@ -26,6 +26,12 @@ struct ClipboardProbe {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let spaces = if let Some(index) = args.iter().position(|arg| arg == "--spaces") {
+        args.remove(index);
+        true
+    } else {
+        std::env::var_os("RDS_PREVIEW_SPACES").is_some()
+    };
     let still_flag = args.first().is_some_and(|arg| arg == "--still");
     if still_flag {
         args.remove(0);
@@ -44,13 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.pop();
     }
     let clipboard_report = match args.as_slice() {
-        [] => None,
-        [flag, path] if flag == "--clipboard-report" => {
-            if std::path::Path::new(path).exists() {
-                return Err("report already exists".into());
-            }
-            Some(std::path::PathBuf::from(path))
-        }
+        [] => std::env::var_os("RDS_PREVIEW_CLIPBOARD_REPORT").map(std::path::PathBuf::from),
+        [flag, path] if flag == "--clipboard-report" => Some(std::path::PathBuf::from(path)),
         _ => {
             return Err(
                 "usage: workspace_preview [--still] [--clipboard-report NEW_PATH [--close-with-reply]]"
@@ -58,6 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     };
+    if clipboard_report.as_ref().is_some_and(|path| path.exists()) {
+        return Err("report already exists".into());
+    }
     let clipboard_probe = clipboard_report.is_some();
     if close_with_reply && !clipboard_probe {
         return Err("close probe requires a clipboard report".into());
@@ -87,7 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect();
-    let (viewer, workspace, mut events) = Viewer::workspace(tabs, devices)?;
+    let (viewer, workspace, mut events) = if spaces {
+        Viewer::spaces(tabs, devices)?
+    } else {
+        Viewer::workspace(tabs, devices)?
+    };
     if clipboard_probe || report_dir.is_some() {
         let workspace = workspace.clone();
         tokio::spawn(async move {
@@ -179,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     if matches!(code,45|46) {
                                                         let mut state = probe.lock().unwrap();
                                                         state.copies += 1;
-                                                        let text = format!("RDS synthetic clipboard tab {id} copy {}", state.copies);
+                                                        let text = format!("RDS synthetic clipboard tab {id} copy {}\nПривет ✓", state.copies);
                                                         state.latest = text.clone();
                                                         pending_offer = Some((state.copies, text, Instant::now()+Duration::from_secs(1)));
                                                     } else if code == 47 {

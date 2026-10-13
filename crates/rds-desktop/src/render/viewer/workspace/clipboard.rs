@@ -18,7 +18,7 @@ impl PendingPaste {
     }
 }
 impl Deck {
-    pub(super) fn cancel_clipboard_tab(&mut self, id: TabId) {
+    pub(in super::super) fn cancel_clipboard_tab(&mut self, id: TabId) {
         if self.clipboard_owner == Some(id) {
             self.clipboard_owner = None;
             if self.pending_paste.take().is_some() {

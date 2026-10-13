@@ -33,6 +33,7 @@ pub(super) struct Granted {
     pub video: OwnedFd,
     pub input: OwnedFd,
     pub restore_token: String,
+    pub clipboard: Option<Arc<super::clipboard::Group>>,
 }
 
 pub(super) struct Owner {
@@ -184,6 +185,27 @@ pub(super) async fn open(
         .await?
         .response()
         .map_err(|_| error("monitor selection"))?;
+        let clipboard = match rpc(
+            "clipboard proxy",
+            ashpd::desktop::clipboard::Clipboard::with_connection(connection_for_start.clone()),
+        )
+        .await
+        {
+            Ok(proxy) if proxy.version() >= 1 => {
+                if rpc(
+                    "clipboard request",
+                    proxy.request(&session, Default::default()),
+                )
+                .await
+                .is_ok()
+                {
+                    Some(proxy)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
         let selected = start(&remote, &session, &owner, &connection_for_start).await?;
         if !selected.devices().contains(devices)
             || selected.streams().is_empty()
@@ -233,13 +255,27 @@ pub(super) async fn open(
             remote.connect_to_eis(&session, Default::default()),
         )
         .await?;
-        Ok::<_, DesktopError>((monitors, video, input, restore_token))
+        let clipboard = if selected.is_clipboard_enabled() {
+            match clipboard {
+                Some(proxy) => match super::clipboard::Group::start(proxy, session.clone()).await {
+                    Ok(group) => Some(Arc::new(group)),
+                    Err(_) => {
+                        tracing::warn!("Wayland clipboard signal subscription unavailable");
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok::<_, DesktopError>((monitors, video, input, restore_token, clipboard))
     };
     let configured = tokio::select! {
         result = configured => result,
         _ = &mut cancelled => Err(error("preparation cancelled")),
     };
-    let (monitors, video, input, restore_token) = match configured {
+    let (monitors, video, input, restore_token, clipboard) = match configured {
         Ok(parts) => parts,
         Err(error) => {
             owner.close().await;
@@ -252,6 +288,7 @@ pub(super) async fn open(
         video,
         input,
         restore_token,
+        clipboard,
     })
 }
 

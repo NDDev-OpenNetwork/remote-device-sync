@@ -417,6 +417,24 @@ impl Endpoint {
         Ok(conn)
     }
 
+    /// Discard failed local hints without removing live authenticated paths.
+    /// Iroh retains caller candidates across dials; owned Noq races only the
+    /// current target and has no corresponding candidate cache to clear.
+    pub async fn discard_unvalidated_local_addresses(
+        &self,
+        peer: EndpointId,
+        addresses: Vec<SocketAddr>,
+    ) {
+        match &self.inner {
+            EndpointInner::Iroh(ep) => {
+                ep.forget_unvalidated_ip_addrs(backends::iroh::convert::id(peer), addresses)
+                    .await;
+            }
+            #[cfg(feature = "transport-noq")]
+            EndpointInner::Noq(_) => {}
+        }
+    }
+
     /// Accept the next incoming connection attempt.
     pub async fn accept(&self) -> Option<Incoming> {
         let metrics = self.metrics.clone();

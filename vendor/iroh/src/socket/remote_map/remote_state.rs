@@ -389,6 +389,50 @@ impl RemoteStateActor {
                 };
                 tx.send(info).ok();
             }
+            RemoteStateMessage::ForgetUnvalidatedIpAddrs(addrs, tx) => {
+                // Process ready closures before trusting cached Open history.
+                while let Some(Some((id, closed))) =
+                    now_or_never(self.state.connections_close.next())
+                {
+                    self.handle_connection_close(id, closed);
+                }
+                let mut active = BTreeSet::new();
+                for state in self.connections.values() {
+                    let Some(conn) = state.handle.upgrade() else {
+                        continue;
+                    };
+                    if conn.close_reason().is_some() {
+                        continue;
+                    }
+                    for (id, tuple) in &state.paths {
+                        if conn.path(*id).is_some_and(|path| path.status().is_ok())
+                            && let transports::Addr::Ip(ip) = tuple.remote()
+                        {
+                            active.insert(ip);
+                        }
+                    }
+                }
+                let failed = |addr: &transports::Addr| {
+                    matches!(addr, transports::Addr::Ip(ip)
+                        if addrs.contains(ip) && !active.contains(ip))
+                };
+                if self
+                    .state
+                    .selected_path
+                    .as_ref()
+                    .is_some_and(|path| failed(&path.remote()))
+                {
+                    self.state.selected_path = None;
+                }
+                self.state
+                    .pending_open_paths
+                    .retain(|path| !failed(&path.remote()));
+                let forgotten = self
+                    .state
+                    .paths
+                    .forget_unvalidated_ip_addrs(&addrs, &active);
+                tx.send(forgotten).ok();
+            }
             RemoteStateMessage::NetworkChange { is_major } => {
                 self.handle_msg_network_change(is_major);
             }
@@ -1268,6 +1312,9 @@ pub(crate) enum RemoteStateMessage {
     ///
     /// This currently only includes a list of all known transport addresses for the remote.
     RemoteInfo(oneshot::Sender<RemoteInfo>),
+    /// Remove failed caller IP candidates without a live authenticated path.
+    #[debug("ForgetUnvalidatedIpAddrs(..)")]
+    ForgetUnvalidatedIpAddrs(Vec<SocketAddr>, oneshot::Sender<usize>),
     /// The network status has changed in some way
     NetworkChange { is_major: bool },
 }

@@ -1,8 +1,17 @@
 //! Explicit text paste, bounded reassembly and session-owned OS clipboard.
 use crate::DesktopError;
+use std::{future::Future, pin::Pin};
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const SEND_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Async clipboard lease belonging to an already consented serving backend.
+/// Native objects stay behind this interface; text is never logged.
+pub type ClipboardFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub trait ClipboardBackend: Send {
+    fn publish(&mut self, text: String) -> ClipboardFuture<'_, Result<(), DesktopError>>;
+    fn next_change(&mut self) -> ClipboardFuture<'_, Option<String>>;
+}
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -152,24 +161,59 @@ impl ReverseSender {
 
 #[cfg(all(target_os = "linux", feature = "x11"))]
 mod x11;
-#[cfg(all(target_os = "linux", feature = "x11"))]
-pub(crate) use x11::Worker;
-
-#[cfg(not(all(target_os = "linux", feature = "x11")))]
-pub(crate) struct Worker;
-#[cfg(not(all(target_os = "linux", feature = "x11")))]
+enum Backend {
+    #[cfg(all(target_os = "linux", feature = "x11"))]
+    X11(x11::Worker),
+    Prepared(Box<dyn ClipboardBackend>),
+    Unavailable,
+}
+pub(crate) struct Worker(Backend);
 impl Worker {
-    pub(crate) fn new(_: u32) -> Self {
-        Self
+    pub(crate) fn for_source(
+        source: Option<&dyn crate::DesktopSource>,
+        display: u32,
+        watching: bool,
+    ) -> Self {
+        if let Some(source) = source {
+            return Self(match source.clipboard(display, watching) {
+                Ok(backend) => Backend::Prepared(backend),
+                Err(_) => Backend::Unavailable,
+            });
+        }
+        #[cfg(all(target_os = "linux", feature = "x11"))]
+        {
+            Self(Backend::X11(if watching {
+                x11::Worker::watch(display)
+            } else {
+                x11::Worker::new(display)
+            }))
+        }
+        #[cfg(not(all(target_os = "linux", feature = "x11")))]
+        {
+            let _ = (display, watching);
+            Self(Backend::Unavailable)
+        }
     }
-    pub(crate) fn watch(display: u32) -> Self {
-        Self::new(display)
-    }
-    pub(crate) async fn publish(&mut self, _: String) -> Result<(), DesktopError> {
-        Err(DesktopError::Input("clipboard backend unavailable".into()))
+    pub(crate) async fn publish(&mut self, text: String) -> Result<(), DesktopError> {
+        match &mut self.0 {
+            #[cfg(all(target_os = "linux", feature = "x11"))]
+            Backend::X11(worker) => worker.publish(text).await,
+            Backend::Prepared(worker) => worker.publish(text).await,
+            Backend::Unavailable => {
+                Err(DesktopError::Input("clipboard backend unavailable".into()))
+            }
+        }
     }
     pub(crate) async fn next_change(&mut self) -> Option<ClipboardChange> {
-        std::future::pending().await
+        match &mut self.0 {
+            #[cfg(all(target_os = "linux", feature = "x11"))]
+            Backend::X11(worker) => worker.next_change().await,
+            Backend::Prepared(worker) => worker
+                .next_change()
+                .await
+                .map(|text| ClipboardChange { text }),
+            Backend::Unavailable => None,
+        }
     }
 }
 

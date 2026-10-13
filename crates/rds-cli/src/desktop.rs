@@ -146,12 +146,29 @@ mod native {
             peer: String,
             grant: Option<Box<rds_core::grant::Grant>>,
             binding: PeerBinding,
+            local_addresses: Vec<std::net::SocketAddr>,
         },
         Direct {
             endpoint: rds_net::Endpoint,
             target: rds_net::EndpointAddr,
             grant: Option<rds_core::grant::Grant>,
         },
+    }
+
+    pub(super) fn connect_command(
+        target: String,
+        grant: Option<Box<rds_core::grant::Grant>>,
+        local_addresses: Vec<std::net::SocketAddr>,
+    ) -> Command {
+        if local_addresses.is_empty() {
+            Command::Connect { target, grant }
+        } else {
+            Command::ConnectPreferred {
+                target,
+                grant,
+                local_addresses,
+            }
+        }
     }
 
     /// Display settings must not resolve a mutable device name to a different
@@ -380,12 +397,12 @@ mod native {
                 _ = stop.cancelled() => return Ok(()),
                 result = async {
                     match &mut source {
-                        Source::Managed { client,session,peer,grant,binding } => {
+                        Source::Managed { client,session,peer,grant,binding,local_addresses } => {
                             *peer = binding.target(peer);
                             view.stage("checking managed session");
                             if session.is_none() || client.selected(*session).await.is_err() {
                                 view.stage("connecting peer");
-                                let Reply::Connected(id) = client.request(Command::Connect { target:peer.clone(),grant:grant.clone() }).await? else { anyhow::bail!("unexpected local connection response"); };
+                                let Reply::Connected(id) = client.request(connect_command(peer.clone(),grant.clone(),local_addresses.clone())).await? else { anyhow::bail!("unexpected local connection response"); };
                                 // After the first authenticated connect retain the exact peer
                                 // identity, even when the initial target was a registry name.
                                 view.stage("verifying peer");
@@ -775,14 +792,12 @@ mod native {
                 peer,
                 grant,
                 binding: _,
+                local_addresses,
             } => {
                 let session = match session {
                     Some(session) => session,
                     None => match client
-                        .request(Command::Connect {
-                            target: peer,
-                            grant,
-                        })
+                        .request(connect_command(peer, grant, local_addresses))
                         .await?
                     {
                         Reply::Connected(session) => session,
@@ -927,6 +942,7 @@ pub async fn managed(
             peer,
             grant,
             binding: Default::default(),
+            local_addresses: vec![],
         },
         options,
     )
@@ -949,6 +965,7 @@ pub async fn managed_target(
             peer: target,
             grant,
             binding: Default::default(),
+            local_addresses: vec![],
         },
         options,
     )

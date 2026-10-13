@@ -15,6 +15,7 @@ use tokio::sync::{Semaphore, oneshot, watch};
 pub struct WaylandDesktop {
     slots: Vec<Arc<capture::Slot>>,
     input: Arc<input::Group>,
+    clipboard: Option<Arc<super::clipboard::Group>>,
     producers: Arc<Semaphore>,
     closed: watch::Receiver<bool>,
     close: Mutex<Option<oneshot::Sender<()>>>,
@@ -33,6 +34,21 @@ impl WaylandDesktop {
     /// task cannot synchronously join native or D-Bus cleanup.
     pub async fn open_with_cancel(
         path: &Path,
+        cancelled: impl Future<Output = ()>,
+    ) -> Result<Self, DesktopError> {
+        Self::prepare(path, false, cancelled).await
+    }
+    /// Explicit local permission refresh. Retain identity history and the old
+    /// state until new consent succeeds; remote sessions cannot invoke this.
+    pub async fn request_permission(
+        path: &Path,
+        cancelled: impl Future<Output = ()>,
+    ) -> Result<Self, DesktopError> {
+        Self::prepare(path, true, cancelled).await
+    }
+    async fn prepare(
+        path: &Path,
+        fresh_permission: bool,
         cancelled: impl Future<Output = ()>,
     ) -> Result<Self, DesktopError> {
         tokio::pin!(cancelled);
@@ -57,7 +73,18 @@ impl WaylandDesktop {
             },
             result = &mut opening => result.map_err(|_| error())??,
         };
-        let granted = session::open(store.token(), &mut cancelled).await?;
+        let token = if fresh_permission {
+            None
+        } else {
+            store.token()
+        };
+        let granted = session::open(token, &mut cancelled).await?;
+        tracing::info!(
+            clipboard = granted.clipboard.is_some(),
+            "Wayland portal capabilities prepared"
+        );
+        let clipboard = granted.clipboard.clone();
+        let closing_clipboard = clipboard.clone();
         let mut sources = Vec::with_capacity(granted.monitors.len());
         let mut ids = BTreeMap::new();
         for monitor in &granted.monitors {
@@ -111,6 +138,9 @@ impl WaylandDesktop {
             capture.stop();
             closing_input.stop();
             let (video, input) = tokio::join!(capture.close(), closing_input.close());
+            if let Some(clipboard) = closing_clipboard {
+                clipboard.close().await;
+            }
             // Let our native peers drop before closing the portal normally.
             // A bounded join timeout still proceeds to portal revocation.
             owner.close().await;
@@ -127,6 +157,7 @@ impl WaylandDesktop {
         let backend = Self {
             slots,
             input,
+            clipboard,
             producers: Arc::new(Semaphore::new(8)),
             closed,
             close: Mutex::new(Some(close)),
@@ -242,6 +273,21 @@ impl DesktopSource for WaylandDesktop {
         }
         self.input.sink(display, extent)
     }
+    fn clipboard_supported(&self) -> bool {
+        !*self.closed.borrow()
+            && self
+                .clipboard
+                .as_ref()
+                .is_some_and(|group| group.available())
+    }
+    fn clipboard(
+        &self,
+        display: u32,
+        watching: bool,
+    ) -> Result<Box<dyn crate::clipboard::ClipboardBackend>, DesktopError> {
+        self.slot(display)?;
+        self.clipboard.as_ref().ok_or_else(error)?.worker(watching)
+    }
 }
 
 #[cfg(test)]
@@ -268,5 +314,27 @@ mod cancellation_tests {
         // rather than leaving a detached lock owner requiring polling/retry.
         let state = state::Store::open(&path).unwrap();
         assert!(state.token().is_none());
+    }
+    #[tokio::test]
+    async fn cancelled_fresh_permission_preserves_existing_token_and_display_history() {
+        let directory = Directory(std::env::temp_dir().join(format!(
+            "rds-portal-fresh-cancel-{:032x}",
+            rand::random::<u128>()
+        )));
+        std::fs::create_dir(&directory.0).unwrap();
+        std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.0.join("permission.json");
+        let mut store = state::Store::open(&path).unwrap();
+        assert_eq!(store.index("fixture-monitor").unwrap(), 0);
+        store.save("retained-fixture-token".into()).unwrap();
+        drop(store);
+        assert!(
+            WaylandDesktop::request_permission(&path, std::future::ready(()))
+                .await
+                .is_err()
+        );
+        let mut store = state::Store::open(&path).unwrap();
+        assert_eq!(store.token(), Some("retained-fixture-token"));
+        assert_eq!(store.index("fixture-monitor").unwrap(), 0);
     }
 }

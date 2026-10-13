@@ -27,6 +27,7 @@ use crate::{DesktopError, RawFrame};
 mod frame;
 use frame::{FrameMailbox, Pending};
 
+mod spaces;
 mod workspace;
 pub use workspace::{WorkspaceEvent, WorkspaceHandle, WorkspaceUpdate};
 
@@ -698,6 +699,7 @@ impl ViewerHandle {
 pub struct Viewer {
     event_loop: EventLoop<()>,
     app: App,
+    screens: Option<spaces::Screens>,
 }
 impl Viewer {
     /// Must be constructed and run on the OS main thread. No identity or socket
@@ -715,10 +717,27 @@ impl Viewer {
             workspace: None,
             activity: None,
             modifiers: Default::default(),
+            scoped_window: false,
+            window_closed: false,
+            fullscreen: false,
         };
-        Ok((Self { event_loop, app }, handle, receiver))
+        Ok((
+            Self {
+                event_loop,
+                app,
+                screens: None,
+            },
+            handle,
+            receiver,
+        ))
     }
     pub fn run(mut self) -> Result<(), DesktopError> {
+        if let Some(mut screens) = self.screens.take() {
+            self.event_loop
+                .run_app(&mut screens)
+                .map_err(|e| DesktopError::Capture(e.to_string()))?;
+            return screens.result();
+        }
         if self.app.workspace.is_none() {
             self.app.activity = Some(super::platform::remote_activity());
         }
@@ -758,15 +777,21 @@ impl SessionView {
         if let Some(text) = text {
             match super::platform::publish_text(&text) {
                 Ok(()) => published = true,
-                Err(error) => self
-                    .handle
-                    .status(format!("Clipboard unavailable: {error}")),
+                Err(error) => {
+                    lock(&self.handle.state).clipboard.publication_failed();
+                    self.handle
+                        .status(format!("Clipboard unavailable: {error}"));
+                }
             }
         }
         // Publication changes native ownership; observe it before the next request.
         let Ok(generation) = super::platform::clipboard_generation() else {
+            lock(&self.handle.state).clipboard.publication_failed();
             return Ok(published);
         };
+        if published {
+            lock(&self.handle.state).clipboard.published(generation);
+        }
         let request = lock(&self.handle.state).clipboard.request(generation);
         if let Some(control) = request {
             self.input
@@ -843,6 +868,9 @@ struct App {
     activity: Option<super::platform::RemoteActivity>,
     // Physical modifier flags belong to the window, not a replaceable tab.
     modifiers: winit::event::Modifiers,
+    scoped_window: bool,
+    window_closed: bool,
+    fullscreen: bool,
 }
 impl App {
     fn clipboard_work(&mut self, event_loop: &ActiveEventLoop) {
@@ -931,8 +959,17 @@ impl App {
     }
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: DesktopError) {
         self.error = Some(error);
+        self.close_window(event_loop);
+    }
+    fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        self.release(event_loop);
+        lock(&self.session.handle.state).clipboard.reset();
         let _ = self.session.input.send(ViewerInput::Close);
-        event_loop.exit();
+        if self.scoped_window {
+            self.window_closed = true;
+        } else {
+            event_loop.exit();
+        }
     }
     fn fail_input(&mut self, event_loop: &ActiveEventLoop, error: DesktopError) {
         if self.session.tab.is_some() {
@@ -1192,6 +1229,10 @@ impl ApplicationHandler<()> for App {
                             .with_title("RDS — Connecting")
                             .with_window_level(WindowLevel::Normal)
                             .with_window_icon(Some(icon))
+                            .with_fullscreen(
+                                self.fullscreen
+                                    .then_some(winit::window::Fullscreen::Borderless(None)),
+                            )
                             .with_inner_size(LogicalSize::new(1280., 720.)),
                     )
                     .map_err(|e| DesktopError::Capture(e.to_string()))
@@ -1204,8 +1245,10 @@ impl ApplicationHandler<()> for App {
             Ok((window, gpu)) => {
                 // Explicit viewer launches activate once like ordinary apps.
                 // Reconnect/redraw never raises the window over other apps.
-                super::platform::activate_application();
-                window.focus_window();
+                if !self.scoped_window {
+                    super::platform::activate_application();
+                    window.focus_window();
+                }
                 window.request_redraw();
                 if let Some(deck) = &mut self.workspace {
                     deck.chrome = Some(super::workspace::chrome::Chrome::new(&window));
@@ -1277,9 +1320,7 @@ impl ApplicationHandler<()> for App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                self.release(event_loop);
-                let _ = self.session.input.send(ViewerInput::Close);
-                event_loop.exit();
+                self.close_window(event_loop);
             }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {

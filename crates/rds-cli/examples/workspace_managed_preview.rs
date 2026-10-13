@@ -338,6 +338,7 @@ async fn main() -> anyhow::Result<()> {
             target: rds_net::Ticket::of(endpoint).to_string(),
             label: if index == 0 { "Studio PC" } else { "Build PC" }.into(),
             grant_file: None,
+            local_addresses: vec![],
         })
         .collect::<Vec<_>>();
     let tabs = devices
@@ -359,6 +360,7 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     let config = WorkspaceConfig {
         schema_version: 1,
+        presentation: Default::default(),
         devices,
         tabs,
     };
