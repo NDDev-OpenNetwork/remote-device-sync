@@ -1,0 +1,37 @@
+{
+  "arch": "x86_64",
+  "binary_digest": "103763264cc97f9909d06b21134a7d9152b701ba5c12ac45022b21c3c770a8e1",
+  "budgets": null,
+  "commit_sha": "9c56c9524befafcbdb0d3b498de7f1f73418ba92",
+  "dirty": true,
+  "failures": null,
+  "features": [],
+  "hash": "49793993aa9668a3212e95d96d60c4864725dc8b7bb5feb093cbf431ffc70bce",
+  "kind": "gate",
+  "lockfile_digest": "e35029818bf16420099413b8a0a540b74f7e3eee361b9978eac69efeee89bc56",
+  "note": "verdict: pending native qualification",
+  "os": "linux",
+  "prev_hash": "5e6e3717fa3d630d5e04fe1aef57ed801691fcfbae53e4b7e9c3727963577785",
+  "repetitions": null,
+  "reports": [
+    {
+      "blake3": "d3cbfa29e9619237f5fb46c8e5a75d23fcec4a02788aa93035b5838e4c799b74",
+      "path": "docs/reports/checkpoint-w4-wayland-portal.md"
+    },
+    {
+      "blake3": "b9af1cd845568dbda9cc5c603e52ce055ad3462feaa59ae7da6752913cb9decc",
+      "path": "docs/reports/bench-w4-wayland-portal.json"
+    },
+    {
+      "blake3": "fb01892a292a5fa00da073a3bdee94cf13f74360c5eb45b0d876f66666100d15",
+      "path": "docs/reports/bench-w4-wayland-portal.md"
+    }
+  ],
+  "schema_version": 1,
+  "skips": null,
+  "status": "pass",
+  "subject": "w4-wayland-portal",
+  "toolchain": "1.98.1",
+  "topology": "loopback",
+  "ts_unix": 1791707352
+}
