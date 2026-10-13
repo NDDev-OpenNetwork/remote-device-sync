@@ -1357,6 +1357,16 @@ impl EndpointInner {
         let Some(sender) = self.remote_actors.get(&id) else {
             return 0;
         };
+        // Match insertion's canonical IP keys, preserving native IPv6 scope.
+        let addrs = addrs
+            .into_iter()
+            .map(|addr| match addr {
+                SocketAddr::V6(v6) if v6.ip().to_ipv4_mapped().is_some() => {
+                    SocketAddr::new(v6.ip().to_canonical(), v6.port())
+                }
+                other => other,
+            })
+            .collect();
         let (tx, rx) = oneshot::channel();
         if sender
             .send(RemoteStateMessage::ForgetUnvalidatedIpAddrs(addrs, tx))

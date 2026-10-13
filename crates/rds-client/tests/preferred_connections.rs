@@ -181,9 +181,14 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
         #[cfg(feature = "transport-noq")]
         Backend::Noq,
     ] {
-        for (wrong_key, previous_auth) in [(false, false), (true, false), (true, true)] {
+        for (wrong_key, previous_auth, mapped) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
             eprintln!(
-                "preferred fallback case: backend={backend:?} wrong_key={wrong_key} previous_auth={previous_auth}"
+                "preferred fallback case: backend={backend:?} wrong_key={wrong_key} previous_auth={previous_auth} mapped={mapped}"
             );
             let (relay, urls) = if matches!(backend, Backend::Iroh) {
                 let mut config = iroh_relay::server::ServerConfig::default();
@@ -345,6 +350,19 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
             } else {
                 unused.local_addr().unwrap()
             };
+            let hint = if mapped {
+                let std::net::SocketAddr::V4(v4) = hint else {
+                    panic!("fixture binds IPv4")
+                };
+                std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                    v4.ip().to_ipv6_mapped(),
+                    v4.port(),
+                    0,
+                    0,
+                ))
+            } else {
+                hint
+            };
             let root = std::path::Path::new("/tmp")
                 .canonicalize()
                 .unwrap()
@@ -371,7 +389,7 @@ async fn stale_or_wrong_key_hint_falls_back_to_signed_directory() {
             .expect("bounded hint and directory/relay fallback")
             .unwrap_or_else(|error| {
                 panic!(
-                    "backend={backend:?} wrong_key={wrong_key} previous_auth={previous_auth}: {error}; expected_accepts={}, other_accepts={}, directory_gets={}",
+                    "backend={backend:?} wrong_key={wrong_key} previous_auth={previous_auth} mapped={mapped}: {error}; expected_accepts={}, other_accepts={}, directory_gets={}",
                     expected_accepts.load(Ordering::SeqCst),
                     other_accepts.load(Ordering::SeqCst),
                     directory.metrics().snapshot()["rds_directory_gets_total"],
