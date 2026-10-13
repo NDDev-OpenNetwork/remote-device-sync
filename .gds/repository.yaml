@@ -2,23 +2,24 @@ schema_version: 1
 
 repository:
   id: "repo_01M3295WYVXFN3V6H0WFYN0BC7"
-  display_name: "remote-device-sync"
+  display_name: remote-device-sync
   roles: ["project", "module"]
-  lifecycle: "active"
-
+  lifecycle: archived
 provider:
   type: "github"
-  installation: "installation:github-nddev-technocracy-opennetwork"
+  installation: "installation:github-nddev-technocracy-archive"
   repository_id: 1380014631
-  owner: "NDDev-Technocracy-OpenNetwork"
-  name: "remote-device-sync"
+  owner: NDDev-Technocracy-Archive
+  name: remote-device-sync
 
   aliases:
+    - owner: NDDev-Technocracy-OpenNetwork
+      name: remote-device-sync
     - owner: "NDDev-Technocracy-Sandbox"
       name: "remote-device-sync"
 
 classification:
-  portfolios: ["portfolio:nddev-technocracy-opennetwork"]
+  portfolios: ["portfolio:nddev-technocracy-archive"]
   visibility_contract: "public"
   data_classification: "public"
 
