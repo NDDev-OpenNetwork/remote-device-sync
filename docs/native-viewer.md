@@ -911,6 +911,9 @@ display inspection, settings changes and reconnect. Local dialing has one
 one-second budget before normal same-key directory/transport fallback; it does
 not change authorization or create routes/firewall rules. The matching local
 agent must support the additive `ConnectPreferred` command.
+Failed hints with no live authenticated path are removed before fallback;
+this cache acknowledgement has a separate one-second bound. Other
+live authenticated paths remain eligible. See [the manager contract](local-sessions.md).
 
 ## Fullscreen monitor Spaces
 
@@ -948,3 +951,5 @@ this mode uses their window manager's fullscreen behavior, not macOS Spaces.
 
 Primary contracts: [winit fullscreen](https://docs.rs/winit/0.30.13/winit/window/enum.Fullscreen.html)
 and [Apple Spaces](https://support.apple.com/guide/mac-help/work-in-multiple-spaces-mh14112/mac).
+
+The [October 11 increment report](reports/rds-clipboard-lan-spaces-20261011.md) separates completed checks from native/installed acceptance and retained control-tail failures.

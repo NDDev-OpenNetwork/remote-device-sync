@@ -108,6 +108,15 @@ failure. QUIC authenticates the pinned key; a successful dial followed by servic
 or grant refusal is final and never replays admission through another route.
 Transport cache/discovery can supplement candidates; latency path policy still
 selects among established paths. No ping result or IP address establishes trust.
+After a failed preferred attempt, the manager awaits removal of only those
+Iroh IP hints without a live authenticated path before resolving the fallback.
+Otherwise a wrong-key address can race the relay again and fail its handshake.
+Cache cleanup has a separate one-second bound; a failure to finish it stops the
+connection rather than dialing with uncertain cleanup. Live authenticated
+paths, other peers and relay/custom addresses remain intact. Earlier Open or
+Inactive history alone cannot protect an address now belonging to another key;
+ready connection closures are observed before deciding which paths to preserve. Owned
+Noq has no shared caller-hint cache and needs no corresponding removal.
 Older managers refuse this command; empty hints retain the existing Connect
 command. All monitor reconnections and saved-profile inspections retain hints.
 

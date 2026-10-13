@@ -8,13 +8,17 @@ repository:
 
 provider:
   type: "github"
-  installation: "installation:github-opennetwork"
+  installation: "installation:github-nddev-technocracy-opennetwork"
   repository_id: 1380014631
-  owner: "NDDev-OpenNetwork"
+  owner: "NDDev-Technocracy-OpenNetwork"
   name: "remote-device-sync"
 
+  aliases:
+    - owner: "NDDev-Technocracy-Sandbox"
+      name: "remote-device-sync"
+
 classification:
-  portfolios: ["portfolio:nddev-opennetwork"]
+  portfolios: ["portfolio:nddev-technocracy-opennetwork"]
   visibility_contract: "public"
   data_classification: "public"
 

@@ -18,6 +18,10 @@ impl Screens {
         window: WindowId,
         event: &WindowEvent,
     ) -> bool {
+        if event_loop.exiting() {
+            self.pending_paste = None;
+            return false;
+        }
         let destination = self
             .panes
             .iter()
@@ -83,6 +87,10 @@ impl Screens {
         true
     }
     pub(super) fn check_paste(&mut self, event_loop: &ActiveEventLoop) {
+        if event_loop.exiting() {
+            self.pending_paste = None;
+            return;
+        }
         let Some(paste) = self.pending_paste.take() else {
             return;
         };

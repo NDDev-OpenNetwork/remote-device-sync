@@ -61,3 +61,5 @@ or rich selection formats into text.
 `DesktopV5` is additive and has no silent downgrade. A caller that needs the
 legacy peer contract sets `SessionOpts::reverse_clipboard` to `false`; the
 older V2/V3/V4 greetings then retain their existing wire layouts.
+
+The [October 11 increment report](reports/rds-clipboard-lan-spaces-20261011.md) separates completed checks from native/installed acceptance and retained control-tail failures.

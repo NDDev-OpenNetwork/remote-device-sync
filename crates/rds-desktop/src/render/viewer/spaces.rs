@@ -149,6 +149,13 @@ impl Screens {
             fullscreen: tab.is_some(),
         };
         app.resumed(event_loop);
+        if tab.is_some()
+            && let (Some(deck), Some(window)) = (&mut app.workspace, &app.window)
+            && let Some(chrome) = &mut deck.chrome
+        {
+            chrome.connected();
+            chrome.toggle_panels(window);
+        }
         if app.window_closed {
             if self.error.is_none() {
                 self.error = app.error.take();
@@ -384,6 +391,10 @@ impl ApplicationHandler<()> for Screens {
         self.check_paste(event_loop);
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if event_loop.exiting() {
+            self.pending_paste = None;
+            return;
+        }
         if self.paste_event(event_loop, id, &event) {
             return;
         }
@@ -397,6 +408,10 @@ impl ApplicationHandler<()> for Screens {
         self.process(event_loop);
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if event_loop.exiting() {
+            self.pending_paste = None;
+            return;
+        }
         self.check_paste(event_loop);
         let deadline = self
             .panes

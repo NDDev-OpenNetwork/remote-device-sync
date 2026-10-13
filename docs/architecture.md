@@ -20,6 +20,17 @@ Registration does not establish a QUIC path or assign directory authority.
 Private deployment owns host roles and ordered fallback policy. See
 [endpoint settings](endpoint-configuration.md#reachability-presets).
 
+Preferred local dialing retains the pinned endpoint identity. Before fallback,
+the manager awaits an explicit Iroh actor acknowledgement discarding only failed
+IP hints with no live authenticated path. The small default-inactive vendor
+extension preserves live authenticated paths, other peers and
+relay/custom candidates; owned Noq has no corresponding shared hint cache.
+This prevents a stale address belonging to another key from winning another
+handshake against the newly resolved relay, including an address which worked
+before being assigned to another computer. Old cache history does not establish
+current authentication. TLS and admission remain unchanged.
+See [local sessions](local-sessions.md) and [patch provenance](../vendor/iroh/RDS-PATCH.md).
+
 Configured-order relay preference is a separate explicit setting. Only eligible
 confirmed relay tiers participate; faster direct paths still compete by RTT.
 The order is the existing URL list, with no second authority. Known standby

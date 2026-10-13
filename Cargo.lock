@@ -4952,6 +4952,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "ed25519-dalek",
+ "iroh-relay",
  "postcard",
  "rand 0.10.3",
  "rds-core",
