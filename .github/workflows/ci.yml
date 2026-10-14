@@ -24,7 +24,7 @@ jobs:
     name: rust
     permissions:
       contents: read
-    uses: NDDev-Technocracy-OpenNetwork/ci-workflows/.github/workflows/rust-ci.yml@93eeb2a65e98a29e9dbff7909f67c6419abff046 # commit:93eeb2a65e98a29e9dbff7909f67c6419abff046
+    uses: NDDev-Technocracy-Archive/ci-workflows-20261014/.github/workflows/rust-ci.yml@93eeb2a65e98a29e9dbff7909f67c6419abff046 # commit:93eeb2a65e98a29e9dbff7909f67c6419abff046
     with:
       runner: ubuntu-latest
       toolchain: "1.98.1"
