@@ -4,7 +4,7 @@ repository:
   id: "repo_01M3295WYVXFN3V6H0WFYN0BC7"
   display_name: remote-device-sync
   roles: ["project", "module"]
-  lifecycle: archived
+  lifecycle: active
 provider:
   type: "github"
   installation: "installation:github-nddev-technocracy-archive"
