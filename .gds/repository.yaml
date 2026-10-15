@@ -83,6 +83,7 @@ agent:
 
 module:
   contract: "public"
+  development: "standalone"
   consumption: ["git-submodule"]
   compatibility: "commit-contract"
   pin_policy: "default-branch-commit"
